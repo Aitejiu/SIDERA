@@ -34,6 +34,7 @@ workspace/
 *.db-wal
 
 # Editors and operating systems
+.worktrees/
 .idea/
 .vscode/
 .DS_Store
