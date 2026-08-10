@@ -1,8 +1,14 @@
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from sidera_control_plane.application.task_queries import (
+    TaskPage,
+    TaskView,
+    TimelineItem,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -109,3 +115,78 @@ class ErrorBody(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
+
+
+class TaskResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    title: str
+    description: str
+    acceptance_criteria: tuple[str, ...]
+    status: str
+    priority: int
+    requested_by: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, task: TaskView) -> "TaskResponse":
+        return cls(
+            id=task.id,
+            workspace_id=task.workspace_id,
+            title=task.title,
+            description=task.description,
+            acceptance_criteria=task.acceptance_criteria,
+            status=task.status,
+            priority=task.priority,
+            requested_by=task.requested_by,
+            version=task.version,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+
+
+class TaskPageResponse(BaseModel):
+    items: tuple[TaskResponse, ...]
+    total: int
+    limit: int
+    offset: int
+
+    @classmethod
+    def from_page(cls, page: TaskPage) -> "TaskPageResponse":
+        return cls(
+            items=tuple(TaskResponse.from_view(item) for item in page.items),
+            total=page.total,
+            limit=page.limit,
+            offset=page.offset,
+        )
+
+
+class ActorResponse(BaseModel):
+    type: str
+    id: str
+
+
+class TimelineItemResponse(BaseModel):
+    id: UUID
+    event_type: str
+    aggregate_version: int
+    actor: ActorResponse
+    payload: dict[str, Any]
+    causation_id: UUID
+    correlation_id: UUID
+    created_at: datetime
+
+    @classmethod
+    def from_item(cls, item: TimelineItem) -> "TimelineItemResponse":
+        return cls(
+            id=item.id,
+            event_type=item.event_type,
+            aggregate_version=item.aggregate_version,
+            actor=ActorResponse(type=item.actor_type, id=item.actor_id),
+            payload=item.payload,
+            causation_id=item.causation_id,
+            correlation_id=item.correlation_id,
+            created_at=item.created_at,
+        )

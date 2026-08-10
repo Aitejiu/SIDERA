@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from sidera_control_plane.api.errors import install_error_handlers
 from sidera_control_plane.api.task_commands import router as task_commands_router
+from sidera_control_plane.api.task_queries import router as task_queries_router
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 
@@ -30,6 +31,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     install_error_handlers(app)
     app.include_router(task_commands_router)
+    app.include_router(task_queries_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
