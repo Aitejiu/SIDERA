@@ -106,7 +106,7 @@ class CommandModel(TimestampMixin, Base):
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    rejection_reason: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    rejection_reason: Mapped[str | None] = mapped_column(String(100))
 
 
 class EventModel(TimestampMixin, Base):

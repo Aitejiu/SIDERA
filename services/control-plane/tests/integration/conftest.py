@@ -1,12 +1,12 @@
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -16,6 +16,7 @@ from sidera_control_plane.persistence.models import (
     TaskModel,
     WorkspaceModel,
 )
+from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[2]
@@ -66,3 +67,34 @@ def workspace_id(database: Database) -> UUID:
         )
         session.commit()
     return WORKSPACE_ID
+
+
+@pytest.fixture
+def uow_factory(database: Database) -> Callable[[], SqlAlchemyUnitOfWork]:
+    return lambda: SqlAlchemyUnitOfWork(database)
+
+
+@pytest.fixture
+def row_counts(database: Database) -> Callable[[], dict[str, int]]:
+    def count_rows() -> dict[str, int]:
+        with database.session() as session:
+            return {
+                "tasks": session.scalar(
+                    select(func.count()).select_from(TaskModel)
+                )
+                or 0,
+                "commands": session.scalar(
+                    select(func.count()).select_from(CommandModel)
+                )
+                or 0,
+                "events": session.scalar(
+                    select(func.count()).select_from(EventModel)
+                )
+                or 0,
+                "outbox_messages": session.scalar(
+                    select(func.count()).select_from(OutboxMessageModel)
+                )
+                or 0,
+            }
+
+    return count_rows

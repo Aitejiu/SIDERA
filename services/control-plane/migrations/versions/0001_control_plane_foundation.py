@@ -88,7 +88,7 @@ def upgrade() -> None:
         sa.Column("correlation_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("result", postgresql.JSONB(), nullable=True),
-        sa.Column("rejection_reason", postgresql.JSONB(), nullable=True),
+        sa.Column("rejection_reason", sa.String(length=100), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
