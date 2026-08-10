@@ -18,6 +18,7 @@ from sidera_control_plane.persistence.models import (
     EventModel,
     OutboxMessageModel,
     TaskModel,
+    WorkspaceModel,
 )
 
 
@@ -33,6 +34,14 @@ class TaskRepository:
             )
         )
         return _to_domain_task(row) if row is not None else None
+
+    def workspace_exists(self, workspace_id: UUID) -> bool:
+        return (
+            self._session.scalar(
+                select(WorkspaceModel.id).where(WorkspaceModel.id == workspace_id)
+            )
+            is not None
+        )
 
     def add(self, task: Task) -> None:
         self._session.add(

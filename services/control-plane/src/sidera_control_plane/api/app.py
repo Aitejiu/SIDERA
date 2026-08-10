@@ -1,16 +1,38 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
+from sidera_control_plane.api.errors import install_error_handlers
+from sidera_control_plane.api.task_commands import router as task_commands_router
 from sidera_control_plane.config import Settings
+from sidera_control_plane.persistence.database import Database
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the control-plane HTTP application."""
-    app = FastAPI(title="SIDERA Control Plane", version="0.1.0")
-    app.state.settings = settings
+    resolved_settings = settings or Settings()  # pyright: ignore[reportCallIssue]
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        database = Database(resolved_settings.database_url)
+        app.state.database = database
+        try:
+            yield
+        finally:
+            database.dispose()
+
+    app = FastAPI(
+        title="SIDERA Control Plane",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.state.settings = resolved_settings
+    install_error_handlers(app)
+    app.include_router(task_commands_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok", "service": "sidera-control-plane"}
 
     return app
-

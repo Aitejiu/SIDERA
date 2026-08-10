@@ -1,0 +1,73 @@
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+from sidera_control_plane.application.errors import (
+    ApplicationError,
+    IdempotencyConflict,
+    NotFound,
+)
+from sidera_control_plane.domain.errors import (
+    DomainError,
+    InvalidTransition,
+    ValidationError,
+    VersionConflict,
+)
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        issues = [
+            {"location": list(error["loc"]), "type": error["type"]}
+            for error in exc.errors()
+        ]
+        return _error_response(
+            422,
+            "validation_error",
+            "request validation failed",
+            {"issues": issues},
+        )
+
+    @app.exception_handler(ApplicationError)
+    async def handle_application_error(
+        _request: Request, exc: ApplicationError
+    ) -> JSONResponse:
+        status_code = 404 if isinstance(exc, NotFound) else 409
+        if not isinstance(exc, IdempotencyConflict | NotFound):
+            status_code = 422
+        return _error_response(status_code, exc.code, str(exc), exc.details)
+
+    @app.exception_handler(DomainError)
+    async def handle_domain_error(
+        _request: Request, exc: DomainError
+    ) -> JSONResponse:
+        status_code = 422 if isinstance(exc, ValidationError) else 409
+        details: dict[str, Any] = {}
+        if isinstance(exc, VersionConflict):
+            details = {"expected": exc.expected, "actual": exc.actual}
+        if isinstance(exc, InvalidTransition):
+            details = {}
+        return _error_response(status_code, exc.code, str(exc), details)
+
+
+def _error_response(
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict[str, Any],
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+            }
+        },
+    )
