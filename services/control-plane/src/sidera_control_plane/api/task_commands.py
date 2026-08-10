@@ -16,5 +16,8 @@ def execute_command(
     service: Annotated[TaskCommandService, Depends(get_command_service)],
 ) -> CommandResponse:
     result = service.handle(request.to_envelope())
-    response.status_code = 201 if result.command_id == request.command_id else 200
+    is_new_create = (
+        request.command_type == "CreateTask" and result.command_id == request.command_id
+    )
+    response.status_code = 201 if is_new_create else 200
     return CommandResponse.from_result(result)
