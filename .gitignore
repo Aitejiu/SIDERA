@@ -1,0 +1,39 @@
+# Imported source archives
+/akashic-agent-main.zip
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+!**/.env.example
+/config.json
+/config.toml
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node.js and generated frontend output
+node_modules/
+dist/
+coverage/
+
+# Runtime state
+data/
+logs/
+workspace/
+*.db
+*.db-shm
+*.db-wal
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store

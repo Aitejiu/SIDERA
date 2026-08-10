@@ -1,0 +1,178 @@
+# =============================================================================
+# 必填：LLM 配置
+# 最省事的切换方式：只修改 main 指向的 runtime。
+# api_key 可以直接填字符串，也可以用 ${ENV_VAR} 引用环境变量。
+# =============================================================================
+
+[runtime]
+# 未传 --workspace 且未设置 AKASHIC_WORKSPACE 时使用；~ 会在启动时展开。
+workspace = "~/.akashic/workspace"
+
+[llm]
+main = "deepseek_main"
+fast = "qwen_fast"
+agent = "deepseek_main"
+vl = "qwen_vl"
+
+[llm.runtimes.deepseek_main]
+# 主模型，必填。推荐 deepseek-v4-flash（agent 能力强、价格低）。
+provider = "deepseek"
+model = "deepseek-v4-flash"
+api_key = "sk-..."
+base_url = "https://api.deepseek.com/v1"
+enable_thinking = true
+reasoning_effort = "high"
+context_window = 128000
+# 0 表示不发送 provider 输出上限；正整数表示显式上限。
+max_output_tokens = 0
+input_modalities = ["text"]
+
+[llm.runtimes.qwen_fast]
+# 轻量模型，用于 memory gate / query rewrite / HyDE。
+provider = "qwen"
+model = "qwen-flash"
+api_key = "sk-..."
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+context_window = 128000
+max_output_tokens = 0
+input_modalities = ["text"]
+
+[llm.runtimes.qwen_vl]
+# 视觉模型，仅在主 runtime 不支持图片时需要。
+provider = "qwen"
+model = "qwen-vl-plus"
+api_key = "sk-..."
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+context_window = 128000
+max_output_tokens = 0
+input_modalities = ["text", "image"]
+
+# =============================================================================
+# Agent 行为
+# =============================================================================
+
+[agent]
+system_prompt = "You are Akashic, a helpful AI assistant with access to tools. Always respond in the same language the user uses."
+max_tokens = 0
+# 设为 0 表示不限制迭代轮数；长任务仍可用 /stop 中断。
+max_iterations = 40
+dev_mode = false
+
+[agent.context]
+[agent.context.compaction]
+# 模型完整输入达到 context_window 的 74% 后触发统一 session compaction。
+keep_recent_tokens = 20000
+
+[agent.tools]
+search_enabled = true
+
+# Web Chat 由 Supervisor 在唯一入口 http://127.0.0.1:2236 提供。
+[channels.chat]
+enabled = true
+channel_name = "web"
+
+# Android Mobile Realtime 默认关闭；启用后独立监听 WSS :6323。
+# Cloudflare Tunnel 只映射这个端口，不要映射上面的本机 Web。
+[mobile_realtime]
+enabled = false
+host = "0.0.0.0"
+port = 6323
+database = "data/mobile_realtime.db"
+lan_hostname = "akashic.local"
+public_url = ""
+max_attachment_mb = 50
+inbox_retention_days = 7
+
+[mobile_realtime.key_encryption]
+provider = "secret_service"
+master_key_namespace = "akasic/mobile-realtime"
+keyset_manifest = "data/mobile/keys/current.json"
+
+# 可选：长期记忆整理任务（默认已启用，通常无需修改）
+# [agent.maintenance]
+# memory_optimizer_enabled = true
+# memory_optimizer_interval_seconds = 64800
+
+# 可选：控制加载哪些工具集（默认值适合大多数场景）
+# [agent.wiring]
+# toolsets = ["meta_common", "spawn", "schedule"]
+
+# =============================================================================
+# 必填：至少配置一个频道（Telegram 或 QQ 选其一）
+# token / bot_uin 为空时该频道自动跳过，不会报错。
+# =============================================================================
+
+[channels.telegram]
+# BotFather 给的 bot token，格式：123456789:AAF...
+token = ""
+# 你的 Telegram 用户名（不带 @），只有白名单用户才能使用 bot。
+allow_from = ["your_username"]
+# channel 标识符，决定 session key 前缀（如 telegram:12345）。
+# 多个 bot 想要隔离记忆时，改成不同的名字（如 "telegram_work"）。
+# channel_name = "telegram"
+
+[channels.qq]
+# 填 QQ 号启用 QQ 频道，留空跳过。
+bot_uin = ""
+allow_from = ["your_qq_number"]
+websocket_open_timeout_seconds = 5.0
+
+# 可选：允许在群组中使用（@bot 触发）
+# [[channels.qq.groups]]
+# group_id = "123456789"
+# allow_from = ["your_qq_number"]
+# require_at = true
+
+# 本地程序化控制面；listen 留空时按 workspace 派生 Unix socket。
+[app_server]
+enabled = true
+listen = ""
+max_connections = 32
+ingress_queue_size = 128
+outbound_queue_size = 512
+
+# 插件配置位于 <workspace>/plugin-data/<插件名>-<市场>/config.local.toml。
+
+# =============================================================================
+# 语义记忆
+# default memory 的检索阈值在 plugins/default_memory/config.local.toml。
+# =============================================================================
+
+[memory]
+enabled = true
+# 语义记忆 engine 选择。留空等同 default。
+engine = ""
+
+[memory.embedding]
+model = "text-embedding-v3"
+api_key = "sk-..."
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# =============================================================================
+# 主动推送（可选）
+# 先跑通基本对话再开启这部分。
+# =============================================================================
+
+[proactive]
+# 开启后 agent 会主动向你推送消息。需要先填好下方 chat_id 再设为 true。
+enabled = false
+profile = "daily"
+
+[proactive.target]
+channel = "telegram"
+# 你的 Telegram user id（向 bot 发一条消息后从日志里可以拿到）。
+# 官方 QQBot 私聊可填：channel = "qqbot"，chat_id = "c2c:USER_OPENID"
+chat_id = ""
+
+[proactive.agent]
+max_steps = 35
+content_limit = 5
+web_fetch_max_chars = 8000
+context_prob = 0.03
+delivery_cooldown_hours = 1
+
+[proactive.drift]
+# Drift：无可推送内容时 agent 自主做任务。建议先跑通 proactive 再开启。
+enabled = false
+max_steps = 20
+min_interval_hours = 3

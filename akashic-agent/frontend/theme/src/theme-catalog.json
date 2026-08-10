@@ -1,0 +1,75 @@
+{
+  "version": 2,
+  "defaultThemeId": "light",
+  "themes": [
+    {
+      "id": "light",
+      "label": "浅色",
+      "status": "stable",
+      "colorScheme": "light",
+      "material": {
+        "primary": "#2d72c4", "onPrimary": "#ffffff", "primaryContainer": "#d7e7ff", "onPrimaryContainer": "#001b3f",
+        "secondary": "#535f70", "onSecondary": "#ffffff", "secondaryContainer": "#d7e3f8", "onSecondaryContainer": "#101c2b",
+        "tertiary": "#6b5778", "onTertiary": "#ffffff", "tertiaryContainer": "#f3daff", "onTertiaryContainer": "#251431",
+        "error": "#ba1a1a", "onError": "#ffffff", "errorContainer": "#ffdad6", "onErrorContainer": "#410002",
+        "background": "#f8f9ff", "onBackground": "#191c20", "surface": "#f8f9ff", "onSurface": "#191c20",
+        "surfaceVariant": "#dfe3eb", "onSurfaceVariant": "#42474e", "outline": "#73777f", "outlineVariant": "#c2c7cf",
+        "shadow": "#000000", "scrim": "#000000", "inverseSurface": "#2e3035", "inverseOnSurface": "#f0f0f7", "inversePrimary": "#a8c8ff",
+        "surfaceDim": "#d8dae0", "surfaceBright": "#f8f9ff", "surfaceContainerLowest": "#ffffff", "surfaceContainerLow": "#f2f3fa",
+        "surfaceContainer": "#eceef4", "surfaceContainerHigh": "#e6e8ee", "surfaceContainerHighest": "#e0e2e8", "surfaceTint": "#2d72c4"
+      },
+      "domain": {
+        "success": "#176b40", "onSuccess": "#ffffff", "successContainer": "#a7f2c2", "onSuccessContainer": "#00210f",
+        "warning": "#805600", "onWarning": "#ffffff", "warningContainer": "#ffdea5", "onWarningContainer": "#281900",
+        "trace": "#74558f", "onTrace": "#ffffff", "traceContainer": "#f0dbff", "onTraceContainer": "#2b0d45",
+        "info": "#00658a", "onInfo": "#ffffff", "infoContainer": "#c3e8ff", "onInfoContainer": "#001e2c"
+      }
+    },
+    {
+      "id": "dark",
+      "label": "深色",
+      "status": "stable",
+      "colorScheme": "dark",
+      "material": {
+        "primary": "#a8c8ff", "onPrimary": "#003062", "primaryContainer": "#08497f", "onPrimaryContainer": "#d7e7ff",
+        "secondary": "#bbc7db", "onSecondary": "#253140", "secondaryContainer": "#3b4858", "onSecondaryContainer": "#d7e3f8",
+        "tertiary": "#d7bee4", "onTertiary": "#3b2948", "tertiaryContainer": "#523f5f", "onTertiaryContainer": "#f3daff",
+        "error": "#ffb4ab", "onError": "#690005", "errorContainer": "#93000a", "onErrorContainer": "#ffdad6",
+        "background": "#111318", "onBackground": "#e1e2e8", "surface": "#111318", "onSurface": "#e1e2e8",
+        "surfaceVariant": "#42474e", "onSurfaceVariant": "#c2c7cf", "outline": "#8c9199", "outlineVariant": "#42474e",
+        "shadow": "#000000", "scrim": "#000000", "inverseSurface": "#e1e2e8", "inverseOnSurface": "#2e3035", "inversePrimary": "#2d72c4",
+        "surfaceDim": "#111318", "surfaceBright": "#37393e", "surfaceContainerLowest": "#0c0e13", "surfaceContainerLow": "#191c20",
+        "surfaceContainer": "#1d2024", "surfaceContainerHigh": "#282a2f", "surfaceContainerHighest": "#33353a", "surfaceTint": "#a8c8ff"
+      },
+      "domain": {
+        "success": "#8bd5a6", "onSuccess": "#00391e", "successContainer": "#00522c", "onSuccessContainer": "#a7f2c2",
+        "warning": "#f8bd61", "onWarning": "#442b00", "warningContainer": "#614000", "onWarningContainer": "#ffdea5",
+        "trace": "#ddb7ff", "onTrace": "#43245e", "traceContainer": "#5b3c76", "onTraceContainer": "#f0dbff",
+        "info": "#7bd0ff", "onInfo": "#00344a", "infoContainer": "#004c69", "onInfoContainer": "#c3e8ff"
+      }
+    },
+    {
+      "id": "warm-paper",
+      "label": "暖纸",
+      "status": "experimental",
+      "colorScheme": "light",
+      "material": {
+        "primary": "#805517", "onPrimary": "#ffffff", "primaryContainer": "#ffdda9", "onPrimaryContainer": "#291800",
+        "secondary": "#705b40", "onSecondary": "#ffffff", "secondaryContainer": "#fbdcb8", "onSecondaryContainer": "#271806",
+        "tertiary": "#516440", "onTertiary": "#ffffff", "tertiaryContainer": "#d3eabc", "onTertiaryContainer": "#102004",
+        "error": "#ba1a1a", "onError": "#ffffff", "errorContainer": "#ffdad6", "onErrorContainer": "#410002",
+        "background": "#fff8f2", "onBackground": "#211a14", "surface": "#fff8f2", "onSurface": "#211a14",
+        "surfaceVariant": "#eee0cf", "onSurfaceVariant": "#4d463c", "outline": "#7f7669", "outlineVariant": "#d2c5b6",
+        "shadow": "#000000", "scrim": "#000000", "inverseSurface": "#372f29", "inverseOnSurface": "#fceedf", "inversePrimary": "#f3bd6d",
+        "surfaceDim": "#e5d8ce", "surfaceBright": "#fff8f2", "surfaceContainerLowest": "#ffffff", "surfaceContainerLow": "#fff1e7",
+        "surfaceContainer": "#faece1", "surfaceContainerHigh": "#f4e6db", "surfaceContainerHighest": "#eee0d5", "surfaceTint": "#805517"
+      },
+      "domain": {
+        "success": "#386a20", "onSuccess": "#ffffff", "successContainer": "#b9f398", "onSuccessContainer": "#082100",
+        "warning": "#805600", "onWarning": "#ffffff", "warningContainer": "#ffdea5", "onWarningContainer": "#281900",
+        "trace": "#74558f", "onTrace": "#ffffff", "traceContainer": "#f0dbff", "onTraceContainer": "#2b0d45",
+        "info": "#00658a", "onInfo": "#ffffff", "infoContainer": "#c3e8ff", "onInfoContainer": "#001e2c"
+      }
+    }
+  ]
+}
