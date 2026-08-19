@@ -38,3 +38,9 @@ workspace/
 .idea/
 .vscode/
 .DS_Store
+
+# Workspace-local tooling, external references, and reversible cleanup backups
+/.agents/
+/skills-lock.json
+/.local-backup/
+/references/deepseek-harness/
