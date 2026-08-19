@@ -31,6 +31,7 @@ def make_command(task: Task) -> CommandEnvelope:
         id=uuid4(),
         workspace_id=task.workspace_id,
         command_type="CreateTask",
+        target_type="task",
         actor_type="user",
         actor_id="user:test",
         target_id=None,

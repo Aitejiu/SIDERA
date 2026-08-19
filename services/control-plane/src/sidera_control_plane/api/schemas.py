@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -12,6 +12,7 @@ from sidera_control_plane.application.task_queries import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+AggregateType = Literal["task", "worker", "execution", "lease"]
 
 
 class ActorRequest(BaseModel):
@@ -46,6 +47,7 @@ class CommandRequest(BaseModel):
     command_id: UUID
     workspace_id: UUID
     command_type: NonEmptyString
+    target_type: AggregateType
     actor: ActorRequest
     target_id: UUID | None
     expected_version: int | None
@@ -55,6 +57,18 @@ class CommandRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_command_shape(self) -> "CommandRequest":
+        task_commands = {
+            "CreateTask",
+            "SetTaskPriority",
+            "PauseTask",
+            "ResumeTask",
+            "CancelTask",
+        }
+        if self.command_type in task_commands and self.target_type != "task":
+            raise ValueError("Task commands require target_type=task")
+        return self._validate_payload()
+
+    def _validate_payload(self) -> "CommandRequest":
         if self.command_type == "CreateTask":
             if self.target_id is not None or self.expected_version is not None:
                 raise ValueError("CreateTask cannot target an existing Task")
@@ -81,6 +95,7 @@ class CommandRequest(BaseModel):
             id=self.command_id,
             workspace_id=self.workspace_id,
             command_type=self.command_type,
+            target_type=self.target_type,
             actor_type=self.actor.type,
             actor_id=self.actor.id,
             target_id=self.target_id,

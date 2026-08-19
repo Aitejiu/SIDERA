@@ -223,7 +223,7 @@ def _command_model(
         command_type=envelope.command_type,
         actor_type=envelope.actor_type,
         actor_id=envelope.actor_id,
-        target_type="task",
+        target_type=envelope.target_type,
         target_id=envelope.target_id,
         payload=envelope.payload,
         expected_version=envelope.expected_version,

@@ -8,6 +8,7 @@ class CommandEnvelope:
     id: UUID
     workspace_id: UUID
     command_type: str
+    target_type: str
     actor_type: str
     actor_id: str
     target_id: UUID | None

@@ -63,11 +63,12 @@ def client(database_url: str) -> Iterator[TestClient]:
 def seed_outbox(client: TestClient, workspace_id: UUID, number: int = 1) -> None:
     for index in range(number):
         response = client.post(
-            "/api/commands",
+            "/api/v1/commands",
             json={
                 "command_id": str(uuid4()),
                 "workspace_id": str(workspace_id),
                 "command_type": "CreateTask",
+                "target_type": "task",
                 "actor": {"type": "user", "id": "user:test"},
                 "target_id": None,
                 "expected_version": None,

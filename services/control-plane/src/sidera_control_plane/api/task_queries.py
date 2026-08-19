@@ -11,7 +11,7 @@ from sidera_control_plane.api.schemas import (
 )
 from sidera_control_plane.application.task_queries import TaskQueryService
 
-router = APIRouter(prefix="/api/tasks")
+router = APIRouter(prefix="/api/v1/tasks")
 
 
 @router.get("", response_model=TaskPageResponse)

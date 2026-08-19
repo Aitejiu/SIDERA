@@ -6,7 +6,7 @@ from sidera_control_plane.api.dependencies import get_command_service
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
 from sidera_control_plane.application.command_service import TaskCommandService
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/v1")
 
 
 @router.post("/commands", response_model=CommandResponse, status_code=201)

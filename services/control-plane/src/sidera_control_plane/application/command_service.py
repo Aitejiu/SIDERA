@@ -209,6 +209,7 @@ def hash_request(envelope: CommandEnvelope) -> str:
     encoded = json.dumps(
         {
             "command_type": envelope.command_type,
+            "target_type": envelope.target_type,
             "target_id": str(envelope.target_id) if envelope.target_id else None,
             "expected_version": envelope.expected_version,
             "payload": envelope.payload,
