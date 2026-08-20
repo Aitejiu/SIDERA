@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -48,3 +50,17 @@ def test_scheduler_settings_are_positive():
 
     with pytest.raises(ValueError):
         Settings(database_url="postgresql+psycopg://test", scheduler_batch_size=0)
+
+
+def test_workspace_settings_have_safe_defaults_and_validate_retention():
+    settings = Settings(database_url="postgresql+psycopg://test")
+
+    assert settings.workspace_root == Path(".sidera/workspaces")
+    assert settings.workspace_retention_seconds == 86_400
+    assert settings.git_executable == "git"
+
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            workspace_retention_seconds=0,
+        )
