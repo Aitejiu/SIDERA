@@ -11,3 +11,5 @@ class Settings(BaseSettings):
     worker_heartbeat_timeout_seconds: int = Field(default=45, gt=0)
     scheduler_batch_size: int = Field(default=20, gt=0)
     scheduler_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    reconciler_batch_size: int = Field(default=50, gt=0)
+    reconciler_poll_interval_seconds: float = Field(default=2.0, gt=0)

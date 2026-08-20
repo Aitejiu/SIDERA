@@ -35,12 +35,16 @@ def test_scheduler_settings_are_positive():
         worker_heartbeat_timeout_seconds=45,
         scheduler_batch_size=20,
         scheduler_poll_interval_seconds=1.0,
+        reconciler_batch_size=50,
+        reconciler_poll_interval_seconds=2.0,
     )
 
     assert settings.assignment_lease_seconds == 30
     assert settings.worker_heartbeat_timeout_seconds == 45
     assert settings.scheduler_batch_size == 20
     assert settings.scheduler_poll_interval_seconds == 1.0
+    assert settings.reconciler_batch_size == 50
+    assert settings.reconciler_poll_interval_seconds == 2.0
 
     with pytest.raises(ValueError):
         Settings(database_url="postgresql+psycopg://test", scheduler_batch_size=0)
