@@ -64,7 +64,11 @@ class CommandService:
 
             try:
                 with uow.savepoint():
-                    result = handler.handle(uow, envelope)
+                    command_result = handler.handle(uow, envelope)
+                    uow.commands.record_applied(
+                        envelope, request_hash, command_result
+                    )
+                    result = command_result
             except DomainError as exc:
                 uow.commands.record_rejected(
                     envelope,
@@ -77,8 +81,6 @@ class CommandService:
                     },
                 )
                 rejection = exc
-            else:
-                uow.commands.record_applied(envelope, request_hash, result)
 
         if rejection is not None:
             raise rejection
