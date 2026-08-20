@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -8,21 +8,40 @@ from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     InvalidTransition,
+    StaleFencingToken,
     ValidationError,
     VersionConflict,
 )
 from sidera_control_plane.domain.events import EventData
-from sidera_control_plane.domain.execution import Execution, ExecutionStatus
+from sidera_control_plane.domain.execution import (
+    Execution,
+    ExecutionSession,
+    ExecutionStatus,
+)
+from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.task import TaskStatus
 
 
 class ExecutionCommandHandler:
     command_types = frozenset(
-        {"CreateExecution", "RetryExecution", "CancelExecution"}
+        {
+            "CreateExecution",
+            "RetryExecution",
+            "CancelExecution",
+            "RenewLease",
+            "ReportExecutionStarted",
+            "ReportExecutionSucceeded",
+            "ReportExecutionFailed",
+        }
     )
 
-    def __init__(self, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self, clock: Callable[[], datetime], *, lease_ttl_seconds: int = 30
+    ) -> None:
+        if lease_ttl_seconds <= 0:
+            raise ValueError("lease_ttl_seconds must be positive")
         self._clock = clock
+        self._lease_ttl = timedelta(seconds=lease_ttl_seconds)
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -31,6 +50,14 @@ class ExecutionCommandHandler:
             return self._create(uow, envelope)
         if envelope.command_type == "RetryExecution":
             return self._retry(uow, envelope)
+        if envelope.command_type == "RenewLease":
+            return self._renew_lease(uow, envelope)
+        if envelope.command_type == "ReportExecutionStarted":
+            return self._report_started(uow, envelope)
+        if envelope.command_type == "ReportExecutionSucceeded":
+            return self._report_finished(uow, envelope, succeeded=True)
+        if envelope.command_type == "ReportExecutionFailed":
+            return self._report_finished(uow, envelope, succeeded=False)
         return self._cancel(uow, envelope)
 
     def _create(
@@ -317,6 +344,304 @@ class ExecutionCommandHandler:
             event_ids=tuple(event.id for event in events),
         )
 
+    def _renew_lease(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        lease = _get_target_lease(uow, envelope, for_update=True)
+        worker_id = _required_uuid(envelope.payload, "worker_id")
+        fencing_token = _required_int(envelope.payload, "fencing_token")
+        _assert_worker_actor(envelope, worker_id)
+
+        now = self._clock()
+        previous_version = lease.version
+        old_expires_at = lease.expires_at
+        lease.renew(
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            now=now,
+            ttl=self._lease_ttl,
+        )
+        uow.leases.save(lease, previous_version)
+        event = _event(
+            envelope,
+            workspace_id=lease.workspace_id,
+            aggregate_type="lease",
+            aggregate_id=lease.id,
+            aggregate_version=lease.version,
+            event_type="LeaseRenewed",
+            payload={
+                "status": lease.status.value,
+                "old_expires_at": old_expires_at.isoformat(),
+                "expires_at": lease.expires_at.isoformat(),
+                "fencing_token": lease.fencing_token,
+            },
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=lease.id,
+            aggregate_version=lease.version,
+            event_ids=(event.id,),
+        )
+
+    def _report_started(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        execution = _get_target_execution(uow, envelope, for_update=True)
+        worker_id = _required_uuid(envelope.payload, "worker_id")
+        lease_id = _required_uuid(envelope.payload, "lease_id")
+        fencing_token = _required_int(envelope.payload, "fencing_token")
+        _assert_worker_actor(envelope, worker_id)
+
+        lease = uow.leases.get(lease_id, envelope.workspace_id, for_update=True)
+        if lease is None:
+            raise NotFound("lease not found")
+        now = self._clock()
+        _assert_execution_lease(execution, lease, worker_id, fencing_token, now)
+        worker = uow.workers.get(worker_id, envelope.workspace_id, for_update=True)
+        if worker is None:
+            raise NotFound("worker not found")
+        task = uow.tasks.get(execution.task_id, envelope.workspace_id)
+        if task is None:
+            raise NotFound("task not found")
+        if uow.sessions.get_active_for_execution(execution.id, for_update=True) is not None:
+            raise InvalidTransition("execution already has an active session")
+
+        previous_execution_version = execution.version
+        previous_worker_version = worker.version
+        previous_task_version = task.version
+        execution.start(
+            lease_id=lease.id,
+            fencing_token=fencing_token,
+            now=now,
+        )
+        worker.mark_running()
+        session = ExecutionSession.start(
+            session_id=uuid4(),
+            workspace_id=execution.workspace_id,
+            execution_id=execution.id,
+            worker_id=worker.id,
+            adapter_session_id=_required_str(
+                envelope.payload, "adapter_session_id"
+            ),
+            now=now,
+        )
+        task_changed = task.status is TaskStatus.READY
+        if task_changed:
+            task.mark_running()
+
+        uow.executions.save(execution, previous_execution_version)
+        uow.workers.save(worker, previous_worker_version)
+        uow.sessions.add(session)
+        if task_changed:
+            uow.tasks.save(task, previous_task_version)
+
+        events = [
+            _event(
+                envelope,
+                workspace_id=execution.workspace_id,
+                aggregate_type="execution",
+                aggregate_id=execution.id,
+                aggregate_version=execution.version,
+                event_type="ExecutionStarted",
+                payload={
+                    "status": execution.status.value,
+                    "lease_id": str(lease.id),
+                    "worker_id": str(worker.id),
+                    "fencing_token": fencing_token,
+                },
+            ),
+            _event(
+                envelope,
+                workspace_id=session.workspace_id,
+                aggregate_type="execution_session",
+                aggregate_id=session.id,
+                aggregate_version=session.version,
+                event_type="ExecutionSessionStarted",
+                payload={
+                    "status": session.status.value,
+                    "adapter_session_id": session.adapter_session_id,
+                    "input_mode": session.input_mode,
+                    "last_sequence": session.last_sequence,
+                },
+            ),
+            _event(
+                envelope,
+                workspace_id=worker.workspace_id,
+                aggregate_type="worker",
+                aggregate_id=worker.id,
+                aggregate_version=worker.version,
+                event_type="WorkerRunning",
+                payload={
+                    "status": worker.status.value,
+                    "current_load": worker.current_load,
+                    "capacity": worker.capacity,
+                },
+            ),
+        ]
+        if task_changed:
+            events.append(
+                _event(
+                    envelope,
+                    workspace_id=task.workspace_id,
+                    aggregate_type="task",
+                    aggregate_id=task.id,
+                    aggregate_version=task.version,
+                    event_type="TaskRunning",
+                    payload={"status": task.status.value},
+                )
+            )
+        for event in events:
+            uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_ids=tuple(event.id for event in events),
+        )
+
+    def _report_finished(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        envelope: CommandEnvelope,
+        *,
+        succeeded: bool,
+    ) -> CommandResult:
+        execution = _get_target_execution(uow, envelope, for_update=True)
+        worker_id = _required_uuid(envelope.payload, "worker_id")
+        lease_id = _required_uuid(envelope.payload, "lease_id")
+        fencing_token = _required_int(envelope.payload, "fencing_token")
+        _assert_worker_actor(envelope, worker_id)
+
+        lease = uow.leases.get(lease_id, envelope.workspace_id, for_update=True)
+        if lease is None:
+            raise NotFound("lease not found")
+        now = self._clock()
+        _assert_execution_lease(execution, lease, worker_id, fencing_token, now)
+        worker = uow.workers.get(worker_id, envelope.workspace_id, for_update=True)
+        if worker is None:
+            raise NotFound("worker not found")
+        task = uow.tasks.get(execution.task_id, envelope.workspace_id)
+        if task is None:
+            raise NotFound("task not found")
+        session = uow.sessions.get_active_for_execution(execution.id, for_update=True)
+        if session is None:
+            raise NotFound("active execution session not found")
+
+        previous_execution_version = execution.version
+        previous_lease_version = lease.version
+        previous_worker_version = worker.version
+        previous_session_version = session.version
+        previous_task_version = task.version
+        if succeeded:
+            execution.succeed(
+                lease_id=lease.id,
+                fencing_token=fencing_token,
+                now=now,
+            )
+        else:
+            execution.fail(
+                lease_id=lease.id,
+                fencing_token=fencing_token,
+                failure_code=_required_str(envelope.payload, "failure_code"),
+                now=now,
+            )
+        lease.release(
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            now=now,
+        )
+        worker.release()
+        session.close(lost=False, now=now)
+
+        uow.executions.save(execution, previous_execution_version)
+        uow.leases.save(lease, previous_lease_version)
+        uow.workers.save(worker, previous_worker_version)
+        uow.sessions.save(session, previous_session_version)
+
+        event_type = "ExecutionSucceeded" if succeeded else "ExecutionFailed"
+        execution_payload: dict[str, object] = {
+            "status": execution.status.value,
+            "failure_code": execution.failure_code,
+        }
+        events = [
+            _event(
+                envelope,
+                workspace_id=execution.workspace_id,
+                aggregate_type="execution",
+                aggregate_id=execution.id,
+                aggregate_version=execution.version,
+                event_type=event_type,
+                payload=execution_payload,
+            ),
+            _event(
+                envelope,
+                workspace_id=lease.workspace_id,
+                aggregate_type="lease",
+                aggregate_id=lease.id,
+                aggregate_version=lease.version,
+                event_type="LeaseReleased",
+                payload={
+                    "status": lease.status.value,
+                    "fencing_token": lease.fencing_token,
+                },
+            ),
+            _event(
+                envelope,
+                workspace_id=worker.workspace_id,
+                aggregate_type="worker",
+                aggregate_id=worker.id,
+                aggregate_version=worker.version,
+                event_type="WorkerCapacityReleased",
+                payload={
+                    "status": worker.status.value,
+                    "current_load": worker.current_load,
+                    "capacity": worker.capacity,
+                },
+            ),
+            _event(
+                envelope,
+                workspace_id=session.workspace_id,
+                aggregate_type="execution_session",
+                aggregate_id=session.id,
+                aggregate_version=session.version,
+                event_type="ExecutionSessionClosed",
+                payload={
+                    "status": session.status.value,
+                    "last_sequence": session.last_sequence,
+                },
+            ),
+        ]
+        if task.status in {
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+        } and not uow.executions.has_live_for_task(task.id):
+            previous_task_status = task.status.value
+            task.wait_for_decision()
+            uow.tasks.save(task, previous_task_version)
+            events.append(
+                _event(
+                    envelope,
+                    workspace_id=task.workspace_id,
+                    aggregate_type="task",
+                    aggregate_id=task.id,
+                    aggregate_version=task.version,
+                    event_type="TaskWaitingForDecision",
+                    payload={
+                        "status": task.status.value,
+                        "previous_status": previous_task_status,
+                    },
+                )
+            )
+        for event in events:
+            uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_ids=tuple(event.id for event in events),
+        )
+
 
 def _get_target_execution(
     uow: ControlPlaneUnitOfWork,
@@ -338,6 +663,46 @@ def _get_target_execution(
     if execution.version != envelope.expected_version:
         raise VersionConflict(envelope.expected_version, execution.version)
     return execution
+
+
+def _get_target_lease(
+    uow: ControlPlaneUnitOfWork,
+    envelope: CommandEnvelope,
+    *,
+    for_update: bool,
+) -> AssignmentLease:
+    if envelope.target_id is None or envelope.expected_version is None:
+        raise ValidationError(
+            "mutation commands require target_id and expected_version"
+        )
+    if envelope.expected_version < 1:
+        raise ValidationError("expected_version must be positive")
+    lease = uow.leases.get(
+        envelope.target_id, envelope.workspace_id, for_update=for_update
+    )
+    if lease is None:
+        raise NotFound("lease not found")
+    if lease.version != envelope.expected_version:
+        raise VersionConflict(envelope.expected_version, lease.version)
+    return lease
+
+
+def _assert_worker_actor(envelope: CommandEnvelope, worker_id: UUID) -> None:
+    if envelope.actor_type != "worker" or envelope.actor_id != str(worker_id):
+        raise ValidationError("worker command actor must match worker_id")
+
+
+def _assert_execution_lease(
+    execution: Execution,
+    lease: AssignmentLease,
+    worker_id: UUID,
+    fencing_token: int,
+    now: datetime,
+) -> None:
+    if lease.execution_id != execution.id:
+        raise StaleFencingToken("lease does not belong to execution")
+    lease.assert_owner(worker_id, fencing_token, now)
+    execution.assert_fence(lease_id=lease.id, fencing_token=fencing_token)
 
 
 def _event(

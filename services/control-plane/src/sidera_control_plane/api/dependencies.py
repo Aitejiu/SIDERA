@@ -11,6 +11,7 @@ from sidera_control_plane.application.resource_queries import ResourceQueryServi
 from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
+from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
@@ -24,8 +25,14 @@ def get_database(request: Request) -> Database:
     return database
 
 
+def get_settings(request: Request) -> Settings:
+    settings: Settings = request.app.state.settings
+    return settings
+
+
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> CommandService:
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database
@@ -35,7 +42,10 @@ def get_command_service(
         (
             TaskCommandHandler(),
             WorkerCommandHandler(lambda: datetime.now(UTC)),
-            ExecutionCommandHandler(lambda: datetime.now(UTC)),
+            ExecutionCommandHandler(
+                lambda: datetime.now(UTC),
+                lease_ttl_seconds=settings.assignment_lease_seconds,
+            ),
         ),
     )
 

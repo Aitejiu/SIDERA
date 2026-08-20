@@ -80,6 +80,26 @@ class RetryExecutionPayload(BaseModel):
     not_before: datetime
 
 
+class LeaseOwnerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: UUID
+    fencing_token: int = Field(ge=1)
+
+
+class ReportExecutionStartedPayload(LeaseOwnerPayload):
+    lease_id: UUID
+    adapter_session_id: NonEmptyString
+
+
+class ReportExecutionFinishedPayload(LeaseOwnerPayload):
+    lease_id: UUID
+
+
+class ReportExecutionFailedPayload(ReportExecutionFinishedPayload):
+    failure_code: NonEmptyString = Field(max_length=100)
+
+
 class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,6 +155,18 @@ class CommandRequest(BaseModel):
         elif self.command_type == "CancelExecution":
             self._require_mutation_target("execution")
             parsed = EmptyPayload.model_validate(self.payload)
+        elif self.command_type == "RenewLease":
+            self._require_mutation_target("lease")
+            parsed = LeaseOwnerPayload.model_validate(self.payload)
+        elif self.command_type == "ReportExecutionStarted":
+            self._require_mutation_target("execution")
+            parsed = ReportExecutionStartedPayload.model_validate(self.payload)
+        elif self.command_type == "ReportExecutionSucceeded":
+            self._require_mutation_target("execution")
+            parsed = ReportExecutionFinishedPayload.model_validate(self.payload)
+        elif self.command_type == "ReportExecutionFailed":
+            self._require_mutation_target("execution")
+            parsed = ReportExecutionFailedPayload.model_validate(self.payload)
         else:
             return self
         self.payload = dict(parsed.model_dump(mode="json"))
