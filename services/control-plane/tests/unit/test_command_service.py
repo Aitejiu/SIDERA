@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Self, cast
 from uuid import uuid4
@@ -75,12 +76,24 @@ class FakeCommandRepository:
 class FakeUnitOfWork:
     def __init__(self, commands: FakeCommandRepository) -> None:
         self.commands = commands
+        self.mutations = 0
+        self.savepoint_calls = 0
 
     def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+    @contextmanager
+    def savepoint(self):
+        self.savepoint_calls += 1
+        previous_mutations = self.mutations
+        try:
+            yield
+        except Exception:
+            self.mutations = previous_mutations
+            raise
 
 
 class RecordingHandler:
@@ -108,6 +121,18 @@ class RejectingHandler:
         self, _uow: ControlPlaneUnitOfWork, _envelope: CommandEnvelope
     ) -> CommandResult:
         raise InvalidTransition("thing cannot be rejected", details={"step": "validate"})
+
+
+class MutatingRejectingHandler:
+    command_types = frozenset({"MutateAndReject"})
+
+    def handle(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        del envelope
+        unit = cast(FakeUnitOfWork, uow)
+        unit.mutations += 1
+        raise InvalidTransition("mutation rejected")
 
 
 def make_envelope(command_type: str, *, idempotency_key: str = "thing-001") -> CommandEnvelope:
@@ -169,6 +194,24 @@ def test_dispatcher_replays_domain_rejection_with_stable_details() -> None:
     assert replay_error.value.code == first_error.value.code
     assert str(replay_error.value) == str(first_error.value)
     assert replay_error.value.details == first_error.value.details
+
+
+def test_rejected_handler_rolls_back_mutations_inside_savepoint() -> None:
+    commands = FakeCommandRepository()
+    unit = FakeUnitOfWork(commands)
+    service = CommandService(
+        lambda: cast(ControlPlaneUnitOfWork, unit),
+        (MutatingRejectingHandler(),),
+    )
+    envelope = make_envelope("MutateAndReject")
+
+    with pytest.raises(InvalidTransition, match="mutation rejected"):
+        service.handle(envelope)
+
+    assert unit.savepoint_calls == 1
+    assert unit.mutations == 0
+    with pytest.raises(ReplayedDomainError, match="mutation rejected"):
+        service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
 
 
 def test_request_hash_uses_semantics_not_transport_ids() -> None:

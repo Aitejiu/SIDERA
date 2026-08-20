@@ -63,7 +63,8 @@ class CommandService:
                 return replay_command(stored)
 
             try:
-                result = handler.handle(uow, envelope)
+                with uow.savepoint():
+                    result = handler.handle(uow, envelope)
             except DomainError as exc:
                 uow.commands.record_rejected(
                     envelope,

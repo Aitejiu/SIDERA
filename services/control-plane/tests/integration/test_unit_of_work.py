@@ -4,7 +4,10 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 
+from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.errors import InvalidTransition
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.persistence.database import Database
@@ -140,3 +143,62 @@ def test_unit_of_work_commits_task_command_event_and_outbox_atomically(
         "data": event.payload,
         "correlation_id": str(command.correlation_id),
     }
+
+
+class MutateAndRejectHandler:
+    command_types = frozenset({"MutateAndRejectTask"})
+
+    def handle(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if envelope.target_id is None or envelope.expected_version is None:
+            raise AssertionError("test command must target a task")
+        task = uow.tasks.get(envelope.target_id, envelope.workspace_id)
+        if task is None:
+            raise AssertionError("test task is missing")
+        previous_version = task.version
+        task.set_priority(90)
+        uow.tasks.save(task, previous_version)
+        raise InvalidTransition("simulated domain rejection")
+
+
+def test_rejected_command_rolls_back_handler_changes_but_commits_rejection(
+    uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+    workspace_id: UUID,
+) -> None:
+    task = make_domain_task(workspace_id)
+    with uow_factory() as uow:
+        uow.tasks.add(task)
+
+    command = CommandEnvelope(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        command_type="MutateAndRejectTask",
+        target_type="task",
+        actor_type="user",
+        actor_id="user:test",
+        target_id=task.id,
+        payload={},
+        expected_version=task.version,
+        idempotency_key="mutate-and-reject-001",
+        correlation_id=uuid4(),
+    )
+    service = CommandService(uow_factory, (MutateAndRejectHandler(),))
+
+    with pytest.raises(InvalidTransition, match="simulated domain rejection"):
+        service.handle(command)
+
+    with uow_factory() as uow:
+        stored_task = uow.tasks.get(task.id, workspace_id)
+        stored_command = uow.commands.find_duplicate(
+            workspace_id,
+            command.actor_type,
+            command.actor_id,
+            command.idempotency_key,
+        )
+    assert stored_task is not None
+    assert stored_task.priority == task.priority
+    assert stored_task.version == task.version
+    assert stored_command is not None
+    assert stored_command.status == "rejected"
+    assert stored_command.rejection_reason == "invalid_transition"

@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import TracebackType
 from typing import Self
 
@@ -64,3 +66,8 @@ class SqlAlchemyUnitOfWork:
             raise
         finally:
             self.session.close()
+
+    @contextmanager
+    def savepoint(self) -> Iterator[None]:
+        with self.session.begin_nested():
+            yield

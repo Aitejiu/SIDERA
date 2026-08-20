@@ -1,3 +1,4 @@
+from contextlib import AbstractContextManager
 from datetime import datetime
 from types import TracebackType
 from typing import Protocol, Self
@@ -159,6 +160,9 @@ class ControlPlaneUnitOfWork(Protocol):
     sessions: SessionRepositoryPort
     commands: CommandRepositoryPort
     events: EventStorePort
+
+    def savepoint(self) -> AbstractContextManager[None]:
+        raise NotImplementedError
 
     def __enter__(self) -> Self:
         raise NotImplementedError
