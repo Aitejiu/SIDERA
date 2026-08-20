@@ -11,6 +11,10 @@ from sidera_control_plane.domain.execution import (
     ExecutionSessionStatus,
 )
 from sidera_control_plane.persistence.models import ExecutionSessionModel
+from sidera_control_plane.persistence.module_repository import (
+    capability_profile_from_payload,
+    capability_profile_to_payload,
+)
 
 
 class SessionRepository:
@@ -41,6 +45,17 @@ class SessionRepository:
                 last_sequence=session.last_sequence,
                 last_activity_at=session.last_activity_at,
                 input_mode=session.input_mode,
+                adapter_module_id=session.adapter_module_id,
+                adapter_config_version=session.adapter_config_version,
+                workspace_module_id=session.workspace_module_id,
+                workspace_config_version=session.workspace_config_version,
+                capability_snapshot=(
+                    capability_profile_to_payload(session.capability_snapshot)
+                    if session.capability_snapshot is not None
+                    else None
+                ),
+                process_ref=session.process_ref,
+                workspace_ref=session.workspace_ref,
                 version=session.version,
             )
         )
@@ -61,6 +76,17 @@ class SessionRepository:
                 last_sequence=session.last_sequence,
                 last_activity_at=session.last_activity_at,
                 input_mode=session.input_mode,
+                adapter_module_id=session.adapter_module_id,
+                adapter_config_version=session.adapter_config_version,
+                workspace_module_id=session.workspace_module_id,
+                workspace_config_version=session.workspace_config_version,
+                capability_snapshot=(
+                    capability_profile_to_payload(session.capability_snapshot)
+                    if session.capability_snapshot is not None
+                    else None
+                ),
+                process_ref=session.process_ref,
+                workspace_ref=session.workspace_ref,
                 version=session.version,
                 updated_at=datetime.now(UTC),
             )
@@ -92,4 +118,15 @@ def _to_domain_session(row: ExecutionSessionModel) -> ExecutionSession:
         last_activity_at=row.last_activity_at,
         input_mode=row.input_mode,
         version=row.version,
+        adapter_module_id=row.adapter_module_id,
+        adapter_config_version=row.adapter_config_version,
+        workspace_module_id=row.workspace_module_id,
+        workspace_config_version=row.workspace_config_version,
+        capability_snapshot=(
+            capability_profile_from_payload(row.capability_snapshot)
+            if row.capability_snapshot is not None
+            else None
+        ),
+        process_ref=row.process_ref,
+        workspace_ref=row.workspace_ref,
     )

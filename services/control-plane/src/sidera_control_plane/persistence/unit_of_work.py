@@ -6,17 +6,36 @@ from typing import Self
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import (
+    ArtifactRepositoryPort,
     CommandRepositoryPort,
     EventStorePort,
+    EvidenceClaimRepositoryPort,
+    ExecutionBindingRepositoryPort,
+    ExecutionEventRepositoryPort,
+    ExecutionInputRepositoryPort,
     ExecutionRepositoryPort,
+    GatewayOperationRepositoryPort,
     LeaseStorePort,
+    ModuleRepositoryPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
     WorkerRepositoryPort,
+    WorkspaceRepositoryPort,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
+from sidera_control_plane.persistence.gateway_repository import (
+    ArtifactRepository,
+    EvidenceClaimRepository,
+    ExecutionEventRepository,
+    ExecutionInputRepository,
+    GatewayOperationRepository,
+)
 from sidera_control_plane.persistence.lease_store import LeaseStore
+from sidera_control_plane.persistence.module_repository import (
+    ExecutionBindingRepository,
+    ModuleRepository,
+)
 from sidera_control_plane.persistence.repositories import (
     CommandRepository,
     EventRepository,
@@ -24,6 +43,7 @@ from sidera_control_plane.persistence.repositories import (
 )
 from sidera_control_plane.persistence.session_repository import SessionRepository
 from sidera_control_plane.persistence.worker_repository import WorkerRepository
+from sidera_control_plane.persistence.workspace_repository import WorkspaceRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -33,6 +53,14 @@ class SqlAlchemyUnitOfWork:
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort
     sessions: SessionRepositoryPort
+    modules: ModuleRepositoryPort
+    bindings: ExecutionBindingRepositoryPort
+    gateway_operations: GatewayOperationRepositoryPort
+    workspaces: WorkspaceRepositoryPort
+    execution_events: ExecutionEventRepositoryPort
+    artifacts: ArtifactRepositoryPort
+    evidence_claims: EvidenceClaimRepositoryPort
+    execution_inputs: ExecutionInputRepositoryPort
     commands: CommandRepositoryPort
     events: EventStorePort
 
@@ -46,6 +74,14 @@ class SqlAlchemyUnitOfWork:
         self.executions = ExecutionRepository(self.session)
         self.leases = LeaseStore(self.session)
         self.sessions = SessionRepository(self.session)
+        self.modules = ModuleRepository(self.session)
+        self.bindings = ExecutionBindingRepository(self.session)
+        self.gateway_operations = GatewayOperationRepository(self.session)
+        self.workspaces = WorkspaceRepository(self.session)
+        self.execution_events = ExecutionEventRepository(self.session)
+        self.artifacts = ArtifactRepository(self.session)
+        self.evidence_claims = EvidenceClaimRepository(self.session)
+        self.execution_inputs = ExecutionInputRepository(self.session)
         self.commands = CommandRepository(self.session)
         self.events = EventRepository(self.session)
         return self

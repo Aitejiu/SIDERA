@@ -10,12 +10,22 @@ from sqlalchemy import delete, func, select, update
 
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ArtifactModel,
     AssignmentLeaseModel,
     CommandModel,
     EventModel,
+    EvidenceClaimModel,
+    ExecutionBindingModel,
+    ExecutionEventModel,
+    ExecutionInputModel,
     ExecutionModel,
     ExecutionSessionModel,
+    ExecutionWorkspaceModel,
+    GatewayOperationModel,
+    ModuleDefinitionModel,
+    ModuleInstanceModel,
     OutboxMessageModel,
+    ProcessDescriptorModel,
     TaskModel,
     WorkerModel,
     WorkspaceModel,
@@ -49,9 +59,19 @@ def clean_database(database: Database) -> Iterator[None]:
     with database.session() as session:
         session.execute(update(ExecutionModel).values(active_lease_id=None))
         for model in (
+            ExecutionInputModel,
+            EvidenceClaimModel,
+            ArtifactModel,
+            ExecutionEventModel,
+            GatewayOperationModel,
+            ProcessDescriptorModel,
+            ExecutionWorkspaceModel,
+            ExecutionBindingModel,
             ExecutionSessionModel,
             AssignmentLeaseModel,
             ExecutionModel,
+            ModuleInstanceModel,
+            ModuleDefinitionModel,
             WorkerModel,
             OutboxMessageModel,
             EventModel,

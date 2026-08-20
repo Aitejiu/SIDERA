@@ -316,6 +316,7 @@ class ExecutionSessionModel(TimestampMixin, Base):
         UniqueConstraint(
             "worker_id", "adapter_session_id", name="uq_execution_sessions_adapter"
         ),
+        UniqueConstraint("id", "workspace_id", name="uq_execution_sessions_identity"),
         Index(
             "uq_execution_sessions_active_execution",
             "execution_id",
@@ -341,6 +342,13 @@ class ExecutionSessionModel(TimestampMixin, Base):
         DateTime(timezone=True), nullable=False
     )
     input_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    adapter_module_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    adapter_config_version: Mapped[int | None] = mapped_column(Integer)
+    workspace_module_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    workspace_config_version: Mapped[int | None] = mapped_column(Integer)
+    capability_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    process_ref: Mapped[str | None] = mapped_column(String(500))
+    workspace_ref: Mapped[str | None] = mapped_column(String(500))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -451,3 +459,505 @@ class OutboxMessageModel(TimestampMixin, Base):
     claim_token: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ModuleDefinitionModel(TimestampMixin, Base):
+    __tablename__ = "module_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "config_schema_version >= 1", name="ck_module_definitions_schema_version"
+        ),
+        CheckConstraint(
+            "lifecycle IN ('active', 'draining', 'disabled')",
+            name="ck_module_definitions_lifecycle",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_module_definitions_identity"),
+        Index("ix_module_definitions_workspace_type", "workspace_id", "module_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    module_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    interface_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    config_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    capabilities: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ModuleInstanceModel(TimestampMixin, Base):
+    __tablename__ = "module_instances"
+    __table_args__ = (
+        CheckConstraint("config_version >= 1", name="ck_module_instances_config_version"),
+        CheckConstraint(
+            "lifecycle IN ('active', 'draining', 'disabled')",
+            name="ck_module_instances_lifecycle",
+        ),
+        ForeignKeyConstraint(
+            ["definition_id", "workspace_id"],
+            ["module_definitions.id", "module_definitions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_module_instances_definition_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_module_instances_identity"),
+        UniqueConstraint(
+            "workspace_id", "instance_name", "config_version",
+            name="uq_module_instances_name_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    definition_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    instance_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    config_namespace: Mapped[str] = mapped_column(String(100), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    secret_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ExecutionBindingModel(TimestampMixin, Base):
+    __tablename__ = "execution_bindings"
+    __table_args__ = (
+        CheckConstraint("adapter_config_version >= 1", name="ck_bindings_adapter_config"),
+        CheckConstraint("workspace_config_version >= 1", name="ck_bindings_workspace_config"),
+        CheckConstraint("fencing_token >= 1", name="ck_bindings_fencing_token"),
+        CheckConstraint("version >= 1", name="ck_bindings_version"),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_bindings_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_id", "workspace_id"],
+            ["workers.id", "workers.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_bindings_worker_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["adapter_module_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_bindings_adapter_module_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_module_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_bindings_workspace_module_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["lease_id", "execution_id", "workspace_id"],
+            [
+                "assignment_leases.id",
+                "assignment_leases.execution_id",
+                "assignment_leases.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_bindings_lease_execution_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_bindings_identity"),
+        UniqueConstraint(
+            "execution_id", "workspace_id", name="uq_bindings_execution"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    worker_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    adapter_module_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    workspace_module_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    adapter_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    capability_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    lease_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ExecutionWorkspaceModel(TimestampMixin, Base):
+    __tablename__ = "execution_workspaces"
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle IN ('requested', 'preparing', 'ready', 'active', 'frozen', "
+            "'retained', 'cleaning', 'released', 'quarantined')",
+            name="ck_execution_workspaces_lifecycle",
+        ),
+        CheckConstraint("retention_seconds > 0", name="ck_execution_workspaces_retention"),
+        CheckConstraint("fencing_token >= 1", name="ck_execution_workspaces_fencing"),
+        CheckConstraint("version >= 1", name="ck_execution_workspaces_version"),
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspaces_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspaces_execution_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_execution_workspaces_identity"),
+        Index(
+            "uq_execution_workspaces_active_execution",
+            "execution_id",
+            unique=True,
+            postgresql_where=text("lifecycle IN ('requested', 'preparing', 'ready', 'active')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    checkouts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    location_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
+    retention_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    retain_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ProcessDescriptorModel(TimestampMixin, Base):
+    __tablename__ = "process_descriptors"
+    __table_args__ = (
+        CheckConstraint("pid >= 1", name="ck_process_descriptors_pid"),
+        CheckConstraint("process_group_id >= 1", name="ck_process_descriptors_group"),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_process_descriptors_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_process_descriptors_session_workspace",
+        ),
+        UniqueConstraint("workspace_id", "nonce", name="uq_process_descriptors_nonce"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(255), nullable=False)
+    process_group_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class GatewayOperationModel(TimestampMixin, Base):
+    __tablename__ = "gateway_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('requested', 'running', 'succeeded', 'failed', 'unknown')",
+            name="ck_gateway_operations_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_gateway_operations_attempts"),
+        CheckConstraint("fencing_token >= 1", name="ck_gateway_operations_fencing"),
+        CheckConstraint("version >= 1", name="ck_gateway_operations_version"),
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_gateway_operations_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_gateway_operations_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_gateway_operations_session_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_gateway_operations_module_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["lease_id", "execution_id", "workspace_id"],
+            [
+                "assignment_leases.id",
+                "assignment_leases.execution_id",
+                "assignment_leases.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_gateway_operations_lease_execution_workspace",
+        ),
+        UniqueConstraint(
+            "workspace_id", "operation_type", "operation_id",
+            name="uq_gateway_operations_idempotency",
+        ),
+        Index("ix_gateway_operations_recovery", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    operation_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    operation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    module_instance_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    config_version: Mapped[int | None] = mapped_column(Integer)
+    lease_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_ref: Mapped[str | None] = mapped_column(String(500))
+    failure_code: Mapped[str | None] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ExecutionEventModel(TimestampMixin, Base):
+    __tablename__ = "execution_events"
+    __table_args__ = (
+        CheckConstraint("sequence >= 1", name="ck_execution_events_sequence"),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_events_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_events_session_workspace",
+        ),
+        UniqueConstraint(
+            "session_id", "sequence", name="uq_execution_events_session_sequence"
+        ),
+        Index("ix_execution_events_execution_sequence", "execution_id", "sequence"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_ref: Mapped[str | None] = mapped_column(String(500))
+
+
+class ArtifactModel(TimestampMixin, Base):
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        CheckConstraint("size_bytes >= 0", name="ck_artifacts_size"),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-fA-F]{64}$'", name="ck_artifacts_content_hash"
+        ),
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_artifacts_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_artifacts_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_artifacts_session_workspace",
+        ),
+        UniqueConstraint(
+            "workspace_id", "storage_ref", "content_hash",
+            name="uq_artifacts_storage_hash",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class EvidenceClaimModel(TimestampMixin, Base):
+    __tablename__ = "evidence_claims"
+    __table_args__ = (
+        CheckConstraint(
+            "status = 'candidate'", name="ck_evidence_claims_candidate_only"
+        ),
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_evidence_claims_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_evidence_claims_execution_workspace",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    acceptance_criterion_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    conclusion: Mapped[str] = mapped_column(Text, nullable=False)
+    environment_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    artifact_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    producer: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class ExecutionInputModel(TimestampMixin, Base):
+    __tablename__ = "execution_inputs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('accepted', 'queued', 'dispatching', 'delivered', 'blocked', 'failed', 'cancelled')",
+            name="ck_execution_inputs_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_execution_inputs_version"),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_inputs_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_inputs_session_workspace",
+        ),
+        UniqueConstraint(
+            "workspace_id", "session_id", "client_idempotency_key",
+            name="uq_execution_inputs_idempotency",
+        ),
+        Index(
+            "uq_execution_inputs_one_pending_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('accepted', 'queued', 'dispatching', 'blocked')"
+            ),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    client_idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    attachment_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    operation_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    failure_code: Mapped[str | None] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
