@@ -294,6 +294,7 @@ class ExecutionCommandHandler:
                     event_type="WorkerCapacityReleased",
                     payload={
                         "status": worker.status.value,
+                        "desired_state": worker.desired_state.value,
                         "current_load": worker.current_load,
                         "capacity": worker.capacity,
                     },
@@ -474,6 +475,7 @@ class ExecutionCommandHandler:
                 event_type="WorkerRunning",
                 payload={
                     "status": worker.status.value,
+                    "desired_state": worker.desired_state.value,
                     "current_load": worker.current_load,
                     "capacity": worker.capacity,
                 },
@@ -595,6 +597,7 @@ class ExecutionCommandHandler:
                 event_type="WorkerCapacityReleased",
                 payload={
                     "status": worker.status.value,
+                    "desired_state": worker.desired_state.value,
                     "current_load": worker.current_load,
                     "capacity": worker.capacity,
                 },

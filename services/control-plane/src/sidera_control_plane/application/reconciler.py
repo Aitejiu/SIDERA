@@ -87,6 +87,7 @@ class Reconciler:
                     payload={
                         "worker_id": str(worker.id),
                         "status": worker.status.value,
+                        "desired_state": worker.desired_state.value,
                     },
                 )
                 event = _event(
@@ -98,6 +99,7 @@ class Reconciler:
                     event_type="WorkerOffline",
                     payload={
                         "status": worker.status.value,
+                        "desired_state": worker.desired_state.value,
                         "current_load": worker.current_load,
                         "capacity": worker.capacity,
                     },
@@ -269,6 +271,7 @@ class Reconciler:
                     event_type="WorkerCapacityReleased",
                     payload={
                         "status": worker.status.value,
+                        "desired_state": worker.desired_state.value,
                         "current_load": worker.current_load,
                         "capacity": worker.capacity,
                     },

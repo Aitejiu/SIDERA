@@ -195,6 +195,7 @@ class Scheduler:
                         event_type="WorkerCapacityReserved",
                         payload={
                             "status": worker.status.value,
+                            "desired_state": worker.desired_state.value,
                             "current_load": worker.current_load,
                             "capacity": worker.capacity,
                         },

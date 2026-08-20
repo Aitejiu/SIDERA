@@ -92,6 +92,10 @@ class WorkerModel(TimestampMixin, Base):
         CheckConstraint(
             "startup_latency_ms >= 0", name="ck_workers_startup_latency_ms"
         ),
+        CheckConstraint(
+            "desired_state IN ('active', 'draining')",
+            name="ck_workers_desired_state",
+        ),
         CheckConstraint("version >= 1", name="ck_workers_version"),
         UniqueConstraint("id", "workspace_id", name="uq_workers_id_workspace"),
         Index(
@@ -111,6 +115,9 @@ class WorkerModel(TimestampMixin, Base):
     adapter_type: Mapped[str] = mapped_column(String(100), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    desired_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="active"
+    )
     capabilities: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False)
     current_load: Mapped[int] = mapped_column(Integer, nullable=False)

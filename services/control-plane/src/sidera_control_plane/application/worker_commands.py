@@ -56,6 +56,7 @@ class WorkerCommandHandler:
                 "adapter_type": worker.adapter_type,
                 "display_name": worker.display_name,
                 "status": worker.status.value,
+                "desired_state": worker.desired_state.value,
                 "capabilities": sorted(worker.capabilities),
                 "capacity": worker.capacity,
                 "current_load": worker.current_load,
@@ -115,6 +116,7 @@ class WorkerCommandHandler:
             event_type=event_type,
             payload={
                 "status": worker.status.value,
+                "desired_state": worker.desired_state.value,
                 "current_load": worker.current_load,
                 "capacity": worker.capacity,
                 "last_heartbeat_at": worker.last_heartbeat_at.isoformat(),

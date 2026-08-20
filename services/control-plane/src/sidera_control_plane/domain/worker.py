@@ -19,6 +19,11 @@ class WorkerStatus(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
+class WorkerDesiredState(StrEnum):
+    ACTIVE = "active"
+    DRAINING = "draining"
+
+
 SCHEDULABLE_WORKER_STATUSES = {
     WorkerStatus.IDLE,
     WorkerStatus.RESERVED,
@@ -33,6 +38,7 @@ class Worker:
     adapter_type: str
     display_name: str
     status: WorkerStatus
+    desired_state: WorkerDesiredState
     capabilities: frozenset[str]
     capacity: int
     current_load: int
@@ -70,6 +76,7 @@ class Worker:
             adapter_type=adapter_type.strip(),
             display_name=display_name.strip(),
             status=WorkerStatus.IDLE,
+            desired_state=WorkerDesiredState.ACTIVE,
             capabilities=clean_capabilities,
             capacity=capacity,
             current_load=0,
@@ -85,7 +92,9 @@ class Worker:
         self.last_heartbeat_at = now
         if not healthy:
             self.status = WorkerStatus.UNHEALTHY
-        elif self.status is not WorkerStatus.DRAINING:
+        elif self.desired_state is WorkerDesiredState.DRAINING:
+            self.status = WorkerStatus.DRAINING
+        else:
             self.status = WorkerStatus.IDLE if self.current_load == 0 else WorkerStatus.BUSY
         self.version += 1
 
@@ -93,7 +102,10 @@ class Worker:
         return self.last_heartbeat_at > now - timeout
 
     def reserve(self) -> None:
-        if self.status not in SCHEDULABLE_WORKER_STATUSES:
+        if (
+            self.desired_state is not WorkerDesiredState.ACTIVE
+            or self.status not in SCHEDULABLE_WORKER_STATUSES
+        ):
             raise InvalidTransition(f"worker cannot accept work: {self.status}")
         if self.current_load >= self.capacity:
             raise CapacityExceeded("worker has no remaining capacity")
@@ -110,21 +122,26 @@ class Worker:
             WorkerStatus.DRAINING,
         }:
             raise InvalidTransition(f"worker cannot start work: {self.status}")
-        if self.status is not WorkerStatus.DRAINING:
+        if self.desired_state is WorkerDesiredState.ACTIVE:
             self.status = WorkerStatus.BUSY
+        else:
+            self.status = WorkerStatus.DRAINING
         self.version += 1
 
     def release(self) -> None:
         if self.current_load < 1:
             raise InvalidTransition("worker load is already zero")
         self.current_load -= 1
-        if self.status in SCHEDULABLE_WORKER_STATUSES:
+        if self.desired_state is WorkerDesiredState.DRAINING:
+            self.status = WorkerStatus.DRAINING
+        elif self.status in SCHEDULABLE_WORKER_STATUSES:
             self.status = WorkerStatus.IDLE if self.current_load == 0 else WorkerStatus.BUSY
         self.version += 1
 
     def drain(self) -> None:
         if self.status is WorkerStatus.OFFLINE:
             raise InvalidTransition("offline worker cannot enter draining")
+        self.desired_state = WorkerDesiredState.DRAINING
         self.status = WorkerStatus.DRAINING
         self.version += 1
 

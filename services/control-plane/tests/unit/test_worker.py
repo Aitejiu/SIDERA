@@ -8,7 +8,11 @@ from sidera_control_plane.domain.errors import (
     InvalidTransition,
     ValidationError,
 )
-from sidera_control_plane.domain.worker import Worker, WorkerStatus
+from sidera_control_plane.domain.worker import (
+    Worker,
+    WorkerDesiredState,
+    WorkerStatus,
+)
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
@@ -51,6 +55,18 @@ def test_worker_release_keeps_draining_status_until_reregistration() -> None:
 
     assert worker.current_load == 0
     assert worker.status is WorkerStatus.DRAINING
+    assert worker.desired_state is WorkerDesiredState.DRAINING
+
+
+def test_draining_intent_survives_offline_and_healthy_heartbeat() -> None:
+    worker = make_worker()
+    worker.drain()
+    worker.mark_offline()
+
+    worker.heartbeat(healthy=True, now=NOW + timedelta(seconds=1))
+
+    assert worker.status is WorkerStatus.DRAINING
+    assert worker.desired_state is WorkerDesiredState.DRAINING
 
 
 @pytest.mark.parametrize(

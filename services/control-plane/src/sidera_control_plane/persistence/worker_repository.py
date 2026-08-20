@@ -6,7 +6,11 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.errors import VersionConflict
-from sidera_control_plane.domain.worker import Worker, WorkerStatus
+from sidera_control_plane.domain.worker import (
+    Worker,
+    WorkerDesiredState,
+    WorkerStatus,
+)
 from sidera_control_plane.persistence.models import WorkerModel
 
 
@@ -34,6 +38,7 @@ class WorkerRepository:
                 adapter_type=worker.adapter_type,
                 display_name=worker.display_name,
                 status=worker.status.value,
+                desired_state=worker.desired_state.value,
                 capabilities=sorted(worker.capabilities),
                 capacity=worker.capacity,
                 current_load=worker.current_load,
@@ -56,6 +61,7 @@ class WorkerRepository:
                 adapter_type=worker.adapter_type,
                 display_name=worker.display_name,
                 status=worker.status.value,
+                desired_state=worker.desired_state.value,
                 capabilities=sorted(worker.capabilities),
                 capacity=worker.capacity,
                 current_load=worker.current_load,
@@ -90,6 +96,7 @@ class WorkerRepository:
                         WorkerStatus.BUSY.value,
                     )
                 ),
+                WorkerModel.desired_state == WorkerDesiredState.ACTIVE.value,
                 WorkerModel.last_heartbeat_at > heartbeat_cutoff,
                 WorkerModel.current_load < WorkerModel.capacity,
                 WorkerModel.capabilities.contains(sorted(required_capabilities)),
@@ -135,6 +142,7 @@ def _to_domain_worker(row: WorkerModel) -> Worker:
         adapter_type=row.adapter_type,
         display_name=row.display_name,
         status=WorkerStatus(row.status),
+        desired_state=WorkerDesiredState(row.desired_state),
         capabilities=frozenset(row.capabilities),
         capacity=row.capacity,
         current_load=row.current_load,

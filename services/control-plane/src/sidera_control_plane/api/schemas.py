@@ -264,6 +264,7 @@ class WorkerResponse(BaseModel):
     adapter_type: str
     display_name: str
     status: str
+    desired_state: str
     capabilities: tuple[str, ...]
     capacity: int
     current_load: int
@@ -282,6 +283,7 @@ class WorkerResponse(BaseModel):
             adapter_type=worker.adapter_type,
             display_name=worker.display_name,
             status=worker.status,
+            desired_state=worker.desired_state,
             capabilities=tuple(sorted(worker.capabilities)),
             capacity=worker.capacity,
             current_load=worker.current_load,

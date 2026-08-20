@@ -121,6 +121,7 @@ def test_worker_registration_heartbeat_drain_and_version_replay(
     assert detail.status_code == 200, detail.text
     assert detail.json()["capabilities"] == ["code", "python"]
     assert detail.json()["status"] == "idle"
+    assert detail.json()["desired_state"] == "active"
     assert detail.json()["current_load"] == 0
     assert detail.json()["version"] == 1
     assert detail.json()["created_at"]
@@ -173,6 +174,7 @@ def test_worker_registration_heartbeat_drain_and_version_replay(
     )
     assert final_detail.status_code == 200
     assert final_detail.json()["status"] == "draining"
+    assert final_detail.json()["desired_state"] == "draining"
     assert final_detail.json()["version"] == 4
 
     stale_request = worker_mutation_request(
@@ -222,6 +224,7 @@ def test_worker_registration_heartbeat_drain_and_version_replay(
         "adapter_type": "fake",
         "display_name": "Fake Worker A",
         "status": "idle",
+        "desired_state": "active",
         "capabilities": ["code", "python"],
         "capacity": 2,
         "current_load": 0,

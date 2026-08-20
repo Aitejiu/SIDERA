@@ -103,6 +103,7 @@ def test_resource_repositories_round_trip_and_save(
 
     assert stored_worker is not None
     assert stored_worker.capabilities == frozenset({"python", "postgres"})
+    assert stored_worker.desired_state.value == "active"
     assert stored_worker.last_heartbeat_at == NOW
     assert stored_execution is not None
     assert stored_execution.capability_requirements == frozenset({"python"})

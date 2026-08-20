@@ -37,6 +37,12 @@ def test_foundation_migration_creates_authoritative_tables(database: Database) -
 
     with database.engine.connect() as connection:
         inspector = inspect(connection)
+        worker_columns = {
+            item["name"] for item in inspector.get_columns("workers")
+        }
+        worker_constraints = {
+            item["name"] for item in inspector.get_check_constraints("workers")
+        }
         lease_indexes = {
             item["name"] for item in inspector.get_indexes("assignment_leases")
         }
@@ -44,6 +50,8 @@ def test_foundation_migration_creates_authoritative_tables(database: Database) -
             item["name"] for item in inspector.get_indexes("execution_sessions")
         }
 
+    assert "desired_state" in worker_columns
+    assert "ck_workers_desired_state" in worker_constraints
     assert "uq_assignment_leases_active_execution" in lease_indexes
     assert "uq_execution_sessions_active_execution" in session_indexes
 

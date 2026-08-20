@@ -13,6 +13,7 @@ class WorkerView:
     adapter_type: str
     display_name: str
     status: str
+    desired_state: str
     capabilities: tuple[str, ...]
     capacity: int
     current_load: int
