@@ -39,6 +39,9 @@ def test_scheduler_settings_are_positive():
         scheduler_poll_interval_seconds=1.0,
         reconciler_batch_size=50,
         reconciler_poll_interval_seconds=2.0,
+        gateway_batch_size=15,
+        gateway_poll_interval_seconds=1.5,
+        opencode_executable="opencode",
     )
 
     assert settings.assignment_lease_seconds == 30
@@ -47,6 +50,9 @@ def test_scheduler_settings_are_positive():
     assert settings.scheduler_poll_interval_seconds == 1.0
     assert settings.reconciler_batch_size == 50
     assert settings.reconciler_poll_interval_seconds == 2.0
+    assert settings.gateway_batch_size == 15
+    assert settings.gateway_poll_interval_seconds == 1.5
+    assert settings.opencode_executable == "opencode"
 
     with pytest.raises(ValueError):
         Settings(database_url="postgresql+psycopg://test", scheduler_batch_size=0)

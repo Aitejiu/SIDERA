@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -15,20 +16,27 @@ class SqlAlchemyOutboxStore:
         self._database = database
         self._claim_seconds = claim_seconds
 
-    def claim(self, batch_size: int) -> tuple[OutboxMessage, ...]:
+    def claim(
+        self,
+        batch_size: int,
+        *,
+        topics: Collection[str] | None = None,
+    ) -> tuple[OutboxMessage, ...]:
         now = datetime.now(UTC)
         claimed_until = now + timedelta(seconds=self._claim_seconds)
         with self._database.session() as session:
+            statement = select(OutboxMessageModel).where(
+                OutboxMessageModel.published_at.is_(None),
+                OutboxMessageModel.next_attempt_at <= now,
+                or_(
+                    OutboxMessageModel.claimed_until.is_(None),
+                    OutboxMessageModel.claimed_until < now,
+                ),
+            )
+            if topics:
+                statement = statement.where(OutboxMessageModel.topic.in_(tuple(topics)))
             rows = session.scalars(
-                select(OutboxMessageModel)
-                .where(
-                    OutboxMessageModel.published_at.is_(None),
-                    OutboxMessageModel.next_attempt_at <= now,
-                    or_(
-                        OutboxMessageModel.claimed_until.is_(None),
-                        OutboxMessageModel.claimed_until < now,
-                    ),
-                )
+                statement
                 .order_by(OutboxMessageModel.created_at, OutboxMessageModel.id)
                 .with_for_update(skip_locked=True)
                 .limit(batch_size)

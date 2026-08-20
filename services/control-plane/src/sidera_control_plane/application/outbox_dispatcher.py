@@ -1,4 +1,5 @@
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -27,7 +28,12 @@ class EventSink(Protocol):
 
 
 class OutboxStore(Protocol):
-    def claim(self, batch_size: int) -> tuple[OutboxMessage, ...]: ...
+    def claim(
+        self,
+        batch_size: int,
+        *,
+        topics: Collection[str] | None = None,
+    ) -> tuple[OutboxMessage, ...]: ...
 
     def acknowledge(self, message_id: UUID, claim_token: UUID) -> bool: ...
 

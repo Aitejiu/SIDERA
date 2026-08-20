@@ -80,6 +80,7 @@ class GatewayOperationRepository:
                 GatewayOperationModel.version == previous_version,
             )
             .values(
+                session_id=operation.session_id,
                 status=operation.status.value,
                 attempt_count=operation.attempt_count,
                 next_attempt_at=operation.next_attempt_at,
