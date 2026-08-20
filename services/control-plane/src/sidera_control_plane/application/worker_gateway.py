@@ -4,6 +4,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.event_ingestor import (
+    ArtifactRegistrationReport,
+    ArtifactRegistry,
+    EventIngestionReport,
+    SessionEventIngestor,
+)
 from sidera_control_plane.application.outbox_dispatcher import (
     OutboxMessage,
     OutboxStore,
@@ -79,6 +85,12 @@ class GatewayExecutionResult:
     workspace_id: UUID
     session_id: UUID
     adapter_session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class GatewaySessionSyncResult:
+    event_report: EventIngestionReport
+    artifact_report: ArtifactRegistrationReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +219,8 @@ class WorkerGateway:
             str, Callable[[ModuleInstance], WorkspaceProvider]
         ],
         spec_factory: ExecutionSpecFactory | None = None,
+        event_ingestor: SessionEventIngestor | None = None,
+        artifact_registry: ArtifactRegistry | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
@@ -214,6 +228,13 @@ class WorkerGateway:
         self._workspace_factories = dict(workspace_factories)
         self._spec_factory = spec_factory or ConfiguredExecutionSpecFactory()
         self._clock = clock
+        self._adapter_instances: dict[UUID, WorkerAdapter] = {}
+        self._event_ingestor = event_ingestor or SessionEventIngestor(
+            uow_factory, clock=clock
+        )
+        self._artifact_registry = artifact_registry or ArtifactRegistry(
+            uow_factory, clock=clock
+        )
 
     def handle(self, message: OutboxMessage) -> GatewayExecutionResult:
         context = self._load_context(message)
@@ -227,12 +248,34 @@ class WorkerGateway:
         workspace = self._ensure_workspace(context, spec)
         result = self._ensure_session(context, spec, workspace)
         self._ensure_initial_prompt(context, spec, result)
+        self.sync_session(
+            workspace_id=context.execution.workspace_id,
+            execution_id=context.execution.id,
+            session_id=result.session_id,
+            lease_id=context.lease.id,
+            fencing_token=context.binding.fencing_token,
+        )
         return result
 
     def _load_context(self, message: OutboxMessage) -> _AssignmentContext:
         if message.topic != ASSIGNMENT_TOPIC:
             raise GatewayMessageError(f"unsupported Gateway topic: {message.topic}")
         workspace_id, execution_id, lease_id, fencing_token = _assignment_ids(message)
+        return self._load_context_by_ids(
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+        )
+
+    def _load_context_by_ids(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+    ) -> _AssignmentContext:
         with self._uow_factory() as uow:
             execution = uow.executions.get(execution_id, workspace_id, for_update=True)
             if execution is None:
@@ -282,6 +325,56 @@ class WorkerGateway:
                 workspace_definition=workspace_definition,
                 workspace_instance=workspace_instance,
             )
+
+    def sync_session(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        session_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+    ) -> GatewaySessionSyncResult:
+        context = self._load_context_by_ids(
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+        )
+        with self._uow_factory() as uow:
+            session = uow.sessions.get_active_for_execution(
+                execution_id, for_update=True
+            )
+            if session is None or session.id != session_id:
+                raise GatewayMessageError("active session does not match sync request")
+            handle = _session_handle(session)
+        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
+        adapter_events = tuple(adapter.read_events(handle))
+        event_report = self._event_ingestor.ingest(
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            session_id=session_id,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            events=adapter_events,
+        )
+        candidates = adapter.collect_artifacts(
+            handle,
+            operation_id=uuid5(
+                NAMESPACE_URL, f"sidera.gateway.collect_artifacts:{session_id}"
+            ),
+        )
+        artifact_report = self._artifact_registry.register(
+            workspace_id=workspace_id,
+            task_id=context.task.id,
+            execution_id=execution_id,
+            session_id=session_id,
+            candidates=candidates,
+            acceptance_criteria=context.task.acceptance_criteria,
+            producer=context.adapter_instance.instance_name,
+            environment_ref=context.workspace_instance.instance_name,
+        )
+        return GatewaySessionSyncResult(event_report, artifact_report)
 
     def _ensure_workspace(
         self,
@@ -681,7 +774,11 @@ class WorkerGateway:
             )
         if definition.lifecycle is not ModuleLifecycle.ACTIVE:
             raise GatewayMessageError("adapter module is not active")
-        return factory(instance)
+        adapter = self._adapter_instances.get(instance.id)
+        if adapter is None:
+            adapter = factory(instance)
+            self._adapter_instances[instance.id] = adapter
+        return adapter
 
     def _workspace_provider(
         self, definition: ModuleDefinition, instance: ModuleInstance

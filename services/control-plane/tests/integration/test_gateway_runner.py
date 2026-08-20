@@ -34,7 +34,9 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     ExecutionBindingModel,
+    ExecutionEventModel,
     ExecutionModel,
+    ExecutionSessionModel,
     GatewayOperationModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
@@ -352,6 +354,9 @@ def test_gateway_starts_once_and_replays_duplicate_assignment(
         execution = session.get(ExecutionModel, ids["execution_id"])
         assert execution is not None
         assert execution.status == "running"
+        stored_session = session.query(ExecutionSessionModel).one()
+        assert stored_session.last_sequence == 2
+        assert session.query(ExecutionEventModel).count() == 2
         assert session.query(GatewayOperationModel).count() == 3
         assert session.query(GatewayOperationModel).filter_by(status="succeeded").count() == 3
 
