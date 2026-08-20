@@ -4,7 +4,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from sidera_control_plane.application.resource_queries import WorkerView
+from sidera_control_plane.application.resource_queries import (
+    ExecutionView,
+    LeaseView,
+    WorkerView,
+)
 from sidera_control_plane.application.task_queries import (
     TaskPage,
     TaskView,
@@ -59,6 +63,23 @@ class HeartbeatWorkerPayload(BaseModel):
     healthy: bool
 
 
+class CreateExecutionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: UUID
+    purpose: NonEmptyString
+    capability_requirements: tuple[NonEmptyString, ...] = Field(min_length=1)
+    pinned_worker_id: UUID | None = None
+    max_attempts: int = Field(ge=1, le=10)
+    not_before: datetime
+
+
+class RetryExecutionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    not_before: datetime
+
+
 class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -104,6 +125,15 @@ class CommandRequest(BaseModel):
             parsed = HeartbeatWorkerPayload.model_validate(self.payload)
         elif self.command_type == "DrainWorker":
             self._require_mutation_target("worker")
+            parsed = EmptyPayload.model_validate(self.payload)
+        elif self.command_type == "CreateExecution":
+            self._require_create("execution")
+            parsed = CreateExecutionPayload.model_validate(self.payload)
+        elif self.command_type == "RetryExecution":
+            self._require_mutation_target("execution")
+            parsed = RetryExecutionPayload.model_validate(self.payload)
+        elif self.command_type == "CancelExecution":
+            self._require_mutation_target("execution")
             parsed = EmptyPayload.model_validate(self.payload)
         else:
             return self
@@ -229,6 +259,84 @@ class WorkerResponse(BaseModel):
             version=worker.version,
             created_at=worker.created_at,
             updated_at=worker.updated_at,
+        )
+
+
+class ExecutionResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    task_id: UUID
+    lineage_id: UUID
+    attempt: int
+    max_attempts: int
+    purpose: str
+    status: str
+    capability_requirements: tuple[str, ...]
+    pinned_worker_id: UUID | None
+    assigned_worker_id: UUID | None
+    active_lease_id: UUID | None
+    last_fencing_token: int
+    not_before: datetime
+    failure_code: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, execution: ExecutionView) -> "ExecutionResponse":
+        return cls(
+            id=execution.id,
+            workspace_id=execution.workspace_id,
+            task_id=execution.task_id,
+            lineage_id=execution.lineage_id,
+            attempt=execution.attempt,
+            max_attempts=execution.max_attempts,
+            purpose=execution.purpose,
+            status=execution.status,
+            capability_requirements=tuple(sorted(execution.capability_requirements)),
+            pinned_worker_id=execution.pinned_worker_id,
+            assigned_worker_id=execution.assigned_worker_id,
+            active_lease_id=execution.active_lease_id,
+            last_fencing_token=execution.last_fencing_token,
+            not_before=execution.not_before,
+            failure_code=execution.failure_code,
+            started_at=execution.started_at,
+            finished_at=execution.finished_at,
+            version=execution.version,
+            created_at=execution.created_at,
+            updated_at=execution.updated_at,
+        )
+
+
+class LeaseResponse(BaseModel):
+    id: UUID
+    execution_id: UUID
+    worker_id: UUID
+    status: str
+    issued_at: datetime
+    expires_at: datetime
+    renewed_at: datetime | None
+    ended_at: datetime | None
+    fencing_token: int
+    assignment_reason: dict[str, object]
+    version: int
+
+    @classmethod
+    def from_view(cls, lease: LeaseView) -> "LeaseResponse":
+        return cls(
+            id=lease.id,
+            execution_id=lease.execution_id,
+            worker_id=lease.worker_id,
+            status=lease.status,
+            issued_at=lease.issued_at,
+            expires_at=lease.expires_at,
+            renewed_at=lease.renewed_at,
+            ended_at=lease.ended_at,
+            fencing_token=lease.fencing_token,
+            assignment_reason=lease.assignment_reason,
+            version=lease.version,
         )
 
 
