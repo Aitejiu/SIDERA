@@ -13,11 +13,15 @@ from sidera_control_plane.application.ports import (
     WorkerRepositoryPort,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.execution_repository import ExecutionRepository
+from sidera_control_plane.persistence.lease_store import LeaseStore
 from sidera_control_plane.persistence.repositories import (
     CommandRepository,
     EventRepository,
     TaskRepository,
 )
+from sidera_control_plane.persistence.session_repository import SessionRepository
+from sidera_control_plane.persistence.worker_repository import WorkerRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -36,6 +40,10 @@ class SqlAlchemyUnitOfWork:
     def __enter__(self) -> Self:
         self.session = Session(self._database.engine, expire_on_commit=False)
         self.tasks = TaskRepository(self.session)
+        self.workers = WorkerRepository(self.session)
+        self.executions = ExecutionRepository(self.session)
+        self.leases = LeaseStore(self.session)
+        self.sessions = SessionRepository(self.session)
         self.commands = CommandRepository(self.session)
         self.events = EventRepository(self.session)
         return self
