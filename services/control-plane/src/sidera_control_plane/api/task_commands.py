@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Response
 
 from sidera_control_plane.api.dependencies import get_command_service
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
-from sidera_control_plane.application.command_service import TaskCommandService
+from sidera_control_plane.application.command_service import CommandService
 
 router = APIRouter(prefix="/api/v1")
 
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1")
 def execute_command(
     request: CommandRequest,
     response: Response,
-    service: Annotated[TaskCommandService, Depends(get_command_service)],
+    service: Annotated[CommandService, Depends(get_command_service)],
 ) -> CommandResponse:
     result = service.handle(request.to_envelope())
     is_new_create = (

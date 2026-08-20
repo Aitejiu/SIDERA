@@ -11,9 +11,7 @@ from sidera_control_plane.application.errors import (
 )
 from sidera_control_plane.domain.errors import (
     DomainError,
-    InvalidTransition,
     ValidationError,
-    VersionConflict,
 )
 
 
@@ -46,13 +44,8 @@ def install_error_handlers(app: FastAPI) -> None:
     async def handle_domain_error(
         _request: Request, exc: DomainError
     ) -> JSONResponse:
-        status_code = 422 if isinstance(exc, ValidationError) else 409
-        details: dict[str, Any] = {}
-        if isinstance(exc, VersionConflict):
-            details = {"expected": exc.expected, "actual": exc.actual}
-        if isinstance(exc, InvalidTransition):
-            details = {}
-        return _error_response(status_code, exc.code, str(exc), details)
+        status_code = 422 if exc.code == ValidationError.code else 409
+        return _error_response(status_code, exc.code, str(exc), exc.details)
 
 
 def _error_response(

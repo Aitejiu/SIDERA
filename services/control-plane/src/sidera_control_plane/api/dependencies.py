@@ -3,7 +3,9 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
-from sidera_control_plane.application.command_service import TaskCommandService
+from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.task_query_store import SqlAlchemyTaskQueryStore
@@ -17,11 +19,11 @@ def get_database(request: Request) -> Database:
 
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
-) -> TaskCommandService:
-    factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
+) -> CommandService:
+    factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database
     )
-    return TaskCommandService(factory)
+    return CommandService(factory, (TaskCommandHandler(),))
 
 
 def get_task_query_service(

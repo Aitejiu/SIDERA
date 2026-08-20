@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from sidera_control_plane.api.app import create_app
-from sidera_control_plane.application.command_service import TaskCommandService
+from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import VersionConflict
@@ -482,7 +483,7 @@ def test_two_session_race_applies_one_mutation_and_audits_one_rejection(
         return task
 
     monkeypatch.setattr(TaskRepository, "get", synchronized_get)
-    service = TaskCommandService(uow_factory)
+    service = CommandService(uow_factory, (TaskCommandHandler(),))
     envelopes = tuple(
         CommandEnvelope(
             id=uuid4(),
