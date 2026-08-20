@@ -43,7 +43,11 @@ class TaskCommandService:
                 envelope.idempotency_key,
             )
             if stored is not None:
-                if stored.request_hash != request_hash:
+                legacy_replay = (
+                    stored.target_type == envelope.target_type
+                    and stored.request_hash == _legacy_hash_request(envelope)
+                )
+                if stored.request_hash != request_hash and not legacy_replay:
                     raise IdempotencyConflict(
                         "idempotency key was already used for a different request"
                     )
@@ -206,14 +210,24 @@ class TaskCommandService:
 
 
 def hash_request(envelope: CommandEnvelope) -> str:
+    return _hash_request(envelope, include_target_type=True)
+
+
+def _legacy_hash_request(envelope: CommandEnvelope) -> str:
+    return _hash_request(envelope, include_target_type=False)
+
+
+def _hash_request(envelope: CommandEnvelope, *, include_target_type: bool) -> str:
+    canonical: dict[str, Any] = {
+        "command_type": envelope.command_type,
+        "target_id": str(envelope.target_id) if envelope.target_id else None,
+        "expected_version": envelope.expected_version,
+        "payload": envelope.payload,
+    }
+    if include_target_type:
+        canonical["target_type"] = envelope.target_type
     encoded = json.dumps(
-        {
-            "command_type": envelope.command_type,
-            "target_type": envelope.target_type,
-            "target_id": str(envelope.target_id) if envelope.target_id else None,
-            "expected_version": envelope.expected_version,
-            "payload": envelope.payload,
-        },
+        canonical,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()

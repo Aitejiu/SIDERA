@@ -29,6 +29,7 @@ class CommandResult:
 @dataclass(frozen=True, slots=True)
 class StoredCommand:
     id: UUID
+    target_type: str
     request_hash: str
     status: str
     result: dict[str, Any]

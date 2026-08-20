@@ -111,6 +111,7 @@ class CommandRepository:
             return None
         return StoredCommand(
             id=row.id,
+            target_type=row.target_type,
             request_hash=row.request_hash,
             status=row.status,
             result=dict(row.result or {}),

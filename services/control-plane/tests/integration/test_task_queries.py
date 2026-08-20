@@ -128,6 +128,22 @@ def test_task_list_detail_pagination_and_workspace_isolation(
     assert isolated_timeline.status_code == 404
     assert isolated_timeline.json()["error"]["code"] == "not_found"
 
+    legacy_list = client.get(
+        "/api/tasks",
+        params={"workspace_id": str(workspace_id)},
+    )
+    legacy_detail = client.get(
+        f"/api/tasks/{second_id}",
+        params={"workspace_id": str(workspace_id)},
+    )
+    legacy_timeline = client.get(
+        f"/api/tasks/{second_id}/timeline",
+        params={"workspace_id": str(workspace_id)},
+    )
+    assert legacy_list.status_code == 404
+    assert legacy_detail.status_code == 404
+    assert legacy_timeline.status_code == 404
+
 
 def test_task_timeline_is_ordered_and_contains_audit_links(
     client: TestClient,

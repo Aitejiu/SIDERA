@@ -1,3 +1,5 @@
+import hashlib
+import json
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -79,6 +81,20 @@ def create_task(client: TestClient, workspace_id: UUID) -> UUID:
     return UUID(response.json()["aggregate_id"])
 
 
+def legacy_request_hash(request: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        {
+            "command_type": request["command_type"],
+            "target_id": request["target_id"],
+            "expected_version": request["expected_version"],
+            "payload": request["payload"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def test_versioned_command_route_persists_explicit_target_type(
     client: TestClient,
     database: Database,
@@ -146,6 +162,61 @@ def test_create_task_is_idempotent(
         "commands": 1,
         "events": 1,
         "outbox_messages": 1,
+    }
+
+
+def test_legacy_request_hash_replays_after_target_versioning(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+    row_counts: Callable[[], dict[str, int]],
+) -> None:
+    request = create_task_request(workspace_id)
+    first = client.post("/api/v1/commands", json=request)
+    assert first.status_code == 201, first.text
+
+    with database.session() as session:
+        command = session.scalar(select(CommandModel))
+        assert command is not None
+        command.request_hash = legacy_request_hash(request)
+        session.commit()
+
+    replay = {
+        **request,
+        "command_id": str(uuid4()),
+        "correlation_id": str(uuid4()),
+    }
+    second = client.post("/api/v1/commands", json=replay)
+
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert row_counts() == {
+        "tasks": 1,
+        "commands": 1,
+        "events": 1,
+        "outbox_messages": 1,
+    }
+
+
+@pytest.mark.parametrize("target_type", ["bogus", "worker"])
+def test_task_command_rejects_invalid_target_type(
+    client: TestClient,
+    workspace_id: UUID,
+    row_counts: Callable[[], dict[str, int]],
+    target_type: str,
+) -> None:
+    request = create_task_request(workspace_id)
+    request["target_type"] = target_type
+
+    response = client.post("/api/v1/commands", json=request)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert row_counts() == {
+        "tasks": 0,
+        "commands": 0,
+        "events": 0,
+        "outbox_messages": 0,
     }
 
 
