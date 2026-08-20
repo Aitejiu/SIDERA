@@ -1,10 +1,15 @@
-from collections.abc import Collection
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import datetime
 from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
+from sidera_control_plane.domain.artifacts import (
+    Artifact,
+    ArtifactCandidate,
+    EvidenceClaim,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -12,9 +17,27 @@ from sidera_control_plane.domain.commands import (
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionSession
+from sidera_control_plane.domain.gateway import (
+    AdapterEvent,
+    AdapterSessionHandle,
+    DeliveryResult,
+    ExecutionEvent,
+    GatewayOperation,
+)
+from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
+from sidera_control_plane.domain.modules import (
+    CapabilityProfile,
+    ExecutionBinding,
+    ModuleDefinition,
+    ModuleInstance,
+)
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.workspace import (
+    ExecutionSpec,
+    ExecutionWorkspaceManifest,
+)
 
 
 class TaskRepositoryPort(Protocol):
@@ -124,6 +147,173 @@ class SessionRepositoryPort(Protocol):
         raise NotImplementedError
 
 
+class ModuleRepositoryPort(Protocol):
+    def get_definition(
+        self, module_id: UUID, workspace_id: UUID
+    ) -> ModuleDefinition | None:
+        raise NotImplementedError
+
+    def get_instance(
+        self, module_id: UUID, workspace_id: UUID
+    ) -> ModuleInstance | None:
+        raise NotImplementedError
+
+    def add_definition(self, definition: ModuleDefinition) -> None:
+        raise NotImplementedError
+
+    def add_instance(self, instance: ModuleInstance) -> None:
+        raise NotImplementedError
+
+
+class ExecutionBindingRepositoryPort(Protocol):
+    def get_for_execution(
+        self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionBinding | None:
+        raise NotImplementedError
+
+    def add(self, binding: ExecutionBinding) -> None:
+        raise NotImplementedError
+
+
+class GatewayOperationRepositoryPort(Protocol):
+    def get_by_operation_id(
+        self, operation_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> GatewayOperation | None:
+        raise NotImplementedError
+
+    def add(self, operation: GatewayOperation) -> None:
+        raise NotImplementedError
+
+    def save(self, operation: GatewayOperation, previous_version: int) -> None:
+        raise NotImplementedError
+
+
+class WorkspaceRepositoryPort(Protocol):
+    def get_for_execution(
+        self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionWorkspaceManifest | None:
+        raise NotImplementedError
+
+    def add(self, manifest: ExecutionWorkspaceManifest) -> None:
+        raise NotImplementedError
+
+    def save(self, manifest: ExecutionWorkspaceManifest, previous_version: int) -> None:
+        raise NotImplementedError
+
+
+class ExecutionEventRepositoryPort(Protocol):
+    def add(self, event: ExecutionEvent) -> None:
+        raise NotImplementedError
+
+    def get(
+        self, session_id: UUID, sequence: int, workspace_id: UUID
+    ) -> ExecutionEvent | None:
+        raise NotImplementedError
+
+
+class ArtifactRepositoryPort(Protocol):
+    def add(self, artifact: Artifact) -> None:
+        raise NotImplementedError
+
+    def list_for_execution(
+        self, execution_id: UUID, workspace_id: UUID
+    ) -> tuple[Artifact, ...]:
+        raise NotImplementedError
+
+
+class EvidenceClaimRepositoryPort(Protocol):
+    def add(self, claim: EvidenceClaim) -> None:
+        raise NotImplementedError
+
+    def list_for_task(
+        self, task_id: UUID, workspace_id: UUID
+    ) -> tuple[EvidenceClaim, ...]:
+        raise NotImplementedError
+
+
+class ExecutionInputRepositoryPort(Protocol):
+    def get(
+        self, input_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionInput | None:
+        raise NotImplementedError
+
+    def get_pending_for_session(
+        self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionInput | None:
+        raise NotImplementedError
+
+    def add(self, item: ExecutionInput) -> None:
+        raise NotImplementedError
+
+    def save(self, item: ExecutionInput, previous_version: int) -> None:
+        raise NotImplementedError
+
+
+class WorkerAdapter(Protocol):
+    def probe(self, config: Mapping[str, object]) -> CapabilityProfile:
+        raise NotImplementedError
+
+    def start_session(
+        self,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+        *,
+        operation_id: UUID,
+    ) -> AdapterSessionHandle:
+        raise NotImplementedError
+
+    def read_events(self, handle: AdapterSessionHandle) -> Iterable[AdapterEvent]:
+        raise NotImplementedError
+
+    def send_input(
+        self,
+        handle: AdapterSessionHandle,
+        text: str,
+        attachment_refs: tuple[str, ...],
+        *,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        raise NotImplementedError
+
+    def stop_session(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> DeliveryResult:
+        raise NotImplementedError
+
+    def collect_artifacts(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> tuple[ArtifactCandidate, ...]:
+        raise NotImplementedError
+
+
+class WorkspaceProvider(Protocol):
+    def prepare(
+        self, spec: ExecutionSpec, *, operation_id: UUID
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def freeze(
+        self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def retain(
+        self,
+        manifest: ExecutionWorkspaceManifest,
+        *,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def release(
+        self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def inspect(self, location_ref: str) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+
 class CommandRepositoryPort(Protocol):
     def find_duplicate(
         self,
@@ -163,6 +353,14 @@ class ControlPlaneUnitOfWork(Protocol):
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort
     sessions: SessionRepositoryPort
+    modules: ModuleRepositoryPort
+    bindings: ExecutionBindingRepositoryPort
+    gateway_operations: GatewayOperationRepositoryPort
+    workspaces: WorkspaceRepositoryPort
+    execution_events: ExecutionEventRepositoryPort
+    artifacts: ArtifactRepositoryPort
+    evidence_claims: EvidenceClaimRepositoryPort
+    execution_inputs: ExecutionInputRepositoryPort
     commands: CommandRepositoryPort
     events: EventStorePort
 

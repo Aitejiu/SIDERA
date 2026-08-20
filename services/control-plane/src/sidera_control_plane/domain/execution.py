@@ -8,6 +8,7 @@ from sidera_control_plane.domain.errors import (
     StaleFencingToken,
     ValidationError,
 )
+from sidera_control_plane.domain.modules import CapabilityProfile
 
 
 class ExecutionStatus(StrEnum):
@@ -224,6 +225,13 @@ class ExecutionSession:
     last_activity_at: datetime
     input_mode: str
     version: int
+    adapter_module_id: UUID | None = None
+    adapter_config_version: int | None = None
+    workspace_module_id: UUID | None = None
+    workspace_config_version: int | None = None
+    capability_snapshot: CapabilityProfile | None = None
+    process_ref: str | None = None
+    workspace_ref: str | None = None
 
     @classmethod
     def start(
@@ -235,6 +243,13 @@ class ExecutionSession:
         worker_id: UUID,
         adapter_session_id: str,
         now: datetime,
+        adapter_module_id: UUID | None = None,
+        adapter_config_version: int | None = None,
+        workspace_module_id: UUID | None = None,
+        workspace_config_version: int | None = None,
+        capability_snapshot: CapabilityProfile | None = None,
+        process_ref: str | None = None,
+        workspace_ref: str | None = None,
     ) -> "ExecutionSession":
         clean_adapter_session_id = adapter_session_id.strip()
         if not clean_adapter_session_id:
@@ -250,7 +265,40 @@ class ExecutionSession:
             last_activity_at=now,
             input_mode="unsupported",
             version=1,
+            adapter_module_id=adapter_module_id,
+            adapter_config_version=adapter_config_version,
+            workspace_module_id=workspace_module_id,
+            workspace_config_version=workspace_config_version,
+            capability_snapshot=capability_snapshot,
+            process_ref=process_ref,
+            workspace_ref=workspace_ref,
         )
+
+    def bind_runtime(
+        self,
+        *,
+        adapter_module_id: UUID,
+        adapter_config_version: int,
+        workspace_module_id: UUID,
+        workspace_config_version: int,
+        capability_snapshot: CapabilityProfile,
+        process_ref: str,
+        workspace_ref: str,
+    ) -> None:
+        if self.status is not ExecutionSessionStatus.ACTIVE:
+            raise InvalidTransition("only an active session can bind runtime facts")
+        if adapter_config_version < 1 or workspace_config_version < 1:
+            raise ValidationError("runtime config versions must be positive")
+        if not process_ref.strip() or not workspace_ref.strip():
+            raise ValidationError("runtime process and workspace references are required")
+        self.adapter_module_id = adapter_module_id
+        self.adapter_config_version = adapter_config_version
+        self.workspace_module_id = workspace_module_id
+        self.workspace_config_version = workspace_config_version
+        self.capability_snapshot = capability_snapshot
+        self.process_ref = process_ref.strip()
+        self.workspace_ref = workspace_ref.strip()
+        self.version += 1
 
     def record_activity(self, *, sequence: int, now: datetime) -> None:
         if self.status is not ExecutionSessionStatus.ACTIVE:
