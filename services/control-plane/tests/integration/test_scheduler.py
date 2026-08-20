@@ -58,6 +58,7 @@ def seed_scheduler_case(
     workspace_id: UUID,
     *,
     worker_specs: tuple[WorkerSpec, ...],
+    priority: int = 50,
     required_capabilities: frozenset[str] = frozenset({"code", "python"}),
     pinned_worker_id: UUID | None = None,
     execution_workspace_id: UUID | None = None,
@@ -68,7 +69,7 @@ def seed_scheduler_case(
         title="Scheduler task",
         description="Deterministic scheduling",
         acceptance_criteria=("one worker is assigned",),
-        priority=50,
+        priority=priority,
         requested_by="system:test",
     )
     task.mark_ready()
@@ -251,6 +252,40 @@ def test_scheduler_defers_without_hard_eligible_worker(
         "events": 0,
         "outbox_messages": 0,
     }
+
+
+def test_scheduler_skips_deferred_head_and_assigns_later_candidate(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    _first_task, _, first_execution = seed_scheduler_case(
+        database,
+        workspace_id,
+        worker_specs=(),
+        priority=100,
+    )
+    _second_task, second_workers, second_execution = seed_scheduler_case(
+        database,
+        workspace_id,
+        worker_specs=(WorkerSpec("Available worker", frozenset({"code", "python"})),),
+        priority=50,
+    )
+
+    result = make_scheduler(database).run_once(limit=2)
+
+    assert result.examined == 2
+    assert result.assigned == 1
+    assert result.deferred == 1
+    with SqlAlchemyUnitOfWork(database) as uow:
+        stored_first = uow.executions.get(first_execution.id, workspace_id)
+        stored_second = uow.executions.get(second_execution.id, workspace_id)
+        stored_worker = uow.workers.get(second_workers[0].id, workspace_id)
+    assert stored_first is not None
+    assert stored_first.status is ExecutionStatus.QUEUED
+    assert stored_second is not None
+    assert stored_second.status is ExecutionStatus.LEASED
+    assert stored_worker is not None
+    assert stored_worker.current_load == 1
 
 
 def test_scheduler_respects_workspace_and_unavailable_pin(

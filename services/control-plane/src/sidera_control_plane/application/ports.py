@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from contextlib import AbstractContextManager
 from datetime import datetime
 from types import TracebackType
@@ -78,7 +79,11 @@ class ExecutionRepositoryPort(Protocol):
         raise NotImplementedError
 
     def claim_schedulable(
-        self, *, now: datetime, limit: int
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        excluded_ids: Collection[UUID] = (),
     ) -> tuple[Execution, ...]:
         raise NotImplementedError
 

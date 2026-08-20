@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -99,23 +100,30 @@ class ExecutionRepository:
         )
 
     def claim_schedulable(
-        self, *, now: datetime, limit: int
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        excluded_ids: Collection[UUID] = (),
     ) -> tuple[Execution, ...]:
+        statement = select(ExecutionModel).join(
+            TaskModel,
+            and_(
+                TaskModel.id == ExecutionModel.task_id,
+                TaskModel.workspace_id == ExecutionModel.workspace_id,
+            ),
+        ).where(
+            ExecutionModel.status == ExecutionStatus.QUEUED.value,
+            ExecutionModel.active_lease_id.is_(None),
+            ExecutionModel.not_before <= now,
+            TaskModel.status.in_(("ready", "running")),
+        )
+        if excluded_ids:
+            statement = statement.where(
+                ExecutionModel.id.not_in(tuple(excluded_ids))
+            )
         statement = (
-            select(ExecutionModel)
-            .join(
-                TaskModel,
-                and_(
-                    TaskModel.id == ExecutionModel.task_id,
-                    TaskModel.workspace_id == ExecutionModel.workspace_id,
-                ),
-            )
-            .where(
-                ExecutionModel.status == ExecutionStatus.QUEUED.value,
-                ExecutionModel.active_lease_id.is_(None),
-                ExecutionModel.not_before <= now,
-                TaskModel.status.in_(("ready", "running")),
-            )
+            statement
             .order_by(
                 TaskModel.priority.desc(),
                 ExecutionModel.not_before.asc(),

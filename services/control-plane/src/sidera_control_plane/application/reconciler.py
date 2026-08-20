@@ -120,19 +120,26 @@ class Reconciler:
         now: datetime,
     ) -> _LeaseReconcileResult:
         with self._uow_factory() as uow:
+            lease_snapshot = uow.leases.get(lease_id, workspace_id)
+            if (
+                lease_snapshot is None
+                or lease_snapshot.status is not LeaseStatus.ACTIVE
+                or lease_snapshot.expires_at > now
+            ):
+                return _LeaseReconcileResult(expired=False, retry_queued=False)
+            execution = uow.executions.get(
+                lease_snapshot.execution_id,
+                workspace_id,
+                for_update=True,
+            )
+            if execution is None:
+                return _LeaseReconcileResult(expired=False, retry_queued=False)
             lease = uow.leases.get(lease_id, workspace_id, for_update=True)
             if (
                 lease is None
                 or lease.status is not LeaseStatus.ACTIVE
                 or lease.expires_at > now
             ):
-                return _LeaseReconcileResult(expired=False, retry_queued=False)
-            execution = uow.executions.get(
-                lease.execution_id,
-                workspace_id,
-                for_update=True,
-            )
-            if execution is None:
                 return _LeaseReconcileResult(expired=False, retry_queued=False)
             if (
                 execution.active_lease_id != lease.id
