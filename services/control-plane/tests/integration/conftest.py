@@ -10,10 +10,14 @@ from sqlalchemy import delete, func, select
 
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    AssignmentLeaseModel,
     CommandModel,
     EventModel,
+    ExecutionModel,
+    ExecutionSessionModel,
     OutboxMessageModel,
     TaskModel,
+    WorkerModel,
     WorkspaceModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -44,6 +48,10 @@ def clean_database(database: Database) -> Iterator[None]:
     yield
     with database.session() as session:
         for model in (
+            ExecutionSessionModel,
+            AssignmentLeaseModel,
+            ExecutionModel,
+            WorkerModel,
             OutboxMessageModel,
             EventModel,
             CommandModel,
