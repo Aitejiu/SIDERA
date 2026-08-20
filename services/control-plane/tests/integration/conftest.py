@@ -6,7 +6,7 @@ from uuid import UUID
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -47,6 +47,7 @@ def database(database_url: str) -> Iterator[Database]:
 def clean_database(database: Database) -> Iterator[None]:
     yield
     with database.session() as session:
+        session.execute(update(ExecutionModel).values(active_lease_id=None))
         for model in (
             ExecutionSessionModel,
             AssignmentLeaseModel,
