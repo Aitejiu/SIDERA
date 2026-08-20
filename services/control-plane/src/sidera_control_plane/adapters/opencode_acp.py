@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -14,7 +15,7 @@ from subprocess import Popen
 from typing import Any
 from uuid import UUID, uuid4
 
-from sidera_control_plane.domain.artifacts import ArtifactCandidate
+from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
     AdapterSessionHandle,
@@ -72,6 +73,7 @@ class OpenCodeACPAdapter:
         workspace_root: Path | None = None,
         request_timeout_seconds: float = 30.0,
         stop_grace_seconds: float = 5.0,
+        git_executable: str = "git",
         stderr_limit_bytes: int = 64 * 1024,
         client_name: str = "sidera-control-plane",
         client_version: str = "0.1.0",
@@ -83,12 +85,15 @@ class OpenCodeACPAdapter:
             raise ValueError("OpenCode timeouts must be positive")
         if stderr_limit_bytes <= 0:
             raise ValueError("stderr limit must be positive")
+        if not git_executable.strip():
+            raise ValueError("Git executable is required")
         self._executable = executable
         self._workspace_root = (
             workspace_root.expanduser().resolve() if workspace_root is not None else None
         )
         self._request_timeout_seconds = request_timeout_seconds
         self._stop_grace_seconds = stop_grace_seconds
+        self._git_executable = git_executable.strip()
         self._stderr_limit_bytes = stderr_limit_bytes
         self._client_name = client_name
         self._client_version = client_version
@@ -159,6 +164,7 @@ class OpenCodeACPAdapter:
                     transport=transport,
                     identity=identity,
                     cwd=cwd,
+                    acceptance_criteria=spec.acceptance_criteria,
                 )
             return handle
         except Exception:
@@ -169,7 +175,8 @@ class OpenCodeACPAdapter:
     def read_events(self, handle: AdapterSessionHandle) -> tuple[AdapterEvent, ...]:
         session = self._session(handle)
         with session.lock:
-            session.transport.read_available(timeout=0)
+            if not session.stopped:
+                session.transport.read_available(timeout=0)
             self._append_notifications(session)
             events = tuple(session.events)
             session.events.clear()
@@ -325,7 +332,45 @@ class OpenCodeACPAdapter:
         with session.lock:
             if session.stopped and session.transport.process.poll() is None:
                 raise OpenCodeAdapterError("stopped session has a live process")
-            return ()
+            try:
+                result = subprocess.run(
+                    [
+                        self._git_executable,
+                        "diff",
+                        "--binary",
+                        "--no-ext-diff",
+                        "--no-color",
+                        "--",
+                        ".",
+                    ],
+                    cwd=session.cwd,
+                    check=True,
+                    capture_output=True,
+                )
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise OpenCodeAdapterError(
+                    "OpenCode Git diff collection failed: "
+                    f"{type(exc).__name__}: {exc}"[:500]
+                ) from exc
+            diff = result.stdout
+            if not diff:
+                return ()
+            content_hash = hashlib.sha256(diff).hexdigest()
+            return (
+                ArtifactCandidate(
+                    artifact_type=ArtifactType.DIFF,
+                    storage_ref=f"artifact://opencode/{handle.execution_session_id}/diff",
+                    content_hash=content_hash,
+                    size_bytes=len(diff),
+                    media_type="text/x-diff",
+                    provenance={
+                        "producer": self._client_name,
+                        "environment_ref": str(session.cwd),
+                        "acceptance_criterion_refs": session.acceptance_criteria,
+                        "conclusion": "OpenCode produced a Git diff in the execution workspace.",
+                    },
+                ),
+            )
 
     def active_processes(self) -> tuple[Popen[Any], ...]:
         with self._lock:
@@ -445,11 +490,13 @@ class _OpenCodeSession:
         transport: "_JsonRpcTransport",
         identity: ProcessDescriptor,
         cwd: Path,
+        acceptance_criteria: tuple[str, ...],
     ) -> None:
         self.handle = handle
         self.transport = transport
         self.identity = identity
         self.cwd = cwd
+        self.acceptance_criteria = acceptance_criteria
         self.events: deque[AdapterEvent] = deque()
         self.next_sequence = 1
         self.prompt_busy = False

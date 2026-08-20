@@ -21,3 +21,5 @@ class Settings(BaseSettings):
     workspace_retention_seconds: int = Field(default=86_400, gt=0)
     git_executable: str = Field(default="git", min_length=1)
     opencode_executable: str = Field(default="opencode", min_length=1)
+    opencode_expected_version: str | None = None
+    opencode_probe_timeout_seconds: float = Field(default=30.0, gt=0)

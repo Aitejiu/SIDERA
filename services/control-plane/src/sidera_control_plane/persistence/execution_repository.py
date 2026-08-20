@@ -52,6 +52,9 @@ class ExecutionRepository:
                 started_at=execution.started_at,
                 finished_at=execution.finished_at,
                 version=execution.version,
+                stop_requested=execution.stop_requested,
+                source_execution_id=execution.source_execution_id,
+                source_session_id=execution.source_session_id,
             )
         )
 
@@ -80,6 +83,9 @@ class ExecutionRepository:
                 started_at=execution.started_at,
                 finished_at=execution.finished_at,
                 version=execution.version,
+                stop_requested=execution.stop_requested,
+                source_execution_id=execution.source_execution_id,
+                source_session_id=execution.source_session_id,
                 updated_at=datetime.now(UTC),
             )
         )
@@ -183,4 +189,7 @@ def _to_domain_execution(row: ExecutionModel) -> Execution:
         started_at=row.started_at,
         finished_at=row.finished_at,
         version=row.version,
+        stop_requested=row.stop_requested,
+        source_execution_id=row.source_execution_id,
+        source_session_id=row.source_session_id,
     )

@@ -46,6 +46,18 @@ class SessionRepository:
         row = self._session.scalar(statement)
         return _to_domain_session(row) if row is not None else None
 
+    def get_any(
+        self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionSession | None:
+        statement = select(ExecutionSessionModel).where(
+            ExecutionSessionModel.id == session_id,
+            ExecutionSessionModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_session(row) if row is not None else None
+
     def add(self, session: ExecutionSession) -> None:
         self._session.add(
             ExecutionSessionModel(

@@ -20,6 +20,7 @@ from sidera_control_plane.application.ports import (
     WorkspaceProvider,
 )
 from sidera_control_plane.domain.errors import DomainError
+from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
     Execution,
     ExecutionSession,
@@ -31,6 +32,7 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperation,
     GatewayOperationStatus,
     GatewayOperationType,
+    gateway_operation_id,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
 from sidera_control_plane.domain.lease import AssignmentLease
@@ -52,6 +54,7 @@ from sidera_control_plane.domain.workspace import (
 )
 
 ASSIGNMENT_TOPIC = "execution.ExecutionLeased"
+STOP_TOPIC = "execution.ExecutionStopRequested"
 
 
 class GatewayError(RuntimeError):
@@ -95,6 +98,15 @@ class GatewayExecutionResult:
 class GatewaySessionSyncResult:
     event_report: EventIngestionReport
     artifact_report: ArtifactRegistrationReport
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayStopResult:
+    execution_id: UUID
+    workspace_id: UUID
+    session_id: UUID
+    operation_id: UUID
+    accepted_sequence: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +253,11 @@ class WorkerGateway:
             uow_factory, clock=clock
         )
 
-    def handle(self, message: OutboxMessage) -> GatewayExecutionResult:
+    def handle(
+        self, message: OutboxMessage
+    ) -> GatewayExecutionResult | GatewayStopResult:
+        if message.topic == STOP_TOPIC:
+            return self.handle_stop(message)
         context = self._load_context(message)
         spec = self._spec_factory.create(
             context.execution,
@@ -261,6 +277,260 @@ class WorkerGateway:
             fencing_token=context.binding.fencing_token,
         )
         return result
+
+    def handle_stop(self, message: OutboxMessage) -> GatewayStopResult:
+        (
+            workspace_id,
+            execution_id,
+            lease_id,
+            fencing_token,
+            session_id,
+            command_id,
+        ) = _stop_ids(message)
+        operation_id = _operation_id(execution_id, GatewayOperationType.STOP_SESSION)
+
+        with self._uow_factory() as uow:
+            existing = uow.gateway_operations.get_by_operation_id(
+                operation_id, workspace_id
+            )
+            if existing is not None and existing.status is GatewayOperationStatus.SUCCEEDED:
+                delivery = _delivery_from_operation(operation_id, existing.result_ref)
+                if delivery.accepted_sequence is None:
+                    raise GatewayRecoveryRequired(
+                        "successful stop operation has no accepted sequence"
+                    )
+                return GatewayStopResult(
+                    execution_id=execution_id,
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    operation_id=operation_id,
+                    accepted_sequence=delivery.accepted_sequence,
+                )
+
+        context = self._load_context_by_ids(
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+        )
+        if not context.execution.stop_requested:
+            raise GatewayMessageError("stop request is no longer active")
+        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
+        recovery_code: str | None = None
+        handle: AdapterSessionHandle | None = None
+        completed_delivery: DeliveryResult | None = None
+        with self._uow_factory() as uow:
+            session = uow.sessions.get(
+                session_id, workspace_id, for_update=True
+            )
+            if session is None or session.execution_id != execution_id:
+                raise GatewayMessageError("stop request targets another Session")
+            operation_state = self._begin_operation(
+                uow,
+                context,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.STOP_SESSION,
+                session_id=session.id,
+            )
+            if operation_state.completed:
+                completed_delivery = _delivery_from_operation(
+                    operation_id, operation_state.result_ref
+                )
+            elif operation_state.recovery_required:
+                recovery_code = "gateway_restart_requires_reconciliation"
+            else:
+                handle = _session_handle(session)
+
+        if completed_delivery is not None:
+            if completed_delivery.accepted_sequence is None:
+                raise GatewayRecoveryRequired(
+                    "successful stop operation has no accepted sequence"
+                )
+            self._persist_stop_success(
+                context,
+                session_id=session_id,
+                operation_id=operation_id,
+                accepted_sequence=completed_delivery.accepted_sequence,
+                command_id=command_id,
+            )
+            return GatewayStopResult(
+                execution_id=execution_id,
+                workspace_id=workspace_id,
+                session_id=session_id,
+                operation_id=operation_id,
+                accepted_sequence=completed_delivery.accepted_sequence,
+            )
+        if recovery_code is not None:
+            self._mark_operation_unknown(operation_id, context, recovery_code)
+            raise GatewayRecoveryRequired(
+                f"stop operation {operation_id} requires reconciliation"
+            )
+        if handle is None:
+            raise GatewayRecoveryRequired("stop session handle is unavailable")
+
+        try:
+            delivery = adapter.stop_session(handle, operation_id=operation_id)
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            raise GatewayRecoveryRequired("stop result is unknown") from exc
+        if delivery.operation_id != operation_id:
+            self._mark_operation_unknown(
+                operation_id, context, "adapter_operation_id_mismatch"
+            )
+            raise GatewayRecoveryRequired("stop operation id does not match")
+        failure_code = delivery.failure_code or delivery.outcome.value
+        if delivery.outcome is DeliveryOutcome.UNKNOWN:
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            raise GatewayRecoveryRequired(
+                f"stop result is unknown: {failure_code}"
+            )
+        if delivery.outcome is not DeliveryOutcome.DELIVERED:
+            self._fail_operation(operation_id, context, failure_code)
+            raise GatewayError(f"stop failed: {failure_code}")
+        if delivery.accepted_sequence is None:
+            self._mark_operation_unknown(
+                operation_id, context, "stop_sequence_missing"
+            )
+            raise GatewayRecoveryRequired("stop result has no accepted sequence")
+        try:
+            self.sync_session(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                session_id=session_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+            )
+            self._persist_stop_success(
+                context,
+                session_id=session_id,
+                operation_id=operation_id,
+                accepted_sequence=delivery.accepted_sequence,
+                command_id=command_id,
+            )
+        except Exception as exc:
+            self._mark_operation_unknown(operation_id, context, _failure_code(exc))
+            raise GatewayRecoveryRequired("stop confirmation could not be persisted") from exc
+        return GatewayStopResult(
+            execution_id=execution_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            operation_id=operation_id,
+            accepted_sequence=delivery.accepted_sequence,
+        )
+
+    def _persist_stop_success(
+        self,
+        context: _AssignmentContext,
+        *,
+        session_id: UUID,
+        operation_id: UUID,
+        accepted_sequence: int,
+        command_id: UUID,
+    ) -> None:
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                context.execution.id, context.execution.workspace_id, for_update=True
+            )
+            lease = uow.leases.get(
+                context.lease.id, context.execution.workspace_id, for_update=True
+            )
+            worker = uow.workers.get(
+                context.binding.worker_id, context.execution.workspace_id, for_update=True
+            )
+            session = uow.sessions.get_any(
+                session_id, context.execution.workspace_id, for_update=True
+            )
+            task = uow.tasks.get(context.execution.task_id, context.execution.workspace_id)
+            if execution is None or lease is None or worker is None or session is None:
+                raise GatewayMessageError("stop runtime facts disappeared")
+            if task is None:
+                raise GatewayMessageError("stop task disappeared")
+            if session.execution_id != execution.id:
+                raise GatewayMessageError("stop Session does not match execution")
+            if session.status.value != "active":
+                return
+            execution.assert_fence(
+                lease_id=context.binding.lease_id,
+                fencing_token=context.binding.fencing_token,
+            )
+            lease.assert_owner(
+                context.binding.worker_id, context.binding.fencing_token, self._clock()
+            )
+            previous_execution_version = execution.version
+            previous_lease_version = lease.version
+            previous_worker_version = worker.version
+            previous_session_version = session.version
+            session.close(lost=False, now=self._clock())
+            lease.revoke(now=self._clock())
+            worker.release()
+            execution.cancel(now=self._clock())
+            uow.sessions.save(session, previous_session_version)
+            uow.leases.save(lease, previous_lease_version)
+            uow.workers.save(worker, previous_worker_version)
+            uow.executions.save(execution, previous_execution_version)
+            self._succeed_operation(
+                uow,
+                operation_id,
+                context,
+                f"sequence:{accepted_sequence}",
+                session_id=session.id,
+            )
+            events = [
+                _gateway_event(
+                    command_id,
+                    workspace_id=execution.workspace_id,
+                    aggregate_type="execution",
+                    aggregate_id=execution.id,
+                    aggregate_version=execution.version,
+                    event_type="ExecutionCanceledByStop",
+                    payload={
+                        "status": execution.status.value,
+                        "session_id": str(session.id),
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=session.workspace_id,
+                    aggregate_type="execution_session",
+                    aggregate_id=session.id,
+                    aggregate_version=session.version,
+                    event_type="ExecutionSessionClosed",
+                    payload={
+                        "status": session.status.value,
+                        "last_sequence": session.last_sequence,
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=lease.workspace_id,
+                    aggregate_type="lease",
+                    aggregate_id=lease.id,
+                    aggregate_version=lease.version,
+                    event_type="LeaseReleasedByStop",
+                    payload={
+                        "status": lease.status.value,
+                        "fencing_token": lease.fencing_token,
+                    },
+                ),
+            ]
+            if not uow.executions.has_live_for_task(task.id):
+                previous_task_version = task.version
+                task.wait_for_decision()
+                uow.tasks.save(task, previous_task_version)
+                events.append(
+                    _gateway_event(
+                        command_id,
+                        workspace_id=task.workspace_id,
+                        aggregate_type="task",
+                        aggregate_id=task.id,
+                        aggregate_version=task.version,
+                        event_type="TaskWaitingForDecision",
+                        payload={"status": task.status.value},
+                    )
+                )
+            for event in events:
+                uow.events.append_with_outbox(event)
 
     def _load_context(self, message: OutboxMessage) -> _AssignmentContext:
         if message.topic != ASSIGNMENT_TOPIC:
@@ -948,7 +1218,7 @@ class WorkerGateway:
 
 
 class GatewayAssignmentRunner:
-    """Claim only assignment messages and route failures back to the Outbox."""
+    """Claim Gateway assignment and exact-stop messages."""
 
     def __init__(
         self,
@@ -964,7 +1234,9 @@ class GatewayAssignmentRunner:
     def run_once(self, batch_size: int = 20) -> tuple[int, int, int]:
         if not 1 <= batch_size <= 1_000:
             raise ValueError("batch_size must be between 1 and 1000")
-        messages = self._store.claim(batch_size, topics={ASSIGNMENT_TOPIC})
+        messages = self._store.claim(
+            batch_size, topics={ASSIGNMENT_TOPIC, STOP_TOPIC}
+        )
         processed = 0
         failed = 0
         for message in messages:
@@ -1078,6 +1350,64 @@ def _assignment_ids(message: OutboxMessage) -> tuple[UUID, UUID, UUID, int]:
     return workspace_id, execution_id, lease_id, fencing_token
 
 
+def _stop_ids(
+    message: OutboxMessage,
+) -> tuple[UUID, UUID, UUID, int, UUID, UUID]:
+    payload = message.payload
+    data = payload.get("data")
+    data_mapping: Mapping[str, object] = data if isinstance(data, Mapping) else payload
+    try:
+        workspace_id = UUID(str(_required_payload(payload, "workspace_id")))
+        execution_id = UUID(str(_required_payload(payload, "aggregate_id")))
+        lease_id = UUID(str(_required_payload(data_mapping, "lease_id")))
+        session_id = UUID(str(_required_payload(data_mapping, "session_id")))
+        command_id = UUID(str(_required_payload(data_mapping, "command_id")))
+        raw_fencing_token = _required_payload(data_mapping, "fencing_token")
+        if isinstance(raw_fencing_token, bool) or not isinstance(
+            raw_fencing_token, (int, str)
+        ):
+            raise TypeError("fencing_token must be an integer")
+        fencing_token = int(raw_fencing_token)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GatewayMessageError("ExecutionStopRequested payload is malformed") from exc
+    return (
+        workspace_id,
+        execution_id,
+        lease_id,
+        fencing_token,
+        session_id,
+        command_id,
+    )
+
+
+def _gateway_event(
+    command_id: UUID,
+    *,
+    workspace_id: UUID,
+    aggregate_type: str,
+    aggregate_id: UUID,
+    aggregate_version: int,
+    event_type: str,
+    payload: dict[str, object],
+) -> EventData:
+    return EventData(
+        id=uuid5(
+            NAMESPACE_URL,
+            f"sidera.gateway.event:{command_id}:{aggregate_type}:{aggregate_id}:{aggregate_version}:{event_type}",
+        ),
+        workspace_id=workspace_id,
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
+        aggregate_version=aggregate_version,
+        event_type=event_type,
+        payload=payload,
+        actor_type="gateway",
+        actor_id="worker-gateway",
+        causation_id=command_id,
+        correlation_id=command_id,
+    )
+
+
 def _required_payload(payload: Mapping[str, object], name: str) -> object:
     if name not in payload:
         raise KeyError(name)
@@ -1085,7 +1415,7 @@ def _required_payload(payload: Mapping[str, object], name: str) -> object:
 
 
 def _operation_id(execution_id: UUID, operation_type: GatewayOperationType) -> UUID:
-    return uuid5(NAMESPACE_URL, f"sidera.gateway:{operation_type.value}:{execution_id}")
+    return gateway_operation_id(execution_id, operation_type)
 
 
 def _required_config(config: Mapping[str, object], namespace: str, name: str) -> str:

@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.modules import CapabilityProfile
@@ -240,3 +240,9 @@ def _operation_type(value: GatewayOperationType | str) -> GatewayOperationType:
         return value if isinstance(value, GatewayOperationType) else GatewayOperationType(value)
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"unsupported gateway operation type: {value!r}") from exc
+
+
+def gateway_operation_id(
+    execution_id: UUID, operation_type: GatewayOperationType
+) -> UUID:
+    return uuid5(NAMESPACE_URL, f"sidera.gateway:{operation_type.value}:{execution_id}")

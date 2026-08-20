@@ -140,6 +140,11 @@ class SessionRepositoryPort(Protocol):
     ) -> ExecutionSession | None:
         raise NotImplementedError
 
+    def get_any(
+        self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionSession | None:
+        raise NotImplementedError
+
     def get_active_for_execution(
         self, execution_id: UUID, *, for_update: bool = False
     ) -> ExecutionSession | None:

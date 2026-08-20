@@ -55,6 +55,9 @@ class Execution:
     started_at: datetime | None
     finished_at: datetime | None
     version: int
+    stop_requested: bool = False
+    source_execution_id: UUID | None = None
+    source_session_id: UUID | None = None
 
     @classmethod
     def create(
@@ -70,6 +73,8 @@ class Execution:
         capability_requirements: frozenset[str],
         pinned_worker_id: UUID | None,
         not_before: datetime,
+        source_execution_id: UUID | None = None,
+        source_session_id: UUID | None = None,
     ) -> "Execution":
         clean_purpose = purpose.strip()
         clean_requirements = frozenset(
@@ -100,6 +105,9 @@ class Execution:
             started_at=None,
             finished_at=None,
             version=1,
+            stop_requested=False,
+            source_execution_id=source_execution_id,
+            source_session_id=source_session_id,
         )
 
     def _assert_mutable(self) -> None:
@@ -185,6 +193,17 @@ class Execution:
         self.status = ExecutionStatus.CANCELED
         self.finished_at = now
         self.active_lease_id = None
+        self.version += 1
+
+    def request_stop(self) -> None:
+        self._assert_mutable()
+        if self.status not in {ExecutionStatus.LEASED, ExecutionStatus.RUNNING}:
+            raise InvalidTransition("only a leased or running execution can be stopped")
+        if self.active_lease_id is None:
+            raise InvalidTransition("stopping an execution requires an active lease")
+        if self.stop_requested:
+            raise InvalidTransition("execution stop has already been requested")
+        self.stop_requested = True
         self.version += 1
 
     def mark_lost(

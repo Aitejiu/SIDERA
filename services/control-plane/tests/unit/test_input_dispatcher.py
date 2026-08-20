@@ -1,13 +1,14 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
-from typing import Self
+from typing import Self, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.input_dispatcher import (
     InputDispatcher,
     InputDispatchReport,
 )
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_gateway import GatewayRecoveryRequired
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.gateway import DeliveryOutcome, DeliveryResult
@@ -110,7 +111,15 @@ def _dispatcher(
     uow_factory: Callable[[], FakeUnitOfWork] = lambda: FakeUnitOfWork(
         repository, events
     )
-    return InputDispatcher(uow_factory, gateway, clock=lambda: NOW), repository, events
+    return (
+        InputDispatcher(
+            lambda: cast(ControlPlaneUnitOfWork, uow_factory()),
+            gateway,
+            clock=lambda: NOW,
+        ),
+        repository,
+        events,
+    )
 
 
 def test_dispatcher_persists_delivery_and_emits_audit_event() -> None:

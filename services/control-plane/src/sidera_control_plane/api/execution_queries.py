@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from sidera_control_plane.api.dependencies import get_resource_query_service
 from sidera_control_plane.api.schemas import ExecutionResponse, LeaseResponse
@@ -15,10 +15,11 @@ def list_executions(
     workspace_id: UUID,
     service: Annotated[ResourceQueryService, Depends(get_resource_query_service)],
     task_id: UUID | None = None,
+    status: str | None = Query(default=None, min_length=1),
 ) -> tuple[ExecutionResponse, ...]:
     return tuple(
         ExecutionResponse.from_view(item)
-        for item in service.list_executions(workspace_id, task_id)
+        for item in service.list_executions(workspace_id, task_id, status)
     )
 
 

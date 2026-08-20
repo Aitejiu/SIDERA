@@ -7,6 +7,7 @@ from sidera_control_plane.api.errors import install_error_handlers
 from sidera_control_plane.api.execution_queries import (
     router as execution_queries_router,
 )
+from sidera_control_plane.api.gateway_queries import router as gateway_queries_router
 from sidera_control_plane.api.task_commands import router as task_commands_router
 from sidera_control_plane.api.task_queries import router as task_queries_router
 from sidera_control_plane.api.worker_queries import router as worker_queries_router
@@ -38,6 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(task_queries_router)
     app.include_router(worker_queries_router)
     app.include_router(execution_queries_router)
+    app.include_router(gateway_queries_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

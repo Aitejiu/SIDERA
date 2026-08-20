@@ -4,6 +4,7 @@ from uuid import uuid4
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
+    STOP_TOPIC,
     GatewayAssignmentRunner,
 )
 
@@ -53,14 +54,14 @@ class RecordingGateway:
             raise RuntimeError("gateway unavailable")
 
 
-def test_gateway_runner_claims_only_assignment_topic_and_acknowledges() -> None:
+def test_gateway_runner_claims_assignment_and_stop_topics_and_acknowledges() -> None:
     message = _message()
     store = RecordingStore((message,))
     gateway = RecordingGateway()
     runner = GatewayAssignmentRunner(store, gateway, clock=lambda: NOW)
 
     assert runner.run_once() == (1, 1, 0)
-    assert store.claim_topics == {ASSIGNMENT_TOPIC}
+    assert store.claim_topics == {ASSIGNMENT_TOPIC, STOP_TOPIC}
     assert gateway.messages == [message]
     assert store.acknowledged == [(message.id, message.claim_token)]
 

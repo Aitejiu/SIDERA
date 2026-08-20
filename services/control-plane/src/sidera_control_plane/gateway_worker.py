@@ -60,6 +60,7 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
                     instance, "executable", settings.opencode_executable
                 ),
                 workspace_root=settings.workspace_root,
+                git_executable=settings.git_executable,
             )
 
         adapter_factories = {

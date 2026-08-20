@@ -57,7 +57,13 @@ def database(database_url: str) -> Iterator[Database]:
 def clean_database(database: Database) -> Iterator[None]:
     yield
     with database.session() as session:
-        session.execute(update(ExecutionModel).values(active_lease_id=None))
+        session.execute(
+            update(ExecutionModel).values(
+                active_lease_id=None,
+                source_execution_id=None,
+                source_session_id=None,
+            )
+        )
         for model in (
             ExecutionInputModel,
             EvidenceClaimModel,

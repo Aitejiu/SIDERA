@@ -5,15 +5,22 @@ import pytest
 from sqlalchemy import update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
+from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.application.input_dispatcher import InputDispatcher
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
+    STOP_TOPIC,
     GatewayRecoveryRequired,
+    GatewayStopResult,
     WorkerGateway,
     _operation_id,
 )
+from sidera_control_plane.domain.commands import CommandEnvelope
+from sidera_control_plane.domain.errors import InvalidTransition
 from sidera_control_plane.domain.gateway import (
+    AdapterSessionHandle,
     DeliveryOutcome,
     DeliveryResult,
     GatewayOperationType,
@@ -28,6 +35,7 @@ from sidera_control_plane.domain.modules import (
     StopCapability,
 )
 from sidera_control_plane.domain.workspace import (
+    ExecutionSpec,
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
 )
@@ -43,6 +51,7 @@ from sidera_control_plane.persistence.models import (
     GatewayOperationModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
+    OutboxMessageModel,
     TaskModel,
     WorkerModel,
 )
@@ -69,24 +78,68 @@ class RecordingFakeAdapter(FakeWorkerAdapter):
         super().__init__()
         self.start_count = 0
         self.input_count = 0
+        self.stop_count = 0
 
-    def start_session(self, *args, **kwargs):
+    def start_session(
+        self,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+        *,
+        operation_id: UUID,
+    ) -> AdapterSessionHandle:
         self.start_count += 1
-        return super().start_session(*args, **kwargs)
+        return super().start_session(spec, workspace, operation_id=operation_id)
 
-    def send_input(self, *args, **kwargs):
+    def send_input(
+        self,
+        handle: AdapterSessionHandle,
+        text: str,
+        attachment_refs: tuple[str, ...],
+        *,
+        operation_id: UUID,
+    ) -> DeliveryResult:
         self.input_count += 1
-        return super().send_input(*args, **kwargs)
+        return super().send_input(
+            handle, text, attachment_refs, operation_id=operation_id
+        )
+
+    def stop_session(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> DeliveryResult:
+        self.stop_count += 1
+        return super().stop_session(handle, operation_id=operation_id)
 
 
 class UnknownInputAdapter(RecordingFakeAdapter):
-    def send_input(self, _handle, _text, _attachment_refs, *, operation_id):
+    def send_input(
+        self,
+        handle: AdapterSessionHandle,
+        text: str,
+        attachment_refs: tuple[str, ...],
+        *,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        del handle, text, attachment_refs
         self.input_count += 1
         return DeliveryResult(
             operation_id=operation_id,
             outcome=DeliveryOutcome.UNKNOWN,
             accepted_sequence=None,
             failure_code="acp_response_timeout",
+        )
+
+
+class UnknownStopAdapter(RecordingFakeAdapter):
+    def stop_session(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> DeliveryResult:
+        del handle
+        self.stop_count += 1
+        return DeliveryResult(
+            operation_id=operation_id,
+            outcome=DeliveryOutcome.UNKNOWN,
+            accepted_sequence=None,
+            failure_code="process_stop_unconfirmed",
         )
 
 
@@ -128,7 +181,9 @@ class FakeWorkspaceProvider:
         raise RuntimeError(f"not implemented for {location_ref}")
 
 
-def _seed_assignment(database: Database, workspace_id: UUID) -> dict[str, UUID]:
+def _seed_assignment(
+    database: Database, workspace_id: UUID, *, name_suffix: str = ""
+) -> dict[str, UUID]:
     task_id = uuid4()
     worker_id = uuid4()
     execution_id = uuid4()
@@ -209,7 +264,7 @@ def _seed_assignment(database: Database, workspace_id: UUID) -> dict[str, UUID]:
                     id=adapter_instance_id,
                     workspace_id=workspace_id,
                     definition_id=adapter_definition_id,
-                    instance_name="fake-adapter",
+                    instance_name=f"fake-adapter{name_suffix}",
                     config_version=1,
                     config_namespace="fake",
                     config={"fake.name": "integration"},
@@ -220,7 +275,7 @@ def _seed_assignment(database: Database, workspace_id: UUID) -> dict[str, UUID]:
                     id=workspace_instance_id,
                     workspace_id=workspace_id,
                     definition_id=workspace_definition_id,
-                    instance_name="fake-workspace",
+                    instance_name=f"fake-workspace{name_suffix}",
                     config_version=1,
                     config_namespace="workspace",
                     config={
@@ -329,6 +384,69 @@ def _message(workspace_id: UUID, execution_id: UUID, lease_id: UUID) -> OutboxMe
         attempts=1,
         claim_token=uuid4(),
     )
+
+
+def _stop_service(database: Database) -> CommandService:
+    return CommandService(
+        lambda: SqlAlchemyUnitOfWork(database),
+        (ExecutionCommandHandler(lambda: NOW, lease_ttl_seconds=300),),
+    )
+
+
+def _request_stop(
+    database: Database, workspace_id: UUID, execution_id: UUID, expected_version: int
+) -> tuple[UUID, OutboxMessage]:
+    command_id = uuid4()
+    _stop_service(database).handle(
+        CommandEnvelope(
+            id=command_id,
+            workspace_id=workspace_id,
+            command_type="StopExecution",
+            target_type="execution",
+            actor_type="user",
+            actor_id="user:integration",
+            target_id=execution_id,
+            payload={},
+            expected_version=expected_version,
+            idempotency_key=f"stop:{execution_id}:{command_id}",
+            correlation_id=uuid4(),
+        )
+    )
+    with database.session() as session:
+        row = session.query(OutboxMessageModel).filter_by(topic=STOP_TOPIC).one()
+        return command_id, OutboxMessage(
+            id=row.id,
+            event_id=row.event_id,
+            topic=row.topic,
+            payload=dict(row.payload),
+            attempts=1,
+            claim_token=uuid4(),
+        )
+
+
+def _request_continue(
+    database: Database,
+    workspace_id: UUID,
+    session_id: UUID,
+    expected_version: int,
+) -> UUID:
+    command_id = uuid4()
+    _stop_service(database).handle(
+        CommandEnvelope(
+            id=command_id,
+            workspace_id=workspace_id,
+            command_type="ContinueExecutionSession",
+            target_type="execution_session",
+            actor_type="user",
+            actor_id="user:integration",
+            target_id=session_id,
+            payload={"not_before": NOW.isoformat()},
+            expected_version=expected_version,
+            idempotency_key=f"continue:{session_id}:{command_id}",
+            correlation_id=uuid4(),
+        )
+    )
+    return command_id
 
 
 def test_gateway_starts_once_and_replays_duplicate_assignment(
@@ -529,3 +647,159 @@ def test_input_dispatcher_delivers_to_exact_gateway_session(
         assert stored_session is not None
         assert stored_session.last_sequence == 4
         assert session.query(ExecutionEventModel).count() == 4
+
+
+def test_gateway_stops_exact_execution_and_continues_without_touching_sibling(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    sibling_ids = _seed_assignment(database, workspace_id, name_suffix="-sibling")
+    with database.session() as session:
+        session.execute(
+            update(ExecutionModel)
+            .where(
+                ExecutionModel.id == sibling_ids["execution_id"],
+                ExecutionModel.workspace_id == workspace_id,
+            )
+            .values(task_id=ids["task_id"])
+        )
+        session.commit()
+    adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+
+    first_session = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    sibling_session = gateway.handle(
+        _message(workspace_id, sibling_ids["execution_id"], sibling_ids["lease_id"])
+    )
+    with database.session() as session:
+        first_execution = session.get(ExecutionModel, ids["execution_id"])
+        sibling_execution = session.get(ExecutionModel, sibling_ids["execution_id"])
+        assert first_execution is not None
+        assert sibling_execution is not None
+        first_version = first_execution.version
+        assert first_execution.status == "running"
+        assert sibling_execution.status == "running"
+
+    _command_id, stop_message = _request_stop(
+        database, workspace_id, ids["execution_id"], first_version
+    )
+    stopped = gateway.handle(stop_message)
+    replayed = gateway.handle(stop_message)
+
+    assert isinstance(stopped, GatewayStopResult)
+    assert isinstance(replayed, GatewayStopResult)
+    assert stopped == replayed
+    assert stopped.operation_id == _operation_id(
+        ids["execution_id"], GatewayOperationType.STOP_SESSION
+    )
+    assert adapter.stop_count == 1
+    with database.session() as session:
+        stopped_execution = session.get(ExecutionModel, ids["execution_id"])
+        sibling_execution = session.get(ExecutionModel, sibling_ids["execution_id"])
+        stopped_session = session.get(ExecutionSessionModel, first_session.session_id)
+        sibling_session_row = session.get(
+            ExecutionSessionModel, sibling_session.session_id
+        )
+        stopped_lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        stopped_worker = session.get(WorkerModel, ids["worker_id"])
+        assert stopped_execution is not None
+        assert sibling_execution is not None
+        assert stopped_session is not None
+        assert sibling_session_row is not None
+        assert stopped_lease is not None
+        assert stopped_worker is not None
+        assert stopped_execution.status == "canceled"
+        assert stopped_execution.stop_requested is True
+        assert stopped_execution.active_lease_id is None
+        assert sibling_execution.status == "running"
+        assert sibling_execution.active_lease_id == sibling_ids["lease_id"]
+        assert stopped_session.status == "closed"
+        assert sibling_session_row.status == "active"
+        assert stopped_lease.status == "released"
+        assert stopped_worker.current_load == 0
+        operation = session.query(GatewayOperationModel).filter_by(
+            execution_id=ids["execution_id"],
+            operation_type=GatewayOperationType.STOP_SESSION.value,
+        ).one()
+        assert operation.status == "succeeded"
+        closed_session_version = stopped_session.version
+
+    _request_continue(
+        database,
+        workspace_id,
+        first_session.session_id,
+        closed_session_version,
+    )
+
+    with database.session() as session:
+        continuation = (
+            session.query(ExecutionModel)
+            .filter_by(source_execution_id=ids["execution_id"])
+            .one()
+        )
+        assert continuation.status == "queued"
+        assert continuation.source_session_id == first_session.session_id
+        assert continuation.task_id == ids["task_id"]
+        assert continuation.active_lease_id is None
+        assert session.query(ExecutionModel).count() == 3
+        task = session.get(TaskModel, ids["task_id"])
+        assert task is not None
+        assert task.status == "running"
+
+
+def test_unknown_stop_blocks_continuation_and_preserves_running_session(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    adapter = UnknownStopAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+    started = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        assert execution is not None
+        execution_version = execution.version
+
+    _, stop_message = _request_stop(
+        database, workspace_id, ids["execution_id"], execution_version
+    )
+    with pytest.raises(GatewayRecoveryRequired):
+        gateway.handle(stop_message)
+
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        stored_session = session.get(ExecutionSessionModel, started.session_id)
+        assert execution is not None
+        assert stored_session is not None
+        assert execution.status == "running"
+        assert execution.active_lease_id == ids["lease_id"]
+        assert stored_session.status == "active"
+        assert session.query(ExecutionModel).count() == 1
+        operation = session.query(GatewayOperationModel).filter_by(
+            execution_id=ids["execution_id"],
+            operation_type=GatewayOperationType.STOP_SESSION.value,
+        ).one()
+        assert operation.status == "unknown"
+        session_version = stored_session.version
+
+    with pytest.raises(InvalidTransition, match="only a terminal Session"):
+        _request_continue(
+            database, workspace_id, started.session_id, session_version
+        )

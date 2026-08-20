@@ -14,9 +14,16 @@ from sidera_control_plane.domain.errors import (
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
+    TERMINAL_EXECUTION_STATUSES,
     Execution,
     ExecutionSession,
+    ExecutionSessionStatus,
     ExecutionStatus,
+)
+from sidera_control_plane.domain.gateway import (
+    GatewayOperationStatus,
+    GatewayOperationType,
+    gateway_operation_id,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
@@ -29,6 +36,8 @@ class ExecutionCommandHandler:
             "CreateExecution",
             "RetryExecution",
             "CancelExecution",
+            "StopExecution",
+            "ContinueExecutionSession",
             "RenewLease",
             "ReportExecutionStarted",
             "ReportExecutionSucceeded",
@@ -59,6 +68,10 @@ class ExecutionCommandHandler:
             return self._report_finished(uow, envelope, succeeded=True)
         if envelope.command_type == "ReportExecutionFailed":
             return self._report_finished(uow, envelope, succeeded=False)
+        if envelope.command_type == "StopExecution":
+            return self._request_stop(uow, envelope)
+        if envelope.command_type == "ContinueExecutionSession":
+            return self._continue_session(uow, envelope)
         return self._cancel(uow, envelope)
 
     def _create(
@@ -137,6 +150,137 @@ class ExecutionCommandHandler:
             command_id=envelope.id,
             aggregate_id=execution.id,
             aggregate_version=execution.version,
+            event_ids=tuple(event.id for event in events),
+        )
+
+    def _request_stop(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        execution = _get_target_execution(uow, envelope, for_update=True)
+        if execution.active_lease_id is None:
+            raise InvalidTransition("stopping an execution requires an active lease")
+        session = uow.sessions.get_active_for_execution(execution.id, for_update=True)
+        if session is None:
+            raise InvalidTransition("stopping an execution requires an active Session")
+        previous_version = execution.version
+        execution.request_stop()
+        uow.executions.save(execution, previous_version)
+        event = _event(
+            envelope,
+            workspace_id=execution.workspace_id,
+            aggregate_type="execution",
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_type="ExecutionStopRequested",
+            payload={
+                "execution_id": str(execution.id),
+                "session_id": str(session.id),
+                "lease_id": str(execution.active_lease_id),
+                "fencing_token": execution.last_fencing_token,
+                "command_id": str(envelope.id),
+            },
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_ids=(event.id,),
+        )
+
+    def _continue_session(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        session = _get_target_session(uow, envelope, for_update=True)
+        if session.status is ExecutionSessionStatus.ACTIVE:
+            raise InvalidTransition("only a terminal Session can be continued")
+        execution = uow.executions.get(
+            session.execution_id, envelope.workspace_id, for_update=True
+        )
+        if execution is None:
+            raise NotFound("source execution not found")
+        if execution.status not in TERMINAL_EXECUTION_STATUSES:
+            raise InvalidTransition("source execution is not terminal")
+        if execution.active_lease_id is not None:
+            raise InvalidTransition("source execution still has an active lease")
+        if execution.stop_requested:
+            stop_operation = uow.gateway_operations.get_by_operation_id(
+                gateway_operation_id(
+                    execution.id, GatewayOperationType.STOP_SESSION
+                ),
+                envelope.workspace_id,
+            )
+            if (
+                stop_operation is None
+                or stop_operation.status is not GatewayOperationStatus.SUCCEEDED
+            ):
+                raise InvalidTransition(
+                    "continuation is blocked until the stop operation is confirmed"
+                )
+        task = uow.tasks.get(execution.task_id, envelope.workspace_id)
+        if task is None:
+            raise NotFound("task not found")
+        if task.status in {
+            TaskStatus.PAUSED,
+            TaskStatus.CANCELED,
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+        }:
+            raise InvalidTransition(f"task cannot receive a continuation from {task.status}")
+
+        continuation_id = uuid4()
+        continuation = Execution.create(
+            execution_id=continuation_id,
+            workspace_id=execution.workspace_id,
+            task_id=execution.task_id,
+            lineage_id=continuation_id,
+            attempt=1,
+            max_attempts=execution.max_attempts,
+            purpose=execution.purpose,
+            capability_requirements=execution.capability_requirements,
+            pinned_worker_id=execution.pinned_worker_id,
+            not_before=_required_datetime(envelope.payload, "not_before"),
+            source_execution_id=execution.id,
+            source_session_id=session.id,
+        )
+        events: list[EventData] = []
+        if task.status in {TaskStatus.PENDING, TaskStatus.WAITING}:
+            previous_task_status = task.status.value
+            previous_task_version = task.version
+            task.mark_ready()
+            uow.tasks.save(task, previous_task_version)
+            events.append(
+                _event(
+                    envelope,
+                    workspace_id=task.workspace_id,
+                    aggregate_type="task",
+                    aggregate_id=task.id,
+                    aggregate_version=task.version,
+                    event_type="TaskReady",
+                    payload={
+                        "status": task.status.value,
+                        "previous_status": previous_task_status,
+                    },
+                )
+            )
+        uow.executions.add(continuation)
+        events.append(
+            _event(
+                envelope,
+                workspace_id=continuation.workspace_id,
+                aggregate_type="execution",
+                aggregate_id=continuation.id,
+                aggregate_version=continuation.version,
+                event_type="ExecutionContinued",
+                payload=_execution_payload(continuation),
+            )
+        )
+        for event in events:
+            uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=continuation.id,
+            aggregate_version=continuation.version,
             event_ids=tuple(event.id for event in events),
         )
 
@@ -797,6 +941,30 @@ def _get_target_execution(
     return execution
 
 
+def _get_target_session(
+    uow: ControlPlaneUnitOfWork,
+    envelope: CommandEnvelope,
+    *,
+    for_update: bool,
+) -> ExecutionSession:
+    if envelope.target_type != "execution_session":
+        raise ValidationError("session commands require target_type=execution_session")
+    if envelope.target_id is None or envelope.expected_version is None:
+        raise ValidationError(
+            "session mutation commands require target_id and expected_version"
+        )
+    if envelope.expected_version < 1:
+        raise ValidationError("expected_version must be positive")
+    session = uow.sessions.get_any(
+        envelope.target_id, envelope.workspace_id, for_update=for_update
+    )
+    if session is None:
+        raise NotFound("execution session not found")
+    if session.version != envelope.expected_version:
+        raise VersionConflict(envelope.expected_version, session.version)
+    return session
+
+
 def _get_target_lease(
     uow: ControlPlaneUnitOfWork,
     envelope: CommandEnvelope,
@@ -894,6 +1062,7 @@ def _execution_payload(execution: Execution) -> dict[str, object]:
         "max_attempts": execution.max_attempts,
         "purpose": execution.purpose,
         "status": execution.status.value,
+        "stop_requested": execution.stop_requested,
         "capability_requirements": sorted(execution.capability_requirements),
         "pinned_worker_id": (
             str(execution.pinned_worker_id)
@@ -901,6 +1070,16 @@ def _execution_payload(execution: Execution) -> dict[str, object]:
             else None
         ),
         "not_before": execution.not_before.isoformat(),
+        "source_execution_id": (
+            str(execution.source_execution_id)
+            if execution.source_execution_id is not None
+            else None
+        ),
+        "source_session_id": (
+            str(execution.source_session_id)
+            if execution.source_session_id is not None
+            else None
+        ),
     }
 
 

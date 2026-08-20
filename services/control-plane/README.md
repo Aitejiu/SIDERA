@@ -1,22 +1,59 @@
 # SIDERA Control Plane
 
-R1/R2 control plane is a deterministic FastAPI service for Task commands,
-queries, immutable Events, transactional Outbox delivery, virtual Workers,
-Execution leases, deterministic scheduling, and lease recovery. PostgreSQL is
-its only authoritative store. It does not call an LLM, launch OpenCode, own
-collaboration topology, or store user memory and knowledge content.
+The SIDERA control plane is a deterministic FastAPI service for Task commands,
+normalized operational queries, immutable Events, transactional Outbox
+delivery, modular Workers, Execution leases, scheduling, and Gateway recovery.
+PostgreSQL is its only authoritative store. The R3 Gateway launches one
+OpenCode ACP child process per Execution through a replaceable Adapter; it does
+not own the Main Agent, collaboration topology, user memory, or knowledge
+content.
 
 ## Prerequisites
 
 - Python 3.12 or newer and `uv`.
 - PostgreSQL 16 binaries. The commands below use the user-local installation
   created for this workspace; another PostgreSQL 16 installation is equivalent.
+- macOS Homebrew and the pinned OpenCode executable described below.
 
 Install Python dependencies from the repository root:
 
 ```bash
 uv sync --project services/control-plane --all-groups --frozen
 ```
+
+## macOS Local Profile
+
+The verified local profile on 2026-08-20 uses OpenCode `1.18.19` from the
+`anomalyco/tap` Homebrew tap. Keep the expected version in the environment so
+an upgrade cannot silently change the Adapter contract:
+
+```bash
+brew tap anomalyco/tap
+brew install anomalyco/tap/opencode
+brew pin opencode
+opencode --version
+
+export SIDERA_OPENCODE_EXECUTABLE="$(command -v opencode)"
+export SIDERA_OPENCODE_EXPECTED_VERSION="1.18.19"
+export SIDERA_WORKSPACE_ROOT="$PWD/.sidera/workspaces"
+mkdir -p "$SIDERA_WORKSPACE_ROOT"
+```
+
+OpenCode credentials remain in the OpenCode credential store. SIDERA module
+instances record only opaque references such as
+`opencode.default-credential`; API keys must not be placed in module JSON,
+Events, Outbox payloads, or logs.
+
+Run the explicit executable and ACP preflight before starting a real Gateway:
+
+```bash
+uv run --project services/control-plane python \
+  -m sidera_control_plane.opencode_preflight
+```
+
+The command prints a compact JSON capability report and returns non-zero when
+the configured executable, version, Git worktree, ACP `initialize`, or ACP
+`session/new` check fails. There is no automatic fake-worker fallback.
 
 ## Native PostgreSQL
 
@@ -84,21 +121,24 @@ uv run --project services/control-plane python \
 `StdoutEventSink` is a development diagnostic, not a production transport or a
 delivery contract. External delivery is at least once.
 
-Run the Scheduler and Reconciler as independent native processes:
+Run the Scheduler, Reconciler, and R3 Gateway as independent native processes:
 
 ```bash
 uv run --project services/control-plane python \
   -m sidera_control_plane.scheduler_worker --once
 uv run --project services/control-plane python \
   -m sidera_control_plane.reconciler_worker --once
+uv run --project services/control-plane python \
+  -m sidera_control_plane.gateway_worker --once
 ```
 
-Omit `--once` for continuous PostgreSQL polling. The four processes are
+Omit `--once` for continuous PostgreSQL polling. The five processes are
 independent and can be stopped or restarted separately: API, Outbox worker,
-Scheduler, and Reconciler. `Ctrl-C` exits cleanly; all durable ownership,
-attempt, retry, and audit facts remain in PostgreSQL and are reloaded after a
-restart. Each batch writes one compact JSON summary to stdout; failures return
-non-zero and do not report a successful batch.
+Scheduler, Reconciler, and Gateway. `Ctrl-C` exits cleanly; all durable
+ownership, attempt, retry, Session, input, Artifact, and audit facts remain in
+PostgreSQL and are reloaded after a restart. Each batch writes one compact JSON
+summary to stdout; failures return non-zero and do not report a successful
+batch.
 
 ## R2 Timing And Limits
 
@@ -121,11 +161,25 @@ worker heartbeat timeout <= assignment Lease TTL only when rapid exclusion is de
 Reconciler polling interval << assignment Lease TTL
 ```
 
-R2 Workers are virtual/fake resources. Scheduler granting a Lease does not
-start OpenCode or any other harness. Real Adapter capability negotiation,
-start/delivery uncertainty, live stream input, checkpoints, and interactive
-Session intervention are R3 responsibilities. R2 fake reports only verify the
-control-plane fencing and recovery contract.
+R2 Workers are virtual resources and the Scheduler only grants a Lease. The R3
+Gateway owns real Adapter capability negotiation, isolated workspaces,
+OpenCode process identity, Session events, input delivery, Artifact
+registration, exact stop, and continuation recovery. OpenCode reports
+unsupported capabilities as disabled in the public contract; the current
+profile is experimental and does not claim durable ACP resume or external
+idempotency.
+
+## R3 Public Queries
+
+The normalized Gateway projections are available under `/api/v1/gateway`:
+
+- `/executions/{execution_id}/binding`
+- `/executions/{execution_id}/workspace`
+- `/sessions`, `/events`, `/artifacts`, `/evidence`, and `/inputs`
+
+Every list query requires an explicit `workspace_id`; cursors are opaque to
+callers and event history also supports `after_sequence`. The API returns
+stable SIDERA projections instead of raw ACP messages.
 
 ## Verification
 
@@ -146,6 +200,15 @@ uv run --project services/control-plane alembic \
   -c services/control-plane/alembic.ini check
 ```
 
-Akashic, OpenCode, Web intervention, memory, and knowledge integration remain
-outside this service. Container packaging is deferred until the deployment
-topology is selected.
+Run the real OpenCode E2E only after the preflight succeeds and only when the
+explicit switch is set:
+
+```bash
+SIDERA_RUN_OPENCODE_E2E=1 \
+uv run --project services/control-plane pytest \
+  services/control-plane/tests/integration/test_opencode_end_to_end.py -q
+```
+
+Akashic, Web intervention UI, Main Agent, DSH integration, memory, and
+knowledge remain outside this service. Container packaging is deferred until
+the deployment topology is selected.

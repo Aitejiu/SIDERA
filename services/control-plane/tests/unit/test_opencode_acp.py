@@ -1,5 +1,6 @@
 import os
 import stat
+import subprocess
 import textwrap
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from sidera_control_plane.adapters.opencode_acp import (
     AdapterProbeError,
     OpenCodeACPAdapter,
 )
+from sidera_control_plane.domain.artifacts import ArtifactType
 from sidera_control_plane.domain.gateway import DeliveryOutcome
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
@@ -162,6 +164,67 @@ def test_opencode_acp_missing_executable_is_unhealthy() -> None:
 
     with pytest.raises(AdapterProbeError, match="unavailable"):
         adapter.probe({})
+
+
+def test_opencode_acp_collects_git_diff_and_acceptance_provenance(
+    tmp_path: Path,
+) -> None:
+    executable = _fake_acp_executable(tmp_path)
+    adapter = OpenCodeACPAdapter(
+        executable=str(executable),
+        workspace_root=tmp_path,
+        request_timeout_seconds=2,
+        stop_grace_seconds=0.2,
+    )
+    spec = _spec()
+    workspace_path = tmp_path / str(spec.execution_id)
+    workspace_path.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(workspace_path)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace_path), "config", "user.name", "SIDERA Test"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workspace_path),
+            "config",
+            "user.email",
+            "test@sidera.local",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    (workspace_path / "README.md").write_text("base\n")
+    subprocess.run(
+        ["git", "-C", str(workspace_path), "add", "README.md"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace_path), "commit", "-m", "base"],
+        check=True,
+        capture_output=True,
+    )
+    (workspace_path / "README.md").write_text("changed\n")
+
+    handle = adapter.start_session(spec, _workspace(spec), operation_id=uuid4())
+    candidates = adapter.collect_artifacts(handle, operation_id=uuid4())
+
+    assert len(candidates) == 1
+    assert candidates[0].artifact_type is ArtifactType.DIFF
+    assert candidates[0].media_type == "text/x-diff"
+    assert candidates[0].provenance["acceptance_criterion_refs"] == (
+        "the ACP handshake succeeds",
+    )
+    assert candidates[0].size_bytes > 0
+    adapter.stop_session(handle, operation_id=uuid4())
 
 
 def test_opencode_acp_stop_requires_proven_process_identity(

@@ -5,7 +5,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from sidera_control_plane.application.resource_queries import (
+    ArtifactView,
+    EvidenceClaimView,
+    ExecutionBindingView,
+    ExecutionEventView,
+    ExecutionInputView,
+    ExecutionSessionView,
     ExecutionView,
+    ExecutionWorkspaceView,
     LeaseView,
     WorkerView,
 )
@@ -127,6 +134,12 @@ class RetryBlockedExecutionInputPayload(ExecutionInputTargetPayload):
     pass
 
 
+class ContinueExecutionSessionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    not_before: datetime
+
+
 class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -179,9 +192,12 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryExecution":
             self._require_mutation_target("execution")
             parsed = RetryExecutionPayload.model_validate(self.payload)
-        elif self.command_type == "CancelExecution":
+        elif self.command_type in {"CancelExecution", "StopExecution"}:
             self._require_mutation_target("execution")
             parsed = EmptyPayload.model_validate(self.payload)
+        elif self.command_type == "ContinueExecutionSession":
+            self._require_mutation_target("execution_session")
+            parsed = ContinueExecutionSessionPayload.model_validate(self.payload)
         elif self.command_type == "RenewLease":
             self._require_mutation_target("lease")
             parsed = LeaseOwnerPayload.model_validate(self.payload)
@@ -354,6 +370,9 @@ class ExecutionResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     version: int
+    stop_requested: bool
+    source_execution_id: UUID | None
+    source_session_id: UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -378,6 +397,9 @@ class ExecutionResponse(BaseModel):
             started_at=execution.started_at,
             finished_at=execution.finished_at,
             version=execution.version,
+            stop_requested=execution.stop_requested,
+            source_execution_id=execution.source_execution_id,
+            source_session_id=execution.source_session_id,
             created_at=execution.created_at,
             updated_at=execution.updated_at,
         )
@@ -411,6 +433,274 @@ class LeaseResponse(BaseModel):
             assignment_reason=lease.assignment_reason,
             version=lease.version,
         )
+
+
+class ExecutionBindingResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    execution_id: UUID
+    worker_id: UUID
+    adapter_module_id: UUID
+    workspace_module_id: UUID
+    adapter_config_version: int
+    workspace_config_version: int
+    capability_snapshot: dict[str, object]
+    lease_id: UUID
+    fencing_token: int
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, binding: ExecutionBindingView) -> "ExecutionBindingResponse":
+        return cls(
+            id=binding.id,
+            workspace_id=binding.workspace_id,
+            execution_id=binding.execution_id,
+            worker_id=binding.worker_id,
+            adapter_module_id=binding.adapter_module_id,
+            workspace_module_id=binding.workspace_module_id,
+            adapter_config_version=binding.adapter_config_version,
+            workspace_config_version=binding.workspace_config_version,
+            capability_snapshot=binding.capability_snapshot,
+            lease_id=binding.lease_id,
+            fencing_token=binding.fencing_token,
+            version=binding.version,
+            created_at=binding.created_at,
+            updated_at=binding.updated_at,
+        )
+
+
+class ExecutionSessionResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    execution_id: UUID
+    worker_id: UUID
+    adapter_session_id: str
+    status: str
+    last_sequence: int
+    last_activity_at: datetime
+    input_mode: str
+    adapter_module_id: UUID | None
+    adapter_config_version: int | None
+    workspace_module_id: UUID | None
+    workspace_config_version: int | None
+    capability_snapshot: dict[str, object] | None
+    workspace_ref: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, session: ExecutionSessionView) -> "ExecutionSessionResponse":
+        return cls(
+            id=session.id,
+            workspace_id=session.workspace_id,
+            execution_id=session.execution_id,
+            worker_id=session.worker_id,
+            adapter_session_id=session.adapter_session_id,
+            status=session.status,
+            last_sequence=session.last_sequence,
+            last_activity_at=session.last_activity_at,
+            input_mode=session.input_mode,
+            adapter_module_id=session.adapter_module_id,
+            adapter_config_version=session.adapter_config_version,
+            workspace_module_id=session.workspace_module_id,
+            workspace_config_version=session.workspace_config_version,
+            capability_snapshot=session.capability_snapshot,
+            workspace_ref=session.workspace_ref,
+            version=session.version,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+        )
+
+
+class ExecutionWorkspaceResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    task_id: UUID
+    execution_id: UUID
+    checkouts: tuple[dict[str, object], ...]
+    location_ref: str
+    lifecycle: str
+    retention_seconds: int
+    retain_until: datetime | None
+    fencing_token: int
+    frozen_at: datetime | None
+    released_at: datetime | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, workspace: ExecutionWorkspaceView
+    ) -> "ExecutionWorkspaceResponse":
+        return cls(
+            id=workspace.id,
+            workspace_id=workspace.workspace_id,
+            task_id=workspace.task_id,
+            execution_id=workspace.execution_id,
+            checkouts=workspace.checkouts,
+            location_ref=workspace.location_ref,
+            lifecycle=workspace.lifecycle,
+            retention_seconds=workspace.retention_seconds,
+            retain_until=workspace.retain_until,
+            fencing_token=workspace.fencing_token,
+            frozen_at=workspace.frozen_at,
+            released_at=workspace.released_at,
+            version=workspace.version,
+            created_at=workspace.created_at,
+            updated_at=workspace.updated_at,
+        )
+
+
+class ExecutionEventResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    execution_id: UUID
+    session_id: UUID
+    sequence: int
+    event_type: str
+    payload: dict[str, object]
+    occurred_at: datetime
+    raw_ref: str | None
+
+    @classmethod
+    def from_view(cls, event: ExecutionEventView) -> "ExecutionEventResponse":
+        return cls(
+            id=event.id,
+            workspace_id=event.workspace_id,
+            execution_id=event.execution_id,
+            session_id=event.session_id,
+            sequence=event.sequence,
+            event_type=event.event_type,
+            payload=event.payload,
+            occurred_at=event.occurred_at,
+            raw_ref=event.raw_ref,
+        )
+
+
+class ArtifactMetadataResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    task_id: UUID
+    execution_id: UUID
+    session_id: UUID | None
+    artifact_type: str
+    storage_ref: str
+    content_hash: str
+    size_bytes: int
+    media_type: str
+    provenance: dict[str, object]
+    created_at: datetime
+
+    @classmethod
+    def from_view(cls, artifact: ArtifactView) -> "ArtifactMetadataResponse":
+        return cls(
+            id=artifact.id,
+            workspace_id=artifact.workspace_id,
+            task_id=artifact.task_id,
+            execution_id=artifact.execution_id,
+            session_id=artifact.session_id,
+            artifact_type=artifact.artifact_type,
+            storage_ref=artifact.storage_ref,
+            content_hash=artifact.content_hash,
+            size_bytes=artifact.size_bytes,
+            media_type=artifact.media_type,
+            provenance=artifact.provenance,
+            created_at=artifact.created_at,
+        )
+
+
+class EvidenceClaimResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    task_id: UUID
+    execution_id: UUID
+    acceptance_criterion_ref: str
+    conclusion: str
+    environment_ref: str
+    artifact_ids: tuple[UUID, ...]
+    producer: str
+    status: str
+    created_at: datetime
+
+    @classmethod
+    def from_view(cls, claim: EvidenceClaimView) -> "EvidenceClaimResponse":
+        return cls(
+            id=claim.id,
+            workspace_id=claim.workspace_id,
+            task_id=claim.task_id,
+            execution_id=claim.execution_id,
+            acceptance_criterion_ref=claim.acceptance_criterion_ref,
+            conclusion=claim.conclusion,
+            environment_ref=claim.environment_ref,
+            artifact_ids=claim.artifact_ids,
+            producer=claim.producer,
+            status=claim.status,
+            created_at=claim.created_at,
+        )
+
+
+class ExecutionInputStatusResponse(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    execution_id: UUID
+    session_id: UUID
+    client_idempotency_key: str
+    status: str
+    operation_id: UUID | None
+    failure_code: str | None
+    version: int
+    text_length: int
+    attachment_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, item: ExecutionInputView
+    ) -> "ExecutionInputStatusResponse":
+        return cls(
+            id=item.id,
+            workspace_id=item.workspace_id,
+            execution_id=item.execution_id,
+            session_id=item.session_id,
+            client_idempotency_key=item.client_idempotency_key,
+            status=item.status,
+            operation_id=item.operation_id,
+            failure_code=item.failure_code,
+            version=item.version,
+            text_length=item.text_length,
+            attachment_count=item.attachment_count,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+
+
+class CursorPageResponse(BaseModel):
+    next_cursor: str | None
+
+
+class ExecutionSessionPageResponse(CursorPageResponse):
+    items: tuple[ExecutionSessionResponse, ...]
+
+
+class ExecutionEventPageResponse(CursorPageResponse):
+    items: tuple[ExecutionEventResponse, ...]
+
+
+class ArtifactPageResponse(CursorPageResponse):
+    items: tuple[ArtifactMetadataResponse, ...]
+
+
+class EvidenceClaimPageResponse(CursorPageResponse):
+    items: tuple[EvidenceClaimResponse, ...]
+
+
+class ExecutionInputPageResponse(CursorPageResponse):
+    items: tuple[ExecutionInputStatusResponse, ...]
 
 
 class TaskPageResponse(BaseModel):
