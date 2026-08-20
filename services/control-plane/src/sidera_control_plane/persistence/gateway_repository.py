@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
@@ -244,6 +244,43 @@ class ExecutionInputRepository:
         row = self._session.scalar(statement)
         return _to_domain_input(row) if row is not None else None
 
+    def find_by_client_idempotency_key(
+        self,
+        session_id: UUID,
+        workspace_id: UUID,
+        client_idempotency_key: str,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionInput | None:
+        statement = select(ExecutionInputModel).where(
+            ExecutionInputModel.session_id == session_id,
+            ExecutionInputModel.workspace_id == workspace_id,
+            ExecutionInputModel.client_idempotency_key == client_idempotency_key,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_input(row) if row is not None else None
+
+    def claim_queued(self, limit: int) -> tuple[ExecutionInput, ...]:
+        rows = self._session.scalars(
+            select(ExecutionInputModel)
+            .where(ExecutionInputModel.status == ExecutionInputStatus.QUEUED.value)
+            .order_by(ExecutionInputModel.created_at, ExecutionInputModel.id)
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+        ).all()
+        claimed: list[ExecutionInput] = []
+        for row in rows:
+            item = _to_domain_input(row)
+            previous_version = item.version
+            item.begin_dispatch(
+                operation_id=uuid5(NAMESPACE_URL, f"sidera.input:{item.id}")
+            )
+            self.save(item, previous_version)
+            claimed.append(item)
+        return tuple(claimed)
+
     def add(self, item: ExecutionInput) -> None:
         self._session.add(
             ExecutionInputModel(
@@ -260,6 +297,7 @@ class ExecutionInputRepository:
                 version=item.version,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
+                source_command_id=item.source_command_id,
             )
         )
 
@@ -390,4 +428,5 @@ def _to_domain_input(row: ExecutionInputModel) -> ExecutionInput:
         version=row.version,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        source_command_id=row.source_command_id,
     )

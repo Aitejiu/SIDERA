@@ -5,7 +5,10 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from sidera_control_plane.application.command_service import CommandService
-from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
+from sidera_control_plane.application.execution_commands import (
+    ExecutionCommandHandler,
+    ExecutionInputCommandHandler,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.task_commands import TaskCommandHandler
@@ -46,6 +49,7 @@ def get_command_service(
                 lambda: datetime.now(UTC),
                 lease_ttl_seconds=settings.assignment_lease_seconds,
             ),
+            ExecutionInputCommandHandler(lambda: datetime.now(UTC)),
         ),
     )
 

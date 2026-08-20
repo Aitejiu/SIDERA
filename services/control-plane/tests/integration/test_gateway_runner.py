@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
+from sidera_control_plane.application.input_dispatcher import InputDispatcher
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
@@ -33,8 +34,10 @@ from sidera_control_plane.domain.workspace import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
+    CommandModel,
     ExecutionBindingModel,
     ExecutionEventModel,
+    ExecutionInputModel,
     ExecutionModel,
     ExecutionSessionModel,
     GatewayOperationModel,
@@ -435,3 +438,94 @@ def test_gateway_preserves_unknown_initial_prompt_result(
         ).one()
         assert operation.status == "unknown"
         assert operation.failure_code == "acp_response_timeout"
+
+
+def test_input_dispatcher_delivers_to_exact_gateway_session(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+
+    result = gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+    adapter.release_boundary(adapter.active_sessions()[0])
+    input_id = uuid4()
+    source_command_id = uuid4()
+    with database.session() as session:
+        session.add(
+            CommandModel(
+                id=source_command_id,
+                workspace_id=workspace_id,
+                command_type="SendExecutionInput",
+                actor_type="user",
+                actor_id="integration",
+                target_type="execution_session",
+                target_id=result.session_id,
+                payload={"source": "integration"},
+                expected_version=1,
+                idempotency_key=f"source:{source_command_id}",
+                request_hash="0" * 64,
+                correlation_id=uuid4(),
+                status="applied",
+                result={},
+                rejection_reason=None,
+            )
+        )
+        session.add(
+            ExecutionInputModel(
+                id=input_id,
+                workspace_id=workspace_id,
+                execution_id=ids["execution_id"],
+                session_id=result.session_id,
+                client_idempotency_key="gateway-input-1",
+                text="continue the assigned task",
+                attachment_refs=[],
+                status="queued",
+                operation_id=None,
+                failure_code=None,
+                version=1,
+                source_command_id=source_command_id,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        session.commit()
+
+    dispatcher = InputDispatcher(
+        lambda: SqlAlchemyUnitOfWork(database), gateway, clock=lambda: NOW
+    )
+    report = dispatcher.run_once()
+
+    assert report.claimed == 1
+    assert report.delivered == 1
+    with database.session() as session:
+        stored_input = session.get(ExecutionInputModel, input_id)
+        assert stored_input is not None
+        assert stored_input.status == "delivered"
+        assert stored_input.operation_id is None
+        operations = session.query(GatewayOperationModel).filter_by(
+            execution_id=ids["execution_id"],
+            operation_type=GatewayOperationType.SEND_INPUT.value,
+        )
+        assert operations.count() == 2
+        assert operations.filter_by(status="succeeded").count() == 2
+
+    gateway.sync_session(
+        workspace_id=workspace_id,
+        execution_id=ids["execution_id"],
+        session_id=result.session_id,
+        lease_id=ids["lease_id"],
+        fencing_token=1,
+    )
+    with database.session() as session:
+        stored_session = session.get(ExecutionSessionModel, result.session_id)
+        assert stored_session is not None
+        assert stored_session.last_sequence == 4
+        assert session.query(ExecutionEventModel).count() == 4

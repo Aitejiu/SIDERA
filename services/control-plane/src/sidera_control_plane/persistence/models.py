@@ -955,6 +955,9 @@ class ExecutionInputModel(TimestampMixin, Base):
     operation_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     failure_code: Mapped[str | None] = mapped_column(String(100))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_command_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("commands.id", ondelete="RESTRICT")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

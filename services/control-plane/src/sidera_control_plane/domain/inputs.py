@@ -37,6 +37,7 @@ class ExecutionInput:
     version: int
     created_at: datetime
     updated_at: datetime
+    source_command_id: UUID | None = None
 
     @classmethod
     def accept(
@@ -50,6 +51,7 @@ class ExecutionInput:
         text: str,
         attachment_refs: tuple[str, ...],
         now: datetime,
+        source_command_id: UUID | None = None,
     ) -> "ExecutionInput":
         if not text:
             raise ValidationError("input text cannot be empty")
@@ -73,6 +75,7 @@ class ExecutionInput:
             version=1,
             created_at=now,
             updated_at=now,
+            source_command_id=source_command_id,
         )
 
     def update_text(self, text: str) -> None:
@@ -91,6 +94,14 @@ class ExecutionInput:
             raise InvalidTransition("only queued input can begin dispatch")
         self.status = ExecutionInputStatus.DISPATCHING
         self.operation_id = operation_id
+        self.failure_code = None
+        self.version += 1
+
+    def defer(self) -> None:
+        if self.status is not ExecutionInputStatus.DISPATCHING:
+            raise InvalidTransition("only dispatching input can be deferred")
+        self.status = ExecutionInputStatus.QUEUED
+        self.operation_id = None
         self.failure_code = None
         self.version += 1
 

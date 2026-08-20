@@ -18,6 +18,7 @@ from sidera_control_plane.domain.execution import (
     ExecutionSession,
     ExecutionStatus,
 )
+from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.task import TaskStatus
 
@@ -138,6 +139,7 @@ class ExecutionCommandHandler:
             aggregate_version=execution.version,
             event_ids=tuple(event.id for event in events),
         )
+
 
     def _retry(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -646,6 +648,133 @@ class ExecutionCommandHandler:
         )
 
 
+class ExecutionInputCommandHandler:
+    command_types = frozenset(
+        {
+            "SendExecutionInput",
+            "UpdatePendingExecutionInput",
+            "CancelExecutionInput",
+            "RetryBlockedExecutionInput",
+        }
+    )
+
+    def __init__(self, clock: Callable[[], datetime]) -> None:
+        self._clock = clock
+
+    def handle(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if envelope.command_type == "SendExecutionInput":
+            return self._send(uow, envelope)
+        session = self._load_session(uow, envelope)
+        item = self._load_input(uow, envelope, session.id)
+        previous_version = item.version
+        if envelope.command_type == "UpdatePendingExecutionInput":
+            item.update_text(_required_str(envelope.payload, "text"))
+            event_type = "ExecutionInputUpdated"
+        elif envelope.command_type == "CancelExecutionInput":
+            item.cancel(now=self._clock())
+            event_type = "ExecutionInputCanceled"
+        else:
+            item.retry_blocked()
+            event_type = "ExecutionInputRetryQueued"
+        uow.execution_inputs.save(item, previous_version)
+        event = _input_event(envelope, item, event_type)
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=item.id,
+            aggregate_version=item.version,
+            event_ids=(event.id,),
+        )
+
+    def _send(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        session = self._load_session(uow, envelope)
+        execution_id = _required_uuid(envelope.payload, "execution_id")
+        if execution_id != session.execution_id:
+            raise ValidationError("input execution_id does not match the Session")
+        client_key = _required_str(envelope.payload, "client_idempotency_key")
+        text = _required_str(envelope.payload, "text")
+        attachment_refs = _required_string_tuple(
+            envelope.payload, "attachment_refs", allow_empty=True
+        )
+        existing = uow.execution_inputs.find_by_client_idempotency_key(
+            session.id, envelope.workspace_id, client_key, for_update=True
+        )
+        if existing is not None:
+            if existing.text != text or existing.attachment_refs != attachment_refs:
+                raise ValidationError(
+                    "client idempotency key was reused with different input"
+                )
+            return CommandResult(
+                command_id=envelope.id,
+                aggregate_id=existing.id,
+                aggregate_version=existing.version,
+                event_ids=(),
+            )
+        if uow.execution_inputs.get_pending_for_session(
+            session.id, envelope.workspace_id, for_update=True
+        ) is not None:
+            raise InvalidTransition("the Session already has a pending input")
+        item = ExecutionInput.accept(
+            id=uuid4(),
+            workspace_id=envelope.workspace_id,
+            execution_id=session.execution_id,
+            session_id=session.id,
+            client_idempotency_key=client_key,
+            text=text,
+            attachment_refs=attachment_refs,
+            now=self._clock(),
+            source_command_id=envelope.id,
+        )
+        item.queue()
+        uow.execution_inputs.add(item)
+        event = _input_event(envelope, item, "ExecutionInputAccepted")
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=item.id,
+            aggregate_version=item.version,
+            event_ids=(event.id,),
+        )
+
+    @staticmethod
+    def _load_session(
+        uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> ExecutionSession:
+        if envelope.target_type != "execution_session" or envelope.target_id is None:
+            raise ValidationError("input commands require an execution_session target")
+        if envelope.expected_version is None or envelope.expected_version < 1:
+            raise ValidationError("input commands require a positive expected_version")
+        session = uow.sessions.get(
+            envelope.target_id, envelope.workspace_id, for_update=True
+        )
+        if session is None:
+            raise NotFound("active execution session not found")
+        if session.version != envelope.expected_version:
+            raise VersionConflict(envelope.expected_version, session.version)
+        return session
+
+    @staticmethod
+    def _load_input(
+        uow: ControlPlaneUnitOfWork,
+        envelope: CommandEnvelope,
+        session_id: UUID,
+    ) -> ExecutionInput:
+        client_key = _required_str(envelope.payload, "client_idempotency_key")
+        item = uow.execution_inputs.find_by_client_idempotency_key(
+            session_id, envelope.workspace_id, client_key, for_update=True
+        )
+        if item is None:
+            raise NotFound("execution input not found")
+        execution_id = _required_uuid(envelope.payload, "execution_id")
+        if item.execution_id != execution_id:
+            raise ValidationError("input execution_id does not match the input")
+        return item
+
+
 def _get_target_execution(
     uow: ControlPlaneUnitOfWork,
     envelope: CommandEnvelope,
@@ -733,6 +862,30 @@ def _event(
     )
 
 
+def _input_event(
+    envelope: CommandEnvelope,
+    item: ExecutionInput,
+    event_type: str,
+) -> EventData:
+    return _event(
+        envelope,
+        workspace_id=item.workspace_id,
+        aggregate_type="execution_input",
+        aggregate_id=item.id,
+        aggregate_version=item.version,
+        event_type=event_type,
+        payload={
+            "execution_id": str(item.execution_id),
+            "session_id": str(item.session_id),
+            "client_idempotency_key": item.client_idempotency_key,
+            "status": item.status.value,
+            "text_length": len(item.text),
+            "attachment_count": len(item.attachment_refs),
+            "failure_code": item.failure_code,
+        },
+    )
+
+
 def _execution_payload(execution: Execution) -> dict[str, object]:
     return {
         "task_id": str(execution.task_id),
@@ -765,8 +918,12 @@ def _required_int(payload: dict[str, Any], name: str) -> int:
     return value
 
 
-def _required_string_tuple(payload: dict[str, Any], name: str) -> tuple[str, ...]:
+def _required_string_tuple(
+    payload: dict[str, Any], name: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
     value = payload.get(name)
+    if value is None and allow_empty:
+        return ()
     if not isinstance(value, (list, tuple)) or not all(
         isinstance(item, str) for item in value
     ):

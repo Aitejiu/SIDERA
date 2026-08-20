@@ -135,6 +135,11 @@ class LeaseStorePort(Protocol):
 
 
 class SessionRepositoryPort(Protocol):
+    def get(
+        self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionSession | None:
+        raise NotImplementedError
+
     def get_active_for_execution(
         self, execution_id: UUID, *, for_update: bool = False
     ) -> ExecutionSession | None:
@@ -240,6 +245,19 @@ class ExecutionInputRepositoryPort(Protocol):
     def get_pending_for_session(
         self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionInput | None:
+        raise NotImplementedError
+
+    def find_by_client_idempotency_key(
+        self,
+        session_id: UUID,
+        workspace_id: UUID,
+        client_idempotency_key: str,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionInput | None:
+        raise NotImplementedError
+
+    def claim_queued(self, limit: int) -> tuple[ExecutionInput, ...]:
         raise NotImplementedError
 
     def add(self, item: ExecutionInput) -> None:

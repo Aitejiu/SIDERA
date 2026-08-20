@@ -19,6 +19,7 @@ from sidera_control_plane.application.ports import (
     WorkerAdapter,
     WorkspaceProvider,
 )
+from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.execution import (
     Execution,
     ExecutionSession,
@@ -26,12 +27,15 @@ from sidera_control_plane.domain.execution import (
 from sidera_control_plane.domain.gateway import (
     AdapterSessionHandle,
     DeliveryOutcome,
+    DeliveryResult,
     GatewayOperation,
     GatewayOperationStatus,
     GatewayOperationType,
 )
+from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
+    CapabilityInput,
     ExecutionBinding,
     ModuleDefinition,
     ModuleInstance,
@@ -110,6 +114,7 @@ class _OperationState:
     operation_id: UUID
     completed: bool
     recovery_required: bool = False
+    result_ref: str | None = None
 
 
 class ConfiguredExecutionSpecFactory:
@@ -376,6 +381,151 @@ class WorkerGateway:
         )
         return GatewaySessionSyncResult(event_report, artifact_report)
 
+    def send_input(self, item: ExecutionInput) -> DeliveryResult:
+        """Send one claimed input through the exact active Session."""
+        operation_id = item.operation_id
+        if item.status is not ExecutionInputStatus.DISPATCHING or operation_id is None:
+            raise GatewayMessageError("input must be dispatching with an operation id")
+
+        try:
+            context = self._load_input_context(item)
+        except (GatewayError, DomainError) as exc:
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.BLOCKED,
+                accepted_sequence=None,
+                failure_code=_failure_code(exc),
+            )
+
+        recovery_code: str | None = None
+        handle: AdapterSessionHandle | None = None
+        with self._uow_factory() as uow:
+            session = uow.sessions.get(
+                item.session_id, item.workspace_id, for_update=True
+            )
+            if session is None or session.execution_id != item.execution_id:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="active_session_mismatch",
+                )
+            if session.input_mode != CapabilityInput.QUEUED.value:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="input_mode_unsupported",
+                )
+            if context.binding.capability_snapshot.input is not CapabilityInput.QUEUED:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="input_capability_unsupported",
+                )
+            operation_state = self._begin_operation(
+                uow,
+                context,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.SEND_INPUT,
+                session_id=session.id,
+            )
+            if operation_state.completed:
+                return _delivery_from_operation(operation_id, operation_state.result_ref)
+            if operation_state.recovery_required:
+                recovery_code = "gateway_restart_requires_reconciliation"
+            else:
+                try:
+                    handle = _session_handle(session)
+                except GatewayRecoveryRequired as exc:
+                    recovery_code = _failure_code(exc)
+
+        if recovery_code is not None:
+            self._mark_operation_unknown(operation_id, context, recovery_code)
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.UNKNOWN,
+                accepted_sequence=None,
+                failure_code=recovery_code,
+            )
+        if handle is None:
+            self._mark_operation_unknown(
+                operation_id, context, "session_handle_unavailable"
+            )
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.UNKNOWN,
+                accepted_sequence=None,
+                failure_code="session_handle_unavailable",
+            )
+
+        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
+        try:
+            delivery = adapter.send_input(
+                handle,
+                item.text,
+                item.attachment_refs,
+                operation_id=operation_id,
+            )
+            if delivery.operation_id != operation_id:
+                self._mark_operation_unknown(
+                    operation_id, context, "adapter_operation_id_mismatch"
+                )
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="adapter_operation_id_mismatch",
+                )
+            if delivery.outcome is DeliveryOutcome.DELIVERED:
+                if delivery.accepted_sequence is None:
+                    raise GatewayRecoveryRequired(
+                        "adapter marked input delivered without an accepted sequence"
+                    )
+                with self._uow_factory() as uow:
+                    self._succeed_operation(
+                        uow,
+                        operation_id,
+                        context,
+                        f"sequence:{delivery.accepted_sequence}",
+                        session_id=item.session_id,
+                    )
+                return delivery
+            failure_code = delivery.failure_code or delivery.outcome.value
+            if delivery.outcome is DeliveryOutcome.UNKNOWN:
+                self._mark_operation_unknown(operation_id, context, failure_code)
+            else:
+                self._fail_operation(operation_id, context, failure_code)
+            return delivery
+        except Exception as exc:  # noqa: BLE001
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.UNKNOWN,
+                accepted_sequence=None,
+                failure_code=failure_code,
+            )
+
+    def _load_input_context(self, item: ExecutionInput) -> _AssignmentContext:
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                item.execution_id, item.workspace_id, for_update=True
+            )
+            if execution is None:
+                raise GatewayMessageError("input execution was not found")
+            if execution.active_lease_id is None:
+                raise GatewayMessageError("input execution has no active lease")
+            lease_id = execution.active_lease_id
+            fencing_token = execution.last_fencing_token
+        return self._load_context_by_ids(
+            workspace_id=item.workspace_id,
+            execution_id=item.execution_id,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+        )
+
     def _ensure_workspace(
         self,
         context: _AssignmentContext,
@@ -611,7 +761,11 @@ class WorkerGateway:
             uow.gateway_operations.add(operation)
             return _OperationState(operation_id=operation_id, completed=False)
         if operation.status is GatewayOperationStatus.SUCCEEDED:
-            return _OperationState(operation_id=operation_id, completed=True)
+            return _OperationState(
+                operation_id=operation_id,
+                completed=True,
+                result_ref=operation.result_ref,
+            )
         if operation.status is GatewayOperationStatus.RUNNING:
             return _OperationState(operation_id=operation_id, completed=False, recovery_required=True)
         if operation.status is GatewayOperationStatus.UNKNOWN:
@@ -876,6 +1030,25 @@ def _session_handle(session: ExecutionSession) -> AdapterSessionHandle:
         capability_snapshot=session.capability_snapshot,
         last_accepted_sequence=session.last_sequence,
         started_at=session.last_activity_at,
+    )
+
+
+def _delivery_from_operation(
+    operation_id: UUID, result_ref: str | None
+) -> DeliveryResult:
+    if result_ref is None or not result_ref.startswith("sequence:"):
+        raise GatewayRecoveryRequired("succeeded input operation has no sequence result")
+    try:
+        accepted_sequence = int(result_ref.removeprefix("sequence:"))
+    except ValueError as exc:
+        raise GatewayRecoveryRequired(
+            "succeeded input operation has an invalid sequence result"
+        ) from exc
+    return DeliveryResult(
+        operation_id=operation_id,
+        outcome=DeliveryOutcome.DELIVERED,
+        accepted_sequence=accepted_sequence,
+        failure_code=None,
     )
 
 

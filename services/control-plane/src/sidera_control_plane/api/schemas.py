@@ -17,7 +17,10 @@ from sidera_control_plane.application.task_queries import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-AggregateType = Literal["task", "worker", "execution", "lease"]
+InputText = Annotated[str, StringConstraints(min_length=1)]
+AggregateType = Literal[
+    "task", "worker", "execution", "execution_session", "lease"
+]
 
 
 class ActorRequest(BaseModel):
@@ -100,6 +103,30 @@ class ReportExecutionFailedPayload(ReportExecutionFinishedPayload):
     failure_code: NonEmptyString = Field(max_length=100)
 
 
+class ExecutionInputTargetPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    client_idempotency_key: NonEmptyString
+
+
+class SendExecutionInputPayload(ExecutionInputTargetPayload):
+    text: InputText
+    attachment_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+
+
+class UpdatePendingExecutionInputPayload(ExecutionInputTargetPayload):
+    text: InputText
+
+
+class CancelExecutionInputPayload(ExecutionInputTargetPayload):
+    pass
+
+
+class RetryBlockedExecutionInputPayload(ExecutionInputTargetPayload):
+    pass
+
+
 class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -167,6 +194,18 @@ class CommandRequest(BaseModel):
         elif self.command_type == "ReportExecutionFailed":
             self._require_mutation_target("execution")
             parsed = ReportExecutionFailedPayload.model_validate(self.payload)
+        elif self.command_type == "SendExecutionInput":
+            self._require_mutation_target("execution_session")
+            parsed = SendExecutionInputPayload.model_validate(self.payload)
+        elif self.command_type == "UpdatePendingExecutionInput":
+            self._require_mutation_target("execution_session")
+            parsed = UpdatePendingExecutionInputPayload.model_validate(self.payload)
+        elif self.command_type == "CancelExecutionInput":
+            self._require_mutation_target("execution_session")
+            parsed = CancelExecutionInputPayload.model_validate(self.payload)
+        elif self.command_type == "RetryBlockedExecutionInput":
+            self._require_mutation_target("execution_session")
+            parsed = RetryBlockedExecutionInputPayload.model_validate(self.payload)
         else:
             return self
         self.payload = dict(parsed.model_dump(mode="json"))
