@@ -1,9 +1,10 @@
 # SIDERA Control Plane
 
-R1 control plane is a deterministic FastAPI service for Task commands, queries,
-immutable Events, and transactional Outbox delivery. PostgreSQL is its only
-authoritative store. It does not call an LLM and does not contain Worker
-selection, collaboration topology, user memory, or knowledge content.
+R1/R2 control plane is a deterministic FastAPI service for Task commands,
+queries, immutable Events, transactional Outbox delivery, virtual Workers,
+Execution leases, deterministic scheduling, and lease recovery. PostgreSQL is
+its only authoritative store. It does not call an LLM, launch OpenCode, own
+collaboration topology, or store user memory and knowledge content.
 
 ## Prerequisites
 
@@ -83,6 +84,49 @@ uv run --project services/control-plane python \
 `StdoutEventSink` is a development diagnostic, not a production transport or a
 delivery contract. External delivery is at least once.
 
+Run the Scheduler and Reconciler as independent native processes:
+
+```bash
+uv run --project services/control-plane python \
+  -m sidera_control_plane.scheduler_worker --once
+uv run --project services/control-plane python \
+  -m sidera_control_plane.reconciler_worker --once
+```
+
+Omit `--once` for continuous PostgreSQL polling. The four processes are
+independent and can be stopped or restarted separately: API, Outbox worker,
+Scheduler, and Reconciler. `Ctrl-C` exits cleanly; all durable ownership,
+attempt, retry, and audit facts remain in PostgreSQL and are reloaded after a
+restart. Each batch writes one compact JSON summary to stdout; failures return
+non-zero and do not report a successful batch.
+
+## R2 Timing And Limits
+
+Configure these settings with the `SIDERA_` environment prefix:
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `SIDERA_ASSIGNMENT_LEASE_SECONDS` | `30` | Initial and renewed Lease TTL |
+| `SIDERA_WORKER_HEARTBEAT_TIMEOUT_SECONDS` | `45` | Stale Worker cutoff |
+| `SIDERA_SCHEDULER_BATCH_SIZE` | `20` | Executions examined per Scheduler batch |
+| `SIDERA_SCHEDULER_POLL_INTERVAL_SECONDS` | `1.0` | Continuous Scheduler delay |
+| `SIDERA_RECONCILER_BATCH_SIZE` | `50` | Workers/Leases examined per Reconciler batch |
+| `SIDERA_RECONCILER_POLL_INTERVAL_SECONDS` | `2.0` | Continuous Reconciler delay |
+
+Keep these timing relationships explicit when deploying:
+
+```text
+worker heartbeat interval < worker heartbeat timeout
+worker heartbeat timeout <= assignment Lease TTL only when rapid exclusion is desired
+Reconciler polling interval << assignment Lease TTL
+```
+
+R2 Workers are virtual/fake resources. Scheduler granting a Lease does not
+start OpenCode or any other harness. Real Adapter capability negotiation,
+start/delivery uncertainty, live stream input, checkpoints, and interactive
+Session intervention are R3 responsibilities. R2 fake reports only verify the
+control-plane fencing and recovery contract.
+
 ## Verification
 
 Run these commands from the repository root with PostgreSQL running and
@@ -102,6 +146,6 @@ uv run --project services/control-plane alembic \
   -c services/control-plane/alembic.ini check
 ```
 
-Akashic, OpenCode, Worker/Execution scheduling, Web intervention, memory, and
-knowledge integration are intentionally outside R1. Container packaging is
-deferred until the deployment topology is selected.
+Akashic, OpenCode, Web intervention, memory, and knowledge integration remain
+outside this service. Container packaging is deferred until the deployment
+topology is selected.
