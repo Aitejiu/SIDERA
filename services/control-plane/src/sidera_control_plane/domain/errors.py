@@ -18,3 +18,14 @@ class VersionConflict(DomainError):
         self.expected = expected
         self.actual = actual
 
+
+class CapacityExceeded(DomainError):
+    code = "capacity_exceeded"
+
+
+class StaleFencingToken(DomainError):
+    code = "stale_fencing_token"
+
+
+class LeaseExpired(DomainError):
+    code = "lease_expired"
