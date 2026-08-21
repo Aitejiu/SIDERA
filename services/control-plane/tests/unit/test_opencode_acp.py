@@ -226,6 +226,8 @@ def test_opencode_acp_collects_git_diff_and_acceptance_provenance(
         "the ACP handshake succeeds",
     )
     assert candidates[0].size_bytes > 0
+    assert isinstance(candidates[0].content, bytes)
+    assert len(candidates[0].content) == candidates[0].size_bytes
     adapter.stop_session(handle, operation_id=uuid4())
 
 

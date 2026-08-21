@@ -30,6 +30,7 @@ class ArtifactCandidate:
     size_bytes: int
     media_type: str
     provenance: Mapping[str, Any]
+    content: bytes | None = None
 
     def __post_init__(self) -> None:
         if not self.storage_ref.strip() or not self.media_type.strip():
@@ -38,6 +39,8 @@ class ArtifactCandidate:
             raise ValidationError("artifact content_hash must be a SHA-256 hex digest")
         if self.size_bytes < 0:
             raise ValidationError("artifact size_bytes cannot be negative")
+        if self.content is not None and not isinstance(self.content, bytes):
+            raise ValidationError("artifact content must be bytes")
         object.__setattr__(
             self,
             "artifact_type",

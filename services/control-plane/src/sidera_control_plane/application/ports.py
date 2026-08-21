@@ -272,6 +272,17 @@ class ArtifactRepositoryPort(Protocol):
         raise NotImplementedError
 
 
+class ArtifactContentWriter(Protocol):
+    def put(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        expected_hash: str,
+        content: bytes,
+    ) -> str:
+        raise NotImplementedError
+
+
 class EvidenceClaimRepositoryPort(Protocol):
     def add(self, claim: EvidenceClaim) -> None:
         raise NotImplementedError

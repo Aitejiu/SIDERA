@@ -19,6 +19,9 @@ from sidera_control_plane.application.worker_gateway import (
 )
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.modules import ModuleInstance
+from sidera_control_plane.persistence.artifact_content_store import (
+    LocalArtifactContentStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.outbox_store import SqlAlchemyOutboxStore
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -77,6 +80,10 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             adapter_factories=adapter_factories,
             workspace_factories=workspace_factories,
             spec_factory=ConfiguredExecutionSpecFactory(),
+            artifact_content_store=LocalArtifactContentStore(
+                settings.artifact_root,
+                max_bytes=settings.artifact_max_bytes,
+            ),
             clock=lambda: datetime.now(UTC),
         )
         runner = GatewayAssignmentRunner(

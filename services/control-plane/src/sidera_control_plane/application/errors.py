@@ -19,6 +19,10 @@ class Conflict(ApplicationError):
     code = "conflict"
 
 
+class ServiceUnavailable(ApplicationError):
+    code = "service_unavailable"
+
+
 class NoCurrentPlan(Conflict):
     code = "no_current_plan"
 

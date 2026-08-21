@@ -4,11 +4,15 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from sidera_control_plane.application.artifact_content import (
+    ArtifactRangeNotSatisfiable,
+)
 from sidera_control_plane.application.errors import (
     ApplicationError,
     Conflict,
     IdempotencyConflict,
     NotFound,
+    ServiceUnavailable,
 )
 from sidera_control_plane.domain.errors import (
     DomainError,
@@ -36,8 +40,15 @@ def install_error_handlers(app: FastAPI) -> None:
     async def handle_application_error(
         _request: Request, exc: ApplicationError
     ) -> JSONResponse:
-        status_code = 404 if isinstance(exc, NotFound) else 409
-        if not isinstance(exc, Conflict | IdempotencyConflict | NotFound):
+        if isinstance(exc, NotFound):
+            status_code = 404
+        elif isinstance(exc, ArtifactRangeNotSatisfiable):
+            status_code = 416
+        elif isinstance(exc, ServiceUnavailable):
+            status_code = 503
+        elif isinstance(exc, Conflict | IdempotencyConflict):
+            status_code = 409
+        else:
             status_code = 422
         return _error_response(status_code, exc.code, str(exc), exc.details)
 

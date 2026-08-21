@@ -3,6 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from sidera_control_plane.api.artifact_content import (
+    router as artifact_content_router,
+)
 from sidera_control_plane.api.errors import install_error_handlers
 from sidera_control_plane.api.execution_queries import (
     router as execution_queries_router,
@@ -54,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(worker_trace_queries_router)
     app.include_router(execution_queries_router)
     app.include_router(gateway_queries_router)
+    app.include_router(artifact_content_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

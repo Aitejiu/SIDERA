@@ -64,6 +64,25 @@ class EmptyPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ArtifactContentDescriptorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+    workspace_id: UUID
+    media_type: str
+    byte_size: int = Field(ge=0)
+    content_hash: str
+    download_name: NonEmptyString
+    content_available: bool
+    unavailable_reason: str | None
+
+
+class DownloadTokenResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: NonEmptyString
+
+
 class PublishPlanSnapshotPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -733,7 +752,6 @@ class ArtifactMetadataResponse(BaseModel):
     execution_id: UUID
     session_id: UUID | None
     artifact_type: str
-    storage_ref: str
     content_hash: str
     size_bytes: int
     media_type: str
@@ -749,7 +767,6 @@ class ArtifactMetadataResponse(BaseModel):
             execution_id=artifact.execution_id,
             session_id=artifact.session_id,
             artifact_type=artifact.artifact_type,
-            storage_ref=artifact.storage_ref,
             content_hash=artifact.content_hash,
             size_bytes=artifact.size_bytes,
             media_type=artifact.media_type,

@@ -252,6 +252,7 @@ class ArtifactRegistry:
                         size_bytes=candidate.size_bytes,
                         media_type=candidate.media_type,
                         provenance=_redact_payload(candidate.provenance),
+                        content=None,
                     )
                     artifact = Artifact.from_candidate(
                         id=uuid4(),
@@ -279,7 +280,7 @@ class ArtifactRegistry:
                         conclusion = _provenance_text(
                             candidate.provenance,
                             "conclusion",
-                            f"Artifact {artifact.storage_ref} was produced.",
+                            "Artifact was produced by the worker.",
                         )
                         claim = EvidenceClaim.create_candidate(
                             id=uuid4(),

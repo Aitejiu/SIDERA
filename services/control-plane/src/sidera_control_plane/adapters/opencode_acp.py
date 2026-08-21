@@ -369,6 +369,7 @@ class OpenCodeACPAdapter:
                         "acceptance_criterion_refs": session.acceptance_criteria,
                         "conclusion": "OpenCode produced a Git diff in the execution workspace.",
                     },
+                    content=diff,
                 ),
             )
 

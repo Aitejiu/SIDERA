@@ -576,7 +576,7 @@ def _artifact(row: ArtifactModel) -> ArtifactFact:
         artifact_type=row.artifact_type,
         media_type=row.media_type,
         size_bytes=row.size_bytes,
-        content_available=bool(row.storage_ref),
+        content_available=row.storage_ref.startswith("artifact-local://"),
         created_at=row.created_at,
     )
 

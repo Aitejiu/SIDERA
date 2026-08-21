@@ -1,9 +1,12 @@
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.artifact_content import (
+    ALLOWED_ARTIFACT_MEDIA_TYPES,
+)
 from sidera_control_plane.application.event_ingestor import (
     ArtifactRegistrationReport,
     ArtifactRegistry,
@@ -15,10 +18,12 @@ from sidera_control_plane.application.outbox_dispatcher import (
     OutboxStore,
 )
 from sidera_control_plane.application.ports import (
+    ArtifactContentWriter,
     ControlPlaneUnitOfWork,
     WorkerAdapter,
     WorkspaceProvider,
 )
+from sidera_control_plane.domain.artifacts import ArtifactCandidate
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
@@ -238,6 +243,7 @@ class WorkerGateway:
         spec_factory: ExecutionSpecFactory | None = None,
         event_ingestor: SessionEventIngestor | None = None,
         artifact_registry: ArtifactRegistry | None = None,
+        artifact_content_store: ArtifactContentWriter | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
@@ -252,6 +258,7 @@ class WorkerGateway:
         self._artifact_registry = artifact_registry or ArtifactRegistry(
             uow_factory, clock=clock
         )
+        self._artifact_content_store = artifact_content_store
 
     def handle(
         self, message: OutboxMessage
@@ -639,6 +646,11 @@ class WorkerGateway:
                 NAMESPACE_URL, f"sidera.gateway.collect_artifacts:{session_id}"
             ),
         )
+        candidates = self._prepare_artifact_candidates(
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            candidates=candidates,
+        )
         artifact_report = self._artifact_registry.register(
             workspace_id=workspace_id,
             task_id=context.task.id,
@@ -650,6 +662,39 @@ class WorkerGateway:
             environment_ref=context.workspace_instance.instance_name,
         )
         return GatewaySessionSyncResult(event_report, artifact_report)
+
+    def _prepare_artifact_candidates(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        candidates: Sequence[ArtifactCandidate],
+    ) -> tuple[ArtifactCandidate, ...]:
+        prepared: list[ArtifactCandidate] = []
+        for candidate in candidates:
+            if candidate.content is None:
+                prepared.append(candidate)
+                continue
+            if candidate.media_type not in ALLOWED_ARTIFACT_MEDIA_TYPES:
+                raise GatewayMessageError("artifact media type is not allowed")
+            if len(candidate.content) != candidate.size_bytes:
+                raise GatewayMessageError("artifact content size does not match metadata")
+            if self._artifact_content_store is None:
+                prepared.append(replace(candidate, content=None))
+                continue
+            try:
+                storage_ref = self._artifact_content_store.put(
+                    workspace_id,
+                    execution_id,
+                    candidate.content_hash,
+                    candidate.content,
+                )
+            except Exception as exc:
+                raise GatewayMessageError("artifact content could not be stored") from exc
+            prepared.append(
+                replace(candidate, storage_ref=storage_ref, content=None)
+            )
+        return tuple(prepared)
 
     def send_input(self, item: ExecutionInput) -> DeliveryResult:
         """Send one claimed input through the exact active Session."""

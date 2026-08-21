@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -20,6 +21,9 @@ from sidera_control_plane.application.worker_trace_queries import (
     WorkerTraceQueryService,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.persistence.artifact_content_store import (
+    LocalArtifactContentStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
@@ -90,3 +94,17 @@ def get_worker_trace_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> WorkerTraceQueryService:
     return WorkerTraceQueryService(SqlAlchemyTaskFirstQueryStore(database))
+
+
+def get_artifact_content_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ArtifactContentService:
+    return ArtifactContentService(
+        database,
+        LocalArtifactContentStore(
+            settings.artifact_root,
+            max_bytes=settings.artifact_max_bytes,
+        ),
+        token_secret=settings.artifact_download_token_secret,
+    )

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,3 +29,7 @@ class Settings(BaseSettings):
     projection_stream_heartbeat_seconds: float = Field(default=15.0, gt=0)
     projection_change_retention_seconds: int = Field(default=604_800, gt=0)
     main_agent_entry_uri: str | None = None
+    artifact_root: Path = Path(".sidera/artifacts")
+    artifact_max_bytes: int = Field(default=10_485_760, gt=0)
+    artifact_download_token_secret: SecretStr | None = None
+    artifact_download_token_ttl_seconds: int = Field(default=300, gt=0)
