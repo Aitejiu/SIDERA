@@ -92,7 +92,11 @@ function NavItem({
   icon: ReactNode;
 }) {
   return (
-    <NavLink className={({ isActive }) => `navigation-item${isActive ? " is-active" : ""}`} to={to}>
+    <NavLink
+      className={({ isActive }) => `navigation-item${isActive ? " is-active" : ""}`}
+      to={to}
+      aria-label={label}
+    >
       {icon}
       <span>{label}</span>
     </NavLink>

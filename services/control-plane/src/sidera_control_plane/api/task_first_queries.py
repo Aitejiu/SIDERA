@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.encoders import jsonable_encoder
 
 from sidera_control_plane.api.dependencies import get_task_first_query_service
-from sidera_control_plane.api.schemas import TaskOverviewProjectionResponse
+from sidera_control_plane.api.schemas import (
+    TaskActivityProjectionResponse,
+    TaskDetailProjectionResponse,
+    TaskGraphProjectionResponse,
+    TaskOverviewProjectionResponse,
+)
 from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 
 router = APIRouter()
@@ -35,7 +40,10 @@ def get_task_overview(
     return _encode(service.get_overview(workspace_id, root_task_id))
 
 
-@router.get("/api/v1/tasks/{root_task_id}/graph")
+@router.get(
+    "/api/v1/tasks/{root_task_id}/graph",
+    response_model=TaskGraphProjectionResponse,
+)
 def get_task_graph(
     root_task_id: UUID,
     workspace_id: UUID,
@@ -44,7 +52,10 @@ def get_task_graph(
     return _encode(service.get_graph(workspace_id, root_task_id))
 
 
-@router.get("/api/v1/tasks/{root_task_id}/work-items/{work_item_key}")
+@router.get(
+    "/api/v1/tasks/{root_task_id}/work-items/{work_item_key}",
+    response_model=TaskDetailProjectionResponse,
+)
 def get_task_detail(
     root_task_id: UUID,
     work_item_key: str,
@@ -54,7 +65,10 @@ def get_task_detail(
     return _encode(service.get_detail(workspace_id, root_task_id, work_item_key))
 
 
-@router.get("/api/v1/tasks/{root_task_id}/activity")
+@router.get(
+    "/api/v1/tasks/{root_task_id}/activity",
+    response_model=TaskActivityProjectionResponse,
+)
 def get_task_activity(
     root_task_id: UUID,
     workspace_id: UUID,

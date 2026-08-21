@@ -18,6 +18,12 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/download-token",
 }
 
+EXPECTED_TYPED_RESPONSES = {
+    "/api/v1/tasks/{root_task_id}/graph": "TaskGraphProjectionResponse",
+    "/api/v1/tasks/{root_task_id}/work-items/{work_item_key}": "TaskDetailProjectionResponse",
+    "/api/v1/tasks/{root_task_id}/activity": "TaskActivityProjectionResponse",
+}
+
 
 def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) -> None:
     output = tmp_path / "nested" / "openapi.json"
@@ -31,6 +37,13 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert first_bytes.endswith(b"\n")
     assert set(first["paths"]) >= EXPECTED_PATHS
     assert "Model" not in first_bytes.decode("utf-8")
+
+    for path, schema_name in EXPECTED_TYPED_RESPONSES.items():
+        response_schema = first["paths"][path]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
+        assert schema_name in first["components"]["schemas"]
 
     for path_item in first["paths"].values():
         for method, operation in path_item.items():

@@ -552,6 +552,36 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActivityItemProjectionResponse */
+        ActivityItemProjectionResponse: {
+            /** Causal Parent Id */
+            causal_parent_id: string | null;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Scheduler Enforced */
+            scheduler_enforced: boolean;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /** Source Type */
+            source_type: string;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+        };
         /** ActorRequest */
         ActorRequest: {
             /** Id */
@@ -640,6 +670,22 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /** ArtifactSummaryProjectionResponse */
+        ArtifactSummaryProjectionResponse: {
+            /**
+             * Artifact Id
+             * Format: uuid
+             */
+            artifact_id: string;
+            /** Artifact Type */
+            artifact_type: string;
+            /** Content Available */
+            content_available: boolean;
+            /** Media Type */
+            media_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
         /** AttentionItemProjectionResponse */
         AttentionItemProjectionResponse: {
             /**
@@ -665,6 +711,20 @@ export interface components {
             resource_version: number;
             /** Summary */
             summary: string;
+            /** Title */
+            title: string;
+        };
+        /** CheckpointSummaryProjectionResponse */
+        CheckpointSummaryProjectionResponse: {
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Sequence */
+            sequence: number;
             /** Title */
             title: string;
         };
@@ -785,6 +845,20 @@ export interface components {
              * Format: uuid
              */
             workspace_id: string;
+        };
+        /** EvidenceSummaryProjectionResponse */
+        EvidenceSummaryProjectionResponse: {
+            /** Acceptance Ref */
+            acceptance_ref: string;
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /** Conclusion */
+            conclusion: string;
+            /**
+             * Evidence Id
+             * Format: uuid
+             */
+            evidence_id: string;
         };
         /** ExecutionBindingResponse */
         ExecutionBindingResponse: {
@@ -1084,6 +1158,26 @@ export interface components {
             /** Workspace Ref */
             workspace_ref: string | null;
         };
+        /** ExecutionSummaryProjectionResponse */
+        ExecutionSummaryProjectionResponse: {
+            /** Attempt */
+            attempt: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Finished At */
+            finished_at: string | null;
+            /** Session Id */
+            session_id: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /** Worker Id */
+            worker_id: string | null;
+        };
         /** ExecutionWorkspaceResponse */
         ExecutionWorkspaceResponse: {
             /** Checkouts */
@@ -1184,6 +1278,23 @@ export interface components {
              */
             worker_id: string;
         };
+        /** MilestoneProjectionResponse */
+        MilestoneProjectionResponse: {
+            /** Completed Count */
+            completed_count: number;
+            /** Key */
+            key: string;
+            /** Materialized Count */
+            materialized_count: number;
+            /** Order Hint */
+            order_hint: number;
+            /** Planned Count */
+            planned_count: number;
+            /** State */
+            state: string;
+            /** Title */
+            title: string;
+        };
         /** MilestoneResponse */
         MilestoneResponse: {
             /** Acceptance Refs */
@@ -1196,6 +1307,111 @@ export interface components {
             title: string;
             /** Work Item Keys */
             work_item_keys: string[];
+        };
+        /** TaskActivityProjectionResponse */
+        TaskActivityProjectionResponse: {
+            /** Items */
+            items: components["schemas"]["ActivityItemProjectionResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Next Cursor */
+            next_cursor: string | null;
+            /** Schema Version */
+            schema_version: number;
+        };
+        /** TaskDetailProjectionResponse */
+        TaskDetailProjectionResponse: {
+            /** Acceptance Refs */
+            acceptance_refs: string[];
+            /** Artifacts */
+            artifacts: components["schemas"]["ArtifactSummaryProjectionResponse"][];
+            /** Checkpoints */
+            checkpoints: components["schemas"]["CheckpointSummaryProjectionResponse"][];
+            /** Dependencies */
+            dependencies: components["schemas"]["TaskEdgeProjectionResponse"][];
+            /** Evidence */
+            evidence: components["schemas"]["EvidenceSummaryProjectionResponse"][];
+            /** Executions */
+            executions: components["schemas"]["ExecutionSummaryProjectionResponse"][];
+            /** Expected Outputs */
+            expected_outputs: string[];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            node: components["schemas"]["TaskNodeProjectionResponse"];
+            /** Schema Version */
+            schema_version: number;
+        };
+        /** TaskEdgeProjectionResponse */
+        TaskEdgeProjectionResponse: {
+            /** Downstream Work Item Key */
+            downstream_work_item_key: string;
+            /** Enforcement */
+            enforcement: string;
+            /** Kind */
+            kind: string;
+            /** Required Evidence Refs */
+            required_evidence_refs: string[];
+            /** Scheduler Enforced */
+            scheduler_enforced: boolean;
+            /** Upstream Work Item Key */
+            upstream_work_item_key: string;
+        };
+        /** TaskGraphProjectionResponse */
+        TaskGraphProjectionResponse: {
+            /** Edges */
+            edges: components["schemas"]["TaskEdgeProjectionResponse"][];
+            /** Milestones */
+            milestones: components["schemas"]["MilestoneProjectionResponse"][];
+            /** Nodes */
+            nodes: components["schemas"]["TaskNodeProjectionResponse"][];
+            overview: components["schemas"]["TaskOverviewProjectionResponse"];
+            /** Schema Version */
+            schema_version: number;
+        };
+        /** TaskNodeProjectionResponse */
+        TaskNodeProjectionResponse: {
+            /** Critical Path */
+            critical_path: boolean;
+            /** Current Action */
+            current_action: string | null;
+            /** Evidence Required */
+            evidence_required: number;
+            /** Evidence Satisfied */
+            evidence_satisfied: number;
+            /** Execution Horizon */
+            execution_horizon: boolean;
+            /** Execution Id */
+            execution_id: string | null;
+            /** Goal Summary */
+            goal_summary: string;
+            /** Kind */
+            kind: string;
+            /** Milestone Key */
+            milestone_key: string | null;
+            /** Required Capabilities */
+            required_capabilities: string[];
+            /** Scheduler Enforced */
+            scheduler_enforced: boolean;
+            /** Session Id */
+            session_id: string | null;
+            /** State */
+            state: string;
+            /** Task Id */
+            task_id: string | null;
+            /** Title */
+            title: string;
+            /** Updated At */
+            updated_at: string | null;
+            /** Waiting On Plan Dependency */
+            waiting_on_plan_dependency: boolean;
+            /** Work Item Key */
+            work_item_key: string;
+            /** Worker Display Name */
+            worker_display_name: string | null;
+            /** Worker Id */
+            worker_id: string | null;
+            /** Worker Slot Key */
+            worker_slot_key: string | null;
         };
         /** TaskOverviewProjectionResponse */
         TaskOverviewProjectionResponse: {
@@ -1913,9 +2129,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TaskActivityProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1987,9 +2201,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TaskGraphProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2193,9 +2405,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TaskDetailProjectionResponse"];
                 };
             };
             /** @description Validation Error */

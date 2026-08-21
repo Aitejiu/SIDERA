@@ -119,6 +119,143 @@ class TaskOverviewProjectionResponse(BaseModel):
     as_of: datetime
 
 
+class TaskNodeProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    work_item_key: str
+    task_id: UUID | None
+    kind: str
+    title: str
+    goal_summary: str
+    milestone_key: str | None
+    worker_slot_key: str | None
+    required_capabilities: tuple[str, ...]
+    state: str
+    execution_id: UUID | None
+    session_id: UUID | None
+    worker_id: UUID | None
+    worker_display_name: str | None
+    execution_horizon: bool
+    critical_path: bool
+    waiting_on_plan_dependency: bool
+    scheduler_enforced: bool
+    current_action: str | None
+    evidence_satisfied: int
+    evidence_required: int
+    updated_at: datetime | None
+
+
+class TaskEdgeProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upstream_work_item_key: str
+    downstream_work_item_key: str
+    kind: str
+    enforcement: str
+    scheduler_enforced: bool
+    required_evidence_refs: tuple[str, ...]
+
+
+class MilestoneProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    title: str
+    state: str
+    materialized_count: int
+    completed_count: int
+    planned_count: int
+    order_hint: int
+
+
+class TaskGraphProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    overview: TaskOverviewProjectionResponse
+    nodes: tuple[TaskNodeProjectionResponse, ...]
+    edges: tuple[TaskEdgeProjectionResponse, ...]
+    milestones: tuple[MilestoneProjectionResponse, ...]
+
+
+class ExecutionSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    session_id: UUID | None
+    worker_id: UUID | None
+    status: str
+    attempt: int
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class ArtifactSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+    artifact_type: str
+    media_type: str
+    size_bytes: int
+    content_available: bool
+
+
+class EvidenceSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: UUID
+    acceptance_ref: str
+    conclusion: str
+    artifact_ids: tuple[UUID, ...]
+
+
+class CheckpointSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sequence: int
+    title: str
+    artifact_ids: tuple[UUID, ...]
+    occurred_at: datetime
+
+
+class TaskDetailProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    last_change_cursor: int
+    node: TaskNodeProjectionResponse
+    acceptance_refs: tuple[str, ...]
+    expected_outputs: tuple[str, ...]
+    dependencies: tuple[TaskEdgeProjectionResponse, ...]
+    executions: tuple[ExecutionSummaryProjectionResponse, ...]
+    artifacts: tuple[ArtifactSummaryProjectionResponse, ...]
+    evidence: tuple[EvidenceSummaryProjectionResponse, ...]
+    checkpoints: tuple[CheckpointSummaryProjectionResponse, ...]
+
+
+class ActivityItemProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    source_id: UUID
+    occurred_at: datetime
+    kind: str
+    title: str
+    summary: str
+    correlation_id: UUID
+    causal_parent_id: UUID | None
+    scheduler_enforced: bool
+
+
+class TaskActivityProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    last_change_cursor: int
+    items: tuple[ActivityItemProjectionResponse, ...]
+    next_cursor: str | None
+
+
 class PublishPlanSnapshotPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
