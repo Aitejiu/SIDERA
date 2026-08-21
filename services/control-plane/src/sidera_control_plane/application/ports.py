@@ -32,6 +32,7 @@ from sidera_control_plane.domain.modules import (
     ModuleDefinition,
     ModuleInstance,
 )
+from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.workspace import (
@@ -51,6 +52,24 @@ class TaskRepositoryPort(Protocol):
         raise NotImplementedError
 
     def save(self, task: Task, previous_version: int) -> None:
+        raise NotImplementedError
+
+
+class PlanRepositoryPort(Protocol):
+    def add(self, snapshot: TaskPlanSnapshot) -> None:
+        raise NotImplementedError
+
+    def get(self, snapshot_id: UUID, workspace_id: UUID) -> TaskPlanSnapshot | None:
+        raise NotImplementedError
+
+    def get_current_for_root(
+        self, root_task_id: UUID, workspace_id: UUID
+    ) -> TaskPlanSnapshot | None:
+        raise NotImplementedError
+
+    def list_for_root(
+        self, root_task_id: UUID, workspace_id: UUID
+    ) -> tuple[TaskPlanSnapshot, ...]:
         raise NotImplementedError
 
 
@@ -372,6 +391,7 @@ class EventStorePort(Protocol):
 
 class ControlPlaneUnitOfWork(Protocol):
     tasks: TaskRepositoryPort
+    plans: PlanRepositoryPort
     workers: WorkerRepositoryPort
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort

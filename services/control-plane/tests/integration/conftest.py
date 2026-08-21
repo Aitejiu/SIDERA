@@ -25,10 +25,13 @@ from sidera_control_plane.persistence.models import (
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
+    PlanSnapshotModel,
     ProcessDescriptorModel,
+    ProjectionChangeModel,
     TaskModel,
     WorkerModel,
     WorkspaceModel,
+    WorkspaceProjectionCursorModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -65,6 +68,9 @@ def clean_database(database: Database) -> Iterator[None]:
             )
         )
         for model in (
+            ProjectionChangeModel,
+            WorkspaceProjectionCursorModel,
+            PlanSnapshotModel,
             ExecutionInputModel,
             EvidenceClaimModel,
             ArtifactModel,

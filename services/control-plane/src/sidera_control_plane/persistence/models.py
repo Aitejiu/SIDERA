@@ -48,6 +48,109 @@ class WorkspaceModel(TimestampMixin, Base):
     )
 
 
+class PlanSnapshotModel(TimestampMixin, Base):
+    __tablename__ = "task_plan_snapshots"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_plan_snapshots_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["parent_snapshot_id"],
+            ["task_plan_snapshots.id"],
+            ondelete="RESTRICT",
+            name="fk_plan_snapshots_parent",
+        ),
+        CheckConstraint("generation >= 1", name="ck_plan_snapshots_generation"),
+        CheckConstraint(
+            "schema_version >= 1", name="ck_plan_snapshots_schema_version"
+        ),
+        UniqueConstraint(
+            "root_task_id", "generation", name="uq_plan_snapshots_root_generation"
+        ),
+        Index(
+            "ix_plan_snapshots_workspace_root_generation",
+            "workspace_id",
+            "root_task_id",
+            "generation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    goal_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    published_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class WorkspaceProjectionCursorModel(Base):
+    __tablename__ = "workspace_projection_cursors"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class ProjectionChangeModel(Base):
+    __tablename__ = "projection_changes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="CASCADE",
+            name="fk_projection_changes_workspace",
+        ),
+        CheckConstraint("cursor >= 1", name="ck_projection_changes_cursor"),
+        CheckConstraint(
+            "schema_version >= 1", name="ck_projection_changes_schema_version"
+        ),
+        Index(
+            "ix_projection_changes_workspace_occurred",
+            "workspace_id",
+            "occurred_at",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    cursor: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    projection_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    change_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    resource_version: Mapped[int | None] = mapped_column(BigInteger)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    correlation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+
+
 class TaskModel(TimestampMixin, Base):
     __tablename__ = "tasks"
     __table_args__ = (
