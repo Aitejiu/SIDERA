@@ -36,6 +36,25 @@ class VersionConflict(DomainError):
         self.actual = actual
 
 
+class ExecutionContextChanged(DomainError):
+    code = "execution_context_changed"
+
+    def __init__(
+        self,
+        changed_fields: tuple[str, ...],
+        *,
+        current: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(
+            "execution context changed; refresh the Session before sending input",
+            details={
+                "changed_fields": list(changed_fields),
+                "current": current or {},
+            },
+        )
+        self.changed_fields = changed_fields
+
+
 class PlanGenerationConflict(DomainError):
     code = "plan_generation_conflict"
 

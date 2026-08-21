@@ -11,6 +11,12 @@ from sidera_control_plane.application.execution_commands import (
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import InvalidTransition
+from sidera_control_plane.domain.plans import (
+    TaskPlanSnapshot,
+    WorkerSlot,
+    WorkItem,
+    WorkItemKind,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
@@ -19,6 +25,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionModel,
     ExecutionSessionModel,
     OutboxMessageModel,
+    PlanSnapshotModel,
     TaskModel,
     WorkerModel,
 )
@@ -31,11 +38,53 @@ NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
 def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
     task_id = uuid4()
+    plan_snapshot_id = uuid4()
     worker_id = uuid4()
     execution_id = uuid4()
     lease_id = uuid4()
     session_id = uuid4()
     with database.session() as db_session:
+        snapshot = TaskPlanSnapshot.create(
+            snapshot_id=plan_snapshot_id,
+            schema_version=1,
+            workspace_id=workspace_id,
+            root_task_id=task_id,
+            generation=1,
+            parent_snapshot_id=None,
+            source_type="test",
+            source_ref="integration:input",
+            title="Input task",
+            goal_summary="Accept direct user input",
+            acceptance_refs=("input is delivered",),
+            work_items=(
+                WorkItem(
+                    key="input",
+                    task_id=task_id,
+                    kind=WorkItemKind.CHILD,
+                    title="Input task",
+                    goal_summary="Accept direct user input",
+                    acceptance_refs=("input is delivered",),
+                    milestone_key=None,
+                    worker_slot_key="input",
+                    expected_outputs=(),
+                    source_refs=(),
+                ),
+            ),
+            worker_slots=(
+                WorkerSlot(
+                    key="input",
+                    role="implementation",
+                    capability_requirements=("python",),
+                    worker_policy_ref=None,
+                    configuration_ref=None,
+                    concurrency_limit=1,
+                ),
+            ),
+            milestones=(),
+            dependencies=(),
+            published_by="integration",
+            published_at=NOW,
+        )
         db_session.add(
             TaskModel(
                 id=task_id,
@@ -47,6 +96,24 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
                 priority=50,
                 requested_by="integration",
                 version=1,
+            )
+        )
+        db_session.flush()
+        db_session.add(
+            PlanSnapshotModel(
+                id=snapshot.id,
+                schema_version=snapshot.schema_version,
+                workspace_id=snapshot.workspace_id,
+                root_task_id=snapshot.root_task_id,
+                generation=snapshot.generation,
+                parent_snapshot_id=None,
+                source_type=snapshot.source_type,
+                source_ref=snapshot.source_ref,
+                title=snapshot.title,
+                goal_summary=snapshot.goal_summary,
+                payload=snapshot.to_payload(),
+                published_by=snapshot.published_by,
+                published_at=snapshot.published_at,
             )
         )
         db_session.add(
@@ -139,6 +206,7 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
         db_session.commit()
     return {
         "task_id": task_id,
+        "plan_snapshot_id": plan_snapshot_id,
         "worker_id": worker_id,
         "execution_id": execution_id,
         "lease_id": lease_id,
@@ -154,7 +222,17 @@ def _envelope(
     client_key: str,
     *,
     payload: dict[str, object] | None = None,
+    context: dict[str, object] | None = None,
 ) -> CommandEnvelope:
+    command_payload: dict[str, object] = {
+        "execution_id": str(execution_id),
+        "client_idempotency_key": client_key,
+        **(payload or {}),
+    }
+    if command_type == "SendExecutionInput":
+        if context is None:
+            raise AssertionError("SendExecutionInput tests require an exact context")
+        command_payload["context"] = context
     return CommandEnvelope(
         id=uuid4(),
         workspace_id=workspace_id,
@@ -163,15 +241,23 @@ def _envelope(
         actor_type="user",
         actor_id="user:integration",
         target_id=session_id,
-        payload={
-            "execution_id": str(execution_id),
-            "client_idempotency_key": client_key,
-            **(payload or {}),
-        },
+        payload=command_payload,
         expected_version=1,
         idempotency_key=f"command:{command_type}:{client_key}:{uuid4()}",
         correlation_id=uuid4(),
     )
+
+
+def _context(ids: dict[str, UUID]) -> dict[str, object]:
+    return {
+        "plan_snapshot_id": str(ids["plan_snapshot_id"]),
+        "root_task_id": str(ids["task_id"]),
+        "work_item_key": "input",
+        "worker_slot_key": "input",
+        "worker_id": str(ids["worker_id"]),
+        "execution_id": str(ids["execution_id"]),
+        "session_id": str(ids["session_id"]),
+    }
 
 
 def _service(database: Database) -> CommandService:
@@ -194,6 +280,7 @@ def test_input_command_persists_queue_outbox_and_client_replay(
         "SendExecutionInput",
         "client-1",
         payload={"text": "  keep this text  ", "attachment_refs": []},
+        context=_context(ids),
     )
 
     first = service.handle(envelope)
@@ -223,6 +310,7 @@ def test_input_commands_enforce_one_pending_and_allow_update_cancel(
         "SendExecutionInput",
         "client-1",
         payload={"text": "first", "attachment_refs": []},
+        context=_context(ids),
     )
     service.handle(first)
 
@@ -235,6 +323,7 @@ def test_input_commands_enforce_one_pending_and_allow_update_cancel(
                 "SendExecutionInput",
                 "client-2",
                 payload={"text": "second", "attachment_refs": []},
+                context=_context(ids),
             )
         )
 
@@ -263,4 +352,3 @@ def test_input_commands_enforce_one_pending_and_allow_update_cancel(
         item = db_session.query(ExecutionInputModel).one()
         assert item.status == "cancelled"
         assert item.text == "updated"
-

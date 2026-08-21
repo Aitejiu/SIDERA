@@ -20,12 +20,14 @@ export class ApiProblem extends Error {
   readonly status: number;
   readonly code: string;
   readonly detail: string;
+  readonly details: Record<string, unknown>;
   readonly correlationId: string | null;
 
   constructor(
     status: number,
     code: string,
     detail: string,
+    details: Record<string, unknown>,
     correlationId: string | null,
   ) {
     super(detail);
@@ -33,6 +35,7 @@ export class ApiProblem extends Error {
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.details = details;
     this.correlationId = correlationId;
   }
 }
@@ -59,6 +62,22 @@ export async function apiGetAt<Path extends keyof paths>(
     method: "GET",
   });
   return parseResponse<JsonBody<GetOperation<Path>>>(response);
+}
+
+export async function apiGetBlobAt<Path extends keyof paths>(
+  path: string,
+  contractPath: Path,
+  init?: RequestInit,
+): Promise<Blob> {
+  void contractPath;
+  const response = await fetch(path, {
+    ...init,
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw await toApiProblem(response);
+  }
+  return response.blob();
 }
 
 export async function apiCommand<Path extends keyof paths>(
@@ -99,8 +118,10 @@ async function toApiProblem(response: Response): Promise<ApiProblem> {
     error && typeof error.message === "string"
       ? error.message
       : response.statusText || "Request failed";
+  const details =
+    error && isRecord(error.details) ? error.details : {};
   const correlationId = response.headers.get("X-Correlation-Id");
-  return new ApiProblem(response.status, code, detail, correlationId);
+  return new ApiProblem(response.status, code, detail, details, correlationId);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

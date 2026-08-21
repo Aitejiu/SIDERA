@@ -75,6 +75,11 @@ class PlanRepositoryPort(Protocol):
     ) -> TaskPlanSnapshot | None:
         raise NotImplementedError
 
+    def get_current_for_task(
+        self, task_id: UUID, workspace_id: UUID
+    ) -> TaskPlanSnapshot | None:
+        raise NotImplementedError
+
     def list_for_root(
         self, root_task_id: UUID, workspace_id: UUID
     ) -> tuple[TaskPlanSnapshot, ...]:

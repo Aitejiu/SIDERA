@@ -8,6 +8,7 @@ import {
 import { App, TaskRoutePlaceholder } from "./App";
 import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
 import { TaskListPage } from "@/features/tasks/TaskListPage";
+import { WorkerTracePage } from "@/features/trace/WorkerTracePage";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -26,6 +27,10 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId",
         element: <TaskDetailPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/tasks/:rootTaskId/executions/:executionId/sessions/:sessionId/trace",
+        element: <WorkerTracePage />,
       },
       {
         path: "/workspaces/:workspaceId/activity",

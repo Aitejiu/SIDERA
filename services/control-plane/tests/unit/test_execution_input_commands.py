@@ -21,13 +21,25 @@ def _request(command_type: str, payload: dict[str, object]) -> dict[str, object]
 
 
 def test_send_execution_input_requires_exact_session_and_preserves_text() -> None:
+    plan_snapshot_id = uuid4()
+    root_task_id = uuid4()
+    session_id = uuid4()
     execution_id = uuid4()
+    worker_id = uuid4()
     text = "  keep this text exactly  "
     request = CommandRequest.model_validate(
         _request(
             "SendExecutionInput",
             {
-                "execution_id": str(execution_id),
+                "context": {
+                    "plan_snapshot_id": str(plan_snapshot_id),
+                    "root_task_id": str(root_task_id),
+                    "work_item_key": "backend",
+                    "worker_slot_key": "backend",
+                    "worker_id": str(worker_id),
+                    "execution_id": str(execution_id),
+                    "session_id": str(session_id),
+                },
                 "client_idempotency_key": "client-1",
                 "text": text,
                 "attachment_refs": ["artifact://context/1"],
@@ -36,7 +48,7 @@ def test_send_execution_input_requires_exact_session_and_preserves_text() -> Non
     )
 
     assert request.target_type == "execution_session"
-    assert request.payload["execution_id"] == str(execution_id)
+    assert request.payload["context"]["execution_id"] == str(execution_id)
     assert request.payload["text"] == text
     assert request.payload["attachment_refs"] == ["artifact://context/1"]
 
@@ -81,9 +93,30 @@ def test_input_schema_rejects_empty_text() -> None:
             _request(
                 "SendExecutionInput",
                 {
-                    "execution_id": str(uuid4()),
+                    "context": {
+                        "plan_snapshot_id": str(uuid4()),
+                        "root_task_id": str(uuid4()),
+                        "work_item_key": "backend",
+                        "worker_slot_key": "backend",
+                        "worker_id": str(uuid4()),
+                        "execution_id": str(uuid4()),
+                        "session_id": str(uuid4()),
+                    },
                     "client_idempotency_key": "client-1",
                     "text": "",
+                },
+            )
+        )
+
+
+def test_send_execution_input_requires_context_address() -> None:
+    with pytest.raises(ValueError):
+        CommandRequest.model_validate(
+            _request(
+                "SendExecutionInput",
+                {
+                    "client_idempotency_key": "client-1",
+                    "text": "send without an address",
                 },
             )
         )

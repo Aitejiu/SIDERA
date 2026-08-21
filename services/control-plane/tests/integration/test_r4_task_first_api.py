@@ -216,7 +216,7 @@ def _seed(database: Database) -> None:
                     workspace_id=WORKSPACE_ID,
                     adapter_type="opencode",
                     display_name="OpenCode backend worker",
-                    status="running",
+                    status="busy",
                     desired_state="active",
                     capabilities=["python"],
                     capacity=1,

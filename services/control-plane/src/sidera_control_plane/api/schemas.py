@@ -256,6 +256,81 @@ class TaskActivityProjectionResponse(BaseModel):
     next_cursor: str | None
 
 
+class TraceUsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_tokens: int | None
+    cost_microunits: int | None
+
+
+class TraceTimingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_ms: int
+    model_ms: int = Field(title="model_ms")
+    tools_ms: int
+    total_ms: int
+
+
+class WorkerTraceEventResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    work_item_key: str | None
+    plan_snapshot_id: UUID | None
+    execution_id: UUID
+    session_id: UUID
+    sequence: int
+    occurred_at: datetime
+    category: str
+    status: str
+    title: str
+    summary: str
+    duration_ms: int | None
+    usage: TraceUsageResponse | None
+    artifact_refs: tuple[UUID, ...]
+    provider_payload_ref: str | None
+    provider_extensions: dict[str, Any]
+
+
+class WorkerContextBranchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    work_item_key: str
+    worker_slot_key: str
+    execution_lineage_id: UUID
+    current_execution_id: UUID
+    current_session_id: UUID
+    head_checkpoint_sequence: int | None
+    artifact_refs: tuple[UUID, ...]
+    replay_capability: Literal["none", "portable_replay", "native_resume"]
+
+
+class WorkerTraceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    execution_id: UUID
+    session_id: UUID
+    worker_id: UUID | None
+    status: str
+    current_action: str | None
+    plan_generation: int | None
+    checkpoint_sequence: int | None
+    freshness_at: datetime | None
+    last_change_cursor: int
+    timing: TraceTimingResponse
+    events: tuple[WorkerTraceEventResponse, ...]
+    previous_before_sequence: int | None
+    context_branch: WorkerContextBranchResponse | None
+
+
 class PublishPlanSnapshotPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -324,7 +399,23 @@ class ExecutionInputTargetPayload(BaseModel):
     client_idempotency_key: NonEmptyString
 
 
-class SendExecutionInputPayload(ExecutionInputTargetPayload):
+class ExecutionContextAddressPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_snapshot_id: UUID
+    root_task_id: UUID
+    work_item_key: NonEmptyString
+    worker_slot_key: NonEmptyString
+    worker_id: UUID
+    execution_id: UUID
+    session_id: UUID
+
+
+class SendExecutionInputPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: ExecutionContextAddressPayload
+    client_idempotency_key: NonEmptyString
     text: InputText
     attachment_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
 

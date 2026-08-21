@@ -53,6 +53,27 @@ class PlanRepository:
         )
         return _to_domain(row) if row is not None else None
 
+    def get_current_for_task(
+        self, task_id: UUID, workspace_id: UUID
+    ) -> TaskPlanSnapshot | None:
+        rows = self._session.scalars(
+            select(PlanSnapshotModel)
+            .where(PlanSnapshotModel.workspace_id == workspace_id)
+            .order_by(
+                PlanSnapshotModel.root_task_id,
+                PlanSnapshotModel.generation.desc(),
+            )
+        ).all()
+        seen_roots: set[UUID] = set()
+        for row in rows:
+            if row.root_task_id in seen_roots:
+                continue
+            seen_roots.add(row.root_task_id)
+            snapshot = _to_domain(row)
+            if any(item.task_id == task_id for item in snapshot.work_items):
+                return snapshot
+        return None
+
     def get_for_generation(
         self, root_task_id: UUID, workspace_id: UUID, generation: int
     ) -> TaskPlanSnapshot | None:

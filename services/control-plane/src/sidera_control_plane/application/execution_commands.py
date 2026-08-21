@@ -1,12 +1,13 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
+    ExecutionContextChanged,
     InvalidTransition,
     StaleFencingToken,
     ValidationError,
@@ -27,6 +28,7 @@ from sidera_control_plane.domain.gateway import (
 )
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
+from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import TaskStatus
 
 
@@ -835,10 +837,79 @@ class ExecutionInputCommandHandler:
     def _send(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        context = _required_context(envelope.payload)
+        _validate_input_target(envelope, context["session_id"])
+
+        # Discover the Session without a lock, then keep the execution/root-task
+        # lock order aligned with plan publication before revalidating the Session.
+        assert envelope.target_id is not None
+        session_probe = uow.sessions.get_any(
+            envelope.target_id, envelope.workspace_id, for_update=False
+        )
+        if session_probe is None:
+            raise NotFound("execution session not found")
+        execution = uow.executions.get(
+            session_probe.execution_id, envelope.workspace_id, for_update=True
+        )
+        if execution is None:
+            raise NotFound("execution not found")
+        snapshot = uow.plans.get_current_for_task(
+            execution.task_id, envelope.workspace_id
+        )
+        if snapshot is None:
+            raise ExecutionContextChanged(
+                (
+                    "plan_snapshot_id",
+                    "root_task_id",
+                    "work_item_key",
+                    "worker_slot_key",
+                ),
+                current={
+                    "execution_id": str(execution.id),
+                    "session_id": str(session_probe.id),
+                },
+            )
+        root_task = uow.tasks.get(
+            snapshot.root_task_id, envelope.workspace_id, for_update=True
+        )
+        if root_task is None:
+            raise NotFound("root task not found")
+        snapshot = uow.plans.get_current_for_root(
+            root_task.id, envelope.workspace_id
+        )
+        if snapshot is None:
+            raise ExecutionContextChanged(
+                ("plan_snapshot_id",),
+                current={
+                    "root_task_id": str(root_task.id),
+                    "execution_id": str(execution.id),
+                    "session_id": str(session_probe.id),
+                },
+            )
+
         session = self._load_session(uow, envelope)
-        execution_id = _required_uuid(envelope.payload, "execution_id")
-        if execution_id != session.execution_id:
-            raise ValidationError("input execution_id does not match the Session")
+        binding = uow.bindings.get_for_execution(
+            execution.id, envelope.workspace_id, for_update=True
+        )
+        current_worker_id = (
+            binding.worker_id
+            if binding is not None
+            else execution.assigned_worker_id or session.worker_id
+        )
+        worker = uow.workers.get(
+            current_worker_id, envelope.workspace_id, for_update=True
+        )
+        changed_fields, current = _execution_context_mismatches(
+            context=context,
+            snapshot=snapshot,
+            execution=execution,
+            session=session,
+            binding_worker_id=binding.worker_id if binding is not None else None,
+            worker_loaded=worker is not None,
+        )
+        if changed_fields:
+            raise ExecutionContextChanged(changed_fields, current=current)
+
         client_key = _required_str(envelope.payload, "client_idempotency_key")
         text = _required_str(envelope.payload, "text")
         attachment_refs = _required_string_tuple(
@@ -875,7 +946,12 @@ class ExecutionInputCommandHandler:
         )
         item.queue()
         uow.execution_inputs.add(item)
-        event = _input_event(envelope, item, "ExecutionInputAccepted")
+        event = _input_event(
+            envelope,
+            item,
+            "ExecutionInputAccepted",
+            context=_context_payload(context),
+        )
         uow.events.append_with_outbox(event)
         return CommandResult(
             command_id=envelope.id,
@@ -1034,7 +1110,20 @@ def _input_event(
     envelope: CommandEnvelope,
     item: ExecutionInput,
     event_type: str,
+    *,
+    context: Mapping[str, object] | None = None,
 ) -> EventData:
+    payload: dict[str, Any] = {
+        "execution_id": str(item.execution_id),
+        "session_id": str(item.session_id),
+        "client_idempotency_key": item.client_idempotency_key,
+        "status": item.status.value,
+        "text_length": len(item.text),
+        "attachment_count": len(item.attachment_refs),
+        "failure_code": item.failure_code,
+    }
+    if context is not None:
+        payload["execution_context"] = dict(context)
     return _event(
         envelope,
         workspace_id=item.workspace_id,
@@ -1042,15 +1131,7 @@ def _input_event(
         aggregate_id=item.id,
         aggregate_version=item.version,
         event_type=event_type,
-        payload={
-            "execution_id": str(item.execution_id),
-            "session_id": str(item.session_id),
-            "client_idempotency_key": item.client_idempotency_key,
-            "status": item.status.value,
-            "text_length": len(item.text),
-            "attachment_count": len(item.attachment_refs),
-            "failure_code": item.failure_code,
-        },
+        payload=payload,
     )
 
 
@@ -1083,14 +1164,130 @@ def _execution_payload(execution: Execution) -> dict[str, object]:
     }
 
 
-def _required_str(payload: dict[str, Any], name: str) -> str:
+def _required_str(payload: Mapping[str, Any], name: str) -> str:
     value = payload.get(name)
     if not isinstance(value, str):
         raise ValidationError(f"{name} must be a string")
     return value
 
 
-def _required_int(payload: dict[str, Any], name: str) -> int:
+def _required_context(payload: dict[str, Any]) -> dict[str, UUID | str]:
+    raw_context = payload.get("context")
+    if not isinstance(raw_context, Mapping):
+        raise ValidationError("context is required for SendExecutionInput")
+    context = cast(Mapping[str, Any], raw_context)
+    return {
+        "plan_snapshot_id": _required_uuid(context, "plan_snapshot_id"),
+        "root_task_id": _required_uuid(context, "root_task_id"),
+        "work_item_key": _required_str(context, "work_item_key"),
+        "worker_slot_key": _required_str(context, "worker_slot_key"),
+        "worker_id": _required_uuid(context, "worker_id"),
+        "execution_id": _required_uuid(context, "execution_id"),
+        "session_id": _required_uuid(context, "session_id"),
+    }
+
+
+def _context_payload(context: Mapping[str, UUID | str]) -> dict[str, str]:
+    return {key: str(value) for key, value in context.items()}
+
+
+def _validate_input_target(
+    envelope: CommandEnvelope, context_session_id: UUID | str
+) -> None:
+    if envelope.target_type != "execution_session" or envelope.target_id is None:
+        raise ValidationError("input commands require an execution_session target")
+    if envelope.expected_version is None or envelope.expected_version < 1:
+        raise ValidationError("input commands require a positive expected_version")
+    if context_session_id != envelope.target_id:
+        raise ExecutionContextChanged(
+            ("session_id",),
+            current={"session_id": str(envelope.target_id)},
+        )
+
+
+def _execution_context_mismatches(
+    *,
+    context: Mapping[str, UUID | str],
+    snapshot: TaskPlanSnapshot,
+    execution: Execution,
+    session: ExecutionSession,
+    binding_worker_id: UUID | None,
+    worker_loaded: bool,
+) -> tuple[tuple[str, ...], dict[str, object]]:
+    work_item = next(
+        (item for item in snapshot.work_items if item.key == context["work_item_key"]),
+        None,
+    )
+    worker_slot = next(
+        (slot for slot in snapshot.worker_slots if slot.key == context["worker_slot_key"]),
+        None,
+    )
+    worker_ids = {
+        worker_id
+        for worker_id in (
+            execution.assigned_worker_id,
+            session.worker_id,
+            binding_worker_id,
+        )
+        if worker_id is not None
+    }
+    current_worker_id = next(iter(worker_ids), None) if len(worker_ids) == 1 else None
+    current = {
+        "plan_snapshot_id": str(snapshot.id),
+        "root_task_id": str(snapshot.root_task_id),
+        "work_item_key": work_item.key if work_item is not None else None,
+        "worker_slot_key": (
+            worker_slot.key
+            if worker_slot is not None
+            else work_item.worker_slot_key if work_item is not None else None
+        ),
+        "worker_id": str(current_worker_id) if current_worker_id is not None else None,
+        "execution_id": str(execution.id),
+        "session_id": str(session.id),
+    }
+    changed: set[str] = set()
+    if context["plan_snapshot_id"] != snapshot.id:
+        changed.add("plan_snapshot_id")
+    if context["root_task_id"] != snapshot.root_task_id:
+        changed.add("root_task_id")
+    if (
+        work_item is None
+        or work_item.task_id != execution.task_id
+        or context["work_item_key"] != work_item.key
+    ):
+        changed.add("work_item_key")
+    if (
+        worker_slot is None
+        or work_item is None
+        or work_item.worker_slot_key != worker_slot.key
+        or context["worker_slot_key"] != worker_slot.key
+    ):
+        changed.add("worker_slot_key")
+    if (
+        len(worker_ids) != 1
+        or current_worker_id != context["worker_id"]
+        or not worker_loaded
+    ):
+        changed.add("worker_id")
+    if context["execution_id"] != execution.id or session.execution_id != execution.id:
+        changed.add("execution_id")
+    if context["session_id"] != session.id:
+        changed.add("session_id")
+    return tuple(field for field in _CONTEXT_FIELDS if field in changed), current
+
+
+_CONTEXT_FIELDS = (
+    "plan_snapshot_id",
+    "root_task_id",
+    "work_item_key",
+    "worker_slot_key",
+    "worker_id",
+    "execution_id",
+    "session_id",
+)
+
+
+def _required_int(payload: Mapping[str, Any], name: str) -> int:
     value = payload.get(name)
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValidationError(f"{name} must be an integer")
@@ -1098,7 +1295,7 @@ def _required_int(payload: dict[str, Any], name: str) -> int:
 
 
 def _required_string_tuple(
-    payload: dict[str, Any], name: str, *, allow_empty: bool = False
+    payload: Mapping[str, Any], name: str, *, allow_empty: bool = False
 ) -> tuple[str, ...]:
     value = payload.get(name)
     if value is None and allow_empty:
@@ -1110,7 +1307,7 @@ def _required_string_tuple(
     return tuple(value)
 
 
-def _required_uuid(payload: dict[str, Any], name: str) -> UUID:
+def _required_uuid(payload: Mapping[str, Any], name: str) -> UUID:
     value = payload.get(name)
     if isinstance(value, UUID):
         return value
@@ -1122,14 +1319,14 @@ def _required_uuid(payload: dict[str, Any], name: str) -> UUID:
         raise ValidationError(f"{name} must be a UUID") from exc
 
 
-def _optional_uuid(payload: dict[str, Any], name: str) -> UUID | None:
+def _optional_uuid(payload: Mapping[str, Any], name: str) -> UUID | None:
     value = payload.get(name)
     if value is None:
         return None
     return _required_uuid(payload, name)
 
 
-def _required_datetime(payload: dict[str, Any], name: str) -> datetime:
+def _required_datetime(payload: Mapping[str, Any], name: str) -> datetime:
     value = payload.get(name)
     if isinstance(value, datetime):
         result = value

@@ -1590,6 +1590,28 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** TraceTimingResponse */
+        TraceTimingResponse: {
+            /** Input Ms */
+            input_ms: number;
+            /** model_ms */
+            model_ms: number;
+            /** Tools Ms */
+            tools_ms: number;
+            /** Total Ms */
+            total_ms: number;
+        };
+        /** TraceUsageResponse */
+        TraceUsageResponse: {
+            /** Cached Tokens */
+            cached_tokens: number | null;
+            /** Cost Microunits */
+            cost_microunits: number | null;
+            /** Input Tokens */
+            input_tokens: number | null;
+            /** Output Tokens */
+            output_tokens: number | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -1625,6 +1647,47 @@ export interface components {
             title: string;
             /** Worker Slot Key */
             worker_slot_key: string | null;
+        };
+        /** WorkerContextBranchResponse */
+        WorkerContextBranchResponse: {
+            /** Artifact Refs */
+            artifact_refs: string[];
+            /**
+             * Current Execution Id
+             * Format: uuid
+             */
+            current_execution_id: string;
+            /**
+             * Current Session Id
+             * Format: uuid
+             */
+            current_session_id: string;
+            /**
+             * Execution Lineage Id
+             * Format: uuid
+             */
+            execution_lineage_id: string;
+            /** Head Checkpoint Sequence */
+            head_checkpoint_sequence: number | null;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /**
+             * Replay Capability
+             * @enum {string}
+             */
+            replay_capability: "none" | "portable_replay" | "native_resume";
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Work Item Key */
+            work_item_key: string;
+            /** Worker Slot Key */
+            worker_slot_key: string;
         };
         /** WorkerResponse */
         WorkerResponse: {
@@ -1688,6 +1751,96 @@ export interface components {
             role: string;
             /** Worker Policy Ref */
             worker_policy_ref: string | null;
+        };
+        /** WorkerTraceEventResponse */
+        WorkerTraceEventResponse: {
+            /** Artifact Refs */
+            artifact_refs: string[];
+            /** Category */
+            category: string;
+            /** Duration Ms */
+            duration_ms: number | null;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Plan Snapshot Id */
+            plan_snapshot_id: string | null;
+            /** Provider Extensions */
+            provider_extensions: {
+                [key: string]: unknown;
+            };
+            /** Provider Payload Ref */
+            provider_payload_ref: string | null;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Schema Version */
+            schema_version: number;
+            /** Sequence */
+            sequence: number;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Status */
+            status: string;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+            usage: components["schemas"]["TraceUsageResponse"] | null;
+            /** Work Item Key */
+            work_item_key: string | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** WorkerTraceResponse */
+        WorkerTraceResponse: {
+            /** Checkpoint Sequence */
+            checkpoint_sequence: number | null;
+            context_branch: components["schemas"]["WorkerContextBranchResponse"] | null;
+            /** Current Action */
+            current_action: string | null;
+            /** Events */
+            events: components["schemas"]["WorkerTraceEventResponse"][];
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Freshness At */
+            freshness_at: string | null;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Plan Generation */
+            plan_generation: number | null;
+            /** Previous Before Sequence */
+            previous_before_sequence: number | null;
+            /** Schema Version */
+            schema_version: number;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Status */
+            status: string;
+            timing: components["schemas"]["TraceTimingResponse"];
+            /** Worker Id */
+            worker_id: string | null;
         };
     };
     responses: never;
@@ -2166,9 +2319,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkerTraceResponse"];
                 };
             };
             /** @description Validation Error */
