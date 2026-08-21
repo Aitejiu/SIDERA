@@ -1,21 +1,39 @@
 import { Activity, ListTodo, Settings2 } from "lucide-react";
-import { NavLink, Outlet } from "react-router-dom";
+import type { ReactNode } from "react";
+import { NavLink, Outlet, useParams } from "react-router-dom";
+
+import { WorkspaceStreamProvider, useWorkspaceStream } from "./WorkspaceStreamProvider";
+import { StatusMark } from "@/shared/ui/StatusMark";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
 export function App() {
+  const { workspaceId } = useParams<{ workspaceId: string }>();
+  const resolvedWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
+
+  return (
+    <WorkspaceStreamProvider workspaceId={resolvedWorkspaceId}>
+      <AppFrame workspaceId={resolvedWorkspaceId} />
+    </WorkspaceStreamProvider>
+  );
+}
+
+function AppFrame({ workspaceId }: { workspaceId: string }) {
+  const { streamState, notices, dismissNotice } = useWorkspaceStream();
+
   return (
     <div className="control-room">
       <header className="topbar">
-        <NavLink className="product-mark" to={`/workspaces/${DEFAULT_WORKSPACE_ID}/tasks`}>
+        <NavLink className="product-mark" to={`/workspaces/${workspaceId}/tasks`}>
           <span className="product-mark__glyph" aria-hidden="true">
             S
           </span>
           <span>SIDERA</span>
         </NavLink>
         <div className="topbar__context">
-          <span className="connection-mark" aria-label="控制面在线" title="控制面在线" />
+          <StatusMark kind={streamState.status} />
           <span className="mono-label">LOCAL CONTROL PLANE</span>
+          <span className="mono-label">{formatEventTime(streamState.lastEventAt)}</span>
         </div>
       </header>
 
@@ -24,16 +42,16 @@ export function App() {
           <div className="workspace-context">
             <span className="eyebrow">工作区</span>
             <strong>SIDERA Local</strong>
-            <span className="mono-label">{DEFAULT_WORKSPACE_ID.slice(0, 8)}</span>
+            <span className="mono-label">{workspaceId.slice(0, 8)}</span>
           </div>
           <nav className="navigation-list">
-            <NavItem to={`/workspaces/${DEFAULT_WORKSPACE_ID}/tasks`} label="任务" icon={<ListTodo size={17} />} />
-            <NavItem to={`/workspaces/${DEFAULT_WORKSPACE_ID}/activity`} label="活动" icon={<Activity size={17} />} />
-            <NavItem to={`/workspaces/${DEFAULT_WORKSPACE_ID}/settings`} label="设置" icon={<Settings2 size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/tasks`} label="任务" icon={<ListTodo size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/activity`} label="活动" icon={<Activity size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/settings`} label="设置" icon={<Settings2 size={17} />} />
           </nav>
           <div className="rail-footer">
             <span className="eyebrow">连接状态</span>
-            <span className="status-line"><span className="status-dot status-dot--live" />实时通道待接入</span>
+            <StatusMark kind={streamState.status} />
           </div>
         </aside>
 
@@ -43,6 +61,23 @@ export function App() {
           </div>
         </main>
       </div>
+      {notices.length > 0 ? (
+        <div className="notification-tray" aria-live="polite" aria-label="任务通知">
+          {notices.map((notice) => (
+            <div className="notification-item" key={notice.id}>
+              <span>{notice.title}</span>
+              <button
+                className="notification-dismiss"
+                type="button"
+                onClick={() => dismissNotice(notice.id)}
+                aria-label={`关闭${notice.title}`}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -54,7 +89,7 @@ function NavItem({
 }: {
   to: string;
   label: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 }) {
   return (
     <NavLink className={({ isActive }) => `navigation-item${isActive ? " is-active" : ""}`} to={to}>
@@ -62,6 +97,17 @@ function NavItem({
       <span>{label}</span>
     </NavLink>
   );
+}
+
+function formatEventTime(timestamp: number | null): string {
+  if (timestamp === null) {
+    return "未接收事件";
+  }
+  return new Date(timestamp).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 export function TaskRoutePlaceholder() {

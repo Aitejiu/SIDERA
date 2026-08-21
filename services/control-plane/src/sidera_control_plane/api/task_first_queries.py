@@ -6,12 +6,16 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.encoders import jsonable_encoder
 
 from sidera_control_plane.api.dependencies import get_task_first_query_service
+from sidera_control_plane.api.schemas import TaskOverviewProjectionResponse
 from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 
 router = APIRouter()
 
 
-@router.get("/api/v1/workspaces/{workspace_id}/task-overviews")
+@router.get(
+    "/api/v1/workspaces/{workspace_id}/task-overviews",
+    response_model=list[TaskOverviewProjectionResponse],
+)
 def list_task_overviews(
     workspace_id: UUID,
     service: Annotated[TaskFirstQueryService, Depends(get_task_first_query_service)],
@@ -19,7 +23,10 @@ def list_task_overviews(
     return [_encode(item) for item in service.list_overviews(workspace_id)]
 
 
-@router.get("/api/v1/tasks/{root_task_id}/overview")
+@router.get(
+    "/api/v1/tasks/{root_task_id}/overview",
+    response_model=TaskOverviewProjectionResponse,
+)
 def get_task_overview(
     root_task_id: UUID,
     workspace_id: UUID,

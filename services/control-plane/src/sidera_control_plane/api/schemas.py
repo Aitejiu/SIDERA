@@ -83,6 +83,42 @@ class DownloadTokenResponse(BaseModel):
     token: NonEmptyString
 
 
+class AttentionItemProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    kind: str
+    title: str
+    summary: str
+    resource_id: UUID
+    resource_version: int
+    correlation_id: UUID
+    occurred_at: datetime
+
+
+class TaskOverviewProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    generation: int
+    title: str
+    goal_summary: str
+    acceptance_refs: tuple[str, ...]
+    current_milestone_key: str | None
+    materialized_count: int
+    planned_count: int
+    running_count: int
+    completed_count: int
+    failed_count: int
+    next_work_item_keys: tuple[str, ...]
+    attention_items: tuple[AttentionItemProjectionResponse, ...]
+    last_change_cursor: int
+    as_of: datetime
+
+
 class PublishPlanSnapshotPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

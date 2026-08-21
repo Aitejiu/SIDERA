@@ -48,6 +48,19 @@ export async function apiGet<Path extends keyof paths>(
   return parseResponse<JsonBody<GetOperation<Path>>>(response);
 }
 
+export async function apiGetAt<Path extends keyof paths>(
+  path: string,
+  contractPath: Path,
+  init?: RequestInit,
+): Promise<JsonBody<GetOperation<Path>>> {
+  void contractPath;
+  const response = await fetch(path, {
+    ...init,
+    method: "GET",
+  });
+  return parseResponse<JsonBody<GetOperation<Path>>>(response);
+}
+
 export async function apiCommand<Path extends keyof paths>(
   path: Path,
   init: RequestInit,

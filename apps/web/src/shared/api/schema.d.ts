@@ -640,6 +640,34 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /** AttentionItemProjectionResponse */
+        AttentionItemProjectionResponse: {
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Key */
+            key: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /** Resource Version */
+            resource_version: number;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+        };
         /** CommandRequest */
         CommandRequest: {
             actor: components["schemas"]["ActorRequest"];
@@ -1168,6 +1196,57 @@ export interface components {
             title: string;
             /** Work Item Keys */
             work_item_keys: string[];
+        };
+        /** TaskOverviewProjectionResponse */
+        TaskOverviewProjectionResponse: {
+            /** Acceptance Refs */
+            acceptance_refs: string[];
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Attention Items */
+            attention_items: components["schemas"]["AttentionItemProjectionResponse"][];
+            /** Completed Count */
+            completed_count: number;
+            /** Current Milestone Key */
+            current_milestone_key: string | null;
+            /** Failed Count */
+            failed_count: number;
+            /** Generation */
+            generation: number;
+            /** Goal Summary */
+            goal_summary: string;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Materialized Count */
+            materialized_count: number;
+            /** Next Work Item Keys */
+            next_work_item_keys: string[];
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /** Planned Count */
+            planned_count: number;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Running Count */
+            running_count: number;
+            /** Schema Version */
+            schema_version: number;
+            /** Title */
+            title: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** TaskPageResponse */
         TaskPageResponse: {
@@ -1943,9 +2022,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TaskOverviewProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2450,9 +2527,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["TaskOverviewProjectionResponse"][];
                 };
             };
             /** @description Validation Error */

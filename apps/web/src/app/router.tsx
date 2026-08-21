@@ -6,6 +6,7 @@ import {
 } from "react-router-dom";
 
 import { App, TaskRoutePlaceholder } from "./App";
+import { TaskListPage } from "@/features/tasks/TaskListPage";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -19,7 +20,7 @@ export const routes: RouteObject[] = [
     children: [
       {
         path: "/workspaces/:workspaceId/tasks",
-        element: <TaskRoutePlaceholder />,
+        element: <TaskListPage />,
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId",
