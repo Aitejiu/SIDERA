@@ -2,7 +2,14 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_serializer,
+    model_validator,
+)
 
 from sidera_control_plane.application.resource_queries import (
     ArtifactView,
@@ -22,6 +29,7 @@ from sidera_control_plane.application.task_queries import (
     TimelineItem,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 InputText = Annotated[str, StringConstraints(min_length=1)]
@@ -54,6 +62,13 @@ class SetTaskPriorityPayload(BaseModel):
 
 class EmptyPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class PublishPlanSnapshotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_current_generation: int = Field(ge=0)
+    snapshot: dict[str, Any]
 
 
 class RegisterWorkerPayload(BaseModel):
@@ -162,6 +177,7 @@ class CommandRequest(BaseModel):
             "PauseTask",
             "ResumeTask",
             "CancelTask",
+            "PublishPlanSnapshot",
         }
         if self.command_type in task_commands and self.target_type != "task":
             raise ValueError("Task commands require target_type=task")
@@ -171,6 +187,9 @@ class CommandRequest(BaseModel):
         if self.command_type == "CreateTask":
             self._require_create("task")
             parsed: BaseModel = CreateTaskPayload.model_validate(self.payload)
+        elif self.command_type == "PublishPlanSnapshot":
+            self._require_mutation_target("task")
+            parsed = PublishPlanSnapshotPayload.model_validate(self.payload)
         elif self.command_type == "SetTaskPriority":
             self._require_mutation_target()
             parsed = SetTaskPriorityPayload.model_validate(self.payload)
@@ -270,6 +289,132 @@ class CommandResponse(BaseModel):
             aggregate_id=result.aggregate_id,
             aggregate_version=result.aggregate_version,
             event_ids=result.event_ids,
+        )
+
+
+class WorkItemResponse(BaseModel):
+    key: str
+    task_id: UUID | None
+    kind: str
+    title: str
+    goal_summary: str
+    acceptance_refs: tuple[str, ...]
+    milestone_key: str | None
+    worker_slot_key: str | None
+    expected_outputs: tuple[str, ...]
+    source_refs: tuple[str, ...]
+
+
+class WorkerSlotResponse(BaseModel):
+    key: str
+    role: str
+    capability_requirements: tuple[str, ...]
+    worker_policy_ref: str | None
+    configuration_ref: str | None
+    concurrency_limit: int | None
+
+
+class MilestoneResponse(BaseModel):
+    key: str
+    title: str
+    work_item_keys: tuple[str, ...]
+    acceptance_refs: tuple[str, ...]
+    order_hint: int
+
+
+class DependencyResponse(BaseModel):
+    upstream_work_item_key: str
+    downstream_work_item_key: str
+    kind: str
+    required_evidence_refs: tuple[str, ...]
+    enforcement: str
+
+
+class TaskPlanSnapshotResponse(BaseModel):
+    id: UUID
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    generation: int
+    parent_snapshot_id: UUID | None
+    source_type: str
+    source_ref: str
+    title: str
+    goal_summary: str
+    acceptance_refs: tuple[str, ...]
+    work_items: tuple[WorkItemResponse, ...]
+    worker_slots: tuple[WorkerSlotResponse, ...]
+    milestones: tuple[MilestoneResponse, ...]
+    dependencies: tuple[DependencyResponse, ...]
+    published_by: str
+    published_at: datetime
+
+    @field_serializer("published_at")
+    def serialize_published_at(self, value: datetime) -> str:
+        return value.isoformat()
+
+    @classmethod
+    def from_snapshot(cls, snapshot: TaskPlanSnapshot) -> "TaskPlanSnapshotResponse":
+        return cls(
+            id=snapshot.id,
+            schema_version=snapshot.schema_version,
+            workspace_id=snapshot.workspace_id,
+            root_task_id=snapshot.root_task_id,
+            generation=snapshot.generation,
+            parent_snapshot_id=snapshot.parent_snapshot_id,
+            source_type=snapshot.source_type,
+            source_ref=snapshot.source_ref,
+            title=snapshot.title,
+            goal_summary=snapshot.goal_summary,
+            acceptance_refs=snapshot.acceptance_refs,
+            work_items=tuple(
+                WorkItemResponse(
+                    key=item.key,
+                    task_id=item.task_id,
+                    kind=item.kind.value,
+                    title=item.title,
+                    goal_summary=item.goal_summary,
+                    acceptance_refs=item.acceptance_refs,
+                    milestone_key=item.milestone_key,
+                    worker_slot_key=item.worker_slot_key,
+                    expected_outputs=item.expected_outputs,
+                    source_refs=item.source_refs,
+                )
+                for item in snapshot.work_items
+            ),
+            worker_slots=tuple(
+                WorkerSlotResponse(
+                    key=slot.key,
+                    role=slot.role,
+                    capability_requirements=slot.capability_requirements,
+                    worker_policy_ref=slot.worker_policy_ref,
+                    configuration_ref=slot.configuration_ref,
+                    concurrency_limit=slot.concurrency_limit,
+                )
+                for slot in snapshot.worker_slots
+            ),
+            milestones=tuple(
+                MilestoneResponse(
+                    key=milestone.key,
+                    title=milestone.title,
+                    work_item_keys=milestone.work_item_keys,
+                    acceptance_refs=milestone.acceptance_refs,
+                    order_hint=milestone.order_hint,
+                )
+                for milestone in snapshot.milestones
+            ),
+            dependencies=tuple(
+                DependencyResponse(
+                    upstream_work_item_key=dependency.upstream_work_item_key,
+                    downstream_work_item_key=dependency.downstream_work_item_key,
+                    kind=dependency.kind.value,
+                    required_evidence_refs=dependency.required_evidence_refs,
+                    enforcement=dependency.enforcement.value,
+                )
+                for dependency in snapshot.dependencies
+            ),
+            published_by=snapshot.published_by,
+            published_at=snapshot.published_at,
         )
 
 

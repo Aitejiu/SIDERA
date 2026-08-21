@@ -9,6 +9,7 @@ from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
     ExecutionInputCommandHandler,
 )
+from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.task_commands import TaskCommandHandler
@@ -44,6 +45,7 @@ def get_command_service(
         factory,
         (
             TaskCommandHandler(),
+            PublishPlanSnapshotHandler(),
             WorkerCommandHandler(lambda: datetime.now(UTC)),
             ExecutionCommandHandler(
                 lambda: datetime.now(UTC),

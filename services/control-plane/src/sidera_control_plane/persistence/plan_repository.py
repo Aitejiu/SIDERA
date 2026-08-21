@@ -53,6 +53,18 @@ class PlanRepository:
         )
         return _to_domain(row) if row is not None else None
 
+    def get_for_generation(
+        self, root_task_id: UUID, workspace_id: UUID, generation: int
+    ) -> TaskPlanSnapshot | None:
+        row = self._session.scalar(
+            select(PlanSnapshotModel).where(
+                PlanSnapshotModel.root_task_id == root_task_id,
+                PlanSnapshotModel.workspace_id == workspace_id,
+                PlanSnapshotModel.generation == generation,
+            )
+        )
+        return _to_domain(row) if row is not None else None
+
     def list_for_root(
         self, root_task_id: UUID, workspace_id: UUID
     ) -> tuple[TaskPlanSnapshot, ...]:

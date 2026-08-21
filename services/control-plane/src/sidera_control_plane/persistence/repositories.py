@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -26,14 +27,32 @@ class TaskRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def get(self, task_id: UUID, workspace_id: UUID) -> Task | None:
-        row = self._session.scalar(
+    def get(
+        self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> Task | None:
+        statement = select(TaskModel).where(
+            TaskModel.id == task_id,
+            TaskModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_task(row) if row is not None else None
+
+    def get_many(
+        self, task_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Task, ...]:
+        ordered_ids = tuple(dict.fromkeys(task_ids))
+        if not ordered_ids:
+            return ()
+        rows = self._session.scalars(
             select(TaskModel).where(
-                TaskModel.id == task_id,
+                TaskModel.id.in_(ordered_ids),
                 TaskModel.workspace_id == workspace_id,
             )
-        )
-        return _to_domain_task(row) if row is not None else None
+        ).all()
+        tasks_by_id = {row.id: _to_domain_task(row) for row in rows}
+        return tuple(tasks_by_id[task_id] for task_id in ordered_ids if task_id in tasks_by_id)
 
     def workspace_exists(self, workspace_id: UUID) -> bool:
         return (

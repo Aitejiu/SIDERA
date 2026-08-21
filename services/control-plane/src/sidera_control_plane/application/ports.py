@@ -42,7 +42,14 @@ from sidera_control_plane.domain.workspace import (
 
 
 class TaskRepositoryPort(Protocol):
-    def get(self, task_id: UUID, workspace_id: UUID) -> Task | None:
+    def get(
+        self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> Task | None:
+        raise NotImplementedError
+
+    def get_many(
+        self, task_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Task, ...]:
         raise NotImplementedError
 
     def workspace_exists(self, workspace_id: UUID) -> bool:

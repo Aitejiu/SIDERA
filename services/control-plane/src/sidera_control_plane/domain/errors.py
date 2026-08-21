@@ -36,6 +36,18 @@ class VersionConflict(DomainError):
         self.actual = actual
 
 
+class PlanGenerationConflict(DomainError):
+    code = "plan_generation_conflict"
+
+    def __init__(self, expected: int, actual: int) -> None:
+        super().__init__(
+            f"expected plan generation {expected}, actual {actual}",
+            details={"expected": expected, "actual": actual},
+        )
+        self.expected = expected
+        self.actual = actual
+
+
 class CapacityExceeded(DomainError):
     code = "capacity_exceeded"
 
