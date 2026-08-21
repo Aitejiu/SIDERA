@@ -1,0 +1,95 @@
+import type { paths } from "./schema";
+
+type GetOperation<Path extends keyof paths> = paths[Path] extends {
+  get: infer Operation;
+}
+  ? Operation
+  : never;
+
+type JsonBody<Operation> = Operation extends { responses: infer Responses }
+  ? Responses extends { 200: infer Response }
+    ? Response extends { content: infer Content }
+      ? Content extends { "application/json": infer Body }
+        ? Body
+        : unknown
+      : unknown
+    : unknown
+  : unknown;
+
+export class ApiProblem extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail: string;
+  readonly correlationId: string | null;
+
+  constructor(
+    status: number,
+    code: string,
+    detail: string,
+    correlationId: string | null,
+  ) {
+    super(detail);
+    this.name = "ApiProblem";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+    this.correlationId = correlationId;
+  }
+}
+
+export async function apiGet<Path extends keyof paths>(
+  path: Path,
+  init?: RequestInit,
+): Promise<JsonBody<GetOperation<Path>>> {
+  const response = await fetch(path as string, {
+    ...init,
+    method: "GET",
+  });
+  return parseResponse<JsonBody<GetOperation<Path>>>(response);
+}
+
+export async function apiCommand<Path extends keyof paths>(
+  path: Path,
+  init: RequestInit,
+): Promise<unknown> {
+  const response = await fetch(path as string, init);
+  return parseResponse<unknown>(response);
+}
+
+export function createCommandIdentity() {
+  return {
+    commandId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  };
+}
+
+async function parseResponse<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    throw await toApiProblem(response);
+  }
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  return (await response.json()) as T;
+}
+
+async function toApiProblem(response: Response): Promise<ApiProblem> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  const error = isRecord(body) && isRecord(body.error) ? body.error : null;
+  const code = error && typeof error.code === "string" ? error.code : "http_error";
+  const detail =
+    error && typeof error.message === "string"
+      ? error.message
+      : response.statusText || "Request failed";
+  const correlationId = response.headers.get("X-Correlation-Id");
+  return new ApiProblem(response.status, code, detail, correlationId);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}

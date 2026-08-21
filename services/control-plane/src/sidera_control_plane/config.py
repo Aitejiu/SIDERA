@@ -33,3 +33,5 @@ class Settings(BaseSettings):
     artifact_max_bytes: int = Field(default=10_485_760, gt=0)
     artifact_download_token_secret: SecretStr | None = None
     artifact_download_token_ttl_seconds: int = Field(default=300, gt=0)
+    web_origin: str = "http://127.0.0.1:5173"
+    api_bind_host: str = "127.0.0.1"

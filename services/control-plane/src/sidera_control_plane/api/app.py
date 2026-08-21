@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from sidera_control_plane.api.artifact_content import (
     router as artifact_content_router,
@@ -45,6 +46,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="SIDERA Control Plane",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[resolved_settings.web_origin],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Last-Event-ID", "Range"],
+        expose_headers=["Content-Range", "Accept-Ranges", "Content-Disposition"],
+        allow_credentials=False,
     )
     app.state.settings = resolved_settings
     install_error_handlers(app)

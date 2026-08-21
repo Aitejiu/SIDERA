@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title">
+  <title>SIDERA</title>
+  <rect width="32" height="32" fill="#202328" />
+  <path d="M8 8h16v4H12v4h12v8H8v-4h12v-4H8z" fill="#f4f5f6" />
+  <rect x="8" y="24" width="16" height="2" fill="#2166d1" />
+</svg>
