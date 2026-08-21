@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -5,7 +6,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
@@ -24,6 +25,12 @@ from sidera_control_plane.application.worker_gateway import (
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.modules import CapabilityProfile
+from sidera_control_plane.domain.plans import (
+    TaskPlanSnapshot,
+    WorkerSlot,
+    WorkItem,
+    WorkItemKind,
+)
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
@@ -41,6 +48,7 @@ from sidera_control_plane.persistence.models import (
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
+    PlanSnapshotModel,
     TaskModel,
     WorkerModel,
 )
@@ -144,8 +152,51 @@ def _seed_execution(
     adapter_instance_id = uuid4()
     workspace_instance_id = uuid4()
     capabilities = _capability_payload(profile)
+    plan_snapshot_id = uuid4()
     with database.session() as session:
-        if session.get(TaskModel, task_id) is None:
+        task = session.get(TaskModel, task_id)
+        if task is None:
+            snapshot = TaskPlanSnapshot.create(
+                snapshot_id=plan_snapshot_id,
+                schema_version=1,
+                workspace_id=workspace_id,
+                root_task_id=task_id,
+                generation=1,
+                parent_snapshot_id=None,
+                source_type="integration",
+                source_ref="integration:opencode-e2e",
+                title="OpenCode R3 E2E",
+                goal_summary="Run a real OpenCode execution with an exact input address.",
+                acceptance_refs=("the execution produces a Git diff",),
+                work_items=(
+                    WorkItem(
+                        key="opencode-e2e",
+                        task_id=task_id,
+                        kind=WorkItemKind.CHILD,
+                        title="OpenCode R3 E2E",
+                        goal_summary="Run the real OpenCode execution.",
+                        acceptance_refs=("the execution produces a Git diff",),
+                        milestone_key=None,
+                        worker_slot_key="opencode-e2e",
+                        expected_outputs=("diff",),
+                        source_refs=(),
+                    ),
+                ),
+                worker_slots=(
+                    WorkerSlot(
+                        key="opencode-e2e",
+                        role="implementation",
+                        capability_requirements=("python",),
+                        worker_policy_ref=None,
+                        configuration_ref=None,
+                        concurrency_limit=1,
+                    ),
+                ),
+                milestones=(),
+                dependencies=(),
+                published_by="integration",
+                published_at=NOW,
+            )
             session.add(
                 TaskModel(
                     id=task_id,
@@ -162,6 +213,37 @@ def _seed_execution(
                     version=1,
                 )
             )
+            session.flush()
+            session.add(
+                PlanSnapshotModel(
+                    id=snapshot.id,
+                    schema_version=snapshot.schema_version,
+                    workspace_id=snapshot.workspace_id,
+                    root_task_id=snapshot.root_task_id,
+                    generation=snapshot.generation,
+                    parent_snapshot_id=None,
+                    source_type=snapshot.source_type,
+                    source_ref=snapshot.source_ref,
+                    title=snapshot.title,
+                    goal_summary=snapshot.goal_summary,
+                    payload=snapshot.to_payload(),
+                    published_by=snapshot.published_by,
+                    published_at=snapshot.published_at,
+                )
+            )
+        else:
+            existing_snapshot_id = session.scalar(
+                select(PlanSnapshotModel.id)
+                .where(
+                    PlanSnapshotModel.workspace_id == workspace_id,
+                    PlanSnapshotModel.root_task_id == task_id,
+                )
+                .order_by(PlanSnapshotModel.generation.desc())
+                .limit(1)
+            )
+            if existing_snapshot_id is None:
+                raise AssertionError("OpenCode E2E task is missing its plan snapshot")
+            plan_snapshot_id = existing_snapshot_id
         session.add(
             WorkerModel(
                 id=worker_id,
@@ -304,6 +386,7 @@ def _seed_execution(
         session.commit()
     return {
         "task_id": task_id,
+        "plan_snapshot_id": plan_snapshot_id,
         "worker_id": worker_id,
         "execution_id": execution_id,
         "lease_id": lease_id,
@@ -473,6 +556,15 @@ def test_real_opencode_gateway_task_flow(
                 target_type="execution_session",
                 target_id=first_result.session_id,
                 payload={
+                    "context": {
+                        "plan_snapshot_id": str(ids["plan_snapshot_id"]),
+                        "root_task_id": str(ids["task_id"]),
+                        "work_item_key": "opencode-e2e",
+                        "worker_slot_key": "opencode-e2e",
+                        "worker_id": str(ids["worker_id"]),
+                        "execution_id": str(ids["execution_id"]),
+                        "session_id": str(first_result.session_id),
+                    },
                     "execution_id": str(ids["execution_id"]),
                     "client_idempotency_key": "opencode-e2e-input-1",
                     "text": "Confirm the workspace is ready.",
@@ -549,3 +641,18 @@ def test_real_opencode_gateway_task_flow(
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     process.kill()
+    if os.environ.get("SIDERA_KEEP_OPENCODE_E2E") == "1" and first_result is not None:
+        print(
+            json.dumps(
+                {
+                    "sidera_real_opencode": {
+                        "workspace_id": str(workspace_id),
+                        "root_task_id": str(ids["task_id"]),
+                        "execution_id": str(ids["execution_id"]),
+                        "session_id": str(first_result.session_id),
+                    }
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )

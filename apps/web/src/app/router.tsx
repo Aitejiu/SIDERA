@@ -10,6 +10,7 @@ import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
 import { TaskListPage } from "@/features/tasks/TaskListPage";
 import { PlanDiffPage } from "@/features/tasks/PlanDiffPage";
 import { PlanGenerationPage } from "@/features/tasks/PlanGenerationPage";
+import { ArtifactPage } from "@/features/trace/ArtifactPage";
 import { WorkerTracePage } from "@/features/trace/WorkerTracePage";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
@@ -41,6 +42,10 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/executions/:executionId/sessions/:sessionId/trace",
         element: <WorkerTracePage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/artifacts/:artifactId",
+        element: <ArtifactPage />,
       },
       {
         path: "/workspaces/:workspaceId/activity",

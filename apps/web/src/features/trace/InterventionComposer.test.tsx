@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
 
@@ -163,5 +163,38 @@ describe("InterventionComposer", () => {
       </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByRole("textbox", { name: "介入内容" })).toHaveValue(""));
+  });
+
+  it("keeps an explicit stop status visible while an input remains queued", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("/api/v1/commands", () =>
+        HttpResponse.json({ command_id: "1", aggregate_id: "2", aggregate_version: 1, event_ids: [] })),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { rerender } = renderComposer();
+    await user.type(screen.getByRole("textbox", { name: "介入内容" }), "Queue before stop");
+    await user.click(screen.getByRole("button", { name: "发送到当前 Session" }));
+    const clientKey = JSON.parse(
+      window.localStorage.getItem(interventionDraftKey(session.workspace_id, context)) ?? "{}",
+    ).clientIdempotencyKey as string;
+
+    rerender(
+      <MemoryRouter>
+        <InterventionComposer
+          workspaceId={session.workspace_id}
+          rootTaskId={context.root_task_id}
+          context={context}
+          contextBranch={null}
+          session={session}
+          execution={execution}
+          inputs={[{ id: "input", workspace_id: session.workspace_id, execution_id: context.execution_id, session_id: context.session_id, client_idempotency_key: clientKey, status: "queued", operation_id: null, failure_code: null, version: 2, text_length: 16, attachment_count: 0, created_at: "2026-08-21T08:00:00Z", updated_at: "2026-08-21T08:00:00Z" }]}
+          traceFresh
+          onRefresh={async () => undefined}
+        />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("button", { name: "停止 Execution" }));
+    expect(screen.getByText("停止已请求", { exact: true })).toBeVisible();
   });
 });

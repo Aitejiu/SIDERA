@@ -64,7 +64,10 @@ export function InterventionComposer({
   const pendingInput = matchingInput?.status === "queued" || matchingInput?.status === "blocked" ? matchingInput : undefined;
   const matchedAwaitingInput = awaitingClientKey !== null && matchingInput !== undefined;
   const visibleDraftText = matchedAwaitingInput ? "" : draft.text;
-  const visibleStatus = matchedAwaitingInput
+  const explicitStatus = status === "stopping" || status === "stop-requested" || status === "rejected";
+  const visibleStatus = explicitStatus
+    ? status
+    : matchedAwaitingInput
     ? matchingInput.status === "delivered" ? "worker-responded" : matchingInput.status
     : status;
 

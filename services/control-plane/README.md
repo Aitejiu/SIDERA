@@ -181,6 +181,42 @@ Every list query requires an explicit `workspace_id`; cursors are opaque to
 callers and event history also supports `after_sequence`. The API returns
 stable SIDERA projections instead of raw ACP messages.
 
+## R4 Web And E2E
+
+The standalone Web is in `apps/web`. It reads Task First projections, durable
+projection changes, normalized Worker traces and hash-addressed Artifact
+descriptors through the Public API. Start it with the instructions in
+[`apps/web/README.md`](../../apps/web/README.md).
+
+The deterministic browser seed is guarded by `SIDERA_ALLOW_E2E_SEED=1` and
+scoped to the exact workspace name `SIDERA R4 E2E Workspace`:
+
+```bash
+export SIDERA_DATABASE_URL="postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_test"
+export SIDERA_ALLOW_E2E_SEED=1
+python tests/e2e/seed_r4_workspace.py --scenario task-first
+npm --prefix ../../apps/web run test:e2e
+```
+
+The scale scenario verifies 200 WorkItems, 400 informational edges and
+50,000 reverse-paginated trace events. The fixture never truncates shared
+tables. The real browser gate uses the fixed OpenCode integration workspace
+and cleans it after the test:
+
+```bash
+SIDERA_RUN_OPENCODE_E2E=1 \
+SIDERA_OPENCODE_EXECUTABLE="$(command -v opencode)" \
+SIDERA_OPENCODE_EXPECTED_VERSION="1.18.19" \
+SIDERA_DATABASE_URL="$SIDERA_DATABASE_URL" \
+npm --prefix ../../apps/web run test:e2e -- \
+  --project=real-opencode tests/e2e/real-opencode.spec.ts
+```
+
+`SIDERA_ARTIFACT_ROOT` controls local Artifact content storage and
+`SIDERA_PROJECTION_CHANGE_RETENTION_SECONDS` controls replay retention. Keep
+`SIDERA_WEB_ORIGIN` exact and loopback-only for the Local Identity Profile.
+The API does not fall back to a fake Worker when OpenCode preflight fails.
+
 ## Verification
 
 Run these commands from the repository root with PostgreSQL running and
