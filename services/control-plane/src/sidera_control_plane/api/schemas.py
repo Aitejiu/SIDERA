@@ -64,6 +64,14 @@ class EmptyPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AcknowledgeAttentionItemPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attention_key: NonEmptyString
+    source_correlation_id: UUID
+    source_resource_version: int = Field(ge=1)
+
+
 class ArtifactContentDescriptorResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -254,6 +262,29 @@ class TaskActivityProjectionResponse(BaseModel):
     last_change_cursor: int
     items: tuple[ActivityItemProjectionResponse, ...]
     next_cursor: str | None
+
+
+class PlanDiffEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    work_item_key: str
+    change: Literal["unchanged", "patched", "added", "removed"]
+    changed_fields: tuple[str, ...]
+    reuse_candidate: bool
+    context_patch_candidate: bool
+    portable_replay_candidate: bool
+    runtime_execution_id: UUID | None
+
+
+class PlanDiffResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    last_change_cursor: int
+    root_task_id: UUID
+    left_generation: int
+    right_generation: int
+    entries: tuple[PlanDiffEntryResponse, ...]
 
 
 class TraceUsageResponse(BaseModel):
@@ -473,6 +504,9 @@ class CommandRequest(BaseModel):
         elif self.command_type == "PublishPlanSnapshot":
             self._require_mutation_target("task")
             parsed = PublishPlanSnapshotPayload.model_validate(self.payload)
+        elif self.command_type == "AcknowledgeAttentionItem":
+            self._require_mutation_target("task")
+            parsed = AcknowledgeAttentionItemPayload.model_validate(self.payload)
         elif self.command_type == "SetTaskPriority":
             self._require_mutation_target()
             parsed = SetTaskPriorityPayload.model_validate(self.payload)

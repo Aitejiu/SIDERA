@@ -1308,6 +1308,44 @@ export interface components {
             /** Work Item Keys */
             work_item_keys: string[];
         };
+        /** PlanDiffEntryResponse */
+        PlanDiffEntryResponse: {
+            /**
+             * Change
+             * @enum {string}
+             */
+            change: "unchanged" | "patched" | "added" | "removed";
+            /** Changed Fields */
+            changed_fields: string[];
+            /** Context Patch Candidate */
+            context_patch_candidate: boolean;
+            /** Portable Replay Candidate */
+            portable_replay_candidate: boolean;
+            /** Reuse Candidate */
+            reuse_candidate: boolean;
+            /** Runtime Execution Id */
+            runtime_execution_id: string | null;
+            /** Work Item Key */
+            work_item_key: string;
+        };
+        /** PlanDiffResponse */
+        PlanDiffResponse: {
+            /** Entries */
+            entries: components["schemas"]["PlanDiffEntryResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Left Generation */
+            left_generation: number;
+            /** Right Generation */
+            right_generation: number;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Schema Version */
+            schema_version: number;
+        };
         /** TaskActivityProjectionResponse */
         TaskActivityProjectionResponse: {
             /** Items */
@@ -2420,9 +2458,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PlanDiffResponse"];
                 };
             };
             /** @description Validation Error */

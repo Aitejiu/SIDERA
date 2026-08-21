@@ -151,6 +151,50 @@ class ProjectionChangeModel(Base):
     )
 
 
+class AttentionAcknowledgementModel(Base):
+    __tablename__ = "attention_acknowledgements"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_attention_ack_root_task_workspace",
+        ),
+        CheckConstraint(
+            "source_resource_version >= 1",
+            name="ck_attention_ack_source_resource_version",
+        ),
+        Index(
+            "ix_attention_ack_root_acknowledged",
+            "workspace_id",
+            "root_task_id",
+            "acknowledged_at",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    actor_type: Mapped[str] = mapped_column(String(50), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    attention_key: Mapped[str] = mapped_column(String(500), primary_key=True)
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_correlation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_resource_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    acknowledged_command_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    acknowledged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
 class TaskModel(TimestampMixin, Base):
     __tablename__ = "tasks"
     __table_args__ = (

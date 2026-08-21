@@ -1,9 +1,11 @@
 import { Activity, ListTodo, Settings2 } from "lucide-react";
 import type { ReactNode } from "react";
-import { NavLink, Outlet, useParams } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
 import { WorkspaceStreamProvider, useWorkspaceStream } from "./WorkspaceStreamProvider";
 import { StatusMark } from "@/shared/ui/StatusMark";
+
+import { NotificationCenter } from "@/features/attention/NotificationCenter";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -19,7 +21,7 @@ export function App() {
 }
 
 function AppFrame({ workspaceId }: { workspaceId: string }) {
-  const { streamState, notices, dismissNotice } = useWorkspaceStream();
+  const { streamState } = useWorkspaceStream();
 
   return (
     <div className="control-room">
@@ -61,23 +63,7 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
           </div>
         </main>
       </div>
-      {notices.length > 0 ? (
-        <div className="notification-tray" aria-live="polite" aria-label="任务通知">
-          {notices.map((notice) => (
-            <div className="notification-item" key={notice.id}>
-              <span>{notice.title}</span>
-              <button
-                className="notification-dismiss"
-                type="button"
-                onClick={() => dismissNotice(notice.id)}
-                aria-label={`关闭${notice.title}`}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : null}
+      <NotificationCenter />
     </div>
   );
 }
@@ -115,6 +101,10 @@ function formatEventTime(timestamp: number | null): string {
 }
 
 export function TaskRoutePlaceholder() {
+  const location = useLocation();
+  if (location.pathname.endsWith("/settings")) {
+    return <NotificationCenter mode="settings" />;
+  }
   return (
     <section className="route-placeholder" aria-labelledby="workspace-title">
       <div className="breadcrumb">工作区 / 任务</div>

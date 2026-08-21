@@ -5,6 +5,9 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from sidera_control_plane.application.artifact_content import ArtifactContentService
+from sidera_control_plane.application.attention_commands import (
+    AcknowledgeAttentionItemHandler,
+)
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -57,6 +60,7 @@ def get_command_service(
         factory,
         (
             TaskCommandHandler(),
+            AcknowledgeAttentionItemHandler(lambda: datetime.now(UTC)),
             PublishPlanSnapshotHandler(),
             WorkerCommandHandler(lambda: datetime.now(UTC)),
             ExecutionCommandHandler(
@@ -87,6 +91,8 @@ def get_task_first_query_service(
     return TaskFirstQueryService(
         SqlAlchemyTaskFirstQueryStore(database),
         main_agent_entry_uri=settings.main_agent_entry_uri,
+        actor_type=settings.local_actor_type,
+        actor_id=settings.local_actor_id,
     )
 
 

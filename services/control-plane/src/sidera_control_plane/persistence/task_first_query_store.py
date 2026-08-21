@@ -22,11 +22,13 @@ from sidera_control_plane.application.task_first_queries import (
     WorkerFact,
 )
 from sidera_control_plane.application.worker_trace_queries import RawTraceFact
+from sidera_control_plane.domain.attention import AttentionAcknowledgement
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
     AssignmentLeaseModel,
+    AttentionAcknowledgementModel,
     EvidenceClaimModel,
     ExecutionBindingModel,
     ExecutionEventModel,
@@ -54,6 +56,7 @@ class TaskFirstQuerySnapshot:
     evidence: dict[UUID, tuple[EvidenceFact, ...]]
     checkpoints: dict[UUID, tuple[CheckpointFact, ...]]
     activity: tuple[ActivityFact, ...]
+    acknowledgements: tuple[AttentionAcknowledgement, ...]
     last_change_cursor: int
     as_of: datetime
 
@@ -79,7 +82,12 @@ class WorkerTraceQuerySnapshot:
 
 class TaskFirstQueryStore(Protocol):
     def load(
-        self, workspace_id: UUID, root_task_id: UUID
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        *,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
     ) -> TaskFirstQuerySnapshot | None: ...
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]: ...
@@ -109,7 +117,12 @@ class SqlAlchemyTaskFirstQueryStore:
         self._database = database
 
     def load(
-        self, workspace_id: UUID, root_task_id: UUID
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        *,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
     ) -> TaskFirstQuerySnapshot | None:
         with self._database.session() as session:
             session.execute(
@@ -261,6 +274,20 @@ class SqlAlchemyTaskFirstQueryStore:
                 ),
                 default=plan.published_at,
             )
+            acknowledgements: tuple[AttentionAcknowledgement, ...] = ()
+            if actor_type is not None and actor_id is not None:
+                acknowledgement_rows = session.scalars(
+                    select(AttentionAcknowledgementModel).where(
+                        AttentionAcknowledgementModel.workspace_id == workspace_id,
+                        AttentionAcknowledgementModel.root_task_id == root_task_id,
+                        AttentionAcknowledgementModel.actor_type == actor_type,
+                        AttentionAcknowledgementModel.actor_id == actor_id,
+                    )
+                ).all()
+                acknowledgements = tuple(
+                    _attention_acknowledgement(row)
+                    for row in acknowledgement_rows
+                )
             return TaskFirstQuerySnapshot(
                 workspace_id=workspace_id,
                 plan=plan,
@@ -274,6 +301,7 @@ class SqlAlchemyTaskFirstQueryStore:
                 evidence=evidence,
                 checkpoints=checkpoints,
                 activity=activity,
+                acknowledgements=acknowledgements,
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
             )
@@ -473,6 +501,22 @@ def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
     return snapshot
 
 
+def _attention_acknowledgement(
+    row: AttentionAcknowledgementModel,
+) -> AttentionAcknowledgement:
+    return AttentionAcknowledgement(
+        workspace_id=row.workspace_id,
+        actor_type=row.actor_type,
+        actor_id=row.actor_id,
+        attention_key=row.attention_key,
+        root_task_id=row.root_task_id,
+        source_correlation_id=row.source_correlation_id,
+        source_resource_version=row.source_resource_version,
+        acknowledged_command_id=row.acknowledged_command_id,
+        acknowledged_at=row.acknowledged_at,
+    )
+
+
 def _task(row: TaskModel) -> TaskFact:
     return TaskFact(
         id=row.id,
@@ -506,6 +550,7 @@ def _group_executions(
                 finished_at=row.finished_at,
                 updated_at=row.updated_at,
                 capability_requirements=tuple(sorted(row.capability_requirements)),
+                version=row.version,
                 lineage_id=row.lineage_id,
                 source_execution_id=row.source_execution_id,
                 source_session_id=row.source_session_id,

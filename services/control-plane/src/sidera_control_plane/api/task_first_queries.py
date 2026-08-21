@@ -7,6 +7,7 @@ from fastapi.encoders import jsonable_encoder
 
 from sidera_control_plane.api.dependencies import get_task_first_query_service
 from sidera_control_plane.api.schemas import (
+    PlanDiffResponse,
     TaskActivityProjectionResponse,
     TaskDetailProjectionResponse,
     TaskGraphProjectionResponse,
@@ -86,7 +87,10 @@ def get_task_activity(
     )
 
 
-@router.get("/api/v1/tasks/{root_task_id}/plan-diff")
+@router.get(
+    "/api/v1/tasks/{root_task_id}/plan-diff",
+    response_model=PlanDiffResponse,
+)
 def get_plan_diff(
     root_task_id: UUID,
     workspace_id: UUID,

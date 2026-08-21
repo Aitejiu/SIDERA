@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select, update
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
+    AttentionAcknowledgementModel,
     AssignmentLeaseModel,
     CommandModel,
     EventModel,
@@ -69,6 +70,7 @@ def clean_database(database: Database) -> Iterator[None]:
         )
         for model in (
             ProjectionChangeModel,
+            AttentionAcknowledgementModel,
             WorkspaceProjectionCursorModel,
             PlanSnapshotModel,
             ExecutionInputModel,

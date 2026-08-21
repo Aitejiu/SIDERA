@@ -233,7 +233,7 @@ class EventRepository:
 def _event_resource_id(event: EventData) -> UUID | None:
     if event.aggregate_type == "task":
         return event.aggregate_id
-    if event.aggregate_type == "task_plan":
+    if event.aggregate_type in {"task_plan", "attention"}:
         root_task_id = event.payload.get("root_task_id")
         if isinstance(root_task_id, str):
             try:

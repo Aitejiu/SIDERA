@@ -16,17 +16,20 @@ import {
   type ProjectionStream,
   type ProjectionStreamSnapshot,
 } from "@/shared/api/projectionStream";
-
-interface WorkspaceNotice {
-  id: string;
-  title: string;
-  resourceId: string | null;
-}
+import {
+  appendNotification,
+  browserNotificationsEnabled,
+  notificationFromChange,
+  readLastNotifiedCursor,
+  sendBrowserNotification,
+  writeLastNotifiedCursor,
+  type WorkspaceNotification,
+} from "@/features/attention/notifications";
 
 interface WorkspaceStreamContextValue {
   streamState: ProjectionStreamSnapshot;
   seedSnapshotCursor: (cursor: number) => void;
-  notices: readonly WorkspaceNotice[];
+  notices: readonly WorkspaceNotification[];
   dismissNotice: (id: string) => void;
 }
 
@@ -40,7 +43,7 @@ export function WorkspaceStreamProvider({
   children: ReactNode;
 }) {
   const queryClient = useQueryClient();
-  const [notices, setNotices] = useState<WorkspaceNotice[]>([]);
+  const [notices, setNotices] = useState<WorkspaceNotification[]>([]);
 
   const invalidationQueue = useMemo(
     () => createInvalidationQueue(queryClient, workspaceId),
@@ -50,19 +53,20 @@ export function WorkspaceStreamProvider({
   const handleChange = useCallback(
     (change: ProjectionChange) => {
       invalidationQueue.enqueue(change);
-      const key = `${change.projection_type}:${change.resource_id ?? "workspace"}`;
-      if (change.change_type === "completed" || change.change_type === "failed") {
-        setNotices((current) => [
-          ...current.filter((notice) => notice.id !== key),
-          {
-            id: key,
-            title: change.change_type === "completed" ? "任务节点已完成" : "任务节点失败",
-            resourceId: change.resource_id,
-          },
-        ]);
+      const notification = notificationFromChange(workspaceId, change);
+      if (notification === null) {
+        return;
       }
+      if (change.cursor <= readLastNotifiedCursor(workspaceId)) {
+        return;
+      }
+      writeLastNotifiedCursor(workspaceId, change.cursor);
+      if (browserNotificationsEnabled(workspaceId)) {
+        sendBrowserNotification(notification);
+      }
+      setNotices((current) => appendNotification(current, notification));
     },
-    [invalidationQueue],
+    [invalidationQueue, workspaceId],
   );
 
   const handleResync = useCallback(

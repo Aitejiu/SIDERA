@@ -10,6 +10,10 @@ from sidera_control_plane.domain.artifacts import (
     ArtifactCandidate,
     EvidenceClaim,
 )
+from sidera_control_plane.domain.attention import (
+    AttentionAcknowledgement,
+    AttentionSource,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -83,6 +87,34 @@ class PlanRepositoryPort(Protocol):
     def list_for_root(
         self, root_task_id: UUID, workspace_id: UUID
     ) -> tuple[TaskPlanSnapshot, ...]:
+        raise NotImplementedError
+
+
+class AttentionAcknowledgementRepositoryPort(Protocol):
+    def get_current_source(
+        self, root_task_id: UUID, workspace_id: UUID, attention_key: str
+    ) -> AttentionSource | None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        workspace_id: UUID,
+        actor_type: str,
+        actor_id: str,
+        attention_key: str,
+    ) -> AttentionAcknowledgement | None:
+        raise NotImplementedError
+
+    def list_for_root(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        actor_type: str,
+        actor_id: str,
+    ) -> tuple[AttentionAcknowledgement, ...]:
+        raise NotImplementedError
+
+    def upsert(self, acknowledgement: AttentionAcknowledgement) -> None:
         raise NotImplementedError
 
 
@@ -430,6 +462,7 @@ class EventStorePort(Protocol):
 class ControlPlaneUnitOfWork(Protocol):
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
+    attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
     executions: ExecutionRepositoryPort

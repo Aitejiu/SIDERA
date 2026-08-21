@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { History } from "lucide-react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
+import { AttentionPanel } from "@/features/attention/AttentionPanel";
 
 import {
   getTaskActivity,
   getTaskDetail,
   getTaskGraph,
+  getTask,
   taskActivityQueryKey,
   taskDetailQueryKey,
   taskGraphQueryKey,
+  taskQueryKey,
 } from "./api";
 import { ExecutionHorizon } from "./ExecutionHorizon";
 import { MilestoneTrack } from "./MilestoneTrack";
@@ -33,6 +37,13 @@ export function TaskDetailPage() {
     queryKey: taskGraphQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
     queryFn: ({ signal }) => getTaskGraph(resolvedWorkspaceId, resolvedRootTaskId, signal),
     enabled: resolvedWorkspaceId.length > 0 && resolvedRootTaskId.length > 0,
+  });
+  const rootTaskQuery = useQuery({
+    queryKey: taskQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
+    queryFn: ({ signal }) => getTask(resolvedWorkspaceId, resolvedRootTaskId, signal),
+    enabled: resolvedWorkspaceId.length > 0
+      && resolvedRootTaskId.length > 0
+      && (graphQuery.data?.overview.attention_items.length ?? 0) > 0,
   });
   const activityQuery = useInfiniteQuery({
     queryKey: taskActivityQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
@@ -107,12 +118,27 @@ export function TaskDetailPage() {
                 <h1 id="task-detail-title">{graphQuery.data.overview.title}</h1>
                 <p>{graphQuery.data.overview.goal_summary}</p>
               </div>
-              <span className="mono-label">CURSOR {graphQuery.data.overview.last_change_cursor}</span>
+              <div className="task-detail-heading__meta">
+                <Link className="quiet-button" to={`/workspaces/${resolvedWorkspaceId}/tasks/${resolvedRootTaskId}/plan/${graphQuery.data.overview.generation}`}>
+                  <History size={14} aria-hidden="true" />计划历史
+                </Link>
+                <span className="mono-label">CURSOR {graphQuery.data.overview.last_change_cursor}</span>
+              </div>
             </div>
 
             <div className="task-detail-layout">
               <div className="task-detail-main">
                 <MilestoneTrack milestones={graphQuery.data.milestones} />
+                <AttentionPanel
+                  workspaceId={resolvedWorkspaceId}
+                  rootTaskId={resolvedRootTaskId}
+                  rootTaskVersion={rootTaskQuery.data?.version}
+                  items={graphQuery.data.overview.attention_items}
+                  onAcknowledged={() => {
+                    void graphQuery.refetch();
+                    void rootTaskQuery.refetch();
+                  }}
+                />
                 <ExecutionHorizon graph={graphQuery.data} />
                 <div className="graph-ledger-switch" role="tablist" aria-label="图与任务表视图">
                   <button className={viewMode === "dag" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "dag"} onClick={() => setViewMode("dag")}>DAG</button>
@@ -123,6 +149,8 @@ export function TaskDetailPage() {
                 {viewMode !== "dag" ? <TaskLedger nodes={graphQuery.data.nodes} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
                 <TaskActivity
                   activity={activity}
+                  workspaceId={resolvedWorkspaceId}
+                  rootTaskId={resolvedRootTaskId}
                   onLoadMore={() => void activityQuery.fetchNextPage()}
                   isLoadingMore={activityQuery.isFetchingNextPage}
                   isLoading={activityQuery.isPending}

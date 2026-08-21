@@ -8,6 +8,10 @@ from typing import Any
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NoCurrentPlan, NotFound
+from sidera_control_plane.domain.attention import (
+    AttentionAcknowledgement,
+    AttentionSource,
+)
 from sidera_control_plane.domain.plans import (
     TaskPlanSnapshot,
     WorkItem,
@@ -57,6 +61,7 @@ class ExecutionFact:
     finished_at: datetime | None
     updated_at: datetime
     capability_requirements: tuple[str, ...]
+    version: int = 1
     lineage_id: UUID | None = None
     source_execution_id: UUID | None = None
     source_session_id: UUID | None = None
@@ -169,6 +174,7 @@ class TaskFirstProjectionService:
         activity: FactMap,
         last_change_cursor: int,
         as_of: datetime,
+        acknowledgements: Iterable[AttentionAcknowledgement] = (),
     ) -> TaskGraphProjection:
         nodes = [
             self._node_for_item(
@@ -196,8 +202,11 @@ class TaskFirstProjectionService:
             nodes,
             milestones,
             activity=activity,
+            tasks=tasks,
+            executions=executions,
             last_change_cursor=last_change_cursor,
             as_of=as_of,
+            acknowledgements=acknowledgements,
         )
         return TaskGraphProjection(
             schema_version=1,
@@ -625,15 +634,21 @@ class TaskFirstProjectionService:
         milestones: tuple[MilestoneProjection, ...],
         *,
         activity: FactMap,
+        tasks: Mapping[UUID, TaskFact],
+        executions: FactMap,
         last_change_cursor: int,
         as_of: datetime,
+        acknowledgements: Iterable[AttentionAcknowledgement],
     ) -> TaskOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
             None,
         )
+        acknowledged_by_key = {
+            item.attention_key: item for item in acknowledgements
+        }
         attention = tuple(
-            self._attention(node, activity)
+            item
             for node in nodes
             if node.state
             in {
@@ -642,6 +657,17 @@ class TaskFirstProjectionService:
                 TaskNodeState.BLOCKED,
                 TaskNodeState.FAILED,
             }
+            for item in (self._attention(node, activity, tasks, executions),)
+            if not acknowledged_by_key.get(item.key)
+            or not acknowledged_by_key[item.key].applies_to(
+                AttentionSource(
+                    attention_key=item.key,
+                    root_task_id=snapshot.root_task_id,
+                    resource_id=item.resource_id,
+                    resource_version=item.resource_version,
+                    correlation_id=item.correlation_id,
+                )
+            )
         )
         next_keys = tuple(
             node.work_item_key
@@ -686,16 +712,36 @@ class TaskFirstProjectionService:
 
     @staticmethod
     def _attention(
-        node: TaskNodeProjection, activity: FactMap
+        node: TaskNodeProjection,
+        activity: FactMap,
+        tasks: Mapping[UUID, TaskFact],
+        executions: FactMap,
     ) -> AttentionItemProjection:
         fact = _latest_fact(activity, node.task_id)
+        task = tasks.get(node.task_id) if node.task_id else None
+        execution = _latest_fact(executions, node.task_id)
+        resource_id = (
+            execution.id
+            if isinstance(execution, ExecutionFact)
+            else task.id
+            if task is not None
+            else UUID(int=0)
+        )
+        resource_version = (
+            execution.version
+            if isinstance(execution, ExecutionFact)
+            else task.version
+            if task is not None
+            else 1
+        )
+        resource_kind = "execution" if isinstance(execution, ExecutionFact) else "task"
         return AttentionItemProjection(
-            key=f"{node.work_item_key}:{node.state.value}",
+            key=f"{resource_kind}:{resource_id}:{node.state.value}",
             kind=node.state.value,
             title=node.title,
             summary=node.current_action or f"Task is {node.state.value}",
-            resource_id=node.task_id or UUID(int=0),
-            resource_version=1,
+            resource_id=resource_id,
+            resource_version=resource_version,
             correlation_id=fact.correlation_id if fact else UUID(int=0),
             occurred_at=(
                 fact.occurred_at
@@ -867,15 +913,24 @@ def _activity_cursor(value: ActivityFact) -> str:
 
 
 class TaskFirstQueryService:
-    def __init__(self, store: Any, *, main_agent_entry_uri: str | None = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        main_agent_entry_uri: str | None = None,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+    ) -> None:
         self._store = store
         self._composer = TaskFirstProjectionService()
         self._main_agent_entry_uri = main_agent_entry_uri
+        self._actor_type = actor_type
+        self._actor_id = actor_id
 
     def list_overviews(self, workspace_id: UUID) -> tuple[TaskOverviewProjection, ...]:
         overviews: list[TaskOverviewProjection] = []
         for root_task_id in self._store.list_current_root_ids(workspace_id):
-            loaded = self._store.load(workspace_id, root_task_id)
+            loaded = self._load(workspace_id, root_task_id)
             if loaded is not None:
                 overviews.append(self._graph(loaded).overview)
         return tuple(overviews)
@@ -959,10 +1014,20 @@ class TaskFirstQueryService:
         return self._composer.capabilities(self._main_agent_entry_uri)
 
     def _require_loaded(self, workspace_id: UUID, root_task_id: UUID) -> Any:
-        loaded = self._store.load(workspace_id, root_task_id)
+        loaded = self._load(workspace_id, root_task_id)
         if loaded is None:
             raise NoCurrentPlan("current task plan is unavailable")
         return loaded
+
+    def _load(
+        self, workspace_id: UUID, root_task_id: UUID
+    ) -> Any:
+        return self._store.load(
+            workspace_id,
+            root_task_id,
+            actor_type=self._actor_type,
+            actor_id=self._actor_id,
+        )
 
     def _graph(self, loaded: Any) -> TaskGraphProjection:
         activity_by_task: dict[UUID, tuple[ActivityFact, ...]] = defaultdict(tuple)
@@ -980,6 +1045,7 @@ class TaskFirstQueryService:
             workers=loaded.workers,
             evidence=loaded.evidence,
             activity=activity_by_task,
+            acknowledgements=loaded.acknowledgements,
             last_change_cursor=loaded.last_change_cursor,
             as_of=loaded.as_of,
         )

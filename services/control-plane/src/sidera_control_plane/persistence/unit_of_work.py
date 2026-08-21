@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import (
     ArtifactRepositoryPort,
+    AttentionAcknowledgementRepositoryPort,
     CommandRepositoryPort,
     EventStorePort,
     EvidenceClaimRepositoryPort,
@@ -26,6 +27,9 @@ from sidera_control_plane.application.ports import (
 )
 from sidera_control_plane.application.projection_changes import (
     ProjectionChangePublisher,
+)
+from sidera_control_plane.persistence.attention_repository import (
+    AttentionAcknowledgementRepository,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
@@ -59,6 +63,7 @@ class SqlAlchemyUnitOfWork:
     session: Session
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
+    attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
     executions: ExecutionRepositoryPort
@@ -85,6 +90,7 @@ class SqlAlchemyUnitOfWork:
         self.session = Session(self._database.engine, expire_on_commit=False)
         self.tasks = TaskRepository(self.session)
         self.plans = PlanRepository(self.session)
+        self.attention = AttentionAcknowledgementRepository(self.session)
         self.projection_changes = ProjectionChangePublisher(
             ProjectionChangeRepository(
                 self.session,

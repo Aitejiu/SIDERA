@@ -1,9 +1,12 @@
 import { ArrowDown, Clock3 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import type { TaskActivity as TaskActivityProjection } from "./types";
 
 export function TaskActivity({
   activity,
+  workspaceId,
+  rootTaskId,
   onLoadMore,
   isLoadingMore = false,
   isLoading = false,
@@ -11,6 +14,8 @@ export function TaskActivity({
   onRetry,
 }: {
   activity: TaskActivityProjection | undefined;
+  workspaceId: string;
+  rootTaskId: string;
   onLoadMore?: () => void;
   isLoadingMore?: boolean;
   isLoading?: boolean;
@@ -47,14 +52,19 @@ export function TaskActivity({
       </div>
       <div className="activity-list">
         {activity.items.map((item) => (
-          <div className="activity-item" key={`${item.source_type}:${item.source_id}:${item.occurred_at}`}>
+          <Link
+            className="activity-item"
+            key={`${item.source_type}:${item.source_id}:${item.occurred_at}`}
+            to={`/workspaces/${workspaceId}/tasks/${rootTaskId}`}
+            aria-label={`查看${item.title}`}
+          >
             <Clock3 size={14} aria-hidden="true" />
             <div>
               <strong>{item.title}</strong>
               <span>{item.summary}</span>
             </div>
             <span className="mono-label">{formatTime(item.occurred_at)}</span>
-          </div>
+          </Link>
         ))}
       </div>
       {activity.next_cursor !== null ? (
