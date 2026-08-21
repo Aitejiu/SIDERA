@@ -33,6 +33,7 @@ from sidera_control_plane.domain.modules import (
     ModuleInstance,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.workspace import (
@@ -77,6 +78,20 @@ class PlanRepositoryPort(Protocol):
     def list_for_root(
         self, root_task_id: UUID, workspace_id: UUID
     ) -> tuple[TaskPlanSnapshot, ...]:
+        raise NotImplementedError
+
+
+class ProjectionChangePublisherPort(Protocol):
+    def changed(
+        self,
+        *,
+        workspace_id: UUID,
+        projection_type: str,
+        resource_id: UUID | None,
+        change_type: str,
+        resource_version: int | None,
+        correlation_id: UUID,
+    ) -> ProjectionChange:
         raise NotImplementedError
 
 
@@ -399,6 +414,7 @@ class EventStorePort(Protocol):
 class ControlPlaneUnitOfWork(Protocol):
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
+    projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort

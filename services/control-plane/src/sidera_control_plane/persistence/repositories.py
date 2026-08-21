@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.application.ports import ProjectionChangePublisherPort
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -177,8 +178,13 @@ class CommandRepository:
 
 
 class EventRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def append_with_outbox(self, event: EventData) -> None:
         self._session.add(
@@ -213,6 +219,28 @@ class EventRepository:
                 },
             )
         )
+        if self._projection_changes is not None:
+            self._projection_changes.changed(
+                workspace_id=event.workspace_id,
+                projection_type="task_first",
+                resource_id=_event_resource_id(event),
+                change_type=event.event_type,
+                resource_version=event.aggregate_version,
+                correlation_id=event.correlation_id,
+            )
+
+
+def _event_resource_id(event: EventData) -> UUID | None:
+    if event.aggregate_type == "task":
+        return event.aggregate_id
+    if event.aggregate_type == "task_plan":
+        root_task_id = event.payload.get("root_task_id")
+        if isinstance(root_task_id, str):
+            try:
+                return UUID(root_task_id)
+            except ValueError:
+                pass
+    return None
 
 
 def _to_domain_task(row: TaskModel) -> Task:

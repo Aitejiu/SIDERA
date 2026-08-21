@@ -18,10 +18,14 @@ from sidera_control_plane.application.ports import (
     LeaseStorePort,
     ModuleRepositoryPort,
     PlanRepositoryPort,
+    ProjectionChangePublisherPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
     WorkerRepositoryPort,
     WorkspaceRepositoryPort,
+)
+from sidera_control_plane.application.projection_changes import (
+    ProjectionChangePublisher,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
@@ -38,6 +42,9 @@ from sidera_control_plane.persistence.module_repository import (
     ModuleRepository,
 )
 from sidera_control_plane.persistence.plan_repository import PlanRepository
+from sidera_control_plane.persistence.projection_change_repository import (
+    ProjectionChangeRepository,
+)
 from sidera_control_plane.persistence.repositories import (
     CommandRepository,
     EventRepository,
@@ -52,6 +59,7 @@ class SqlAlchemyUnitOfWork:
     session: Session
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
+    projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort
@@ -67,13 +75,22 @@ class SqlAlchemyUnitOfWork:
     commands: CommandRepositoryPort
     events: EventStorePort
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, *, projection_change_retention_seconds: int = 604_800
+    ) -> None:
         self._database = database
+        self._projection_change_retention_seconds = projection_change_retention_seconds
 
     def __enter__(self) -> Self:
         self.session = Session(self._database.engine, expire_on_commit=False)
         self.tasks = TaskRepository(self.session)
         self.plans = PlanRepository(self.session)
+        self.projection_changes = ProjectionChangePublisher(
+            ProjectionChangeRepository(
+                self.session,
+                retention_seconds=self._projection_change_retention_seconds,
+            )
+        )
         self.workers = WorkerRepository(self.session)
         self.executions = ExecutionRepository(self.session)
         self.leases = LeaseStore(self.session)
@@ -82,12 +99,16 @@ class SqlAlchemyUnitOfWork:
         self.bindings = ExecutionBindingRepository(self.session)
         self.gateway_operations = GatewayOperationRepository(self.session)
         self.workspaces = WorkspaceRepository(self.session)
-        self.execution_events = ExecutionEventRepository(self.session)
-        self.artifacts = ArtifactRepository(self.session)
-        self.evidence_claims = EvidenceClaimRepository(self.session)
+        self.execution_events = ExecutionEventRepository(
+            self.session, self.projection_changes
+        )
+        self.artifacts = ArtifactRepository(self.session, self.projection_changes)
+        self.evidence_claims = EvidenceClaimRepository(
+            self.session, self.projection_changes
+        )
         self.execution_inputs = ExecutionInputRepository(self.session)
         self.commands = CommandRepository(self.session)
-        self.events = EventRepository(self.session)
+        self.events = EventRepository(self.session, self.projection_changes)
         return self
 
     def __exit__(

@@ -5,6 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.application.ports import ProjectionChangePublisherPort
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactType,
@@ -106,8 +107,13 @@ class GatewayOperationRepository:
 
 
 class ExecutionEventRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def add(self, event: ExecutionEvent) -> None:
         self._session.add(
@@ -123,6 +129,15 @@ class ExecutionEventRepository:
                 raw_ref=event.raw_ref,
             )
         )
+        if self._projection_changes is not None:
+            self._projection_changes.changed(
+                workspace_id=event.workspace_id,
+                projection_type="worker_trace",
+                resource_id=event.execution_id,
+                change_type=event.event_type,
+                resource_version=event.sequence,
+                correlation_id=event.id,
+            )
 
     def get(
         self, session_id: UUID, sequence: int, workspace_id: UUID
@@ -138,8 +153,13 @@ class ExecutionEventRepository:
 
 
 class ArtifactRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def add(self, artifact: Artifact) -> None:
         self._session.add(
@@ -157,6 +177,15 @@ class ArtifactRepository:
                 provenance=dict(artifact.provenance),
             )
         )
+        if self._projection_changes is not None:
+            self._projection_changes.changed(
+                workspace_id=artifact.workspace_id,
+                projection_type="worker_trace",
+                resource_id=artifact.execution_id,
+                change_type="artifact",
+                resource_version=None,
+                correlation_id=artifact.id,
+            )
 
     def list_for_execution(
         self, execution_id: UUID, workspace_id: UUID
@@ -173,8 +202,13 @@ class ArtifactRepository:
 
 
 class EvidenceClaimRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def add(self, claim: EvidenceClaim) -> None:
         self._session.add(
@@ -192,6 +226,15 @@ class EvidenceClaimRepository:
                 created_at=claim.created_at,
             )
         )
+        if self._projection_changes is not None:
+            self._projection_changes.changed(
+                workspace_id=claim.workspace_id,
+                projection_type="task_first",
+                resource_id=claim.task_id,
+                change_type="evidence_claim",
+                resource_version=None,
+                correlation_id=claim.id,
+            )
 
     def list_for_task(
         self, task_id: UUID, workspace_id: UUID

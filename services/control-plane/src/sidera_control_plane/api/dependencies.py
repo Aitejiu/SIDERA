@@ -39,7 +39,8 @@ def get_command_service(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CommandService:
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
-        database
+        database,
+        projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
     return CommandService(
         factory,
