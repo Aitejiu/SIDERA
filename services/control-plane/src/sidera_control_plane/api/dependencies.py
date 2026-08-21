@@ -16,6 +16,9 @@ from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
+from sidera_control_plane.application.worker_trace_queries import (
+    WorkerTraceQueryService,
+)
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.resource_query_store import (
@@ -81,3 +84,9 @@ def get_task_first_query_service(
         SqlAlchemyTaskFirstQueryStore(database),
         main_agent_entry_uri=settings.main_agent_entry_uri,
     )
+
+
+def get_worker_trace_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> WorkerTraceQueryService:
+    return WorkerTraceQueryService(SqlAlchemyTaskFirstQueryStore(database))

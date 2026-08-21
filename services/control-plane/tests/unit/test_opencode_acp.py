@@ -151,9 +151,11 @@ def test_opencode_acp_probe_and_prompt_round_trip(tmp_path: Path) -> None:
         operation_id=uuid4(),
     )
     assert result.outcome is DeliveryOutcome.DELIVERED
-    assert any(
-        event.event_type == "progress.updated" for event in adapter.read_events(handle)
-    )
+    events = adapter.read_events(handle)
+    assert any(event.event_type == "progress.updated" for event in events)
+    progress = next(event for event in events if event.event_type == "progress.updated")
+    assert progress.payload["trace_category"] == "assistant_summary"
+    assert progress.payload["trace_summary"] == "done"
 
     stopped = adapter.stop_session(handle, operation_id=uuid4())
     assert stopped.outcome is DeliveryOutcome.DELIVERED

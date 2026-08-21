@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -248,3 +249,84 @@ class MainAgentSlotProjection:
 class WorkspaceCapabilitiesProjection:
     schema_version: int
     main_agent: MainAgentSlotProjection
+
+
+class TraceCategory(StrEnum):
+    INPUT = "input"
+    ASSISTANT_SUMMARY = "assistant_summary"
+    MODEL = "model"
+    TOOL = "tool"
+    SUBTOOL = "subtool"
+    ARTIFACT = "artifact"
+    CHECKPOINT = "checkpoint"
+    SCHEDULER = "scheduler"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class TraceUsage:
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_tokens: int | None
+    cost_microunits: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TraceTimingSummary:
+    input_ms: int
+    model_ms: int
+    tools_ms: int
+    total_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerTraceEvent:
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    work_item_key: str | None
+    plan_snapshot_id: UUID | None
+    execution_id: UUID
+    session_id: UUID
+    sequence: int
+    occurred_at: datetime
+    category: TraceCategory
+    status: str
+    title: str
+    summary: str
+    duration_ms: int | None
+    usage: TraceUsage | None
+    artifact_refs: tuple[UUID, ...]
+    provider_payload_ref: str | None
+    provider_extensions: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerTraceProjection:
+    schema_version: int
+    execution_id: UUID
+    session_id: UUID
+    worker_id: UUID | None
+    status: str
+    current_action: str | None
+    plan_generation: int | None
+    checkpoint_sequence: int | None
+    freshness_at: datetime | None
+    last_change_cursor: int
+    timing: TraceTimingSummary
+    events: tuple[WorkerTraceEvent, ...]
+    previous_before_sequence: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerContextBranchProjection:
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    work_item_key: str
+    worker_slot_key: str
+    execution_lineage_id: UUID
+    current_execution_id: UUID
+    current_session_id: UUID
+    head_checkpoint_sequence: int | None
+    artifact_refs: tuple[UUID, ...]
+    replay_capability: Literal["none", "portable_replay", "native_resume"]

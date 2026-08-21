@@ -712,12 +712,45 @@ def _notification_event(
         "tool_call": "progress.updated",
         "tool_call_update": "progress.updated",
     }.get(update_type, "progress.updated")
+    payload = dict(update)
+    payload["trace_category"] = _trace_category(update_type, update)
+    summary = _trace_summary(update)
+    if summary:
+        payload["trace_summary"] = summary
+    usage = update.get("usage")
+    if isinstance(usage, Mapping):
+        payload["trace_usage"] = dict(usage)
     return AdapterEvent(
         event_type=event_type,
         sequence=1,
-        payload=dict(update),
+        payload=payload,
         occurred_at=datetime.now(UTC),
     )
+
+
+def _trace_category(update_type: str, update: Mapping[str, Any]) -> str:
+    if update_type in {"agent_message_chunk", "plan"}:
+        return "assistant_summary"
+    if update_type == "usage_update":
+        return "model"
+    if update_type == "tool_call_update":
+        return "subtool" if update.get("parent_tool") else "tool"
+    if update_type == "tool_call":
+        return "tool"
+    return "model"
+
+
+def _trace_summary(update: Mapping[str, Any]) -> str | None:
+    for key in ("summary", "text", "title", "tool", "name"):
+        value = update.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:4096]
+    content = update.get("content")
+    if isinstance(content, Mapping):
+        text = content.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()[:4096]
+    return None
 
 
 def _process_identity(process: Popen[Any]) -> ProcessDescriptor:

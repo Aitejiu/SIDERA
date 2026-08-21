@@ -21,6 +21,7 @@ from sidera_control_plane.application.task_first_queries import (
     TaskFact,
     WorkerFact,
 )
+from sidera_control_plane.application.worker_trace_queries import RawTraceFact
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -57,6 +58,25 @@ class TaskFirstQuerySnapshot:
     as_of: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerTraceQuerySnapshot:
+    workspace_id: UUID
+    root_task_id: UUID
+    execution_id: UUID
+    session_id: UUID
+    worker_id: UUID | None
+    status: str
+    lineage_id: UUID
+    plan_snapshot_id: UUID | None
+    plan_generation: int | None
+    work_item_key: str | None
+    worker_slot_key: str | None
+    events: tuple[RawTraceFact, ...]
+    artifact_refs: tuple[UUID, ...]
+    last_change_cursor: int
+    previous_before_sequence: int | None
+
+
 class TaskFirstQueryStore(Protocol):
     def load(
         self, workspace_id: UUID, root_task_id: UUID
@@ -71,6 +91,17 @@ class TaskFirstQueryStore(Protocol):
     def list_executions_for_tasks(
         self, workspace_id: UUID, task_ids: set[UUID]
     ) -> dict[UUID, tuple[ExecutionFact, ...]]: ...
+
+    def load_trace(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        execution_id: UUID,
+        session_id: UUID,
+        *,
+        before_sequence: int | None,
+        limit: int,
+    ) -> WorkerTraceQuerySnapshot | None: ...
 
 
 class SqlAlchemyTaskFirstQueryStore:
@@ -296,6 +327,143 @@ class SqlAlchemyTaskFirstQueryStore:
                 .order_by(ExecutionModel.created_at.asc(), ExecutionModel.id.asc())
             ).all()
         return _group_executions(rows)
+
+    def load_trace(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        execution_id: UUID,
+        session_id: UUID,
+        *,
+        before_sequence: int | None,
+        limit: int,
+    ) -> WorkerTraceQuerySnapshot | None:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._database.session() as session:
+            session.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            )
+            execution = session.scalar(
+                select(ExecutionModel).where(
+                    ExecutionModel.workspace_id == workspace_id,
+                    ExecutionModel.id == execution_id,
+                    ExecutionModel.task_id.in_(
+                        select(TaskModel.id).where(
+                            TaskModel.workspace_id == workspace_id
+                        )
+                    ),
+                )
+            )
+            if execution is None:
+                return None
+            session_row = session.scalar(
+                select(ExecutionSessionModel).where(
+                    ExecutionSessionModel.workspace_id == workspace_id,
+                    ExecutionSessionModel.id == session_id,
+                    ExecutionSessionModel.execution_id == execution_id,
+                )
+            )
+            if session_row is None:
+                return None
+            plan_row = session.scalar(
+                select(PlanSnapshotModel)
+                .where(
+                    PlanSnapshotModel.workspace_id == workspace_id,
+                    PlanSnapshotModel.root_task_id == root_task_id,
+                )
+                .order_by(PlanSnapshotModel.generation.desc())
+                .limit(1)
+            )
+            plan = _plan(plan_row) if plan_row is not None else None
+            work_item_key: str | None = None
+            worker_slot_key: str | None = None
+            if plan is not None:
+                item = next(
+                    (
+                        item
+                        for item in plan.work_items
+                        if item.task_id == execution.task_id
+                    ),
+                    None,
+                )
+                if item is not None:
+                    work_item_key = item.key
+                    worker_slot_key = item.worker_slot_key
+            statement = select(ExecutionEventModel).where(
+                ExecutionEventModel.workspace_id == workspace_id,
+                ExecutionEventModel.execution_id == execution_id,
+                ExecutionEventModel.session_id == session_id,
+            )
+            if before_sequence is not None:
+                statement = statement.where(
+                    ExecutionEventModel.sequence < before_sequence
+                )
+            event_rows = session.scalars(
+                statement.order_by(ExecutionEventModel.sequence.desc()).limit(limit + 1)
+            ).all()
+            selected_rows = list(event_rows[:limit])
+            selected_rows.reverse()
+            previous_before = (
+                min(row.sequence for row in selected_rows)
+                if len(event_rows) > limit and selected_rows
+                else None
+            )
+            facts = tuple(
+                RawTraceFact(
+                    schema_version=1,
+                    workspace_id=workspace_id,
+                    root_task_id=root_task_id,
+                    plan_snapshot_id=plan.id if plan else None,
+                    work_item_key=work_item_key,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    sequence=row.sequence,
+                    occurred_at=row.occurred_at,
+                    event_type=row.event_type,
+                    status=execution.status,
+                    payload=dict(row.payload),
+                    provider_payload_ref=None,
+                )
+                for row in selected_rows
+            )
+            artifact_rows = session.scalars(
+                select(ArtifactModel.id)
+                .where(
+                    ArtifactModel.workspace_id == workspace_id,
+                    ArtifactModel.execution_id == execution_id,
+                )
+                .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
+            ).all()
+            last_cursor = session.scalar(
+                select(WorkspaceProjectionCursorModel.last_cursor).where(
+                    WorkspaceProjectionCursorModel.workspace_id == workspace_id
+                )
+            )
+            if last_cursor is None:
+                last_cursor = session.scalar(
+                    select(ProjectionChangeModel.cursor)
+                    .where(ProjectionChangeModel.workspace_id == workspace_id)
+                    .order_by(ProjectionChangeModel.cursor.desc())
+                    .limit(1)
+                ) or 0
+            return WorkerTraceQuerySnapshot(
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                execution_id=execution_id,
+                session_id=session_id,
+                worker_id=session_row.worker_id or execution.assigned_worker_id,
+                status=execution.status,
+                lineage_id=execution.lineage_id,
+                plan_snapshot_id=plan.id if plan else None,
+                plan_generation=plan.generation if plan else None,
+                work_item_key=work_item_key,
+                worker_slot_key=worker_slot_key,
+                events=facts,
+                artifact_refs=tuple(artifact_rows),
+                last_change_cursor=int(last_cursor),
+                previous_before_sequence=previous_before,
+            )
 
 
 def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
