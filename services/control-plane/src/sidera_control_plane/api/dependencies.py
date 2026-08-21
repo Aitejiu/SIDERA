@@ -13,12 +13,16 @@ from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHa
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.task_commands import TaskCommandHandler
+from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
+)
+from sidera_control_plane.persistence.task_first_query_store import (
+    SqlAlchemyTaskFirstQueryStore,
 )
 from sidera_control_plane.persistence.task_query_store import SqlAlchemyTaskQueryStore
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -67,3 +71,13 @@ def get_resource_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> ResourceQueryService:
     return ResourceQueryService(SqlAlchemyResourceQueryStore(database))
+
+
+def get_task_first_query_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> TaskFirstQueryService:
+    return TaskFirstQueryService(
+        SqlAlchemyTaskFirstQueryStore(database),
+        main_agent_entry_uri=settings.main_agent_entry_uri,
+    )

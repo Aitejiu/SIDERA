@@ -15,6 +15,14 @@ class NotFound(ApplicationError):
     code = "not_found"
 
 
+class Conflict(ApplicationError):
+    code = "conflict"
+
+
+class NoCurrentPlan(Conflict):
+    code = "no_current_plan"
+
+
 class IdempotencyConflict(ApplicationError):
     code = "idempotency_conflict"
 

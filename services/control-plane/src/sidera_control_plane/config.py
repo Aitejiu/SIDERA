@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     opencode_expected_version: str | None = None
     opencode_probe_timeout_seconds: float = Field(default=30.0, gt=0)
     local_actor_type: str = Field(default="local", min_length=1)
-    local_actor_id: str = Field(default="developer", min_length=1)
+    local_actor_id: str = Field(default="aitejiu", min_length=1)
     projection_stream_poll_interval_seconds: float = Field(default=0.5, gt=0)
     projection_stream_heartbeat_seconds: float = Field(default=15.0, gt=0)
     projection_change_retention_seconds: int = Field(default=604_800, gt=0)
+    main_agent_entry_uri: str | None = None

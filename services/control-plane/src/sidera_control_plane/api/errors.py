@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from sidera_control_plane.application.errors import (
     ApplicationError,
+    Conflict,
     IdempotencyConflict,
     NotFound,
 )
@@ -36,7 +37,7 @@ def install_error_handlers(app: FastAPI) -> None:
         _request: Request, exc: ApplicationError
     ) -> JSONResponse:
         status_code = 404 if isinstance(exc, NotFound) else 409
-        if not isinstance(exc, IdempotencyConflict | NotFound):
+        if not isinstance(exc, Conflict | IdempotencyConflict | NotFound):
             status_code = 422
         return _error_response(status_code, exc.code, str(exc), exc.details)
 
