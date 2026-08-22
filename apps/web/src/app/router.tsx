@@ -12,6 +12,8 @@ import { PlanDiffPage } from "@/features/tasks/PlanDiffPage";
 import { PlanGenerationPage } from "@/features/tasks/PlanGenerationPage";
 import { ArtifactPage } from "@/features/trace/ArtifactPage";
 import { WorkerTracePage } from "@/features/trace/WorkerTracePage";
+import { ExecutionPage } from "@/features/trace/ExecutionPage";
+import { CapabilitiesPage, ChatPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -40,6 +42,10 @@ export const routes: RouteObject[] = [
         element: <PlanDiffPage />,
       },
       {
+        path: "/workspaces/:workspaceId/tasks/:rootTaskId/executions/:executionId/sessions/:sessionId",
+        element: <ExecutionPage />,
+      },
+      {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/executions/:executionId/sessions/:sessionId/trace",
         element: <WorkerTracePage />,
       },
@@ -48,8 +54,24 @@ export const routes: RouteObject[] = [
         element: <ArtifactPage />,
       },
       {
+        path: "/workspaces/:workspaceId/inbox",
+        element: <InboxPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/chat",
+        element: <ChatPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/history",
+        element: <HistoryPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/capabilities",
+        element: <CapabilitiesPage />,
+      },
+      {
         path: "/workspaces/:workspaceId/activity",
-        element: <TaskRoutePlaceholder />,
+        element: <Navigate to="../inbox" replace />,
       },
       {
         path: "/workspaces/:workspaceId/settings",

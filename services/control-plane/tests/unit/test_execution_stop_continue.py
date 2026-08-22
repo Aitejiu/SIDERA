@@ -4,8 +4,13 @@ from uuid import uuid4
 import pytest
 
 from sidera_control_plane.api.schemas import CommandRequest
+from sidera_control_plane.application.execution_commands import _continuation_worker_id
 from sidera_control_plane.domain.errors import InvalidTransition
-from sidera_control_plane.domain.execution import Execution, ExecutionStatus
+from sidera_control_plane.domain.execution import (
+    Execution,
+    ExecutionSession,
+    ExecutionStatus,
+)
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
@@ -87,3 +92,20 @@ def test_continue_rejects_an_execution_target() -> None:
         CommandRequest.model_validate(
             _request("ContinueExecutionSession", "execution", {"not_before": NOW.isoformat()})
         )
+
+
+def test_continuation_is_pinned_to_the_original_session_worker() -> None:
+    assigned_worker_id = uuid4()
+    session_worker_id = uuid4()
+    execution = _execution()
+    execution.assigned_worker_id = assigned_worker_id
+    session = ExecutionSession.start(
+        session_id=uuid4(),
+        workspace_id=execution.workspace_id,
+        execution_id=execution.id,
+        worker_id=session_worker_id,
+        adapter_session_id="adapter-session",
+        now=NOW,
+    )
+
+    assert _continuation_worker_id(execution, session) == session_worker_id

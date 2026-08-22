@@ -13,6 +13,7 @@ test.describe("large Task First graph", () => {
     const startedAt = Date.now();
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}`);
     await expect(page.locator("#task-detail-title")).toHaveText("Scale graph");
+    await page.getByRole("tab", { name: "任务表", exact: true }).click();
     await expect(page.locator(".ledger-row")).toHaveCount(200, { timeout: 15_000 });
     const ledgerElapsedMs = Date.now() - startedAt;
     test.info().attach("scale-ledger-timing", {

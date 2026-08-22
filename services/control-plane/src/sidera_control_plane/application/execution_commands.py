@@ -32,6 +32,12 @@ from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import TaskStatus
 
 
+def _continuation_worker_id(execution: Execution, session: ExecutionSession) -> UUID:
+    """Keep a continuation on the worker that owned the original session."""
+    del execution
+    return session.worker_id
+
+
 class ExecutionCommandHandler:
     command_types = frozenset(
         {
@@ -240,7 +246,7 @@ class ExecutionCommandHandler:
             max_attempts=execution.max_attempts,
             purpose=execution.purpose,
             capability_requirements=execution.capability_requirements,
-            pinned_worker_id=execution.pinned_worker_id,
+            pinned_worker_id=_continuation_worker_id(execution, session),
             not_before=_required_datetime(envelope.payload, "not_before"),
             source_execution_id=execution.id,
             source_session_id=session.id,
@@ -285,8 +291,6 @@ class ExecutionCommandHandler:
             aggregate_version=continuation.version,
             event_ids=tuple(event.id for event in events),
         )
-
-
     def _retry(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:

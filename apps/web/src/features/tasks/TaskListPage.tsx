@@ -68,7 +68,7 @@ export function TaskListPage() {
           <span>物化</span>
           <span>调度</span>
           <span>下一节点</span>
-          <span>关注</span>
+          <span>需要我</span>
         </div>
         <div className="task-list" aria-label="任务列表">
           {query.data?.map((overview) => (

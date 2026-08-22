@@ -74,10 +74,10 @@ test.describe("accessible R4 routes", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByRole("heading", { name: "Backend execution", exact: true })).toBeVisible();
 
-    const executionLink = page.getByRole("link", { name: /Execution 60000000/ });
+    const executionLink = page.getByRole("link", { name: /查看执行过程/ });
     await executionLink.focus();
     await page.keyboard.press("Enter");
-    await expect(page.locator("#worker-trace-title")).toHaveText("Worker 轨迹");
+    await expect(page.locator("#execution-page-title")).toHaveText("执行步骤");
     const traceWakeResponse = await request.post("/api/v1/commands", {
       data: {
         command_id: randomUUID(),
@@ -106,7 +106,7 @@ test.describe("accessible R4 routes", () => {
     const send = page.getByRole("button", { name: "发送到当前 Session" });
     await send.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByText("已排队", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("介入当前 Session").getByText("已排队", { exact: true })).toBeVisible();
 
     page.once("dialog", (dialog) => void dialog.accept());
     const stop = page.getByRole("button", { name: "停止 Execution" });

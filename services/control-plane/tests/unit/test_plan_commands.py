@@ -3,7 +3,8 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Self, cast
+from types import TracebackType
+from typing import Any, Self, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -160,6 +161,25 @@ class FakeEventRepository:
 
 
 class FakeUnitOfWork:
+    tasks: Any
+    attention: Any
+    plans: Any
+    commands: Any
+    events: Any
+    projection_changes: Any
+    workers: Any
+    executions: Any
+    leases: Any
+    sessions: Any
+    modules: Any
+    bindings: Any
+    gateway_operations: Any
+    workspaces: Any
+    execution_events: Any
+    artifacts: Any
+    evidence_claims: Any
+    execution_inputs: Any
+
     def __init__(
         self,
         tasks: FakeTaskRepository,
@@ -174,8 +194,13 @@ class FakeUnitOfWork:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_args: object) -> None:
-        return None
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc_value, traceback
 
     @contextmanager
     def savepoint(self) -> Iterator[None]:

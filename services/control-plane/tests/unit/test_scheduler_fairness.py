@@ -20,7 +20,7 @@ class FakeUniqueViolation(UniqueViolation):
         self._constraint_name = constraint_name
 
     @property
-    def diag(self) -> SimpleNamespace:
+    def diag(self) -> Any:
         return SimpleNamespace(constraint_name=self._constraint_name)
 
 

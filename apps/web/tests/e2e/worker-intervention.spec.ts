@@ -20,7 +20,7 @@ test.describe("exact worker intervention", () => {
 
     await page.getByLabel("介入内容").fill("继续验证 backend checkpoint");
     await page.getByRole("button", { name: "发送到当前 Session" }).click();
-    await expect(page.getByText("已排队", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("介入当前 Session").getByText("已排队", { exact: true })).toBeVisible();
     await expect(page.getByLabel("介入内容")).toHaveValue("");
   });
 
@@ -86,9 +86,9 @@ async function openTrace(page: Page, request: APIRequestContext): Promise<void> 
   await expect(page.locator(".topbar .status-mark--live")).toBeVisible();
   await page.getByRole("link", { name: "打开任务 R4 control room delivery" }).click();
   await page.getByRole("tab", { name: "任务表", exact: true }).click();
-  await page.getByRole("link", { name: /Execution 60000000/ }).click();
-  await expect(page.locator("#worker-trace-title")).toBeVisible();
-  await expect(page).toHaveURL(new RegExp(`${EXECUTION_ID}/sessions/${SESSION_ID}/trace$`));
+  await page.getByRole("link", { name: /查看执行过程/ }).click();
+  await expect(page.locator("#execution-page-title")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`${EXECUTION_ID}/sessions/${SESSION_ID}$`));
   await expect(page.locator(".trace-row")).toHaveCount(3);
   await expect(page.locator("textarea[aria-label='介入内容']")).toBeVisible();
 }

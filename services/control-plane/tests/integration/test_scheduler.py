@@ -263,6 +263,7 @@ def test_scheduler_skips_deferred_head_and_assigns_later_candidate(
         workspace_id,
         worker_specs=(),
         priority=100,
+        required_capabilities=frozenset({"special-first"}),
     )
     _second_task, second_workers, second_execution = seed_scheduler_case(
         database,

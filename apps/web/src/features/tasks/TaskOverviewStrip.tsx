@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, CirclePlay, Clock3, Layers3 } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, CirclePlay, Clock3, Layers3 } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import type { TaskOverview } from "./api";
@@ -43,15 +43,20 @@ export function TaskOverviewStrip({
         {overview.current_milestone_key ? <span>里程碑 {overview.current_milestone_key}</span> : <span>尚未进入里程碑</span>}
       </div>
       <div className="task-row__attention">
-        <span className="eyebrow">关注</span>
-        <strong className={overview.attention_items.length > 0 ? "attention-value" : "metric-muted"}>
-          <AlertTriangle size={14} aria-hidden="true" />需要关注 {overview.attention_items.length}
-        </strong>
+        <span className="eyebrow">需要我</span>
+        {overview.attention_items[0] ? (
+          <>
+            <strong className="attention-value"><AlertTriangle size={14} aria-hidden="true" />{overview.title} / {overview.attention_items[0].title}</strong>
+            <span>{overview.attention_items[0].summary}</span>
+            {overview.attention_items.length > 1 ? <span>另有 {overview.attention_items.length - 1} 项待处理</span> : null}
+          </>
+        ) : <strong className="metric-muted"><Check size={14} aria-hidden="true" />当前没有卡点</strong>}
         <ArrowRight className="task-row__arrow" size={17} aria-hidden="true" />
       </div>
     </Link>
   );
 }
+
 
 function formatFreshness(value: string): string {
   const timestamp = Date.parse(value);

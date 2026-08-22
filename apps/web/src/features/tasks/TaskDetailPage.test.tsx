@@ -200,6 +200,16 @@ describe("TaskDetailPage", () => {
     );
   });
 
+  it("opens with a task status board and keeps DAG optional", async () => {
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "任务状态看板" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "执行中" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "下一步" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "查看设计控制面" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "任务 DAG" })).not.toBeInTheDocument();
+  });
+
   it("keeps graph, ledger, horizon and inspector on one selected work item", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -209,12 +219,14 @@ describe("TaskDetailPage", () => {
     expect(screen.getAllByText("构建 Web").length).toBeGreaterThan(0);
     expect(screen.getAllByText("计划中").length).toBeGreaterThan(0);
     expect(screen.getAllByText("设计控制面").length).toBeGreaterThan(0);
-    expect(await screen.findByText("依赖：design → build")).toBeVisible();
     expect(await screen.findByText("目标与验收")).toBeVisible();
     expect(screen.getAllByText("Projection tests passed").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("tab", { name: /^DAG$/ }));
+    expect(await screen.findByText("依赖：design → build")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: /^任务表$/ }));
+    await user.click(screen.getByRole("button", { name: "在任务表中选择构建 Web" }));
 
-    await user.click(screen.getByRole("button", { name: "选择 build" }));
-    expect(screen.getByRole("button", { name: "选择 build" })).toHaveAttribute("data-selected", "true");
+    expect(screen.getByRole("button", { name: "在任务表中选择构建 Web" })).toHaveAttribute("data-selected", "true");
     expect(screen.getAllByText("计划中").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /介入/ })).not.toBeInTheDocument();
 

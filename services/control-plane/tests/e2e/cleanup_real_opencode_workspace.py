@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
@@ -92,7 +93,7 @@ def main() -> int:
                         )
                     )
                 else:
-                    session.execute(delete(model).where(model.workspace_id == WORKSPACE_ID))
+                    session.execute(delete(model).where(cast(Any, model).workspace_id == WORKSPACE_ID))
             if workspace is not None:
                 session.delete(workspace)
             session.commit()

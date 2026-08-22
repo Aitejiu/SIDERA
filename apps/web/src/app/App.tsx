@@ -1,8 +1,9 @@
-import { Activity, ListTodo, Settings2 } from "lucide-react";
+import { Boxes, Clock3, ListTodo, Mail, MessageCircle, Settings2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
 import { WorkspaceStreamProvider, useWorkspaceStream } from "./WorkspaceStreamProvider";
+import { WorkspaceTabs } from "./WorkspaceTabs";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { NotificationCenter } from "@/features/attention/NotificationCenter";
@@ -48,16 +49,20 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
           </div>
           <nav className="navigation-list">
             <NavItem to={`/workspaces/${workspaceId}/tasks`} label="任务" icon={<ListTodo size={17} />} />
-            <NavItem to={`/workspaces/${workspaceId}/activity`} label="活动" icon={<Activity size={17} />} />
-            <NavItem to={`/workspaces/${workspaceId}/settings`} label="设置" icon={<Settings2 size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/inbox`} label="信箱" icon={<Mail size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/chat`} label="聊天" icon={<MessageCircle size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/history`} label="历史" icon={<Clock3 size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/capabilities`} label="能力" icon={<Boxes size={17} />} />
           </nav>
           <div className="rail-footer">
+            <NavItem to={`/workspaces/${workspaceId}/settings`} label="设置" icon={<Settings2 size={17} />} />
             <span className="eyebrow">连接状态</span>
             <StatusMark kind={streamState.status} />
           </div>
         </aside>
 
         <main className="main-surface">
+          <WorkspaceTabs workspaceId={workspaceId} />
           <div className="route-frame">
             <Outlet />
           </div>

@@ -19,6 +19,7 @@ import {
 import { ExecutionHorizon } from "./ExecutionHorizon";
 import { MilestoneTrack } from "./MilestoneTrack";
 import { TaskActivity } from "./TaskActivity";
+import { TaskBoard } from "./TaskBoard";
 import { TaskGraph } from "./TaskGraph";
 import { TaskInspector } from "./TaskInspector";
 import { TaskLedger } from "./TaskLedger";
@@ -29,9 +30,7 @@ export function TaskDetailPage() {
   const resolvedRootTaskId = rootTaskId ?? "";
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedFromUrl = searchParams.get("workItem");
-  const [viewMode, setViewMode] = useState<"both" | "dag" | "ledger">(() =>
-    typeof window !== "undefined" && window.innerWidth < 640 ? "ledger" : "both",
-  );
+  const [viewMode, setViewMode] = useState<"board" | "dag" | "ledger">("board");
 
   const graphQuery = useQuery({
     queryKey: taskGraphQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
@@ -133,6 +132,7 @@ export function TaskDetailPage() {
                   workspaceId={resolvedWorkspaceId}
                   rootTaskId={resolvedRootTaskId}
                   rootTaskVersion={rootTaskQuery.data?.version}
+                  rootTaskTitle={graphQuery.data.overview.title}
                   items={graphQuery.data.overview.attention_items}
                   onAcknowledged={() => {
                     void graphQuery.refetch();
@@ -140,13 +140,14 @@ export function TaskDetailPage() {
                   }}
                 />
                 <ExecutionHorizon graph={graphQuery.data} />
-                <div className="graph-ledger-switch" role="tablist" aria-label="图与任务表视图">
+                <div className="graph-ledger-switch" role="tablist" aria-label="任务状态视图">
+                  <button className={viewMode === "board" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "board"} onClick={() => setViewMode("board")}>看板</button>
                   <button className={viewMode === "dag" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "dag"} onClick={() => setViewMode("dag")}>DAG</button>
                   <button className={viewMode === "ledger" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "ledger"} onClick={() => setViewMode("ledger")}>任务表</button>
-                  <button className={viewMode === "both" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "both"} onClick={() => setViewMode("both")}>全部</button>
                 </div>
-                {viewMode !== "ledger" ? <TaskGraph graph={graphQuery.data} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
-                {viewMode !== "dag" ? <TaskLedger nodes={graphQuery.data.nodes} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
+                {viewMode === "board" ? <TaskBoard nodes={graphQuery.data.nodes} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
+                {viewMode === "dag" ? <TaskGraph graph={graphQuery.data} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
+                {viewMode === "ledger" ? <TaskLedger nodes={graphQuery.data.nodes} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
                 <TaskActivity
                   activity={activity}
                   workspaceId={resolvedWorkspaceId}

@@ -49,7 +49,7 @@ test("shows a real OpenCode execution in the browser control room", async ({ pag
     await expect(page.locator("#task-detail-title")).toHaveText("OpenCode R3 E2E");
     await expect(page.locator(".inspector-evidence strong", { hasText: "the execution produces a Git diff" })).toBeVisible();
     await expect(
-      page.locator(`a[href*="/executions/${ids.execution_id}/sessions/${ids.session_id}/trace"]`),
+      page.locator(`a[href*="/executions/${ids.execution_id}/sessions/${ids.session_id}"]`),
     ).toBeVisible();
     const artifactLink = page.getByRole("link", { name: "diff · text/x-diff" });
     await expect(artifactLink).toBeVisible();

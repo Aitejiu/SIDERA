@@ -5,6 +5,7 @@ import { useLayoutEffect, useMemo, useRef } from "react";
 import type { WorkerTraceEvent } from "./types";
 
 export function TraceLedger({
+  title = "Worker 轨迹",
   events,
   selectedSequence,
   onSelect,
@@ -15,6 +16,7 @@ export function TraceLedger({
   onFollowTail,
   onPauseFollow,
 }: {
+  title?: string;
   events: WorkerTraceEvent[];
   selectedSequence: number | null;
   onSelect: (event: WorkerTraceEvent) => void;
@@ -72,7 +74,7 @@ export function TraceLedger({
       <div className="section-heading trace-ledger__heading">
         <div>
           <span className="eyebrow">TURN / STEP LEDGER</span>
-          <h2 id="trace-ledger-title">Worker 轨迹</h2>
+          <h2 id="trace-ledger-title">{title}</h2>
         </div>
         <div className="trace-ledger__actions">
           {hasOlder ? (

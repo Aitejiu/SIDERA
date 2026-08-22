@@ -18,11 +18,7 @@ test.describe("responsive control room visuals", () => {
   test("keeps the selected task surface stable", async ({ page }) => {
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}`);
     await expect(page.locator("#task-detail-title")).toBeVisible();
-    if (await page.evaluate(() => window.innerWidth < 640)) {
-      await expect(page.locator(".ledger-row")).toHaveCount(4);
-    } else {
-      await expect(page.locator(".edge-summary")).toHaveCount(2);
-    }
+    await expect(page.locator(".task-board-card")).toHaveCount(4);
     await expect(page).toHaveScreenshot("task-detail.png", {
       fullPage: true,
       animations: "disabled",

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Annotated
 from uuid import UUID
 
@@ -65,7 +65,7 @@ async def _event_stream(
     *,
     start_cursor: int,
     schema_version: int,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     cursor = start_cursor
     last_heartbeat = asyncio.get_running_loop().time()
     while True:

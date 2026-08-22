@@ -13,11 +13,11 @@ test.describe("Task First control room", () => {
     await expect(taskLink).toBeVisible();
     await expect(taskLink).toContainText("GEN 2");
     await expect(taskLink).toContainText("运行中 1");
-    await expect(taskLink).toContainText("需要关注 1");
+    await expect(taskLink).toContainText("需要我");
     await taskLink.click();
 
     await expect(page.locator("#task-detail-title")).toHaveText("R4 control room delivery");
-    await expect(page.getByRole("heading", { name: "需要关注", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "需要我", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "确认已处理" })).toBeVisible();
 
     await page.getByRole("tab", { name: "DAG", exact: true }).click();
@@ -29,15 +29,18 @@ test.describe("Task First control room", () => {
     await page.getByRole("tab", { name: "任务表", exact: true }).click();
     await expect(page.getByRole("heading", { name: "任务表", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "在任务表中选择Backend execution" })).toBeVisible();
-    const executionLink = page.getByRole("link", { name: /Execution 60000000/ });
+    const executionLink = page.getByRole("link", { name: /查看执行过程/ });
     await expect(executionLink).toBeVisible();
     await executionLink.click();
 
-    await expect(page.locator("#worker-trace-title")).toHaveText("Worker 轨迹");
-    await expect(page).toHaveURL(new RegExp(`${EXECUTION_ID}/sessions/${SESSION_ID}/trace$`));
+    await expect(page.locator("#execution-page-title")).toHaveText("执行步骤");
+    await expect(page).toHaveURL(new RegExp(`${EXECUTION_ID}/sessions/${SESSION_ID}$`));
     await expect(page.locator(".trace-row")).toHaveCount(3);
-    await expect(page.getByRole("heading", { name: "Worker 轨迹", exact: true })).toHaveCount(2);
+    await expect(page.getByRole("heading", { name: "执行步骤", exact: true })).toHaveCount(2);
     await expect(page.getByText("Backend checkpoint")).toBeVisible();
+    await page.getByRole("button", { name: "查看 Agent Trace" }).click();
+    await expect(page.getByRole("dialog", { name: "Agent Trace" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Agent Trace" }).locator("#worker-trace-title")).toHaveText("Worker 轨迹");
   });
 
   test("acknowledges a blocked child without changing the graph shape", async ({ page }) => {
@@ -47,9 +50,7 @@ test.describe("Task First control room", () => {
 
     await page.getByRole("button", { name: "确认已处理" }).click();
     await expect(page.getByText("当前没有待确认事项", { exact: true })).toBeVisible();
-    if (await page.evaluate(() => window.innerWidth < 640)) {
-      await page.getByRole("tab", { name: "DAG", exact: true }).click();
-    }
+    await page.getByRole("tab", { name: "DAG", exact: true }).click();
     await expect(page.locator(".edge-summary")).toHaveCount(2);
   });
 

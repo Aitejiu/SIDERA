@@ -100,7 +100,8 @@ describe("TaskListPage", () => {
     expect(screen.getByText("运行中 2")).toBeVisible();
     expect(screen.getByText("失败 1")).toBeVisible();
     expect(screen.getByText("下一个 trace-viewer")).toBeVisible();
-    expect(screen.getByText("需要关注 1")).toBeVisible();
+    expect(screen.getByText("Ship control room / Trace viewer needs input")).toBeVisible();
+    expect(screen.getAllByText("需要我").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/刚刚更新|分钟前更新|更新于/).length).toBeGreaterThan(0);
   });
 

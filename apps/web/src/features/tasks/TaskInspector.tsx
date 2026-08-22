@@ -80,9 +80,9 @@ export function TaskInspector({
           <Link
             className="inspector-link"
             key={execution.execution_id}
-            to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${execution.execution_id}/sessions/${execution.session_id ?? "unknown"}/trace`}
+            to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${execution.execution_id}/sessions/${execution.session_id ?? "unknown"}`}
           >
-            Execution {execution.execution_id.slice(0, 8)} · {execution.status}
+            查看执行过程 · {execution.execution_id.slice(0, 8)} · {execution.status}
             <ExternalLink size={13} aria-hidden="true" />
           </Link>
         ))}

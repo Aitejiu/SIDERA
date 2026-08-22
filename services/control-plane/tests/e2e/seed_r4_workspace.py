@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete, insert, select, update
@@ -163,7 +164,7 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
                 )
             )
         else:
-            session.execute(delete(model).where(model.workspace_id == workspace_id))
+            session.execute(delete(model).where(cast(Any, model).workspace_id == workspace_id))
     if existing is not None:
         session.execute(
             delete(WorkspaceModel).where(WorkspaceModel.id == workspace_id)

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -128,7 +129,7 @@ def task_fact(task_id: UUID, status: str) -> TaskFact:
     )
 
 
-def empty_facts() -> dict[str, dict[UUID, object]]:
+def empty_facts() -> dict[str, dict[UUID, Any]]:
     return {
         "executions": {},
         "leases": {},

@@ -6,24 +6,21 @@ import { Link, useParams } from "react-router-dom";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import {
-  executionInputsQueryKey,
   executionQueryKey,
   executionSessionQueryKey,
   getExecution,
   getExecutionSession,
   getWorkspaceCapabilities,
   getWorkerTrace,
-  listExecutionInputs,
   workerTraceQueryKey,
 } from "./api";
 import { ArtifactViewer } from "./ArtifactViewer";
-import { InterventionComposer } from "./InterventionComposer";
 import { TraceDetails } from "./TraceDetails";
 import { TraceLedger } from "./TraceLedger";
 import { TraceTiming } from "./TraceTiming";
-import type { ExecutionContextAddress, WorkerTraceEvent } from "./types";
+import type { WorkerTraceEvent } from "./types";
 
-export function WorkerTracePage() {
+export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {}) {
   const {
     workspaceId = "",
     rootTaskId = "",
@@ -55,11 +52,6 @@ export function WorkerTracePage() {
     queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
     enabled: Boolean(workspaceId && executionId),
   });
-  const inputsQuery = useQuery({
-    queryKey: executionInputsQueryKey(workspaceId, sessionId),
-    queryFn: ({ signal }) => listExecutionInputs(workspaceId, sessionId, signal),
-    enabled: Boolean(workspaceId && sessionId && sessionId !== "unknown"),
-  });
   const trace = useMemo(() => {
     const pages = traceQuery.data?.pages ?? [];
     const [firstPage] = pages;
@@ -70,19 +62,6 @@ export function WorkerTracePage() {
     if (trace === undefined || trace.events.length === 0) return null;
     return trace.events.find((event) => event.sequence === selectedSequence) ?? trace.events.at(-1) ?? null;
   }, [selectedSequence, trace]);
-  const context = useMemo<ExecutionContextAddress | null>(() => {
-    const branch = trace?.context_branch;
-    if (trace === undefined || branch === null || branch === undefined || trace.worker_id === null) return null;
-    return {
-      plan_snapshot_id: branch.plan_snapshot_id,
-      root_task_id: branch.root_task_id,
-      work_item_key: branch.work_item_key,
-      worker_slot_key: branch.worker_slot_key,
-      worker_id: trace.worker_id,
-      execution_id: branch.current_execution_id,
-      session_id: branch.current_session_id,
-    };
-  }, [trace]);
   const escalationRequested = selectedEvent !== null && `${selectedEvent.title} ${selectedEvent.summary}`.includes("scope_escalation_requested");
   const capabilitiesQuery = useQuery({
     queryKey: ["workspace-capabilities", workspaceId],
@@ -91,15 +70,6 @@ export function WorkerTracePage() {
   });
   const mainAgent = capabilitiesQuery.data?.main_agent;
   const mainAgentEntry = isRecord(mainAgent) && typeof mainAgent.entry_uri === "string" ? mainAgent.entry_uri : null;
-
-  const refreshAll = async () => {
-    await Promise.all([
-      traceQuery.refetch(),
-      sessionQuery.refetch(),
-      executionQuery.refetch(),
-      inputsQuery.refetch(),
-    ]);
-  };
 
   const selectEvent = (event: WorkerTraceEvent) => {
     setSelectedSequence(event.sequence);
@@ -114,12 +84,12 @@ export function WorkerTracePage() {
   };
 
   return (
-    <section className="worker-trace-page" aria-label="Worker Trace 页面">
-      <div className="breadcrumb trace-breadcrumb">
+    <section className={`worker-trace-page${embedded ? " worker-trace-page--embedded" : ""}`} aria-label="Worker Trace 页面">
+      {!embedded ? <div className="breadcrumb trace-breadcrumb">
         <Link to={`/workspaces/${workspaceId}/tasks`}><ArrowLeft size={13} aria-hidden="true" />任务</Link>
         <span>/</span><Link to={`/workspaces/${workspaceId}/tasks/${rootTaskId}`}>Root Task</Link>
         <span>/</span><span>WorkItem</span><span>/</span><span>Execution</span><span>/</span><span>Session</span>
-      </div>
+      </div> : null}
 
       <header className="trace-page-heading">
         <div>
@@ -177,23 +147,13 @@ export function WorkerTracePage() {
               <TraceDetails event={selectedEvent} onArtifactSelect={setSelectedArtifactId} />
               <ArtifactViewer workspaceId={workspaceId} artifactId={selectedArtifactId} />
             </div>
-            <aside className="trace-side-column" aria-label="Worker 介入面板">
+            <aside className="trace-side-column" aria-label="Trace 诊断信息">
               <div className="trace-side-card">
                 <span className="eyebrow">WORKER STATUS</span>
                 <strong>{trace.status}</strong>
                 <span>{trace.current_action ?? "暂无当前动作"}</span>
+                <Link className="quiet-button" to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${executionId}/sessions/${sessionId}`}>返回执行步骤</Link>
               </div>
-              <InterventionComposer
-                workspaceId={workspaceId}
-                rootTaskId={rootTaskId}
-                context={context}
-                contextBranch={trace.context_branch}
-                session={sessionQuery.data}
-                execution={executionQuery.data}
-                inputs={inputsQuery.data ?? []}
-                traceFresh={traceQuery.isSuccess}
-                onRefresh={refreshAll}
-              />
             </aside>
           </div>
         </>

@@ -14,12 +14,14 @@ export function AttentionPanel({
   workspaceId,
   rootTaskId,
   rootTaskVersion,
+  rootTaskTitle,
   items,
   onAcknowledged,
 }: {
   workspaceId: string;
   rootTaskId: string;
   rootTaskVersion: number | undefined;
+  rootTaskTitle?: string;
   items: AttentionItem[];
   onAcknowledged?: () => void;
 }) {
@@ -70,7 +72,7 @@ export function AttentionPanel({
       <div className="section-heading">
         <div>
           <span className="eyebrow">ATTENTION</span>
-          <h2 id="attention-panel-title">需要关注</h2>
+          <h2 id="attention-panel-title">需要我</h2>
         </div>
         <span className="mono-label">{visibleItems.length} ITEMS</span>
       </div>
@@ -84,7 +86,7 @@ export function AttentionPanel({
               <div className="attention-item__marker" aria-hidden="true"><CircleAlert size={15} /></div>
               <div className="attention-item__body">
                 <div className="attention-item__heading">
-                  <strong>{item.title}</strong>
+                  <strong>{rootTaskTitle ? `${rootTaskTitle} / ${item.title}` : item.title}</strong>
                   <span className="mono-label">{item.kind}</span>
                 </div>
                 <p>{item.summary}</p>
