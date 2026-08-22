@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -283,6 +284,149 @@ class WorkerModel(TimestampMixin, Base):
     )
 
 
+class WorkerItemModel(TimestampMixin, Base):
+    __tablename__ = "worker_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'paused', 'retired')",
+            name="ck_worker_items_status",
+        ),
+        CheckConstraint("context_version >= 1", name="ck_worker_items_context_version"),
+        CheckConstraint(
+            "acknowledged_context_version >= 0 AND "
+            "acknowledged_context_version <= context_version",
+            name="ck_worker_items_ack_context_version",
+        ),
+        CheckConstraint("version >= 1", name="ck_worker_items_version"),
+        CheckConstraint(
+            "jsonb_typeof(derived_from_worker_item_ids) = 'array'",
+            name="ck_worker_items_derived_ids_array",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_items_root_task_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_worker_items_id_workspace"),
+        UniqueConstraint(
+            "root_task_id", "stable_key", name="uq_worker_items_root_stable_key"
+        ),
+        Index(
+            "ix_worker_items_workspace_root_status",
+            "workspace_id",
+            "root_task_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    responsibility: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    acknowledged_context_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    derived_from_worker_item_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkerItemPlacementModel(TimestampMixin, Base):
+    __tablename__ = "worker_item_placements"
+    __table_args__ = (
+        CheckConstraint("plan_generation >= 1", name="ck_worker_item_placements_generation"),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id"],
+            ["task_plan_snapshots.id"],
+            ondelete="RESTRICT",
+            name="fk_worker_item_placements_snapshot",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_worker_item_placements_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_item_placements_root_task",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_item_placements_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["subtask_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_item_placements_subtask_task_workspace",
+        ),
+        PrimaryKeyConstraint("plan_snapshot_id", "worker_item_id"),
+        UniqueConstraint(
+            "plan_snapshot_id",
+            "worker_item_key",
+            name="uq_worker_item_placements_snapshot_key",
+        ),
+        Index(
+            "ix_worker_item_placements_workspace_root_generation",
+            "workspace_id",
+            "root_task_id",
+            "plan_generation",
+        ),
+        Index(
+            "ix_worker_item_placements_workspace_worker_item_generation",
+            "workspace_id",
+            "worker_item_id",
+            "plan_generation",
+        ),
+    )
+
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    subtask_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    subtask_task_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    role: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_requirements: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    worker_policy_ref: Mapped[str | None] = mapped_column(String(500))
+    configuration_ref: Mapped[str | None] = mapped_column(String(500))
+
+
 class ExecutionModel(TimestampMixin, Base):
     __tablename__ = "executions"
     __table_args__ = (
@@ -317,6 +461,12 @@ class ExecutionModel(TimestampMixin, Base):
             ["workers.id", "workers.workspace_id"],
             ondelete="RESTRICT",
             name="fk_executions_assigned_worker_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_executions_worker_item_workspace",
         ),
         ForeignKeyConstraint(
             ["active_lease_id", "id", "workspace_id"],
@@ -360,6 +510,9 @@ class ExecutionModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True)
     )
     active_lease_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    worker_item_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
     last_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)

@@ -33,6 +33,8 @@ def test_foundation_migration_creates_authoritative_tables(database: Database) -
         "executions",
         "execution_sessions",
         "assignment_leases",
+        "worker_items",
+        "worker_item_placements",
     } <= tables
 
     with database.engine.connect() as connection:
