@@ -8,7 +8,7 @@ from sidera_control_plane.domain.errors import (
     StaleFencingToken,
     ValidationError,
 )
-from sidera_control_plane.domain.modules import CapabilityProfile
+from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
 
 
 class ExecutionStatus(StrEnum):
@@ -251,7 +251,7 @@ class ExecutionSession:
     adapter_config_version: int | None = None
     workspace_module_id: UUID | None = None
     workspace_config_version: int | None = None
-    capability_snapshot: CapabilityProfile | None = None
+    capability_snapshot: WorkerAdapterCapabilityProfile | None = None
     process_ref: str | None = None
     workspace_ref: str | None = None
 
@@ -269,7 +269,7 @@ class ExecutionSession:
         adapter_config_version: int | None = None,
         workspace_module_id: UUID | None = None,
         workspace_config_version: int | None = None,
-        capability_snapshot: CapabilityProfile | None = None,
+        capability_snapshot: WorkerAdapterCapabilityProfile | None = None,
         process_ref: str | None = None,
         workspace_ref: str | None = None,
     ) -> "ExecutionSession":
@@ -303,7 +303,7 @@ class ExecutionSession:
         adapter_config_version: int,
         workspace_module_id: UUID,
         workspace_config_version: int,
-        capability_snapshot: CapabilityProfile,
+        capability_snapshot: WorkerAdapterCapabilityProfile,
         process_ref: str,
         workspace_ref: str,
     ) -> None:

@@ -24,12 +24,12 @@ from sidera_control_plane.domain.gateway import (
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
-    CapabilityProfile,
     IdempotencyCapability,
     ResumeCapability,
     SandboxCapability,
     StabilityLevel,
     StopCapability,
+    WorkerAdapterCapabilityProfile,
 )
 from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
@@ -57,7 +57,7 @@ class ACPProtocolError(OpenCodeAdapterError):
 class OpenCodeACPAdapter:
     """WorkerAdapter implementation for one OpenCode ACP child process per session."""
 
-    _PROFILE = CapabilityProfile(
+    _PROFILE = WorkerAdapterCapabilityProfile(
         input=CapabilityInput.QUEUED,
         idempotency=IdempotencyCapability.NONE,
         resume=ResumeCapability.SAME_PROCESS,
@@ -100,7 +100,7 @@ class OpenCodeACPAdapter:
         self._sessions: dict[str, _OpenCodeSession] = {}
         self._lock = threading.RLock()
 
-    def probe(self, config: Mapping[str, object]) -> CapabilityProfile:
+    def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
         executable = _config_text(config, "executable", self._executable)
         cwd = _config_path(config, "cwd", Path.cwd())
         transport = self._spawn(executable, cwd, probe=True)

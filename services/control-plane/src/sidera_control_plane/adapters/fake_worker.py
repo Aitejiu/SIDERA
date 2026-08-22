@@ -13,12 +13,12 @@ from sidera_control_plane.domain.gateway import (
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
-    CapabilityProfile,
     IdempotencyCapability,
     ResumeCapability,
     SandboxCapability,
     StabilityLevel,
     StopCapability,
+    WorkerAdapterCapabilityProfile,
 )
 from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
@@ -33,7 +33,7 @@ class FakeAdapterError(RuntimeError):
 class FakeWorkerAdapter:
     """In-memory WorkerAdapter used for deterministic control-plane tests."""
 
-    _CAPABILITIES = CapabilityProfile(
+    _CAPABILITIES = WorkerAdapterCapabilityProfile(
         input=CapabilityInput.QUEUED,
         idempotency=IdempotencyCapability.NONE,
         resume=ResumeCapability.SAME_PROCESS,
@@ -53,7 +53,7 @@ class FakeWorkerAdapter:
         self._sessions: dict[str, _FakeSession] = {}
         self._lock = RLock()
 
-    def probe(self, config: Mapping[str, object]) -> CapabilityProfile:
+    def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
         del config
         self._maybe_fail("probe")
         return self._CAPABILITIES

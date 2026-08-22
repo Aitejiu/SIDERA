@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 from sidera_control_plane.config import Settings
-from sidera_control_plane.domain.modules import CapabilityProfile
+from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +20,7 @@ class OpenCodePreflightReport:
     resolved_executable: str | None
     version: str | None
     workspace: str | None
-    capability_profile: CapabilityProfile | None
+    capability_profile: WorkerAdapterCapabilityProfile | None
     errors: tuple[str, ...]
 
     def as_dict(self) -> dict[str, object]:
@@ -94,7 +94,7 @@ def run_preflight(
             f"{version or 'unavailable'}"
         )
 
-    profile: CapabilityProfile | None = None
+    profile: WorkerAdapterCapabilityProfile | None = None
     workspace: str | None = None
     try:
         with _temporary_git_worktree(git_executable) as worktree:

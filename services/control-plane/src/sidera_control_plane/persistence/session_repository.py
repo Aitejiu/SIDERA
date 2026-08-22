@@ -5,10 +5,14 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from sidera_control_plane.domain.errors import VersionConflict
+from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.execution import (
     ExecutionSession,
     ExecutionSessionStatus,
+)
+from sidera_control_plane.domain.modules import (
+    WORKER_ADAPTER_MODULE_TYPE,
+    WorkerAdapterCapabilityProfile,
 )
 from sidera_control_plane.persistence.models import ExecutionSessionModel
 from sidera_control_plane.persistence.module_repository import (
@@ -132,6 +136,14 @@ class SessionRepository:
 
 
 def _to_domain_session(row: ExecutionSessionModel) -> ExecutionSession:
+    capability_snapshot = None
+    if row.capability_snapshot is not None:
+        parsed_capabilities = capability_profile_from_payload(
+            WORKER_ADAPTER_MODULE_TYPE, row.capability_snapshot
+        )
+        if not isinstance(parsed_capabilities, WorkerAdapterCapabilityProfile):
+            raise ValidationError("execution session capability snapshot must be a worker")
+        capability_snapshot = parsed_capabilities
     return ExecutionSession(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -147,11 +159,7 @@ def _to_domain_session(row: ExecutionSessionModel) -> ExecutionSession:
         adapter_config_version=row.adapter_config_version,
         workspace_module_id=row.workspace_module_id,
         workspace_config_version=row.workspace_config_version,
-        capability_snapshot=(
-            capability_profile_from_payload(row.capability_snapshot)
-            if row.capability_snapshot is not None
-            else None
-        ),
+        capability_snapshot=capability_snapshot,
         process_ref=row.process_ref,
         workspace_ref=row.workspace_ref,
     )

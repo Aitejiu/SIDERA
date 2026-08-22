@@ -32,10 +32,10 @@ from sidera_control_plane.domain.gateway import (
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
-    CapabilityProfile,
     ExecutionBinding,
     ModuleDefinition,
     ModuleInstance,
+    WorkerAdapterCapabilityProfile,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.projections import ProjectionChange
@@ -439,7 +439,7 @@ class ExecutionInputRepositoryPort(Protocol):
 
 
 class WorkerAdapter(Protocol):
-    def probe(self, config: Mapping[str, object]) -> CapabilityProfile:
+    def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
         raise NotImplementedError
 
     def start_session(

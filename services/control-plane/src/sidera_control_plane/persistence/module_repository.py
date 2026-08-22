@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from enum import StrEnum
 from uuid import UUID
 
 from sqlalchemy import select
@@ -8,18 +9,28 @@ from sidera_control_plane.application.ports import ProjectionChangePublisherPort
 from sidera_control_plane.application.projection_invalidation import (
     projection_targets_for_module,
 )
+from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
+    WORKER_ADAPTER_MODULE_TYPE,
+    WORKSPACE_PROVIDER_MODULE_TYPE,
+    CancellationCapability,
     CapabilityInput,
-    CapabilityProfile,
     ExecutionBinding,
     IdempotencyCapability,
+    ModuleCapabilityProfile,
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
+    PlannerAdapterCapabilityProfile,
     ResumeCapability,
     SandboxCapability,
     StabilityLevel,
     StopCapability,
+    StructuredOutputCapability,
+    UsageReportingCapability,
+    WorkerAdapterCapabilityProfile,
+    WorkspaceProviderCapabilityProfile,
+    canonical_module_type,
 )
 from sidera_control_plane.persistence.models import (
     ExecutionBindingModel,
@@ -162,27 +173,101 @@ class ExecutionBindingRepository:
         )
 
 
-def capability_profile_to_payload(profile: CapabilityProfile) -> dict[str, str]:
+def capability_profile_to_payload(
+    profile: ModuleCapabilityProfile,
+) -> dict[str, object]:
+    if isinstance(profile, WorkerAdapterCapabilityProfile):
+        return {
+            "input": profile.input.value,
+            "idempotency": profile.idempotency.value,
+            "resume": profile.resume.value,
+            "stop": profile.stop.value,
+            "sandbox": profile.sandbox.value,
+            "stability": profile.stability.value,
+        }
+    if isinstance(profile, WorkspaceProviderCapabilityProfile):
+        return {
+            "isolation": profile.isolation.value,
+            "writable": profile.writable,
+            "git_worktree": profile.git_worktree,
+            "stability": profile.stability.value,
+        }
     return {
-        "input": profile.input.value,
+        "structured_output": profile.structured_output.value,
+        "clarification": profile.clarification,
         "idempotency": profile.idempotency.value,
-        "resume": profile.resume.value,
-        "stop": profile.stop.value,
-        "sandbox": profile.sandbox.value,
+        "cancellation": profile.cancellation.value,
+        "usage_reporting": profile.usage_reporting.value,
+        "max_context_bytes": profile.max_context_bytes,
         "stability": profile.stability.value,
+        "interface_version": profile.interface_version,
+        "proposal_schema_versions": list(profile.proposal_schema_versions),
     }
 
 
-def capability_profile_from_payload(payload: Mapping[str, object]) -> CapabilityProfile:
-    return CapabilityProfile(
-        input=CapabilityInput(_required_capability(payload, "input")),
-        idempotency=IdempotencyCapability(
-            _required_capability(payload, "idempotency")
+def capability_profile_from_payload(
+    module_type: str,
+    payload: Mapping[str, object],
+) -> ModuleCapabilityProfile:
+    canonical_type = canonical_module_type(module_type)
+    if not isinstance(payload, Mapping):
+        raise ValidationError("capability payload must be a mapping")
+
+    if canonical_type == WORKER_ADAPTER_MODULE_TYPE:
+        _reject_unknown_fields(payload, _WORKER_FIELDS)
+        return WorkerAdapterCapabilityProfile(
+            input=_enum_capability(payload, "input", CapabilityInput),
+            idempotency=_enum_capability(
+                payload, "idempotency", IdempotencyCapability
+            ),
+            resume=_enum_capability(payload, "resume", ResumeCapability),
+            stop=_enum_capability(payload, "stop", StopCapability),
+            sandbox=_enum_capability(payload, "sandbox", SandboxCapability),
+            stability=_enum_capability(payload, "stability", StabilityLevel),
+        )
+
+    if canonical_type == WORKSPACE_PROVIDER_MODULE_TYPE:
+        if set(payload).issubset(_WORKER_FIELDS) and set(payload) == _WORKER_FIELDS:
+            legacy = capability_profile_from_payload(
+                WORKER_ADAPTER_MODULE_TYPE, payload
+            )
+            assert isinstance(legacy, WorkerAdapterCapabilityProfile)
+            return WorkspaceProviderCapabilityProfile(
+                isolation=legacy.sandbox,
+                writable=legacy.sandbox is not SandboxCapability.NONE,
+                git_worktree=False,
+                stability=legacy.stability,
+            )
+        _reject_unknown_fields(payload, _WORKSPACE_FIELDS)
+        return WorkspaceProviderCapabilityProfile(
+            isolation=_enum_capability(payload, "isolation", SandboxCapability),
+            writable=_bool_capability(payload, "writable"),
+            git_worktree=_bool_capability(payload, "git_worktree"),
+            stability=_enum_capability(payload, "stability", StabilityLevel),
+        )
+
+    _reject_unknown_fields(payload, _PLANNER_FIELDS)
+    proposal_versions = payload.get("proposal_schema_versions")
+    if not isinstance(proposal_versions, (list, tuple)):
+        raise ValidationError("capability field 'proposal_schema_versions' is required")
+    return PlannerAdapterCapabilityProfile(
+        structured_output=_enum_capability(
+            payload, "structured_output", StructuredOutputCapability
         ),
-        resume=ResumeCapability(_required_capability(payload, "resume")),
-        stop=StopCapability(_required_capability(payload, "stop")),
-        sandbox=SandboxCapability(_required_capability(payload, "sandbox")),
-        stability=StabilityLevel(_required_capability(payload, "stability")),
+        clarification=_bool_capability(payload, "clarification"),
+        idempotency=_enum_capability(
+            payload, "idempotency", IdempotencyCapability
+        ),
+        cancellation=_enum_capability(
+            payload, "cancellation", CancellationCapability
+        ),
+        usage_reporting=_enum_capability(
+            payload, "usage_reporting", UsageReportingCapability
+        ),
+        max_context_bytes=_positive_int_capability(payload, "max_context_bytes"),
+        stability=_enum_capability(payload, "stability", StabilityLevel),
+        interface_version=_required_string(payload, "interface_version"),
+        proposal_schema_versions=tuple(proposal_versions),
     )
 
 
@@ -194,7 +279,9 @@ def _to_domain_definition(row: ModuleDefinitionModel) -> ModuleDefinition:
         provider=row.provider,
         interface_version=row.interface_version,
         config_schema_version=row.config_schema_version,
-        capabilities=capability_profile_from_payload(row.capabilities),
+        capabilities=capability_profile_from_payload(
+            row.module_type, row.capabilities
+        ),
         lifecycle=ModuleLifecycle(row.lifecycle),
     )
 
@@ -214,6 +301,11 @@ def _to_domain_instance(row: ModuleInstanceModel) -> ModuleInstance:
 
 
 def _to_domain_binding(row: ExecutionBindingModel) -> ExecutionBinding:
+    capability_snapshot = capability_profile_from_payload(
+        WORKER_ADAPTER_MODULE_TYPE, row.capability_snapshot
+    )
+    if not isinstance(capability_snapshot, WorkerAdapterCapabilityProfile):
+        raise ValidationError("execution binding capability snapshot must be a worker")
     return ExecutionBinding(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -223,18 +315,69 @@ def _to_domain_binding(row: ExecutionBindingModel) -> ExecutionBinding:
         workspace_module_id=row.workspace_module_id,
         adapter_config_version=row.adapter_config_version,
         workspace_config_version=row.workspace_config_version,
-        capability_snapshot=capability_profile_from_payload(row.capability_snapshot),
+        capability_snapshot=capability_snapshot,
         lease_id=row.lease_id,
         fencing_token=row.fencing_token,
         version=row.version,
     )
 
 
-def _required_capability(
+_WORKER_FIELDS = frozenset(
+    {"input", "idempotency", "resume", "stop", "sandbox", "stability"}
+)
+_WORKSPACE_FIELDS = frozenset({"isolation", "writable", "git_worktree", "stability"})
+_PLANNER_FIELDS = frozenset(
+    {
+        "structured_output",
+        "clarification",
+        "idempotency",
+        "cancellation",
+        "usage_reporting",
+        "max_context_bytes",
+        "stability",
+        "interface_version",
+        "proposal_schema_versions",
+    }
+)
+
+
+def _reject_unknown_fields(
     payload: Mapping[str, object],
-    name: str,
-) -> str:
+    allowed: frozenset[str],
+) -> None:
+    unknown = sorted(str(key) for key in payload if key not in allowed)
+    if unknown:
+        raise ValidationError(f"unknown capability fields: {', '.join(unknown)}")
+
+
+def _required_string(payload: Mapping[str, object], name: str) -> str:
     value = payload.get(name)
     if not isinstance(value, str):
-        raise TypeError(f"capability payload field {name!r} is missing")
+        raise ValidationError(f"capability field {name!r} must be a string")
+    return value
+
+
+def _enum_capability[EnumCapability: StrEnum](
+    payload: Mapping[str, object],
+    name: str,
+    enum_type: type[EnumCapability],
+) -> EnumCapability:
+    value = _required_string(payload, name)
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported capability {name}: {value!r}") from exc
+
+
+def _bool_capability(payload: Mapping[str, object], name: str) -> bool:
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise ValidationError(f"capability field {name!r} must be a boolean")
+    return value
+
+
+def _positive_int_capability(payload: Mapping[str, object], name: str) -> int:
+    value = payload.get(name)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValidationError(f"capability field {name!r} must be positive")
     return value

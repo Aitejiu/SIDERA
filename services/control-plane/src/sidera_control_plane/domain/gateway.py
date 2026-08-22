@@ -7,7 +7,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
-from sidera_control_plane.domain.modules import CapabilityProfile
+from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
 
 
 class GatewayOperationType(StrEnum):
@@ -159,7 +159,7 @@ class AdapterSessionHandle:
     execution_session_id: UUID
     adapter_session_id: str
     process_ref: str
-    capability_snapshot: CapabilityProfile
+    capability_snapshot: WorkerAdapterCapabilityProfile
     last_accepted_sequence: int
     started_at: datetime
 
