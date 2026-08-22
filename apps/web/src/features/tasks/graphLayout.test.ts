@@ -3,37 +3,28 @@ import { describe, expect, it } from "vitest";
 import { layoutTaskGraph } from "./graphLayout";
 
 const nodes = [
-  { work_item_key: "integration", title: "Integrate", state: "planned" },
-  { work_item_key: "build", title: "Build", state: "running" },
-  { work_item_key: "design", title: "Design", state: "succeeded" },
-  { work_item_key: "test", title: "Test", state: "planned" },
-  { work_item_key: "isolated", title: "Isolated", state: "planned" },
+  { subtask_key: "integration", title: "Integrate", state: "planned" },
+  { subtask_key: "build", title: "Build", state: "running" },
+  { subtask_key: "design", title: "Design", state: "succeeded" },
+  { subtask_key: "test", title: "Test", state: "planned" },
+  { subtask_key: "isolated", title: "Isolated", state: "planned" },
 ];
 
 const edges = [
   {
-    upstream_work_item_key: "design",
-    downstream_work_item_key: "integration",
+    upstream_subtask_key: "design",
+    downstream_subtask_key: "integration",
     kind: "hard" as const,
-    enforcement: "informational" as const,
-    scheduler_enforced: false,
-    required_evidence_refs: ["evidence:design"],
   },
   {
-    upstream_work_item_key: "build",
-    downstream_work_item_key: "integration",
+    upstream_subtask_key: "build",
+    downstream_subtask_key: "integration",
     kind: "informational" as const,
-    enforcement: "informational" as const,
-    scheduler_enforced: false,
-    required_evidence_refs: [],
   },
   {
-    upstream_work_item_key: "integration",
-    downstream_work_item_key: "test",
+    upstream_subtask_key: "integration",
+    downstream_subtask_key: "test",
     kind: "hard" as const,
-    enforcement: "informational" as const,
-    scheduler_enforced: false,
-    required_evidence_refs: ["evidence:integration"],
   },
 ];
 
@@ -63,10 +54,10 @@ describe("layoutTaskGraph", () => {
   it("keeps dependency semantics separate from layout geometry", async () => {
     const result = await layoutTaskGraph(nodes, edges);
 
-    expect(result.edges.map((edge) => [edge.id, edge.kind, edge.scheduler_enforced])).toEqual([
-      ["build:integration:informational", "informational", false],
-      ["design:integration:hard", "hard", false],
-      ["integration:test:hard", "hard", false],
+    expect(result.edges.map((edge) => [edge.id, edge.kind])).toEqual([
+      ["build:integration:informational", "informational"],
+      ["design:integration:hard", "hard"],
+      ["integration:test:hard", "hard"],
     ]);
   });
 });

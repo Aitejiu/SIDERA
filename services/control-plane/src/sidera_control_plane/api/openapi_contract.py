@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.api.schemas import ExecutionContextAddressPayload
 from sidera_control_plane.config import Settings
 
 
@@ -14,6 +15,11 @@ def export_openapi(output: Path) -> dict[str, Any]:
         )
     )
     document = create_app(settings).openapi()
+    document.setdefault("components", {}).setdefault("schemas", {})[
+        "ExecutionContextAddressPayload"
+    ] = ExecutionContextAddressPayload.model_json_schema(
+        ref_template="#/components/schemas/{model}"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

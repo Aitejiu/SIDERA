@@ -9,7 +9,7 @@ from sidera_control_plane.api.dependencies import (
     get_worker_workspace_query_service,
 )
 from sidera_control_plane.api.schemas import (
-    WorkerActivityPageProjectionResponse,
+    WorkerItemActivityPageResponse,
     WorkerWorkspaceProjectionResponse,
 )
 from sidera_control_plane.application.worker_workspace_queries import (
@@ -36,7 +36,7 @@ def get_worker_item_workspace(
 
 @router.get(
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity",
-    response_model=WorkerActivityPageProjectionResponse,
+    response_model=WorkerItemActivityPageResponse,
     operation_id="list_worker_item_activity",
 )
 def list_worker_item_activity(

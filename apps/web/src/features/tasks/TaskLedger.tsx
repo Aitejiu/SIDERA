@@ -23,8 +23,7 @@ export function TaskLedger({
       const matchesSearch =
         needle.length === 0 ||
         node.title.toLocaleLowerCase().includes(needle) ||
-        node.work_item_key.toLocaleLowerCase().includes(needle) ||
-        (node.worker_display_name ?? "").toLocaleLowerCase().includes(needle);
+        node.subtask_key.toLocaleLowerCase().includes(needle);
       return matchesSearch && (stateFilter === "all" || node.state === stateFilter);
     });
   }, [nodes, search, stateFilter]);
@@ -63,20 +62,20 @@ export function TaskLedger({
       <div className="ledger-list">
         {filteredNodes.map((node) => (
           <button
-            key={node.work_item_key}
+            key={node.subtask_key}
             type="button"
-            className={`ledger-row${node.work_item_key === selectedWorkItemKey ? " is-selected" : ""}`}
-            data-selected={node.work_item_key === selectedWorkItemKey ? "true" : "false"}
-            onClick={() => onSelect(node.work_item_key)}
+            className={`ledger-row${node.subtask_key === selectedWorkItemKey ? " is-selected" : ""}`}
+            data-selected={node.subtask_key === selectedWorkItemKey ? "true" : "false"}
+            onClick={() => onSelect(node.subtask_key)}
             aria-label={`在任务表中选择${node.title}`}
           >
             <span className="ledger-row__title">
               <strong>{node.title}</strong>
-              <span className="mono-label">{node.work_item_key}</span>
+              <span className="mono-label">{node.subtask_key}</span>
             </span>
             <StatusMark kind={statusKind(node.state)} />
             <span className="ledger-row__action">{node.current_action ?? (node.state === "planned" ? "等待物化" : "暂无动作")}</span>
-            <span className="ledger-row__worker">{node.worker_display_name ?? (node.required_capabilities.join(" · ") || "未分配")}</span>
+            <span className="ledger-row__worker">{node.worker_item_count > 0 ? `${node.worker_item_count} 个 WorkerItem` : "未分配"}</span>
             <span className="ledger-row__evidence">{node.evidence_satisfied}/{node.evidence_required} Evidence</span>
           </button>
         ))}

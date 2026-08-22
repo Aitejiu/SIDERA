@@ -15,10 +15,10 @@ export function TaskNode({ data }: NodeProps<TaskFlowNode>) {
         className={`task-flow-node${data.selected ? " is-selected" : ""}`}
         type="button"
         data-selected={data.selected ? "true" : "false"}
-        aria-label={`选择 ${data.work_item_key}`}
+        aria-label={`选择 ${data.subtask_key}`}
       >
         <span className="task-flow-node__topline">
-          <span className="eyebrow">{data.work_item_key}</span>
+          <span className="eyebrow">{data.subtask_key}</span>
           <StatusMark kind={statusKind(data.state)} />
         </span>
         <strong>{data.title}</strong>
@@ -26,7 +26,7 @@ export function TaskNode({ data }: NodeProps<TaskFlowNode>) {
           {data.current_action ?? (data.state === "planned" ? "等待物化" : "等待活动")}
         </span>
         <span className="task-flow-node__meta">
-          {data.worker_display_name ?? (data.required_capabilities.join(" · ") || "未分配 Worker")}
+          {data.worker_item_count > 0 ? `${data.worker_item_count} 个 WorkerItem` : "未分配 WorkerItem"}
           <span>{data.evidence_satisfied}/{data.evidence_required} Evidence</span>
         </span>
       </button>

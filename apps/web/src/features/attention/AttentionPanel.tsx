@@ -8,7 +8,7 @@ import {
 } from "@/shared/api/client";
 import type { components } from "@/shared/api/schema";
 
-type AttentionItem = components["schemas"]["AttentionItemProjectionResponse"];
+type AttentionItem = components["schemas"]["TaskConsoleAttentionProjectionResponse"];
 
 export function AttentionPanel({
   workspaceId,
@@ -86,10 +86,10 @@ export function AttentionPanel({
               <div className="attention-item__marker" aria-hidden="true"><CircleAlert size={15} /></div>
               <div className="attention-item__body">
                 <div className="attention-item__heading">
-                  <strong>{rootTaskTitle ? `${rootTaskTitle} / ${item.title}` : item.title}</strong>
+                  <strong>{rootTaskTitle ? `${rootTaskTitle} / ${item.subtask_title}` : item.subtask_title}</strong>
                   <span className="mono-label">{item.kind}</span>
                 </div>
-                <p>{item.summary}</p>
+                <p>{item.reason}</p>
                 <span className="mono-label">SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}</span>
               </div>
               <button

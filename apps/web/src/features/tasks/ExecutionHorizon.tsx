@@ -6,7 +6,7 @@ import { statusKind } from "./TaskNode";
 import type { TaskGraph } from "./types";
 
 export function ExecutionHorizon({ graph }: { graph: TaskGraph }) {
-  const nodes = graph.nodes.filter((node) => node.execution_horizon);
+  const nodes = graph.nodes.filter((node) => node.state !== "planned" || node.worker_item_count > 0);
   return (
     <section className="execution-horizon" aria-labelledby="horizon-title">
       <div className="section-heading">
@@ -18,12 +18,12 @@ export function ExecutionHorizon({ graph }: { graph: TaskGraph }) {
       </div>
       <div className="horizon-list">
         {nodes.map((node, index) => (
-          <div className="horizon-item" key={node.work_item_key}>
+          <div className="horizon-item" key={node.subtask_key}>
             {index > 0 ? <ArrowDown className="horizon-item__arrow" size={14} aria-hidden="true" /> : null}
             <Crosshair size={15} aria-hidden="true" />
             <div className="horizon-item__body">
               <strong>{node.title}</strong>
-              <span className="mono-label">{node.work_item_key} · {node.critical_path ? "关键路径" : "直接关联"}</span>
+              <span className="mono-label">{node.subtask_key} · {node.kind}</span>
             </div>
             <StatusMark kind={statusKind(node.state)} />
           </div>

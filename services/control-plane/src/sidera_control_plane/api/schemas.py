@@ -570,7 +570,7 @@ class WorkerWorkspaceProjectionResponse(BaseModel):
     as_of: datetime
 
 
-class WorkerActivityPageProjectionResponse(BaseModel):
+class WorkerItemActivityPageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     last_change_cursor: int

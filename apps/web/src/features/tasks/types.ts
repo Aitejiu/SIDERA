@@ -1,12 +1,12 @@
 import type { components } from "@/shared/api/schema";
 
-export type TaskGraph = components["schemas"]["TaskGraphProjectionResponse"];
-export type TaskNode = components["schemas"]["TaskNodeProjectionResponse"];
-export type TaskEdge = components["schemas"]["TaskEdgeProjectionResponse"];
-export type Milestone = components["schemas"]["MilestoneProjectionResponse"];
+export type TaskGraph = components["schemas"]["TaskConsoleGraphProjectionResponse"];
+export type TaskNode = components["schemas"]["SubtaskNodeProjectionResponse"];
+export type TaskEdge = components["schemas"]["SubtaskEdgeProjectionResponse"];
+export type Milestone = components["schemas"]["SubtaskMilestoneProjectionResponse"];
 export type TaskDetail = components["schemas"]["TaskDetailProjectionResponse"];
-export type TaskActivity = components["schemas"]["TaskActivityProjectionResponse"];
-export type ActivityItem = components["schemas"]["ActivityItemProjectionResponse"];
+export type TaskActivity = components["schemas"]["TaskConsoleActivityProjectionResponse"];
+export type ActivityItem = components["schemas"]["TaskConsoleActivityItemProjectionResponse"];
 export type TaskView = components["schemas"]["TaskResponse"];
 export type PlanSnapshot = components["schemas"]["TaskPlanSnapshotResponse"];
 export type PlanDiff = components["schemas"]["PlanDiffResponse"];

@@ -21,9 +21,9 @@ export function TaskGraph({
 }: {
   graph: TaskGraphProjection;
   selectedWorkItemKey: string | null;
-  onSelect: (workItemKey: string) => void;
+  onSelect: (subtaskKey: string) => void;
 }) {
-  const graphKey = `${graph.nodes.map((node) => node.work_item_key).join(",")}|${graph.edges.map((edge) => `${edge.upstream_work_item_key}:${edge.downstream_work_item_key}:${edge.kind}`).join(",")}`;
+  const graphKey = `${graph.nodes.map((node) => node.subtask_key).join(",")}|${graph.edges.map((edge) => `${edge.upstream_subtask_key}:${edge.downstream_subtask_key}:${edge.kind}`).join(",")}`;
   const [layoutState, setLayoutState] = useState<{
     graphKey: string;
     layout: TaskGraphLayout | null;
@@ -89,7 +89,7 @@ export function TaskGraph({
     style: {
       stroke: edge.kind === "informational" ? "#929aa4" : "#2166d1",
       strokeDasharray: edge.kind === "informational" ? "6 4" : undefined,
-      strokeWidth: edge.scheduler_enforced ? 2.5 : 1.5,
+      strokeWidth: edge.kind === "hard" ? 2.5 : 1.5,
     },
   }));
   const onNodeClick: NodeMouseHandler<TaskFlowNode> = (_event, node) => {
@@ -143,12 +143,12 @@ function FallbackNodes({
     <div className="task-graph__fallback">
       {graph.nodes.map((node) => (
         <button
-          key={node.work_item_key}
+          key={node.subtask_key}
           type="button"
           className="task-graph__fallback-node"
-          data-selected={node.work_item_key === selectedWorkItemKey ? "true" : "false"}
-          onClick={() => onSelect(node.work_item_key)}
-          aria-label={`选择 ${node.work_item_key}`}
+          data-selected={node.subtask_key === selectedWorkItemKey ? "true" : "false"}
+          onClick={() => onSelect(node.subtask_key)}
+          aria-label={`选择 ${node.subtask_key}`}
         >
           {node.title}
         </button>

@@ -16,12 +16,18 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/descriptor",
     "/api/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content",
     "/api/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/download-token",
+    "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity",
 }
 
 EXPECTED_TYPED_RESPONSES = {
-    "/api/v1/tasks/{root_task_id}/graph": "TaskGraphProjectionResponse",
+    "/api/v1/tasks/{root_task_id}/graph": "TaskConsoleGraphProjectionResponse",
     "/api/v1/tasks/{root_task_id}/work-items/{work_item_key}": "TaskDetailProjectionResponse",
-    "/api/v1/tasks/{root_task_id}/activity": "TaskActivityProjectionResponse",
+    "/api/v1/tasks/{root_task_id}/activity": "TaskConsoleActivityProjectionResponse",
+    "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}": "SubtaskWorkspaceProjectionResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace": "WorkerWorkspaceProjectionResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity": "WorkerItemActivityPageResponse",
 }
 
 
@@ -50,5 +56,25 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
             if method not in {"get", "post", "put", "patch", "delete", "options"}:
                 continue
             assert operation["operationId"]
+
+    assert first["components"]["schemas"]["ExecutionContextAddressPayload"][
+        "required"
+    ] == [
+        "worker_item_id",
+        "plan_generation",
+        "context_version",
+        "execution_id",
+        "session_id",
+        "session_version",
+        "worker_id",
+    ]
+    graph_node_properties = first["components"]["schemas"][
+        "SubtaskNodeProjectionResponse"
+    ]["properties"]
+    assert not {
+        "work_item_key",
+        "execution_id",
+        "worker_display_name",
+    } & graph_node_properties.keys()
 
     assert json.loads(first_bytes) == first

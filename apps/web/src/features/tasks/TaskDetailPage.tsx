@@ -29,7 +29,7 @@ export function TaskDetailPage() {
   const resolvedWorkspaceId = workspaceId ?? "";
   const resolvedRootTaskId = rootTaskId ?? "";
   const [searchParams, setSearchParams] = useSearchParams();
-  const selectedFromUrl = searchParams.get("workItem");
+  const selectedFromUrl = searchParams.get("subtask");
   const [viewMode, setViewMode] = useState<"board" | "dag" | "ledger">("board");
 
   const graphQuery = useQuery({
@@ -72,10 +72,10 @@ export function TaskDetailPage() {
     if (!nodes || nodes.length === 0) {
       return null;
     }
-    if (selectedFromUrl !== null && nodes.some((node) => node.work_item_key === selectedFromUrl)) {
+    if (selectedFromUrl !== null && nodes.some((node) => node.subtask_key === selectedFromUrl)) {
       return selectedFromUrl;
     }
-    return nodes.find((node) => node.execution_horizon && node.state !== "planned")?.work_item_key ?? nodes[0]?.work_item_key ?? null;
+    return nodes.find((node) => node.state !== "planned" || node.worker_item_count > 0)?.subtask_key ?? nodes[0]?.subtask_key ?? null;
   }, [graphQuery.data?.nodes, selectedFromUrl]);
   const selectedWorkItemKey = preferredWorkItemKey;
   const detailQuery = useQuery({
@@ -90,11 +90,11 @@ export function TaskDetailPage() {
     if (preferredWorkItemKey === null || selectedFromUrl === preferredWorkItemKey) {
       return;
     }
-    setSearchParams({ workItem: preferredWorkItemKey }, { replace: true });
+    setSearchParams({ subtask: preferredWorkItemKey }, { replace: true });
   }, [preferredWorkItemKey, selectedFromUrl, setSearchParams]);
 
   const selectWorkItem = (workItemKey: string) => {
-    setSearchParams({ workItem: workItemKey });
+    setSearchParams({ subtask: workItemKey });
   };
 
   return (

@@ -55,7 +55,7 @@ export function TaskBoard({
               </header>
               <div className="task-board__list">
                 {items.length === 0 ? <div className="task-board__empty"><MoveRight size={14} aria-hidden="true" />{column.empty}</div> : null}
-                {items.map((node) => <TaskBoardCard key={node.work_item_key} node={node} selected={node.work_item_key === selectedWorkItemKey} onSelect={onSelect} />)}
+                {items.map((node) => <TaskBoardCard key={node.subtask_key} node={node} selected={node.subtask_key === selectedWorkItemKey} onSelect={onSelect} />)}
               </div>
             </section>
           );
@@ -67,17 +67,16 @@ export function TaskBoard({
 
 function TaskBoardCard({ node, selected, onSelect }: { node: TaskNode; selected: boolean; onSelect: (workItemKey: string) => void }) {
   const action = node.current_action ?? (node.state === "planned" ? "等待物化" : node.state === "succeeded" ? "验收已完成" : "等待活动");
-  const isExecution = node.execution_id !== null;
+  const hasWorkerItems = node.worker_item_count > 0;
   return (
-    <button className={`task-board-card${selected ? " is-selected" : ""}`} type="button" data-selected={selected ? "true" : "false"} onClick={() => onSelect(node.work_item_key)} aria-label={`查看${node.title}`}>
-      <span className="task-board-card__topline"><span className="eyebrow">{node.work_item_key}</span><StatusMark kind={statusKind(node.state)} /></span>
+    <button className={`task-board-card${selected ? " is-selected" : ""}`} type="button" data-selected={selected ? "true" : "false"} onClick={() => onSelect(node.subtask_key)} aria-label={`查看${node.title}`}>
+      <span className="task-board-card__topline"><span className="eyebrow">{node.subtask_key}</span><StatusMark kind={statusKind(node.state)} /></span>
       <strong>{node.title}</strong>
       <span className="task-board-card__action">{action}</span>
       <span className="task-board-card__meta">
-        <span>{isExecution ? "有执行记录" : node.required_capabilities.join(" · ") || "待配置"}</span>
+        <span>{hasWorkerItems ? `${node.worker_item_count} 个 WorkerItem` : "待配置 WorkerItem"}</span>
         <span>{node.evidence_satisfied}/{node.evidence_required}</span>
       </span>
-      {node.worker_display_name ? <span className="task-board-card__worker">{node.worker_display_name}</span> : null}
       <span className="task-board-card__chevron" aria-hidden="true"><ArrowRight size={14} /></span>
     </button>
   );
@@ -86,7 +85,7 @@ function TaskBoardCard({ node, selected, onSelect }: { node: TaskNode; selected:
 function columnFor(node: TaskNode): BoardColumnKey {
   if (node.state === "waiting_user" || node.state === "blocked" || node.state === "failed") return "attention";
   if (node.state === "running" || node.state === "assigned" || node.state === "queued" || node.state === "retrying") return "running";
-  if (node.state === "waiting_dependency" || node.waiting_on_plan_dependency) return "waiting";
+  if (node.state === "waiting_dependency") return "waiting";
   if (node.state === "succeeded") return "completed";
   return "next";
 }

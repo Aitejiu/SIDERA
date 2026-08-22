@@ -344,6 +344,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Subtask Workspace */
+        get: operations["get_subtask_workspace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{root_task_id}/work-items/{work_item_key}": {
         parameters: {
             query?: never;
@@ -531,6 +548,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Worker Item Activity */
+        get: operations["list_worker_item_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Worker Item Workspace */
+        get: operations["get_worker_item_workspace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -552,36 +603,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** ActivityItemProjectionResponse */
-        ActivityItemProjectionResponse: {
-            /** Causal Parent Id */
-            causal_parent_id: string | null;
-            /**
-             * Correlation Id
-             * Format: uuid
-             */
-            correlation_id: string;
-            /** Kind */
-            kind: string;
-            /**
-             * Occurred At
-             * Format: date-time
-             */
-            occurred_at: string;
-            /** Scheduler Enforced */
-            scheduler_enforced: boolean;
-            /**
-             * Source Id
-             * Format: uuid
-             */
-            source_id: string;
-            /** Source Type */
-            source_type: string;
-            /** Summary */
-            summary: string;
-            /** Title */
-            title: string;
-        };
         /** ActorRequest */
         ActorRequest: {
             /** Id */
@@ -685,34 +706,6 @@ export interface components {
             media_type: string;
             /** Size Bytes */
             size_bytes: number;
-        };
-        /** AttentionItemProjectionResponse */
-        AttentionItemProjectionResponse: {
-            /**
-             * Correlation Id
-             * Format: uuid
-             */
-            correlation_id: string;
-            /** Key */
-            key: string;
-            /** Kind */
-            kind: string;
-            /**
-             * Occurred At
-             * Format: date-time
-             */
-            occurred_at: string;
-            /**
-             * Resource Id
-             * Format: uuid
-             */
-            resource_id: string;
-            /** Resource Version */
-            resource_version: number;
-            /** Summary */
-            summary: string;
-            /** Title */
-            title: string;
         };
         /** CheckpointSummaryProjectionResponse */
         CheckpointSummaryProjectionResponse: {
@@ -920,6 +913,35 @@ export interface components {
              */
             workspace_module_id: string;
         };
+        /** ExecutionContextAddressPayload */
+        ExecutionContextAddressPayload: {
+            /** Context Version */
+            context_version: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Session Version */
+            session_version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
         /** ExecutionEventPageResponse */
         ExecutionEventPageResponse: {
             /** Items */
@@ -1083,6 +1105,8 @@ export interface components {
             updated_at: string;
             /** Version */
             version: number;
+            /** Worker Item Id */
+            worker_item_id: string | null;
             /**
              * Workspace Id
              * Format: uuid
@@ -1278,23 +1302,6 @@ export interface components {
              */
             worker_id: string;
         };
-        /** MilestoneProjectionResponse */
-        MilestoneProjectionResponse: {
-            /** Completed Count */
-            completed_count: number;
-            /** Key */
-            key: string;
-            /** Materialized Count */
-            materialized_count: number;
-            /** Order Hint */
-            order_hint: number;
-            /** Planned Count */
-            planned_count: number;
-            /** State */
-            state: string;
-            /** Title */
-            title: string;
-        };
         /** MilestoneResponse */
         MilestoneResponse: {
             /** Acceptance Refs */
@@ -1346,16 +1353,370 @@ export interface components {
             /** Schema Version */
             schema_version: number;
         };
-        /** TaskActivityProjectionResponse */
-        TaskActivityProjectionResponse: {
+        /** RelatedSubtaskProjectionResponse */
+        RelatedSubtaskProjectionResponse: {
+            /** State */
+            state: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Title */
+            title: string;
+        };
+        /** SubtaskActivityProjectionResponse */
+        SubtaskActivityProjectionResponse: {
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /** Source Type */
+            source_type: string;
+            /** Summary */
+            summary: string;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+        };
+        /** SubtaskArtifactSummaryProjectionResponse */
+        SubtaskArtifactSummaryProjectionResponse: {
+            /**
+             * Artifact Id
+             * Format: uuid
+             */
+            artifact_id: string;
+            /** Artifact Type */
+            artifact_type: string;
+            /** Content Available */
+            content_available: boolean;
+            /** Media Type */
+            media_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
+        /** SubtaskAttentionProjectionResponse */
+        SubtaskAttentionProjectionResponse: {
+            /** Key */
+            key: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Reason */
+            reason: string;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+            /** Worker Item Title */
+            worker_item_title: string | null;
+        };
+        /** SubtaskCheckpointSummaryProjectionResponse */
+        SubtaskCheckpointSummaryProjectionResponse: {
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Sequence */
+            sequence: number;
+            /** Title */
+            title: string;
+        };
+        /** SubtaskEdgeProjectionResponse */
+        SubtaskEdgeProjectionResponse: {
+            /** Downstream Subtask Key */
+            downstream_subtask_key: string;
+            /** Kind */
+            kind: string;
+            /** Upstream Subtask Key */
+            upstream_subtask_key: string;
+        };
+        /** SubtaskEvidenceSummaryProjectionResponse */
+        SubtaskEvidenceSummaryProjectionResponse: {
+            /** Acceptance Ref */
+            acceptance_ref: string;
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /** Conclusion */
+            conclusion: string;
+            /**
+             * Evidence Id
+             * Format: uuid
+             */
+            evidence_id: string;
+        };
+        /** SubtaskMilestoneProjectionResponse */
+        SubtaskMilestoneProjectionResponse: {
+            /** Completed Count */
+            completed_count: number;
+            /** Key */
+            key: string;
+            /** Order Hint */
+            order_hint: number;
+            /** Planned Count */
+            planned_count: number;
+            /** State */
+            state: string;
+            /** Subtask Count */
+            subtask_count: number;
+            /** Title */
+            title: string;
+        };
+        /** SubtaskNodeProjectionResponse */
+        SubtaskNodeProjectionResponse: {
+            /** Attention Worker Item Count */
+            attention_worker_item_count: number;
+            /** Current Action */
+            current_action: string | null;
+            /** Evidence Required */
+            evidence_required: number;
+            /** Evidence Satisfied */
+            evidence_satisfied: number;
+            /** Goal Summary */
+            goal_summary: string;
+            /** Kind */
+            kind: string;
+            /** Milestone Key */
+            milestone_key: string | null;
+            /** Running Worker Item Count */
+            running_worker_item_count: number;
+            /** State */
+            state: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Task Id */
+            task_id: string | null;
+            /** Title */
+            title: string;
+            /** Worker Item Count */
+            worker_item_count: number;
+        };
+        /** SubtaskSummaryProjectionResponse */
+        SubtaskSummaryProjectionResponse: {
+            /** Acceptance Refs */
+            acceptance_refs: string[];
+            /** Current Action */
+            current_action: string | null;
+            /** Evidence Required */
+            evidence_required: number;
+            /** Evidence Satisfied */
+            evidence_satisfied: number;
+            /** Goal Summary */
+            goal_summary: string;
+            /** Key */
+            key: string;
+            /** Kind */
+            kind: string;
+            /** Milestone Key */
+            milestone_key: string | null;
+            /** State */
+            state: string;
+            /** Task Id */
+            task_id: string | null;
+            /** Title */
+            title: string;
+        };
+        /** SubtaskWorkspaceProjectionResponse */
+        SubtaskWorkspaceProjectionResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["SubtaskArtifactSummaryProjectionResponse"][];
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Attention Items */
+            attention_items: components["schemas"]["SubtaskAttentionProjectionResponse"][];
+            /** Checkpoints */
+            checkpoints: components["schemas"]["SubtaskCheckpointSummaryProjectionResponse"][];
+            /** Downstream Subtasks */
+            downstream_subtasks: components["schemas"]["RelatedSubtaskProjectionResponse"][];
+            /** Evidence */
+            evidence: components["schemas"]["SubtaskEvidenceSummaryProjectionResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /** Recent Activity */
+            recent_activity: components["schemas"]["SubtaskActivityProjectionResponse"][];
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            subtask: components["schemas"]["SubtaskSummaryProjectionResponse"];
+            /** Task Title */
+            task_title: string;
+            /** Upstream Subtasks */
+            upstream_subtasks: components["schemas"]["RelatedSubtaskProjectionResponse"][];
+            worker_graph: components["schemas"]["WorkerItemGraphProjectionResponse"];
+            /** Worker Items */
+            worker_items: components["schemas"]["WorkerItemSummaryProjectionResponse"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** TaskConsoleActivityItemProjectionResponse */
+        TaskConsoleActivityItemProjectionResponse: {
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /** Source Type */
+            source_type: string;
+            /** Subtask Key */
+            subtask_key: string | null;
+            /** Subtask Title */
+            subtask_title: string | null;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+        };
+        /** TaskConsoleActivityProjectionResponse */
+        TaskConsoleActivityProjectionResponse: {
             /** Items */
-            items: components["schemas"]["ActivityItemProjectionResponse"][];
+            items: components["schemas"]["TaskConsoleActivityItemProjectionResponse"][];
             /** Last Change Cursor */
             last_change_cursor: number;
             /** Next Cursor */
             next_cursor: string | null;
             /** Schema Version */
             schema_version: number;
+        };
+        /** TaskConsoleAttentionProjectionResponse */
+        TaskConsoleAttentionProjectionResponse: {
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Key */
+            key: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Reason */
+            reason: string;
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /** Resource Version */
+            resource_version: number;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Subtask Title */
+            subtask_title: string;
+            /** Task Title */
+            task_title: string;
+        };
+        /** TaskConsoleGraphProjectionResponse */
+        TaskConsoleGraphProjectionResponse: {
+            /** Edges */
+            edges: components["schemas"]["SubtaskEdgeProjectionResponse"][];
+            /** Milestones */
+            milestones: components["schemas"]["SubtaskMilestoneProjectionResponse"][];
+            /** Nodes */
+            nodes: components["schemas"]["SubtaskNodeProjectionResponse"][];
+            overview: components["schemas"]["TaskConsoleOverviewProjectionResponse"];
+            /** Schema Version */
+            schema_version: number;
+        };
+        /** TaskConsoleOverviewProjectionResponse */
+        TaskConsoleOverviewProjectionResponse: {
+            /** Acceptance Refs */
+            acceptance_refs: string[];
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Attention Items */
+            attention_items: components["schemas"]["TaskConsoleAttentionProjectionResponse"][];
+            /** Completed Subtask Count */
+            completed_subtask_count: number;
+            /** Current Milestone Key */
+            current_milestone_key: string | null;
+            /** Failed Subtask Count */
+            failed_subtask_count: number;
+            /** Generation */
+            generation: number;
+            /** Goal Summary */
+            goal_summary: string;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Next Subtask Keys */
+            next_subtask_keys: string[];
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /** Planned Subtask Count */
+            planned_subtask_count: number;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Running Subtask Count */
+            running_subtask_count: number;
+            /** Schema Version */
+            schema_version: number;
+            /** Subtask Count */
+            subtask_count: number;
+            /** Title */
+            title: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** TaskDetailProjectionResponse */
         TaskDetailProjectionResponse: {
@@ -1393,18 +1754,6 @@ export interface components {
             scheduler_enforced: boolean;
             /** Upstream Work Item Key */
             upstream_work_item_key: string;
-        };
-        /** TaskGraphProjectionResponse */
-        TaskGraphProjectionResponse: {
-            /** Edges */
-            edges: components["schemas"]["TaskEdgeProjectionResponse"][];
-            /** Milestones */
-            milestones: components["schemas"]["MilestoneProjectionResponse"][];
-            /** Nodes */
-            nodes: components["schemas"]["TaskNodeProjectionResponse"][];
-            overview: components["schemas"]["TaskOverviewProjectionResponse"];
-            /** Schema Version */
-            schema_version: number;
         };
         /** TaskNodeProjectionResponse */
         TaskNodeProjectionResponse: {
@@ -1450,57 +1799,6 @@ export interface components {
             worker_id: string | null;
             /** Worker Slot Key */
             worker_slot_key: string | null;
-        };
-        /** TaskOverviewProjectionResponse */
-        TaskOverviewProjectionResponse: {
-            /** Acceptance Refs */
-            acceptance_refs: string[];
-            /**
-             * As Of
-             * Format: date-time
-             */
-            as_of: string;
-            /** Attention Items */
-            attention_items: components["schemas"]["AttentionItemProjectionResponse"][];
-            /** Completed Count */
-            completed_count: number;
-            /** Current Milestone Key */
-            current_milestone_key: string | null;
-            /** Failed Count */
-            failed_count: number;
-            /** Generation */
-            generation: number;
-            /** Goal Summary */
-            goal_summary: string;
-            /** Last Change Cursor */
-            last_change_cursor: number;
-            /** Materialized Count */
-            materialized_count: number;
-            /** Next Work Item Keys */
-            next_work_item_keys: string[];
-            /**
-             * Plan Snapshot Id
-             * Format: uuid
-             */
-            plan_snapshot_id: string;
-            /** Planned Count */
-            planned_count: number;
-            /**
-             * Root Task Id
-             * Format: uuid
-             */
-            root_task_id: string;
-            /** Running Count */
-            running_count: number;
-            /** Schema Version */
-            schema_version: number;
-            /** Title */
-            title: string;
-            /**
-             * Workspace Id
-             * Format: uuid
-             */
-            workspace_id: string;
         };
         /** TaskPageResponse */
         TaskPageResponse: {
@@ -1628,6 +1926,28 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** TraceDescriptorProjectionResponse */
+        TraceDescriptorProjectionResponse: {
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Raw Ref */
+            raw_ref: string | null;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Route */
+            route: string;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+        };
         /** TraceTimingResponse */
         TraceTimingResponse: {
             /** Input Ms */
@@ -1649,6 +1969,17 @@ export interface components {
             input_tokens: number | null;
             /** Output Tokens */
             output_tokens: number | null;
+        };
+        /** UsageSummaryProjectionResponse */
+        UsageSummaryProjectionResponse: {
+            /** Cached Tokens */
+            cached_tokens: number;
+            /** Cost Microunits */
+            cost_microunits: number;
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -1685,6 +2016,98 @@ export interface components {
             title: string;
             /** Worker Slot Key */
             worker_slot_key: string | null;
+        };
+        /** WorkerActivityProjectionResponse */
+        WorkerActivityProjectionResponse: {
+            /**
+             * Activity Id
+             * Format: uuid
+             */
+            activity_id: string;
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /** Body */
+            body: string | null;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Delivery Status */
+            delivery_status: string | null;
+            /** Execution Id */
+            execution_id: string | null;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Session Id */
+            session_id: string | null;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /** Source Type */
+            source_type: string;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+            trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+        };
+        /** WorkerArtifactSummaryProjectionResponse */
+        WorkerArtifactSummaryProjectionResponse: {
+            /**
+             * Artifact Id
+             * Format: uuid
+             */
+            artifact_id: string;
+            /** Artifact Type */
+            artifact_type: string;
+            /** Content Available */
+            content_available: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Media Type */
+            media_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Task Id
+             * Format: uuid
+             */
+            task_id: string;
+        };
+        /** WorkerCheckpointSummaryProjectionResponse */
+        WorkerCheckpointSummaryProjectionResponse: {
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Sequence */
+            sequence: number;
+            /** Title */
+            title: string;
         };
         /** WorkerContextBranchResponse */
         WorkerContextBranchResponse: {
@@ -1726,6 +2149,212 @@ export interface components {
             work_item_key: string;
             /** Worker Slot Key */
             worker_slot_key: string;
+        };
+        /** WorkerEvidenceSummaryProjectionResponse */
+        WorkerEvidenceSummaryProjectionResponse: {
+            /** Acceptance Ref */
+            acceptance_ref: string;
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /** Conclusion */
+            conclusion: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Evidence Id
+             * Format: uuid
+             */
+            evidence_id: string;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Task Id
+             * Format: uuid
+             */
+            task_id: string;
+        };
+        /** WorkerExecutionSummaryProjectionResponse */
+        WorkerExecutionSummaryProjectionResponse: {
+            /** Attempt */
+            attempt: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Session Id */
+            session_id: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Task Id
+             * Format: uuid
+             */
+            task_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Worker Id */
+            worker_id: string | null;
+        };
+        /** WorkerInterventionContextProjectionResponse */
+        WorkerInterventionContextProjectionResponse: {
+            /** Context Version */
+            context_version: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Session Version */
+            session_version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** WorkerItemActivityPageResponse */
+        WorkerItemActivityPageResponse: {
+            /** Items */
+            items: components["schemas"]["WorkerActivityProjectionResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** WorkerItemGraphEdgeProjectionResponse */
+        WorkerItemGraphEdgeProjectionResponse: {
+            /**
+             * Downstream Worker Item Id
+             * Format: uuid
+             */
+            downstream_worker_item_id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Upstream Worker Item Id
+             * Format: uuid
+             */
+            upstream_worker_item_id: string;
+        };
+        /** WorkerItemGraphProjectionResponse */
+        WorkerItemGraphProjectionResponse: {
+            /** Edges */
+            edges: components["schemas"]["WorkerItemGraphEdgeProjectionResponse"][];
+            /** Worker Item Ids */
+            worker_item_ids: string[];
+        };
+        /** WorkerItemIdentityProjectionResponse */
+        WorkerItemIdentityProjectionResponse: {
+            /** Acknowledged Context Version */
+            acknowledged_context_version: number;
+            /** Context Version */
+            context_version: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Responsibility */
+            responsibility: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Stable Key */
+            stable_key: string;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+        };
+        /** WorkerItemPlacementProjectionResponse */
+        WorkerItemPlacementProjectionResponse: {
+            /** Capability Requirements */
+            capability_requirements: string[];
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /** Role */
+            role: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Subtask Task Id */
+            subtask_task_id: string | null;
+            /** Worker Item Key */
+            worker_item_key: string;
+        };
+        /** WorkerItemSummaryProjectionResponse */
+        WorkerItemSummaryProjectionResponse: {
+            /** Blocker */
+            blocker: string | null;
+            /** Context Version */
+            context_version: number;
+            /** Current Agent Summary */
+            current_agent_summary: string | null;
+            /** Current Step */
+            current_step: string | null;
+            /** Recent Activity At */
+            recent_activity_at: string | null;
+            /** Responsibility */
+            responsibility: string;
+            /** Role */
+            role: string;
+            /** Stable Key */
+            stable_key: string;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
         };
         /** WorkerResponse */
         WorkerResponse: {
@@ -1774,6 +2403,41 @@ export interface components {
              * Format: uuid
              */
             workspace_id: string;
+        };
+        /** WorkerRuntimeProjectionResponse */
+        WorkerRuntimeProjectionResponse: {
+            /** Adapter Type */
+            adapter_type: string | null;
+            /** Attempt */
+            attempt: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Execution Status */
+            execution_status: string;
+            /** Fencing Token */
+            fencing_token: number | null;
+            /** Input Mode */
+            input_mode: string | null;
+            /** Lease Id */
+            lease_id: string | null;
+            /** Session Id */
+            session_id: string | null;
+            /** Session Status */
+            session_status: string | null;
+            /** Session Version */
+            session_version: number | null;
+            /**
+             * Task Id
+             * Format: uuid
+             */
+            task_id: string;
+            /** Worker Display Name */
+            worker_display_name: string | null;
+            /** Worker Id */
+            worker_id: string | null;
         };
         /** WorkerSlotResponse */
         WorkerSlotResponse: {
@@ -1879,6 +2543,44 @@ export interface components {
             timing: components["schemas"]["TraceTimingResponse"];
             /** Worker Id */
             worker_id: string | null;
+        };
+        /** WorkerWorkspaceProjectionResponse */
+        WorkerWorkspaceProjectionResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["WorkerArtifactSummaryProjectionResponse"][];
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Can Intervene */
+            can_intervene: boolean;
+            current_placement: components["schemas"]["WorkerItemPlacementProjectionResponse"];
+            current_runtime: components["schemas"]["WorkerRuntimeProjectionResponse"] | null;
+            /** Current Step */
+            current_step: string | null;
+            /** Evidence */
+            evidence: components["schemas"]["WorkerEvidenceSummaryProjectionResponse"][];
+            /** Execution History */
+            execution_history: components["schemas"]["WorkerExecutionSummaryProjectionResponse"][];
+            intervention_context: components["schemas"]["WorkerInterventionContextProjectionResponse"] | null;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            latest_checkpoint: components["schemas"]["WorkerCheckpointSummaryProjectionResponse"] | null;
+            /** Next Action */
+            next_action: string | null;
+            /** Placement History */
+            placement_history: components["schemas"]["WorkerItemPlacementProjectionResponse"][];
+            /** Read Only Reason */
+            read_only_reason: string | null;
+            trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+            usage: components["schemas"]["UsageSummaryProjectionResponse"];
+            worker_item: components["schemas"]["WorkerItemIdentityProjectionResponse"];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
     };
     responses: never;
@@ -2320,7 +3022,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskActivityProjectionResponse"];
+                    "application/json": components["schemas"]["TaskConsoleActivityProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2390,7 +3092,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskGraphProjectionResponse"];
+                    "application/json": components["schemas"]["TaskConsoleGraphProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2423,7 +3125,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskOverviewProjectionResponse"];
+                    "application/json": components["schemas"]["TaskConsoleOverviewProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2559,6 +3261,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskPlanSnapshotResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_subtask_workspace: {
+        parameters: {
+            query: {
+                workspace_id: string;
+            };
+            header?: never;
+            path: {
+                root_task_id: string;
+                subtask_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubtaskWorkspaceProjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2924,7 +3660,74 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskOverviewProjectionResponse"][];
+                    "application/json": components["schemas"]["TaskConsoleOverviewProjectionResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_worker_item_activity: {
+        parameters: {
+            query?: {
+                after?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerItemActivityPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_worker_item_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerWorkspaceProjectionResponse"];
                 };
             };
             /** @description Validation Error */

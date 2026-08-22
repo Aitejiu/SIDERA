@@ -54,6 +54,7 @@ const execution: Execution = {
   pinned_worker_id: context.worker_id,
   assigned_worker_id: context.worker_id,
   active_lease_id: null,
+  worker_item_id: "41000000-0000-0000-0000-000000000001",
   last_fencing_token: 1,
   not_before: "2026-08-21T08:00:00Z",
   failure_code: null,

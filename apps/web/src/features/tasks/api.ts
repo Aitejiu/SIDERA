@@ -12,7 +12,7 @@ import type {
   TaskView,
 } from "./types";
 
-export type TaskOverview = components["schemas"]["TaskOverviewProjectionResponse"];
+export type TaskOverview = components["schemas"]["TaskConsoleOverviewProjectionResponse"];
 
 const TASK_OVERVIEWS_PATH = "/api/v1/workspaces/{workspace_id}/task-overviews" as const;
 

@@ -10,10 +10,12 @@ import { AttentionPanel } from "./AttentionPanel";
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 const ITEM = {
-  key: "task:30000000-0000-0000-0000-000000000002:blocked",
+  key: "subtask:30000000-0000-0000-0000-000000000002:blocked",
   kind: "blocked",
-  title: "Blocked worker",
-  summary: "Waiting for intervention",
+  task_title: "Control room",
+  subtask_key: "backend",
+  subtask_title: "Blocked worker",
+  reason: "Waiting for intervention",
   resource_id: "30000000-0000-0000-0000-000000000002",
   resource_version: 3,
   correlation_id: "00000000-0000-0000-0000-000000000000",

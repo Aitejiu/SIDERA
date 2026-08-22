@@ -21,18 +21,20 @@ const overviews = [
     goal_summary: "Expose progress and exact intervention.",
     acceptance_refs: ["spec:task-first"],
     current_milestone_key: "m2",
-    materialized_count: 4,
-    planned_count: 7,
-    running_count: 2,
-    completed_count: 2,
-    failed_count: 1,
-    next_work_item_keys: ["trace-viewer"],
+    subtask_count: 4,
+    planned_subtask_count: 7,
+    running_subtask_count: 2,
+    completed_subtask_count: 2,
+    failed_subtask_count: 1,
+    next_subtask_keys: ["trace-viewer"],
     attention_items: [
       {
         key: "trace-viewer:blocked",
         kind: "blocked",
-        title: "Trace viewer needs input",
-        summary: "A worker is waiting for a decision.",
+        task_title: "Ship control room",
+        subtask_key: "trace-viewer",
+        subtask_title: "Trace viewer needs input",
+        reason: "A worker is waiting for a decision.",
         resource_id: "30000000-0000-0000-0000-000000000010",
         resource_version: 4,
         correlation_id: "50000000-0000-0000-0000-000000000001",
@@ -52,12 +54,12 @@ const overviews = [
     goal_summary: "Summarize the verified release.",
     acceptance_refs: ["spec:release"],
     current_milestone_key: null,
-    materialized_count: 1,
-    planned_count: 2,
-    running_count: 0,
-    completed_count: 1,
-    failed_count: 0,
-    next_work_item_keys: ["publish"],
+    subtask_count: 1,
+    planned_subtask_count: 2,
+    running_subtask_count: 0,
+    completed_subtask_count: 1,
+    failed_subtask_count: 0,
+    next_subtask_keys: ["publish"],
     attention_items: [],
     last_change_cursor: 42,
     as_of: "2026-08-21T08:01:00Z",
@@ -96,7 +98,7 @@ describe("TaskListPage", () => {
     expect(await screen.findByText("Ship control room")).toBeVisible();
     expect(screen.getByText("Prepare release notes")).toBeVisible();
     expect(screen.getByText("GEN 3")).toBeVisible();
-    expect(screen.getByText("4 / 7 已物化")).toBeVisible();
+    expect(screen.getByText("4 / 7 已规划")).toBeVisible();
     expect(screen.getByText("运行中 2")).toBeVisible();
     expect(screen.getByText("失败 1")).toBeVisible();
     expect(screen.getByText("下一个 trace-viewer")).toBeVisible();
