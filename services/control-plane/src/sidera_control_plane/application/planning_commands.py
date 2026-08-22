@@ -315,14 +315,6 @@ class PlanningCommandHandler:
             },
         )
         uow.events.append_with_outbox(event)
-        uow.projection_changes.changed(
-            workspace_id=request.workspace_id,
-            projection_type="planning_request",
-            resource_id=request.id,
-            change_type="PlanningRequestSubmitted",
-            resource_version=request.version,
-            correlation_id=envelope.correlation_id,
-        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -386,14 +378,6 @@ class PlanningCommandHandler:
             payload={"status": request.status.value},
         )
         uow.events.append_with_outbox(event)
-        uow.projection_changes.changed(
-            workspace_id=request.workspace_id,
-            projection_type="planning_request",
-            resource_id=request.id,
-            change_type="PlanningRequestCancelled",
-            resource_version=request.version,
-            correlation_id=envelope.correlation_id,
-        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -476,14 +460,6 @@ class PlanningCommandHandler:
             },
         )
         uow.events.append_with_outbox(event)
-        uow.projection_changes.changed(
-            workspace_id=request.workspace_id,
-            projection_type="planning_request",
-            resource_id=request.id,
-            change_type="PlanningClarificationAnswered",
-            resource_version=request.version,
-            correlation_id=envelope.correlation_id,
-        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -554,14 +530,6 @@ class PlanningCommandHandler:
             },
         )
         uow.events.append_with_outbox(event)
-        uow.projection_changes.changed(
-            workspace_id=request.workspace_id,
-            projection_type="planning_request",
-            resource_id=request.id,
-            change_type="PlanningProposalRevisionRequested",
-            resource_version=request.version,
-            correlation_id=envelope.correlation_id,
-        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -605,14 +573,6 @@ class PlanningCommandHandler:
             },
         )
         uow.events.append_with_outbox(event)
-        uow.projection_changes.changed(
-            workspace_id=request.workspace_id,
-            projection_type="planning_request",
-            resource_id=request.id,
-            change_type="PlanningProposalRejected",
-            resource_version=request.version,
-            correlation_id=envelope.correlation_id,
-        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -660,14 +620,6 @@ class PlanningCommandHandler:
             },
         )
         uow.events.append_with_outbox(event)
-        uow.projection_changes.changed(
-            workspace_id=request.workspace_id,
-            projection_type="planning_request",
-            resource_id=request.id,
-            change_type="PlanningBlockedRunRetried",
-            resource_version=request.version,
-            correlation_id=envelope.correlation_id,
-        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
