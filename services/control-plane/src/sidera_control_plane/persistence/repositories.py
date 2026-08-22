@@ -160,6 +160,7 @@ class CommandRepository:
                     "aggregate_id": str(result.aggregate_id),
                     "aggregate_version": result.aggregate_version,
                     "event_ids": [str(event_id) for event_id in result.event_ids],
+                    "data": result.data,
                 },
                 rejection_reason=None,
             )

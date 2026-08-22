@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +24,7 @@ class CommandResult:
     aggregate_id: UUID
     aggregate_version: int
     event_ids: tuple[UUID, ...]
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

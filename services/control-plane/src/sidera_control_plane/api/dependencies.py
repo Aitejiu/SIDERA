@@ -14,6 +14,7 @@ from sidera_control_plane.application.execution_commands import (
     ExecutionInputCommandHandler,
 )
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
+from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.subtask_workspace_queries import (
@@ -86,6 +87,11 @@ def get_command_service(
                 lease_ttl_seconds=settings.assignment_lease_seconds,
             ),
             ExecutionInputCommandHandler(lambda: datetime.now(UTC)),
+            PlanningCommandHandler(
+                local_actor_type=settings.local_actor_type,
+                local_actor_id=settings.local_actor_id,
+                clock=lambda: datetime.now(UTC),
+            ),
         ),
     )
 

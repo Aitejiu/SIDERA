@@ -20,6 +20,10 @@ class ValidationError(DomainError):
     code = "validation_error"
 
 
+class OperatorRequired(ValidationError):
+    code = "operator_required"
+
+
 class InvalidTransition(DomainError):
     code = "invalid_transition"
 

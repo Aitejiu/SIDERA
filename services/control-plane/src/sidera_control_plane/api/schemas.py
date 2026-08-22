@@ -34,7 +34,14 @@ from sidera_control_plane.domain.plans import TaskPlanSnapshot
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 InputText = Annotated[str, StringConstraints(min_length=1)]
 AggregateType = Literal[
-    "task", "worker", "execution", "execution_session", "lease"
+    "task",
+    "worker",
+    "execution",
+    "execution_session",
+    "lease",
+    "workspace",
+    "planning_request",
+    "planning_run",
 ]
 
 
@@ -61,6 +68,96 @@ class SetTaskPriorityPayload(BaseModel):
 
 
 class EmptyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerCapabilityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    structured_output: NonEmptyString
+    clarification: bool
+    idempotency: NonEmptyString
+    cancellation: NonEmptyString
+    usage_reporting: NonEmptyString
+    max_context_bytes: int = Field(gt=0)
+    stability: NonEmptyString
+    interface_version: NonEmptyString
+    proposal_schema_versions: tuple[int, ...] = Field(min_length=1)
+
+
+class RegisterPlannerModulePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: NonEmptyString
+    interface_version: NonEmptyString
+    config_schema_version: int = Field(ge=1)
+    capabilities: PlannerCapabilityPayload
+    instance_name: NonEmptyString
+    config_namespace: NonEmptyString
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+
+
+class PlanningBudgetPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_context_bytes: int = Field(gt=0)
+    max_tokens: int = Field(gt=0)
+    max_cost_microunits: int = Field(gt=0)
+    max_runtime_seconds: int = Field(gt=0)
+    max_revisions: int = Field(gt=0)
+    max_nodes: int = Field(gt=0)
+    max_concurrency: int = Field(gt=0)
+
+
+class PlanningRetryPolicyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries: int = Field(ge=0)
+    backoff_seconds: tuple[int, ...] = Field(default_factory=tuple)
+    unknown_outcome_policy: NonEmptyString
+    invalid_output_policy: NonEmptyString
+
+
+class RegisterPlanningProfilePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_key: NonEmptyString
+    version: int = Field(ge=1)
+    display_name: NonEmptyString
+    planner_module_instance_id: UUID
+    planner_module_config_version: int = Field(ge=1)
+    planner_interface_version: NonEmptyString
+    prompt_policy_version: NonEmptyString
+    system_policy: dict[str, Any] = Field(default_factory=dict)
+    proposal_schema_version: int = Field(ge=1)
+    allowed_capabilities: tuple[NonEmptyString, ...] = Field(min_length=1)
+    adapter_preferences: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    adapter_forbidden: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    budget: PlanningBudgetPayload
+    retry_policy: PlanningRetryPolicyPayload
+    default_priority: int = Field(ge=0, le=100)
+    execution_max_attempts: int = Field(ge=1)
+    execution_budget_level: NonEmptyString
+    user_selectable: bool = True
+    planner_secret_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+
+
+class SubmitPlanningRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: UUID
+    profile_version: int = Field(ge=1)
+    objective: NonEmptyString
+    constraints: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    acceptance_criteria: tuple[NonEmptyString, ...] = Field(min_length=1)
+    context_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    requested_outputs: tuple[NonEmptyString, ...] = Field(min_length=1)
+    source_type: NonEmptyString
+    source_ref: NonEmptyString | None = None
+
+
+class CancelPlanningRequestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
@@ -917,6 +1014,18 @@ class CommandRequest(BaseModel):
         if self.command_type == "CreateTask":
             self._require_create("task")
             parsed: BaseModel = CreateTaskPayload.model_validate(self.payload)
+        elif self.command_type == "RegisterPlannerModule":
+            self._require_create("workspace")
+            parsed = RegisterPlannerModulePayload.model_validate(self.payload)
+        elif self.command_type == "RegisterPlanningProfile":
+            self._require_create("workspace")
+            parsed = RegisterPlanningProfilePayload.model_validate(self.payload)
+        elif self.command_type == "SubmitPlanningRequest":
+            self._require_create("workspace")
+            parsed = SubmitPlanningRequestPayload.model_validate(self.payload)
+        elif self.command_type == "CancelPlanningRequest":
+            self._require_mutation_target("planning_request")
+            parsed = CancelPlanningRequestPayload.model_validate(self.payload)
         elif self.command_type == "PublishPlanSnapshot":
             self._require_mutation_target("task")
             parsed = PublishPlanSnapshotPayload.model_validate(self.payload)
@@ -1014,6 +1123,7 @@ class CommandResponse(BaseModel):
     aggregate_id: UUID
     aggregate_version: int
     event_ids: tuple[UUID, ...]
+    data: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_result(cls, result: CommandResult) -> "CommandResponse":
@@ -1022,6 +1132,7 @@ class CommandResponse(BaseModel):
             aggregate_id=result.aggregate_id,
             aggregate_version=result.aggregate_version,
             event_ids=result.event_ids,
+            data=result.data,
         )
 
 

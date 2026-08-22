@@ -9,6 +9,7 @@ import pytest
 from sidera_control_plane.application.command_service import (
     CommandService,
     hash_request,
+    replay_command,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import (
@@ -50,6 +51,7 @@ class FakeCommandRepository:
                 "aggregate_id": str(result.aggregate_id),
                 "aggregate_version": result.aggregate_version,
                 "event_ids": [str(event_id) for event_id in result.event_ids],
+                "data": result.data,
             },
             rejection_reason=None,
         )
@@ -114,6 +116,21 @@ class RecordingHandler:
         )
 
 
+class DataHandler:
+    command_types = frozenset({"RecordData"})
+
+    def handle(
+        self, _uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=uuid4(),
+            aggregate_version=1,
+            event_ids=(),
+            data={"planning_request_id": str(uuid4()), "brief_revision": 1},
+        )
+
+
 class RejectingHandler:
     command_types = frozenset({"RejectThing"})
 
@@ -172,6 +189,36 @@ def test_dispatcher_routes_and_replays_without_reinvoking_handler() -> None:
 
     assert replay == first
     assert handler.calls == 1
+
+
+def test_dispatcher_replays_command_result_data_without_reinvoking_handler() -> None:
+    commands = FakeCommandRepository()
+    service = make_service(commands, (DataHandler(),))
+    envelope = make_envelope("RecordData")
+
+    first = service.handle(envelope)
+    replay = service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+
+    assert replay == first
+    assert replay.data["brief_revision"] == 1
+
+
+def test_legacy_applied_command_without_data_replays_empty_data() -> None:
+    stored = StoredCommand(
+        id=uuid4(),
+        target_type="task",
+        request_hash="hash",
+        status="applied",
+        result={
+            "command_id": str(uuid4()),
+            "aggregate_id": str(uuid4()),
+            "aggregate_version": 1,
+            "event_ids": [],
+        },
+        rejection_reason=None,
+    )
+
+    assert replay_command(stored).data == {}
 
 
 def test_dispatcher_rejects_duplicate_handler_registration() -> None:

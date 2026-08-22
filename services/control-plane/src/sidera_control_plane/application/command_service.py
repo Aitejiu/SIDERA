@@ -132,6 +132,7 @@ def _result_from_document(document: dict[str, Any]) -> CommandResult:
             aggregate_id=UUID(str(document["aggregate_id"])),
             aggregate_version=int(document["aggregate_version"]),
             event_ids=tuple(UUID(str(item)) for item in document["event_ids"]),
+            data=dict(document.get("data") or {}),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("stored command result is invalid") from exc
