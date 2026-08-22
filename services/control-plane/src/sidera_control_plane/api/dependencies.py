@@ -15,6 +15,8 @@ from sidera_control_plane.application.execution_commands import (
 )
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
+from sidera_control_plane.application.planning_metrics import PlanningMetricsService
+from sidera_control_plane.application.planning_queries import PlanningQueryService
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.subtask_workspace_queries import (
@@ -38,6 +40,10 @@ from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.planning_query_store import (
+    SqlAlchemyPlanningMetricsStore,
+    SqlAlchemyPlanningQueryStore,
+)
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
 )
@@ -100,6 +106,18 @@ def get_task_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> TaskQueryService:
     return TaskQueryService(SqlAlchemyTaskQueryStore(database))
+
+
+def get_planning_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> PlanningQueryService:
+    return PlanningQueryService(SqlAlchemyPlanningQueryStore(database))
+
+
+def get_planning_metrics_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> PlanningMetricsService:
+    return PlanningMetricsService(SqlAlchemyPlanningMetricsStore(database))
 
 
 def get_resource_query_service(

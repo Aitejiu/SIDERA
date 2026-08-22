@@ -15,6 +15,7 @@ PROJECTION_TYPES = frozenset(
         "worker_item_workspace",
         "worker_item_activity",
         "worker_trace",
+        "planning_request",
     }
 )
 
@@ -58,6 +59,7 @@ _EXECUTION_LIFECYCLE_TYPES = {
 class ProjectionInvalidationTarget:
     projection_type: str
     resource_id: UUID | None
+    change_type: str | None = None
 
 
 def projection_targets_for_event(
@@ -69,6 +71,25 @@ def projection_targets_for_event(
     """Map one durable domain event to the public projections it can affect."""
 
     payload = event.payload
+    planning_change_type = _planning_change_type(event.event_type)
+    if event.aggregate_type == "planning_request":
+        return (
+            ProjectionInvalidationTarget(
+                "planning_request",
+                event.aggregate_id,
+                planning_change_type or "planning_request_updated",
+            ),
+        )
+    if event.aggregate_type == "planning_run":
+        request_id = _payload_uuid(payload, "planning_request_id")
+        if request_id is not None:
+            return (
+                ProjectionInvalidationTarget(
+                    "planning_request",
+                    request_id,
+                    planning_change_type or "planning_run_updated",
+                ),
+            )
     worker_item_id = worker_item_id or _payload_uuid(payload, "worker_item_id")
     root_task_id = root_task_id or _payload_uuid(payload, "root_task_id")
     context = payload.get("execution_context")
@@ -185,6 +206,25 @@ def _targets(
             resource_id = root_task_id
         result.append(ProjectionInvalidationTarget(projection_type, resource_id))
     return tuple(result)
+
+
+def _planning_change_type(event_type: str) -> str | None:
+    if event_type in {
+        "PlanningRequestSubmitted",
+        "PlanningRequestCancelled",
+        "PlanningClarificationAnswered",
+        "PlanningProposalRevisionRequested",
+        "PlanningProposalRejected",
+        "PlanningBlockedRunRetried",
+    }:
+        return "planning_request_updated"
+    return {
+        "PlanningRunUpdated": "planning_run_updated",
+        "PlanningClarificationRequired": "planning_clarification_required",
+        "PlanningProposalReady": "planning_proposal_ready",
+        "PlanningProposalConflicted": "planning_proposal_conflicted",
+        "PlanningMaterialized": "planning_materialized",
+    }.get(event_type)
 
 
 def _aggregate_worker_item_id(event: EventData) -> UUID | None:

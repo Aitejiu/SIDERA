@@ -237,7 +237,7 @@ class EventRepository:
                     workspace_id=event.workspace_id,
                     projection_type=target.projection_type,
                     resource_id=target.resource_id,
-                    change_type=event.event_type,
+                    change_type=target.change_type or event.event_type,
                     resource_version=event.aggregate_version,
                     correlation_id=event.correlation_id,
                 )

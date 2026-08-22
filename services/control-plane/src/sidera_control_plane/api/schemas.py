@@ -11,6 +11,19 @@ from pydantic import (
     model_validator,
 )
 
+from sidera_control_plane.application.planning_metrics import PlanningMetricsView
+from sidera_control_plane.application.planning_queries import (
+    PlanningBriefView,
+    PlanningCapabilityView,
+    PlanningClarificationView,
+    PlanningMaterializationView,
+    PlanningProfileView,
+    PlanningProposalView,
+    PlanningRequestDetailView,
+    PlanningRequestSummaryView,
+    PlanningRunView,
+    PlanningUsageView,
+)
 from sidera_control_plane.application.resource_queries import (
     ArtifactView,
     EvidenceClaimView,
@@ -1720,6 +1733,471 @@ class ExecutionInputStatusResponse(BaseModel):
 
 class CursorPageResponse(BaseModel):
     next_cursor: str | None
+
+
+class PlanningCapabilityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    structured_output: str
+    clarification: bool
+    idempotency: str
+    cancellation: str
+    usage_reporting: str
+    max_context_bytes: int
+    stability: str
+    interface_version: str
+    proposal_schema_versions: tuple[int, ...]
+
+    @classmethod
+    def from_view(cls, view: PlanningCapabilityView) -> "PlanningCapabilityResponse":
+        return cls(
+            structured_output=view.structured_output,
+            clarification=view.clarification,
+            idempotency=view.idempotency,
+            cancellation=view.cancellation,
+            usage_reporting=view.usage_reporting,
+            max_context_bytes=view.max_context_bytes,
+            stability=view.stability,
+            interface_version=view.interface_version,
+            proposal_schema_versions=view.proposal_schema_versions,
+        )
+
+
+class PlanningProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    profile_key: str
+    version: int
+    display_name: str
+    planner_provider: str
+    planner_module_instance_id: UUID
+    planner_module_config_version: int
+    planner_interface_version: str
+    status: str
+    user_selectable: bool
+    capabilities: PlanningCapabilityResponse
+    created_at: datetime
+
+    @classmethod
+    def from_view(cls, view: PlanningProfileView) -> "PlanningProfileResponse":
+        return cls(
+            id=view.id,
+            workspace_id=view.workspace_id,
+            profile_key=view.profile_key,
+            version=view.version,
+            display_name=view.display_name,
+            planner_provider=view.planner_provider,
+            planner_module_instance_id=view.planner_module_instance_id,
+            planner_module_config_version=view.planner_module_config_version,
+            planner_interface_version=view.planner_interface_version,
+            status=view.status,
+            user_selectable=view.user_selectable,
+            capabilities=PlanningCapabilityResponse.from_view(view.capabilities),
+            created_at=view.created_at,
+        )
+
+
+class PlanningBriefResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    planning_request_id: UUID
+    revision: int
+    objective: str
+    constraints: tuple[str, ...]
+    acceptance_criteria: tuple[str, ...]
+    context_refs: tuple[str, ...]
+    requested_outputs: tuple[str, ...]
+    user_feedback: str | None
+    source_correlation: UUID
+    created_by: str
+    created_at: datetime
+
+    @classmethod
+    def from_view(cls, view: PlanningBriefView) -> "PlanningBriefResponse":
+        return cls(
+            planning_request_id=view.planning_request_id,
+            revision=view.revision,
+            objective=view.objective,
+            constraints=view.constraints,
+            acceptance_criteria=view.acceptance_criteria,
+            context_refs=view.context_refs,
+            requested_outputs=view.requested_outputs,
+            user_feedback=view.user_feedback,
+            source_correlation=view.source_correlation,
+            created_by=view.created_by,
+            created_at=view.created_at,
+        )
+
+
+class PlanningUsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int
+    output_tokens: int
+    cost_microunits: int
+    runtime_seconds: int
+    context_bytes: int
+
+    @classmethod
+    def from_view(cls, view: PlanningUsageView) -> "PlanningUsageResponse":
+        return cls(
+            input_tokens=view.input_tokens,
+            output_tokens=view.output_tokens,
+            cost_microunits=view.cost_microunits,
+            runtime_seconds=view.runtime_seconds,
+            context_bytes=view.context_bytes,
+        )
+
+
+class PlanningRunResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    planning_request_id: UUID
+    workspace_id: UUID
+    brief_revision: int
+    attempt: int
+    operation_id: UUID
+    status: str
+    result_kind: str | None
+    capability_snapshot: PlanningCapabilityResponse
+    usage: PlanningUsageResponse
+    provider_ref: str | None
+    error_code: str | None
+    queued_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    version: int
+
+    @classmethod
+    def from_view(cls, view: PlanningRunView) -> "PlanningRunResponse":
+        return cls(
+            id=view.id,
+            planning_request_id=view.planning_request_id,
+            workspace_id=view.workspace_id,
+            brief_revision=view.brief_revision,
+            attempt=view.attempt,
+            operation_id=view.operation_id,
+            status=view.status,
+            result_kind=view.result_kind,
+            capability_snapshot=PlanningCapabilityResponse.from_view(
+                view.capability_snapshot
+            ),
+            usage=PlanningUsageResponse.from_view(view.usage),
+            provider_ref=view.provider_ref,
+            error_code=view.error_code,
+            queued_at=view.queued_at,
+            started_at=view.started_at,
+            finished_at=view.finished_at,
+            version=view.version,
+        )
+
+
+class PlanningClarificationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    planning_request_id: UUID
+    planning_run_id: UUID
+    question: str
+    rationale: str
+    answer_type: str
+    options: tuple[str, ...]
+    blocking: bool
+    answer: str | None
+    answered_by: str | None
+    answered_at: datetime | None
+    answer_brief_revision: int | None
+    created_at: datetime
+    version: int
+
+    @classmethod
+    def from_view(
+        cls, view: PlanningClarificationView
+    ) -> "PlanningClarificationResponse":
+        return cls(
+            id=view.id,
+            planning_request_id=view.planning_request_id,
+            planning_run_id=view.planning_run_id,
+            question=view.question,
+            rationale=view.rationale,
+            answer_type=view.answer_type,
+            options=view.options,
+            blocking=view.blocking,
+            answer=view.answer,
+            answered_by=view.answered_by,
+            answered_at=view.answered_at,
+            answer_brief_revision=view.answer_brief_revision,
+            created_at=view.created_at,
+            version=view.version,
+        )
+
+
+class PlanningRequestSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    kind: str
+    status: str
+    current_brief_revision: int
+    current_proposal_revision: int | None
+    current_proposal_content_hash: str | None
+    planning_profile_id: UUID
+    planning_profile_version: int
+    profile_key: str | None
+    current_run_id: UUID | None
+    requires_attention: bool
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: PlanningRequestSummaryView
+    ) -> "PlanningRequestSummaryResponse":
+        return cls(
+            id=view.id,
+            workspace_id=view.workspace_id,
+            kind=view.kind,
+            status=view.status,
+            current_brief_revision=view.current_brief_revision,
+            current_proposal_revision=view.current_proposal_revision,
+            current_proposal_content_hash=view.current_proposal_content_hash,
+            planning_profile_id=view.planning_profile_id,
+            planning_profile_version=view.planning_profile_version,
+            profile_key=view.profile_key,
+            current_run_id=view.current_run_id,
+            requires_attention=view.requires_attention,
+            version=view.version,
+            created_at=view.created_at,
+            updated_at=view.updated_at,
+        )
+
+
+class PlanningRequestDetailResponse(PlanningRequestSummaryResponse):
+    profile: PlanningProfileResponse | None
+    active_run: PlanningRunResponse | None
+    pending_clarifications: tuple[PlanningClarificationResponse, ...]
+    usage: PlanningUsageResponse
+    last_change_cursor: int
+
+    @classmethod
+    def from_detail_view(
+        cls, view: PlanningRequestDetailView
+    ) -> "PlanningRequestDetailResponse":
+        summary = PlanningRequestSummaryResponse.from_view(view.summary)
+        return cls(
+            **summary.model_dump(),
+            profile=(
+                PlanningProfileResponse.from_view(view.profile)
+                if view.profile is not None
+                else None
+            ),
+            active_run=(
+                PlanningRunResponse.from_view(view.active_run)
+                if view.active_run is not None
+                else None
+            ),
+            pending_clarifications=tuple(
+                PlanningClarificationResponse.from_view(item)
+                for item in view.pending_clarifications
+            ),
+            usage=PlanningUsageResponse.from_view(view.usage),
+            last_change_cursor=view.last_change_cursor,
+        )
+
+
+class PlanningProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    planning_request_id: UUID
+    revision: int
+    brief_revision: int
+    planning_run_id: UUID
+    proposal_schema_version: int
+    kind: str
+    profile_version: int
+    created_at: datetime
+    content_hash: str
+    derived_diff: dict[str, Any]
+    display: dict[str, Any]
+
+    @classmethod
+    def from_view(cls, view: PlanningProposalView) -> "PlanningProposalResponse":
+        return cls(
+            id=view.id,
+            planning_request_id=view.planning_request_id,
+            revision=view.revision,
+            brief_revision=view.brief_revision,
+            planning_run_id=view.planning_run_id,
+            proposal_schema_version=view.proposal_schema_version,
+            kind=view.kind,
+            profile_version=view.profile_version,
+            created_at=view.created_at,
+            content_hash=view.content_hash,
+            derived_diff=view.derived_diff,
+            display=view.display,
+        )
+
+
+class PlanningMaterializationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    planning_request_id: UUID
+    proposal_revision_id: UUID
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    plan_generation: int
+    subtask_task_mapping: dict[str, str]
+    worker_item_mapping: dict[str, str]
+    execution_request_mapping: dict[str, str]
+    deep_link: str
+    confirmed_by: str
+    created_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: PlanningMaterializationView
+    ) -> "PlanningMaterializationResponse":
+        return cls(
+            id=view.id,
+            workspace_id=view.workspace_id,
+            planning_request_id=view.planning_request_id,
+            proposal_revision_id=view.proposal_revision_id,
+            root_task_id=view.root_task_id,
+            plan_snapshot_id=view.plan_snapshot_id,
+            plan_generation=view.plan_generation,
+            subtask_task_mapping=view.subtask_task_mapping,
+            worker_item_mapping=view.worker_item_mapping,
+            execution_request_mapping=view.execution_request_mapping,
+            deep_link=view.deep_link,
+            confirmed_by=view.confirmed_by,
+            created_at=view.created_at,
+        )
+
+
+class PlanningProfilePageResponse(CursorPageResponse):
+    items: tuple[PlanningProfileResponse, ...]
+
+
+class PlanningRequestPageResponse(CursorPageResponse):
+    items: tuple[PlanningRequestSummaryResponse, ...]
+
+
+class PlanningBriefPageResponse(BaseModel):
+    items: tuple[PlanningBriefResponse, ...]
+
+
+class PlanningRunPageResponse(BaseModel):
+    items: tuple[PlanningRunResponse, ...]
+
+
+class PlanningClarificationPageResponse(BaseModel):
+    items: tuple[PlanningClarificationResponse, ...]
+
+
+class PlanningRunMetricsResponse(BaseModel):
+    queued: int
+    running: int
+    needs_clarification: int
+    blocked: int
+    failed: int
+    succeeded: int
+    cancelled: int
+
+
+class PlanningLatencyMetricsResponse(BaseModel):
+    queue_seconds: float
+    planning_seconds: float
+    materialization_seconds: float
+
+
+class PlanningOutcomeMetricsResponse(BaseModel):
+    retry_rate: float
+    timeout_rate: float
+    unknown_outcome_rate: float
+    invalid_output_rate: float
+
+
+class PlanningUsageMetricsResponse(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    cost_microunits: int
+    context_bytes: int
+
+
+class PlanningLifecycleMetricsResponse(BaseModel):
+    clarifications: int
+    revisions: int
+    confirmed: int
+    rejected: int
+
+
+class PlanningExecutionRequestMetricsResponse(BaseModel):
+    blocked: int
+    ready: int
+    gate_wait_seconds: float
+
+
+class PlanningMetricsResponse(BaseModel):
+    workspace_id: UUID
+    as_of: datetime
+    runs: PlanningRunMetricsResponse
+    latency: PlanningLatencyMetricsResponse
+    outcomes: PlanningOutcomeMetricsResponse
+    usage: PlanningUsageMetricsResponse
+    planning: PlanningLifecycleMetricsResponse
+    execution_requests: PlanningExecutionRequestMetricsResponse
+
+    @classmethod
+    def from_view(cls, view: PlanningMetricsView) -> "PlanningMetricsResponse":
+        return cls(
+            workspace_id=view.workspace_id,
+            as_of=view.as_of,
+            runs=PlanningRunMetricsResponse(
+                queued=view.runs.queued,
+                running=view.runs.running,
+                needs_clarification=view.runs.needs_clarification,
+                blocked=view.runs.blocked,
+                failed=view.runs.failed,
+                succeeded=view.runs.succeeded,
+                cancelled=view.runs.cancelled,
+            ),
+            latency=PlanningLatencyMetricsResponse(
+                queue_seconds=view.latency.queue_seconds,
+                planning_seconds=view.latency.planning_seconds,
+                materialization_seconds=view.latency.materialization_seconds,
+            ),
+            outcomes=PlanningOutcomeMetricsResponse(
+                retry_rate=view.outcomes.retry_rate,
+                timeout_rate=view.outcomes.timeout_rate,
+                unknown_outcome_rate=view.outcomes.unknown_outcome_rate,
+                invalid_output_rate=view.outcomes.invalid_output_rate,
+            ),
+            usage=PlanningUsageMetricsResponse(
+                input_tokens=view.usage.input_tokens,
+                output_tokens=view.usage.output_tokens,
+                cost_microunits=view.usage.cost_microunits,
+                context_bytes=view.usage.context_bytes,
+            ),
+            planning=PlanningLifecycleMetricsResponse(
+                clarifications=view.planning.clarifications,
+                revisions=view.planning.revisions,
+                confirmed=view.planning.confirmed,
+                rejected=view.planning.rejected,
+            ),
+            execution_requests=PlanningExecutionRequestMetricsResponse(
+                blocked=view.execution_requests.blocked,
+                ready=view.execution_requests.ready,
+                gate_wait_seconds=view.execution_requests.gate_wait_seconds,
+            ),
+        )
 
 
 class ExecutionSessionPageResponse(CursorPageResponse):
