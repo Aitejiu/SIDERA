@@ -30,7 +30,7 @@ test-results/
 # Runtime state
 data/
 logs/
-workspace/
+/workspace/
 *.db
 *.db-shm
 *.db-wal
