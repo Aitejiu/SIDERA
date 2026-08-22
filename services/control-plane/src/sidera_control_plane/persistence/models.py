@@ -1275,3 +1275,577 @@ class ExecutionInputModel(TimestampMixin, Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class PlanningProfileModel(TimestampMixin, Base):
+    __tablename__ = "planning_profiles"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_planning_profiles_version"),
+        CheckConstraint(
+            "planner_module_config_version >= 1",
+            name="ck_planning_profiles_module_config_version",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'disabled')",
+            name="ck_planning_profiles_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(policy) = 'object'",
+            name="ck_planning_profiles_policy_object",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_planning_profiles_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planner_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_profiles_module_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_planning_profiles_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "profile_key",
+            "version",
+            name="uq_planning_profiles_workspace_key_version",
+        ),
+        Index(
+            "ix_planning_profiles_workspace_status_selectable",
+            "workspace_id",
+            "status",
+            "user_selectable",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    profile_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    planner_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planner_module_config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    planner_interface_version: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_selectable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class PlanningRequestModel(TimestampMixin, Base):
+    __tablename__ = "planning_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('create', 'revision')", name="ck_planning_requests_kind"
+        ),
+        CheckConstraint(
+            "status IN ('submitted', 'planning', 'waiting_for_user', "
+            "'proposal_ready', 'materialized', 'failed', 'conflicted', "
+            "'rejected', 'cancelled')",
+            name="ck_planning_requests_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_planning_requests_version"),
+        CheckConstraint(
+            "planning_profile_version >= 1",
+            name="ck_planning_requests_profile_version",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(profile_snapshot) = 'object'",
+            name="ck_planning_requests_profile_snapshot_object",
+        ),
+        CheckConstraint(
+            "current_proposal_content_hash IS NULL OR "
+            "current_proposal_content_hash ~ '^[0-9a-fA-F]{64}$'",
+            name="ck_planning_requests_proposal_hash",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_planning_requests_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_profile_id", "workspace_id"],
+            ["planning_profiles.id", "planning_profiles.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_requests_profile_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["id", "workspace_id", "current_brief_revision"],
+            [
+                "planning_brief_revisions.planning_request_id",
+                "planning_brief_revisions.workspace_id",
+                "planning_brief_revisions.revision",
+            ],
+            ondelete="RESTRICT",
+            name="fk_planning_requests_current_brief",
+        ),
+        ForeignKeyConstraint(
+            ["id", "workspace_id", "current_proposal_revision"],
+            [
+                "planning_proposal_revisions.planning_request_id",
+                "planning_proposal_revisions.workspace_id",
+                "planning_proposal_revisions.revision",
+            ],
+            ondelete="RESTRICT",
+            name="fk_planning_requests_current_proposal",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_planning_requests_identity"
+        ),
+        Index("ix_planning_requests_workspace_status", "workspace_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    current_brief_revision: Mapped[int | None] = mapped_column(Integer)
+    current_proposal_revision: Mapped[int | None] = mapped_column(Integer)
+    current_proposal_content_hash: Mapped[str | None] = mapped_column(String(64))
+    planning_profile_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_profile_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(500))
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PlanningBriefRevisionModel(Base):
+    __tablename__ = "planning_brief_revisions"
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_planning_briefs_revision"),
+        CheckConstraint(
+            "jsonb_typeof(payload) = 'object'",
+            name="ck_planning_briefs_payload_object",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_briefs_request_workspace",
+        ),
+        PrimaryKeyConstraint("planning_request_id", "revision"),
+        UniqueConstraint(
+            "planning_request_id",
+            "workspace_id",
+            "revision",
+            name="uq_planning_briefs_request_workspace_revision",
+        ),
+    )
+
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PlanningRunModel(TimestampMixin, Base):
+    __tablename__ = "planning_runs"
+    __table_args__ = (
+        CheckConstraint("attempt >= 1", name="ck_planning_runs_attempt"),
+        CheckConstraint("version >= 1", name="ck_planning_runs_version"),
+        CheckConstraint(
+            "brief_revision >= 1", name="ck_planning_runs_brief_revision"
+        ),
+        CheckConstraint(
+            "planning_profile_version >= 1",
+            name="ck_planning_runs_profile_version",
+        ),
+        CheckConstraint(
+            "planner_module_config_version >= 1",
+            name="ck_planning_runs_module_config_version",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', "
+            "'needs_clarification', 'failed', 'blocked', 'cancelled')",
+            name="ck_planning_runs_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(capability_snapshot) = 'object'",
+            name="ck_planning_runs_capability_snapshot_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(usage) = 'object'",
+            name="ck_planning_runs_usage_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(diagnostic_refs) = 'array'",
+            name="ck_planning_runs_diagnostic_refs_array",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_runs_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id", "brief_revision"],
+            [
+                "planning_brief_revisions.planning_request_id",
+                "planning_brief_revisions.workspace_id",
+                "planning_brief_revisions.revision",
+            ],
+            ondelete="RESTRICT",
+            name="fk_planning_runs_brief_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_profile_id", "workspace_id"],
+            ["planning_profiles.id", "planning_profiles.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_runs_profile_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planner_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_runs_module_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_planning_runs_identity"),
+        UniqueConstraint(
+            "operation_id", name="uq_planning_runs_operation_id"
+        ),
+        UniqueConstraint(
+            "planning_request_id",
+            "attempt",
+            name="uq_planning_runs_request_attempt",
+        ),
+        Index("ix_planning_runs_workspace_status", "workspace_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    brief_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    planning_profile_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_profile_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    planner_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planner_module_config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result_kind: Mapped[str | None] = mapped_column(String(64))
+    capability_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    provider_ref: Mapped[str | None] = mapped_column(String(500))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    diagnostic_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PlanningRunLeaseModel(TimestampMixin, Base):
+    __tablename__ = "planning_run_leases"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'released', 'expired')",
+            name="ck_planning_run_leases_status",
+        ),
+        CheckConstraint(
+            "fencing_token >= 1",
+            name="ck_planning_run_leases_fencing_token",
+        ),
+        CheckConstraint("version >= 1", name="ck_planning_run_leases_version"),
+        ForeignKeyConstraint(
+            ["planning_run_id", "workspace_id"],
+            ["planning_runs.id", "planning_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_run_leases_run_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_planning_run_leases_identity"
+        ),
+        Index(
+            "uq_planning_run_leases_active_run",
+            "planning_run_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_planning_run_leases_expiry",
+            "status",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PlanningClarificationModel(TimestampMixin, Base):
+    __tablename__ = "planning_clarifications"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence >= 1", name="ck_planning_clarifications_sequence"
+        ),
+        CheckConstraint("version >= 1", name="ck_planning_clarifications_version"),
+        CheckConstraint(
+            "jsonb_typeof(options) = 'array'",
+            name="ck_planning_clarifications_options_array",
+        ),
+        CheckConstraint(
+            "answer_brief_revision IS NULL OR answer_brief_revision >= 1",
+            name="ck_planning_clarifications_answer_revision",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_clarifications_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_run_id", "workspace_id"],
+            ["planning_runs.id", "planning_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_clarifications_run_workspace",
+        ),
+        UniqueConstraint(
+            "planning_request_id",
+            "sequence",
+            name="uq_planning_clarifications_request_sequence",
+        ),
+        Index(
+            "ix_planning_clarifications_workspace_request",
+            "workspace_id",
+            "planning_request_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    options: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    blocking: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text)
+    answered_by: Mapped[str | None] = mapped_column(String(255))
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    answer_brief_revision: Mapped[int | None] = mapped_column(Integer)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PlanningProposalRevisionModel(Base):
+    __tablename__ = "planning_proposal_revisions"
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_planning_proposals_revision"),
+        CheckConstraint(
+            "brief_revision >= 1", name="ck_planning_proposals_brief_revision"
+        ),
+        CheckConstraint(
+            "proposal_schema_version >= 1",
+            name="ck_planning_proposals_schema_version",
+        ),
+        CheckConstraint(
+            "profile_version >= 1", name="ck_planning_proposals_profile_version"
+        ),
+        CheckConstraint(
+            "planner_module_config_version >= 1",
+            name="ck_planning_proposals_module_config_version",
+        ),
+        CheckConstraint(
+            "kind IN ('create', 'revision')", name="ck_planning_proposals_kind"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(decision_summary) = 'object'",
+            name="ck_planning_proposals_summary_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(plan_template) = 'object'",
+            name="ck_planning_proposals_template_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(execution_intents) = 'array'",
+            name="ck_planning_proposals_intents_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(impact_policy) = 'object'",
+            name="ck_planning_proposals_impact_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(derived_diff) = 'object'",
+            name="ck_planning_proposals_diff_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(canonical_payload) = 'object'",
+            name="ck_planning_proposals_canonical_object",
+        ),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-fA-F]{64}$'",
+            name="ck_planning_proposals_content_hash",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_proposals_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id", "brief_revision"],
+            [
+                "planning_brief_revisions.planning_request_id",
+                "planning_brief_revisions.workspace_id",
+                "planning_brief_revisions.revision",
+            ],
+            ondelete="RESTRICT",
+            name="fk_planning_proposals_brief_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_run_id", "workspace_id"],
+            ["planning_runs.id", "planning_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_proposals_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["profile_id", "workspace_id"],
+            ["planning_profiles.id", "planning_profiles.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_proposals_profile_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planner_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_planning_proposals_module_workspace",
+        ),
+        PrimaryKeyConstraint("planning_request_id", "revision"),
+        UniqueConstraint(
+            "planning_request_id",
+            "workspace_id",
+            "revision",
+            name="uq_planning_proposals_request_workspace_revision",
+        ),
+        Index(
+            "ix_planning_proposals_workspace_request_revision",
+            "workspace_id",
+            "planning_request_id",
+            "revision",
+        ),
+    )
+
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    brief_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    planning_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    proposal_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    profile_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    profile_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    planner_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planner_module_config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    decision_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    plan_template: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    execution_intents: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False
+    )
+    impact_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    derived_diff: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    canonical_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

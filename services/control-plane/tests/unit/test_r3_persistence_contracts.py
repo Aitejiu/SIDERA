@@ -13,6 +13,13 @@ def test_r3_persistence_models_are_registered() -> None:
         "artifacts",
         "evidence_claims",
         "execution_inputs",
+        "planning_profiles",
+        "planning_requests",
+        "planning_brief_revisions",
+        "planning_runs",
+        "planning_run_leases",
+        "planning_clarifications",
+        "planning_proposal_revisions",
     }
 
     assert expected <= set(Base.metadata.tables)
