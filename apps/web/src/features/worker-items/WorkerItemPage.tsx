@@ -1,20 +1,24 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCcw } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { getTaskGraph, taskGraphQueryKey } from "../tasks/api";
+import { executionQueryKey, getExecution } from "../trace/api";
 import {
   getWorkerItemWorkspace,
   listWorkerItemActivity,
   workerActivityQueryKey,
   workerWorkspaceQueryKey,
 } from "./api";
+import { WorkerComposer } from "./WorkerComposer";
 import { WorkerSidebar } from "./WorkerSidebar";
 import { WorkerTimeline } from "./WorkerTimeline";
+import { WorkerTraceDialog } from "./WorkerTraceDialog";
+import type { Execution } from "../trace/types";
 import type { WorkerActivity, WorkerWorkspace } from "./types";
 
 export function WorkerItemPage() {
@@ -46,7 +50,21 @@ export function WorkerItemPage() {
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     enabled: Boolean(workspaceId && workerItemId),
   });
+  const executionId = workspaceQuery.data?.current_runtime?.execution_id ?? "";
+  const executionQuery = useQuery({
+    queryKey: executionQueryKey(workspaceId, executionId),
+    queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
+    enabled: Boolean(workspaceId && executionId),
+  });
   const activity = useMemo(() => flattenActivities(activityQuery.data?.pages), [activityQuery.data?.pages]);
+
+  const refreshWorkerItem = async () => {
+    await Promise.all([
+      workspaceQuery.refetch(),
+      activityQuery.refetch(),
+      executionId ? executionQuery.refetch() : Promise.resolve(),
+    ]);
+  };
 
   return (
     <section className="worker-item-page" aria-labelledby="worker-item-title">
@@ -71,6 +89,8 @@ export function WorkerItemPage() {
             )?.title ?? workspaceQuery.data.current_placement.subtask_key}
             onLoadMore={() => void activityQuery.fetchNextPage()}
             onRetryActivity={() => void activityQuery.refetch()}
+            execution={executionQuery.data}
+            onRefresh={refreshWorkerItem}
           />
         ) : null}
       </AsyncState>
@@ -89,6 +109,8 @@ function WorkerItemContent({
   subtaskTitle,
   onLoadMore,
   onRetryActivity,
+  execution,
+  onRefresh,
 }: {
   workspace: WorkerWorkspace;
   activity: readonly WorkerActivity[];
@@ -100,7 +122,10 @@ function WorkerItemContent({
   subtaskTitle: string;
   onLoadMore: () => void;
   onRetryActivity: () => void;
+  execution: Execution | undefined;
+  onRefresh: () => Promise<void>;
 }) {
+  const [traceDescriptor, setTraceDescriptor] = useState<NonNullable<WorkerActivity["trace_descriptor"]> | null>(null);
   const workerStatus = statusFor(workspace.worker_item.status);
   return (
     <>
@@ -144,11 +169,26 @@ function WorkerItemContent({
               hasMore={hasMore}
               isLoadingMore={isLoadingMore}
               onLoadMore={onLoadMore}
+              onOpenTrace={(activityItem) => setTraceDescriptor(activityItem.trace_descriptor)}
             />
           )}
+          <WorkerComposer
+            workspaceId={workspace.workspace_id}
+            workerItemId={workspace.worker_item.id}
+            workspace={workspace}
+            execution={execution}
+            onRefresh={onRefresh}
+          />
         </main>
         <WorkerSidebar workspace={workspace} taskTitle={taskTitle} subtaskTitle={subtaskTitle} />
       </div>
+      {traceDescriptor ? (
+        <WorkerTraceDialog
+          workspaceId={workspace.workspace_id}
+          descriptor={traceDescriptor}
+          onClose={() => setTraceDescriptor(null)}
+        />
+      ) : null}
     </>
   );
 }

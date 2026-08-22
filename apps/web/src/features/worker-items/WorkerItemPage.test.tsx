@@ -180,7 +180,7 @@ const firstActivityPage = {
       body: null,
       delivery_status: null,
       artifact_ids: [],
-      trace_descriptor: null,
+      trace_descriptor: workspace.trace_descriptor,
     },
     {
       activity_id: "a0000000-0000-0000-0000-000000000002",
@@ -277,6 +277,68 @@ describe("WorkerItemPage", () => {
           ? HttpResponse.json(olderActivityPage)
           : HttpResponse.json(firstActivityPage),
       ),
+      http.get(
+        `/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_TWO_ID}/sessions/${SESSION_TWO_ID}/trace`,
+        () => HttpResponse.json({
+          schema_version: 1,
+          execution_id: EXECUTION_TWO_ID,
+          session_id: SESSION_TWO_ID,
+          worker_id: "80000000-0000-0000-0000-000000000001",
+          status: "running",
+          current_action: "运行回调测试",
+          plan_generation: 2,
+          checkpoint_sequence: 3,
+          freshness_at: "2026-08-23T08:05:00Z",
+          last_change_cursor: 42,
+          timing: { input_ms: 10, model_ms: 20, tools_ms: 30, total_ms: 60 },
+          events: [{
+            schema_version: 1,
+            workspace_id: WORKSPACE_ID,
+            root_task_id: ROOT_TASK_ID,
+            work_item_key: "callback-implementer",
+            plan_snapshot_id: "10000000-0000-0000-0000-000000000002",
+            execution_id: EXECUTION_TWO_ID,
+            session_id: SESSION_TWO_ID,
+            sequence: 3,
+            occurred_at: "2026-08-23T08:05:00Z",
+            category: "tool",
+            status: "running",
+            title: "运行回调测试",
+            summary: "运行回调测试",
+            duration_ms: 30,
+            usage: null,
+            artifact_refs: [],
+            provider_payload_ref: null,
+            provider_extensions: {},
+          }],
+          previous_before_sequence: null,
+          context_branch: null,
+        }),
+      ),
+      http.get("/api/v1/gateway/sessions", () => HttpResponse.json({
+        items: [{
+          id: SESSION_TWO_ID,
+          workspace_id: WORKSPACE_ID,
+          execution_id: EXECUTION_TWO_ID,
+          worker_id: "80000000-0000-0000-0000-000000000001",
+          adapter_session_id: "adapter-session-2",
+          status: "active",
+          last_sequence: 3,
+          last_activity_at: "2026-08-23T08:05:00Z",
+          input_mode: "queued",
+          version: 4,
+          adapter_module_id: null,
+          adapter_config_version: null,
+          capability_snapshot: null,
+          created_at: "2026-08-23T08:00:00Z",
+          updated_at: "2026-08-23T08:05:00Z",
+          workspace_config_version: null,
+          workspace_module_id: null,
+          workspace_ref: null,
+        }],
+        next_cursor: null,
+      })),
+      http.get(`/api/v1/executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json({ status: "running" })),
     );
   });
 
@@ -288,7 +350,7 @@ describe("WorkerItemPage", () => {
     expect(screen.getByText("Session 1 已关闭")).toBeVisible();
     expect(screen.getByText("Session 2 · 当前")).toBeVisible();
     expect(screen.getByText("只修改这个回调重试规则")).toBeVisible();
-    expect(screen.getByText("OpenCode Worker")).toBeVisible();
+    expect(screen.getAllByText("OpenCode Worker").length).toBeGreaterThan(0);
     expect(screen.getByText("运行回调测试")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
   });
@@ -315,6 +377,22 @@ describe("WorkerItemPage", () => {
     expect(within(sidebar).getByText("重复通知测试通过")).toBeVisible();
   });
 
+  it("opens Agent Trace from an activity and returns focus to the WorkerItem page", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const traceButton = await screen.findByRole("button", { name: "查看 Agent Trace" });
+    await user.click(traceButton);
+
+    const dialog = await screen.findByRole("dialog", { name: "Agent Trace" });
+    expect(within(dialog).getAllByText("运行回调测试").length).toBeGreaterThan(0);
+    await user.click(within(dialog).getByRole("button", { name: "关闭 Agent Trace" }));
+
+    expect(screen.queryByRole("dialog", { name: "Agent Trace" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(traceButton).toHaveFocus();
+  });
+
   it("keeps a retired WorkerItem visibly read-only", async () => {
     server.use(
       http.get(
@@ -333,6 +411,6 @@ describe("WorkerItemPage", () => {
 
     const readOnly = await screen.findByRole("status");
     expect(within(readOnly).getByText("只读")).toBeVisible();
-    expect(screen.getByText("这个 WorkerItem 已退役，只能查看历史上下文")).toBeVisible();
+    expect(screen.getAllByText("这个 WorkerItem 已退役，只能查看历史上下文").length).toBeGreaterThan(0);
   });
 });

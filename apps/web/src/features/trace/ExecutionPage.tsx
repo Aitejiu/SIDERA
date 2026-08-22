@@ -1,28 +1,24 @@
 import { ArrowLeft, Code2, RefreshCcw, SearchCode, X } from "lucide-react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, Navigate, useParams } from "react-router-dom";
 
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import {
-  executionInputsQueryKey,
   executionQueryKey,
   executionSessionQueryKey,
   getExecution,
   getExecutionSession,
   getWorkerTrace,
-  listExecutionInputs,
   workerTraceQueryKey,
 } from "./api";
 import { ArtifactViewer } from "./ArtifactViewer";
-import { ExecutionInputHistory } from "./ExecutionInputHistory";
-import { InterventionComposer } from "./InterventionComposer";
 import { TraceDetails } from "./TraceDetails";
 import { TraceLedger } from "./TraceLedger";
 import { TraceTiming } from "./TraceTiming";
 import { WorkerTracePage } from "./WorkerTracePage";
-import type { ExecutionContextAddress, WorkerTraceEvent } from "./types";
+import type { WorkerTraceEvent } from "./types";
 
 export function ExecutionPage() {
   const {
@@ -56,11 +52,6 @@ export function ExecutionPage() {
     queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
     enabled: Boolean(workspaceId && executionId),
   });
-  const inputsQuery = useQuery({
-    queryKey: executionInputsQueryKey(workspaceId, sessionId),
-    queryFn: ({ signal }) => listExecutionInputs(workspaceId, sessionId, signal),
-    enabled: Boolean(workspaceId && sessionId && sessionId !== "unknown"),
-  });
   const trace = useMemo(() => {
     const pages = traceQuery.data?.pages ?? [];
     const [firstPage] = pages;
@@ -71,24 +62,11 @@ export function ExecutionPage() {
     if (trace === undefined || trace.events.length === 0) return null;
     return trace.events.find((event) => event.sequence === selectedSequence) ?? trace.events.at(-1) ?? null;
   }, [selectedSequence, trace]);
-  const context = useMemo<ExecutionContextAddress | null>(() => {
-    if (trace === undefined || trace.context_branch === null || trace.context_branch === undefined || trace.worker_id === null) return null;
-    return {
-      plan_snapshot_id: trace.context_branch.plan_snapshot_id,
-      root_task_id: trace.context_branch.root_task_id,
-      work_item_key: trace.context_branch.work_item_key,
-      worker_slot_key: trace.context_branch.worker_slot_key,
-      worker_id: trace.worker_id,
-      execution_id: trace.context_branch.current_execution_id,
-      session_id: trace.context_branch.current_session_id,
-    };
-  }, [trace]);
-
-  const refreshAll = async () => {
-    await Promise.all([traceQuery.refetch(), sessionQuery.refetch(), executionQuery.refetch(), inputsQuery.refetch()]);
-  };
-
   const selectEvent = (event: WorkerTraceEvent) => setSelectedSequence(event.sequence);
+
+  if (executionQuery.data?.worker_item_id) {
+    return <Navigate replace to={`/workspaces/${workspaceId}/worker-items/${executionQuery.data.worker_item_id}`} />;
+  }
 
   return (
     <section className="execution-page" aria-labelledby="execution-page-title">
@@ -109,9 +87,16 @@ export function ExecutionPage() {
       </header>
 
       <div className="execution-page__actions">
-        <span className="execution-page__scope"><Code2 size={14} aria-hidden="true" />这个页面记录当前 WorkItem 的执行步骤与介入。</span>
+        <span className="execution-page__scope"><Code2 size={14} aria-hidden="true" />旧 Execution 仅保留执行步骤与诊断信息；介入请进入 WorkerItem 工作区。</span>
         <button className="quiet-button" type="button" onClick={() => setTraceOpen(true)} disabled={trace === undefined}><SearchCode size={14} aria-hidden="true" />查看 Agent Trace</button>
       </div>
+
+      {executionQuery.data?.worker_item_id === null ? (
+        <div className="execution-legacy-notice" role="status">
+          <strong>旧 Execution 只读</strong>
+          <span>这个执行记录没有唯一的 WorkerItem 映射，不能在此发送输入或停止运行。</span>
+        </div>
+      ) : null}
 
       {traceQuery.isError ? <div className="trace-provider-warning" role="alert"><RefreshCcw size={16} aria-hidden="true" /><span>执行步骤暂不可用，Trace Provider 返回错误。</span><button className="quiet-button" type="button" onClick={() => void traceQuery.refetch()}>重试</button></div> : null}
 
@@ -134,25 +119,13 @@ export function ExecutionPage() {
             <TraceDetails event={selectedEvent} onArtifactSelect={setSelectedArtifactId} />
             <ArtifactViewer workspaceId={workspaceId} artifactId={selectedArtifactId} />
           </div>
-          <aside className="execution-side-column" aria-label="执行信息与介入">
+          <aside className="execution-side-column" aria-label="执行信息">
             <div className="trace-side-card">
-              <span className="eyebrow">WORK ITEM ACTIVITY</span>
+              <span className="eyebrow">LEGACY EXECUTION</span>
               <strong>{trace.status}</strong>
               <span>{trace.current_action ?? "暂无当前动作"}</span>
               <span className="mono-label">Worker {trace.worker_id?.slice(0, 8) ?? "未分配"} · Session V{sessionQuery.data?.version ?? "--"}</span>
             </div>
-            <ExecutionInputHistory inputs={inputsQuery.data ?? []} />
-            <InterventionComposer
-              workspaceId={workspaceId}
-              rootTaskId={rootTaskId}
-              context={context}
-              contextBranch={trace.context_branch}
-              session={sessionQuery.data}
-              execution={executionQuery.data}
-              inputs={inputsQuery.data ?? []}
-              traceFresh={traceQuery.isSuccess}
-              onRefresh={refreshAll}
-            />
           </aside>
         </div>
       ) : traceQuery.isPending ? <div className="trace-loading" role="status"><RefreshCcw size={16} />读取执行步骤</div> : null}

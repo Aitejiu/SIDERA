@@ -14,6 +14,7 @@ const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 const EXECUTION_ID = "60000000-0000-0000-0000-000000000001";
 const SESSION_ID = "70000000-0000-0000-0000-000000000001";
 const WORKER_ID = "80000000-0000-0000-0000-000000000001";
+const WORKER_ITEM_ID = "40000000-0000-0000-0000-000000000001";
 
 const trace = {
   schema_version: 1,
@@ -99,22 +100,7 @@ const execution = {
   stop_requested: false,
   source_execution_id: null,
   source_session_id: null,
-};
-
-const input = {
-  id: "90000000-0000-0000-0000-000000000001",
-  workspace_id: WORKSPACE_ID,
-  execution_id: EXECUTION_ID,
-  session_id: SESSION_ID,
-  client_idempotency_key: "intervention-001",
-  status: "delivered",
-  operation_id: "op-001",
-  failure_code: null,
-  version: 1,
-  text_length: 18,
-  attachment_count: 0,
-  created_at: "2026-08-21T08:02:00Z",
-  updated_at: "2026-08-21T08:03:00Z",
+  worker_item_id: null,
 };
 
 function renderPage() {
@@ -124,6 +110,7 @@ function renderPage() {
       <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}`]}>
         <Routes>
           <Route path="/workspaces/:workspaceId/tasks/:rootTaskId/executions/:executionId/sessions/:sessionId" element={<ExecutionPage />} />
+          <Route path="/workspaces/:workspaceId/worker-items/:workerItemId" element={<div>worker-item-target</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -137,7 +124,6 @@ describe("ExecutionPage", () => {
       http.get(`/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`, () => HttpResponse.json(trace)),
       http.get("/api/v1/gateway/sessions", () => HttpResponse.json({ items: [session], next_cursor: null })),
       http.get(`/api/v1/executions/${EXECUTION_ID}`, () => HttpResponse.json(execution)),
-      http.get("/api/v1/gateway/inputs", () => HttpResponse.json({ items: [input], next_cursor: null })),
     );
   });
 
@@ -146,9 +132,9 @@ describe("ExecutionPage", () => {
     renderPage();
 
     expect(await screen.findByRole("heading", { name: "执行步骤" })).toBeVisible();
-    expect(await screen.findByRole("heading", { name: "介入当前 Session" })).toBeVisible();
-    expect(await screen.findByRole("heading", { name: "用户介入记录" })).toBeVisible();
-    expect(screen.getByText("已投递")).toBeVisible();
+    expect(await screen.findByText("旧 Execution 只读")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "介入当前 Session" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "用户介入记录" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看 Agent Trace" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Worker 轨迹" })).not.toBeInTheDocument();
 
@@ -157,5 +143,18 @@ describe("ExecutionPage", () => {
     expect(dialog).toBeVisible();
     expect(within(dialog).getAllByRole("heading", { name: "Worker 轨迹" }).length).toBeGreaterThan(0);
     expect(within(dialog).getByRole("button", { name: "关闭 Agent Trace" })).toBeVisible();
+  });
+
+  it("redirects a mapped legacy execution to its stable WorkerItem workspace", async () => {
+    server.use(
+      http.get(`/api/v1/executions/${EXECUTION_ID}`, () => HttpResponse.json({
+        ...execution,
+        worker_item_id: WORKER_ITEM_ID,
+      })),
+    );
+    renderPage();
+
+    expect(await screen.findByText("worker-item-target")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "执行步骤" })).not.toBeInTheDocument();
   });
 });

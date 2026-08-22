@@ -1,50 +1,64 @@
 import type { ExecutionContextAddress } from "./types";
 
-export interface InterventionDraft {
+export interface WorkerItemInterventionDraft {
   text: string;
   clientIdempotencyKey: string;
+  lastContextFingerprint: string;
 }
 
-export function interventionDraftKey(
-  workspaceId: string,
-  context: ExecutionContextAddress,
-): string {
+export function workerItemDraftKey(workspaceId: string, workerItemId: string): string {
+  return ["sidera:worker-item-draft", workspaceId, workerItemId].join(":");
+}
+
+export function contextFingerprint(context: ExecutionContextAddress | null): string {
+  if (context === null) return "";
   return [
-    "sidera:draft",
-    workspaceId,
-    context.plan_snapshot_id,
-    context.work_item_key,
+    context.worker_item_id,
+    context.plan_generation,
+    context.context_version,
     context.execution_id,
     context.session_id,
-  ].join(":");
+    context.session_version,
+    context.worker_id,
+  ].join("|");
 }
 
-export function loadInterventionDraft(key: string): InterventionDraft {
-  if (typeof window === "undefined") {
-    return { text: "", clientIdempotencyKey: crypto.randomUUID() };
-  }
+export function loadWorkerItemDraft(key: string): WorkerItemInterventionDraft {
+  const empty = () => ({
+    text: "",
+    clientIdempotencyKey: crypto.randomUUID(),
+    lastContextFingerprint: "",
+  });
+  if (typeof window === "undefined") return empty();
   const raw = window.localStorage.getItem(key);
-  if (raw === null) {
-    return { text: "", clientIdempotencyKey: crypto.randomUUID() };
-  }
+  if (raw === null) return empty();
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (isRecord(parsed) && typeof parsed.text === "string" && typeof parsed.clientIdempotencyKey === "string") {
-      return { text: parsed.text, clientIdempotencyKey: parsed.clientIdempotencyKey };
+    if (
+      isRecord(parsed)
+      && typeof parsed.text === "string"
+      && typeof parsed.clientIdempotencyKey === "string"
+      && typeof parsed.lastContextFingerprint === "string"
+    ) {
+      return {
+        text: parsed.text,
+        clientIdempotencyKey: parsed.clientIdempotencyKey,
+        lastContextFingerprint: parsed.lastContextFingerprint,
+      };
     }
   } catch {
-    // A malformed local draft should never block the trace page.
+    // A malformed local draft must never block a WorkerItem workspace.
   }
-  return { text: "", clientIdempotencyKey: crypto.randomUUID() };
+  return empty();
 }
 
-export function saveInterventionDraft(key: string, draft: InterventionDraft): void {
+export function saveWorkerItemDraft(key: string, draft: WorkerItemInterventionDraft): void {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(key, JSON.stringify(draft));
   }
 }
 
-export function clearInterventionDraft(key: string): void {
+export function clearWorkerItemDraft(key: string): void {
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(key);
   }

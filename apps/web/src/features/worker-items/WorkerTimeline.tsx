@@ -22,11 +22,13 @@ export function WorkerTimeline({
   hasMore,
   isLoadingMore,
   onLoadMore,
+  onOpenTrace,
 }: {
   activities: readonly WorkerActivity[];
   hasMore: boolean;
   isLoadingMore: boolean;
   onLoadMore: () => void;
+  onOpenTrace: (activity: WorkerActivity) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousCountRef = useRef(activities.length);
@@ -129,6 +131,7 @@ export function WorkerTimeline({
                 <WorkerActivityRow
                   key={activity.activity_id}
                   activity={activity}
+                  onOpenTrace={onOpenTrace}
                   style={{ transform: `translateY(${item.start}px)` }}
                 />
               );
@@ -142,9 +145,11 @@ export function WorkerTimeline({
 
 function WorkerActivityRow({
   activity,
+  onOpenTrace,
   style,
 }: {
   activity: WorkerActivity;
+  onOpenTrace: (activity: WorkerActivity) => void;
   style: React.CSSProperties;
 }) {
   const boundary = isBoundary(activity.kind);
@@ -157,9 +162,15 @@ function WorkerActivityRow({
           <span className="eyebrow">{activityLabel(activity.kind)}</span>
           <time dateTime={activity.occurred_at}>{formatTime(activity.occurred_at)}</time>
           {activity.trace_descriptor ? (
-            <span className="worker-timeline-item__trace" role="img" aria-label="查看 Agent Trace" title="查看 Agent Trace">
+            <button
+              className="worker-timeline-item__trace"
+              type="button"
+              aria-label="查看 Agent Trace"
+              title="查看 Agent Trace"
+              onClick={() => onOpenTrace(activity)}
+            >
               <SearchCode size={14} aria-hidden="true" />
-            </span>
+            </button>
           ) : null}
         </div>
         <strong>{activity.title}</strong>

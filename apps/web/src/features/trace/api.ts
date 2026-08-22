@@ -160,7 +160,7 @@ export async function getWorkspaceCapabilities(
 
 export async function sendExecutionInput(
   workspaceId: string,
-  session: ExecutionSession,
+  session: Pick<ExecutionSession, "id" | "version">,
   context: ExecutionContextAddress,
   clientIdempotencyKey: string,
   text: string,
