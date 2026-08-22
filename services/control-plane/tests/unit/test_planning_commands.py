@@ -7,7 +7,7 @@ import pytest
 
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.domain.commands import CommandEnvelope
-from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.errors import OperatorRequired, ValidationError
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
@@ -20,7 +20,13 @@ from sidera_control_plane.domain.modules import (
     StructuredOutputCapability,
     UsageReportingCapability,
 )
-from sidera_control_plane.domain.planning import PlanningRequest, PlanningRequestStatus
+from sidera_control_plane.domain.planning import (
+    PlanningBriefRevision,
+    PlanningClarification,
+    PlanningRequest,
+    PlanningRequestStatus,
+    PlanningRunStatus,
+)
 from sidera_control_plane.domain.planning_profiles import (
     InvalidOutputPolicy,
     PlanningBudgetPolicy,
@@ -32,6 +38,7 @@ from sidera_control_plane.domain.planning_profiles import (
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")
+PROPOSAL_HASH = "a" * 64
 
 
 def planner_capabilities() -> PlannerAdapterCapabilityProfile:
@@ -176,11 +183,79 @@ class RequestRepository:
 
 
 class RunRepository:
-    def __init__(self) -> None:
+    def __init__(self, request: PlanningRequest | None = None) -> None:
+        self.request = request
+        self.added: list[object] = []
         self.saved: list[tuple[object, int]] = []
+
+    def add(self, run: object) -> None:
+        self.added.append(run)
+
+    def get(self, run_id: UUID, workspace_id: UUID, *, for_update: bool = False):
+        if self.request is None:
+            return None
+        return next(
+            (
+                run
+                for run in self.request.runs
+                if run.id == run_id and run.workspace_id == workspace_id
+            ),
+            None,
+        )
 
     def save(self, run: object, previous_version: int) -> None:
         self.saved.append((run, previous_version))
+
+
+class LeaseRepository:
+    def __init__(self) -> None:
+        self.saved: list[tuple[object, int]] = []
+
+    def get(self, lease_id: UUID, workspace_id: UUID, *, for_update: bool = False):
+        return None
+
+    def save(self, lease: object, previous_version: int) -> None:
+        self.saved.append((lease, previous_version))
+
+
+class RecordRepository:
+    def __init__(self, current_proposal: object | None = None) -> None:
+        self.current_proposal = current_proposal
+        self.briefs: list[PlanningBriefRevision] = []
+        self.clarifications: list[PlanningClarification] = []
+        self.saved_clarifications: list[tuple[PlanningClarification, int]] = []
+
+    def add_brief(self, brief: PlanningBriefRevision) -> None:
+        self.briefs.append(brief)
+
+    def get_brief(self, request_id: UUID, workspace_id: UUID, revision: int):
+        return next((item for item in self.briefs if item.revision == revision), None)
+
+    def list_briefs(self, request_id: UUID, workspace_id: UUID):
+        return tuple(self.briefs)
+
+    def add_proposal(self, proposal: object, workspace_id: UUID) -> None:
+        raise AssertionError("planning command tests do not create proposals")
+
+    def get_proposal(self, proposal_id: UUID, workspace_id: UUID):
+        return self.current_proposal
+
+    def list_proposals(self, request_id: UUID, workspace_id: UUID):
+        return (self.current_proposal,) if self.current_proposal is not None else ()
+
+    def get_current_proposal(self, request_id: UUID, workspace_id: UUID):
+        return self.current_proposal
+
+    def add_clarification(self, clarification: PlanningClarification) -> None:
+        self.clarifications.append(clarification)
+
+    def list_pending_clarifications(self, request_id: UUID, workspace_id: UUID):
+        return tuple(item for item in self.clarifications if item.answer is None)
+
+    def save_clarification(
+        self, clarification: PlanningClarification, previous_version: int
+    ) -> None:
+        self.saved_clarifications.append((clarification, previous_version))
 
 
 class EventRepository:
@@ -205,14 +280,15 @@ def unit(
     instance: ModuleInstance,
     stored_profile: PlanningProfile | None = None,
     stored_request: PlanningRequest | None = None,
+    current_proposal: object | None = None,
 ) -> Any:
     return SimpleNamespace(
         modules=ModuleRepository(definition, instance),
         planning_profiles=ProfileRepository(stored_profile),
         planning_requests=RequestRepository(stored_request),
-        planning_runs=RunRepository(),
-        planning_leases=SimpleNamespace(),
-        planning_records=SimpleNamespace(),
+        planning_runs=RunRepository(stored_request),
+        planning_leases=LeaseRepository(),
+        planning_records=RecordRepository(current_proposal),
         proposal_materializations=SimpleNamespace(),
         execution_requests=SimpleNamespace(),
         events=EventRepository(),
@@ -296,6 +372,105 @@ def register_profile_payload(instance_id: UUID) -> dict[str, object]:
         "user_selectable": True,
         "planner_secret_refs": [],
     }
+
+
+def new_request(stored_profile: PlanningProfile) -> PlanningRequest:
+    return PlanningRequest.create(
+        request_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        profile_snapshot=stored_profile.snapshot(planner_capabilities()),
+        objective="Implement planning",
+        constraints=("Keep it reviewable",),
+        acceptance_criteria=("The request can be completed",),
+        context_refs=("context:test",),
+        requested_outputs=("proposal",),
+        source_type="web",
+        source_ref="conversation:test",
+        actor="operator",
+        correlation_id=uuid4(),
+        run_id=uuid4(),
+        now=NOW,
+    )
+
+
+def waiting_request(stored_profile: PlanningProfile) -> PlanningRequest:
+    request = new_request(stored_profile)
+    run = request.runs[0]
+    lease_id = uuid4()
+    request.start_planning(
+        run_id=run.id,
+        lease_id=lease_id,
+        fencing_token=1,
+        now=NOW,
+    )
+    clarification = PlanningClarification.create(
+        clarification_id=uuid4(),
+        planning_request_id=request.id,
+        planning_run_id=run.id,
+        question="Which adapter should be used?",
+        rationale="The request allows multiple adapters.",
+        answer_type="choice",
+        options=("opencode", "dsh"),
+        blocking=True,
+        created_at=NOW,
+    )
+    request.mark_needs_clarification(
+        run_id=run.id,
+        clarifications=(clarification,),
+        lease_id=lease_id,
+        fencing_token=1,
+        now=NOW,
+    )
+    return request
+
+
+def proposal_ready_request(stored_profile: PlanningProfile) -> PlanningRequest:
+    request = new_request(stored_profile)
+    run = request.runs[0]
+    lease_id = uuid4()
+    request.start_planning(
+        run_id=run.id,
+        lease_id=lease_id,
+        fencing_token=1,
+        now=NOW,
+    )
+    request.succeed_run(
+        run_id=run.id,
+        lease_id=lease_id,
+        fencing_token=1,
+        provider_ref="fake:proposal-1",
+        structured_result_type="planning.proposal.v2",
+        usage=run.usage,
+        now=NOW,
+    )
+    request.mark_proposal_ready(
+        run_id=run.id,
+        proposal_revision=1,
+        content_hash=PROPOSAL_HASH,
+        now=NOW,
+    )
+    return request
+
+
+def blocked_request(stored_profile: PlanningProfile) -> PlanningRequest:
+    request = new_request(stored_profile)
+    run = request.runs[0]
+    lease_id = uuid4()
+    request.start_planning(
+        run_id=run.id,
+        lease_id=lease_id,
+        fencing_token=1,
+        now=NOW,
+    )
+    request.block_run_unknown(
+        run_id=run.id,
+        lease_id=lease_id,
+        fencing_token=1,
+        error_code="provider_unknown_outcome",
+        error_message="provider result was not observed",
+        now=NOW,
+    )
+    return request
 
 
 def test_register_planner_module_requires_operator_and_rejects_secret_values() -> None:
@@ -425,3 +600,193 @@ def test_cancel_planning_request_requires_expected_version_and_updates_request()
     assert result.aggregate_id == request.id
     assert request.status is PlanningRequestStatus.CANCELLED
     assert unit_of_work.planning_requests.saved[0][1] == 1
+
+
+def test_answer_planning_clarification_creates_one_new_brief_and_run() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = waiting_request(stored_profile)
+    clarification = request.clarifications[0]
+    unit_of_work = unit(definition, instance, stored_profile, request)
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "AnswerPlanningClarification",
+            {
+                "answers": [
+                    {
+                        "clarification_id": str(clarification.id),
+                        "answer": "opencode",
+                    }
+                ]
+            },
+            target_type="planning_request",
+            target_id=request.id,
+            expected_version=request.version,
+        ),
+    )
+
+    assert result.data["brief_revision"] == 2
+    assert result.data["planning_run_id"] == str(request.runs[-1].id)
+    assert request.status is PlanningRequestStatus.PLANNING
+    assert request.current_brief_revision == 2
+    assert len(request.briefs) == 2
+    assert len(request.runs) == 2
+    assert request.runs[-1].status is PlanningRunStatus.QUEUED
+    assert request.clarifications[0].answer == "opencode"
+    assert len(unit_of_work.planning_records.briefs) == 1
+    assert len(unit_of_work.planning_records.saved_clarifications) == 1
+
+
+def test_answer_planning_clarification_rejects_partial_answers_without_mutation() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = waiting_request(stored_profile)
+    unit_of_work = unit(definition, instance, stored_profile, request)
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    with pytest.raises(ValidationError, match="clarification"):
+        handler.handle(
+            unit_of_work,
+            envelope(
+                "AnswerPlanningClarification",
+                {"answers": []},
+                target_type="planning_request",
+                target_id=request.id,
+                expected_version=request.version,
+            ),
+        )
+
+    assert request.current_brief_revision == 1
+    assert len(request.runs) == 1
+    assert unit_of_work.planning_records.briefs == []
+
+
+def test_request_proposal_revision_preserves_old_proposal_and_appends_brief() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = proposal_ready_request(stored_profile)
+    old_proposal = SimpleNamespace(revision=1, content_hash=PROPOSAL_HASH)
+    unit_of_work = unit(
+        definition,
+        instance,
+        stored_profile,
+        request,
+        current_proposal=old_proposal,
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "RequestProposalRevision",
+            {
+                "current_proposal_revision": 1,
+                "current_proposal_content_hash": PROPOSAL_HASH,
+                "feedback": "Split the implementation and verification work.",
+            },
+            target_type="planning_request",
+            target_id=request.id,
+            expected_version=request.version,
+        ),
+    )
+
+    assert result.data["brief_revision"] == 2
+    assert request.status is PlanningRequestStatus.PLANNING
+    assert request.current_proposal_revision is None
+    assert request.current_proposal_content_hash is None
+    assert request.briefs[-1].user_feedback == (
+        "Split the implementation and verification work."
+    )
+    assert unit_of_work.planning_records.current_proposal is old_proposal
+    assert len(unit_of_work.planning_records.briefs) == 1
+
+
+def test_reject_planning_proposal_records_reason_without_deleting_proposal() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = proposal_ready_request(stored_profile)
+    old_proposal = SimpleNamespace(revision=1, content_hash=PROPOSAL_HASH)
+    unit_of_work = unit(
+        definition,
+        instance,
+        stored_profile,
+        request,
+        current_proposal=old_proposal,
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "RejectPlanningProposal",
+            {
+                "current_proposal_revision": 1,
+                "current_proposal_content_hash": PROPOSAL_HASH,
+                "reason": "The proposed scope is too broad.",
+            },
+            target_type="planning_request",
+            target_id=request.id,
+            expected_version=request.version,
+        ),
+    )
+
+    assert result.data["status"] == "rejected"
+    assert request.status is PlanningRequestStatus.REJECTED
+    assert unit_of_work.planning_records.current_proposal is old_proposal
+    assert unit_of_work.events.events[-1].payload["reason"] == (
+        "The proposed scope is too broad."
+    )
+
+
+def test_retry_blocked_planning_run_requires_operator_and_records_decision() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = blocked_request(stored_profile)
+    old_run = request.runs[-1]
+    unit_of_work = unit(definition, instance, stored_profile, request)
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    unauthorized = envelope(
+        "RetryBlockedPlanningRun",
+        {"unknown_outcome_decision": "retry"},
+        actor_type="user",
+        actor_id="user:1",
+        target_type="planning_run",
+        target_id=old_run.id,
+        expected_version=old_run.version,
+    )
+    with pytest.raises(OperatorRequired):
+        handler.handle(unit_of_work, unauthorized)
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "RetryBlockedPlanningRun",
+            {"unknown_outcome_decision": "retry"},
+            target_type="planning_run",
+            target_id=old_run.id,
+            expected_version=old_run.version,
+        ),
+    )
+
+    new_run = request.runs[-1]
+    assert result.data["planning_run_id"] == str(new_run.id)
+    assert result.data["unknown_outcome_decision"] == "retry"
+    assert request.status is PlanningRequestStatus.PLANNING
+    assert new_run.attempt == old_run.attempt + 1
+    assert new_run.operation_id != old_run.operation_id
+    assert unit_of_work.planning_runs.added == [new_run]
+    assert unit_of_work.events.events[-1].payload["unknown_outcome_decision"] == "retry"

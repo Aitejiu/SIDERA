@@ -21,7 +21,12 @@ from sidera_control_plane.domain.modules import (
     PlannerAdapterCapabilityProfile,
 )
 from sidera_control_plane.domain.planning import (
+    RUN_TERMINAL_STATUSES,
+    PlanningBriefRevision,
+    PlanningClarification,
     PlanningRequest,
+    PlanningRun,
+    PlanningRunLeaseStatus,
     PlanningRunStatus,
 )
 from sidera_control_plane.domain.planning_profiles import (
@@ -41,6 +46,10 @@ class PlanningCommandHandler:
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
             "CancelPlanningRequest",
+            "AnswerPlanningClarification",
+            "RequestProposalRevision",
+            "RejectPlanningProposal",
+            "RetryBlockedPlanningRun",
         }
     )
 
@@ -66,6 +75,14 @@ class PlanningCommandHandler:
             return self._submit_request(uow, envelope)
         if envelope.command_type == "CancelPlanningRequest":
             return self._cancel_request(uow, envelope)
+        if envelope.command_type == "AnswerPlanningClarification":
+            return self._answer_clarification(uow, envelope)
+        if envelope.command_type == "RequestProposalRevision":
+            return self._request_proposal_revision(uow, envelope)
+        if envelope.command_type == "RejectPlanningProposal":
+            return self._reject_proposal(uow, envelope)
+        if envelope.command_type == "RetryBlockedPlanningRun":
+            return self._retry_blocked_run(uow, envelope)
         raise ValidationError(f"unsupported planning command: {envelope.command_type}")
 
     def _register_module(
@@ -385,6 +402,376 @@ class PlanningCommandHandler:
             data={"planning_request_id": str(request.id), "status": request.status.value},
         )
 
+    def _answer_clarification(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        request = self._request_for_mutation(uow, envelope)
+        raw_answers = envelope.payload.get("answers")
+        if not isinstance(raw_answers, (list, tuple)) or not raw_answers:
+            raise ValidationError("answers must contain at least one clarification")
+
+        pending = {
+            item.id: item
+            for item in request.clarifications
+            if item.planning_run_id == request.current_run_id
+            and item.blocking
+            and item.answer is None
+        }
+        if not pending:
+            raise ValidationError("planning request has no pending clarifications")
+
+        answers: dict[UUID, str] = {}
+        for raw_answer in raw_answers:
+            item = _mapping(raw_answer, "answer")
+            clarification_id = _uuid(item, "clarification_id")
+            if clarification_id in answers:
+                raise ValidationError("answers cannot contain duplicate clarifications")
+            if clarification_id not in pending:
+                raise ValidationError("answer does not reference a pending clarification")
+            answer = _required_string(item, "answer")
+            _validate_clarification_answer(pending[clarification_id], answer)
+            answers[clarification_id] = answer
+        if set(answers) != set(pending):
+            raise ValidationError("all pending clarifications must be answered together")
+
+        current_brief = _current_brief(request)
+        feedback = _clarification_feedback(answers)
+        brief = _next_brief(
+            request,
+            current_brief=current_brief,
+            user_feedback=_append_feedback(current_brief.user_feedback, feedback),
+            actor=envelope.actor_id,
+            correlation_id=envelope.correlation_id,
+            now=self._clock(),
+        )
+        previous_request_version = request.version
+        previous_clarification_versions = {
+            item.id: item.version for item in request.clarifications
+        }
+        request.answer_clarifications(
+            run_id=request.current_run_id,
+            answers=answers,
+            brief=brief,
+            new_run_id=uuid4(),
+            actor=envelope.actor_id,
+            now=brief.created_at,
+        )
+        self._persist_appended_revision(
+            uow,
+            request,
+            brief=brief,
+            previous_request_version=previous_request_version,
+            previous_clarification_versions=previous_clarification_versions,
+        )
+        event = _event(
+            envelope,
+            aggregate_type="planning_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type="PlanningClarificationAnswered",
+            payload={
+                "clarification_ids": [str(item) for item in answers],
+                "brief_revision": brief.revision,
+                "planning_run_id": str(request.current_run_id),
+            },
+        )
+        uow.events.append_with_outbox(event)
+        uow.projection_changes.changed(
+            workspace_id=request.workspace_id,
+            projection_type="planning_request",
+            resource_id=request.id,
+            change_type="PlanningClarificationAnswered",
+            resource_version=request.version,
+            correlation_id=envelope.correlation_id,
+        )
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=(event.id,),
+            data={
+                "planning_request_id": str(request.id),
+                "planning_run_id": str(request.current_run_id),
+                "brief_revision": brief.revision,
+            },
+        )
+
+    def _request_proposal_revision(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        request = self._request_for_mutation(uow, envelope)
+        self._assert_current_proposal(uow, request, envelope.payload)
+        current_brief = _current_brief(request)
+        feedback = _required_string(envelope.payload, "feedback")
+        now = self._clock()
+        brief = _next_brief(
+            request,
+            current_brief=current_brief,
+            user_feedback=_append_feedback(current_brief.user_feedback, feedback),
+            actor=envelope.actor_id,
+            correlation_id=envelope.correlation_id,
+            now=now,
+        )
+        previous_request_version = request.version
+        request.request_revision(
+            expected_proposal_revision=_positive_int(
+                envelope.payload, "current_proposal_revision"
+            ),
+            expected_content_hash=_content_hash(
+                _required_string(
+                    envelope.payload, "current_proposal_content_hash"
+                )
+            ),
+            feedback=feedback,
+            brief=brief,
+            new_run_id=uuid4(),
+            actor=envelope.actor_id,
+            now=now,
+        )
+        self._persist_appended_revision(
+            uow,
+            request,
+            brief=brief,
+            previous_request_version=previous_request_version,
+        )
+        event = _event(
+            envelope,
+            aggregate_type="planning_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type="PlanningProposalRevisionRequested",
+            payload={
+                "previous_proposal_revision": _positive_int(
+                    envelope.payload, "current_proposal_revision"
+                ),
+                "previous_proposal_content_hash": _content_hash(
+                    _required_string(
+                        envelope.payload, "current_proposal_content_hash"
+                    )
+                ),
+                "brief_revision": brief.revision,
+                "planning_run_id": str(request.current_run_id),
+            },
+        )
+        uow.events.append_with_outbox(event)
+        uow.projection_changes.changed(
+            workspace_id=request.workspace_id,
+            projection_type="planning_request",
+            resource_id=request.id,
+            change_type="PlanningProposalRevisionRequested",
+            resource_version=request.version,
+            correlation_id=envelope.correlation_id,
+        )
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=(event.id,),
+            data={
+                "planning_request_id": str(request.id),
+                "planning_run_id": str(request.current_run_id),
+                "brief_revision": brief.revision,
+            },
+        )
+
+    def _reject_proposal(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        request = self._request_for_mutation(uow, envelope)
+        self._assert_current_proposal(uow, request, envelope.payload)
+        reason = _required_string(envelope.payload, "reason")
+        previous_request_version = request.version
+        previous_run_versions = _active_run_versions(request)
+        request.reject(now=self._clock())
+        uow.planning_requests.save(request, previous_request_version)
+        self._persist_run_changes(uow, request, previous_run_versions)
+        event = _event(
+            envelope,
+            aggregate_type="planning_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type="PlanningProposalRejected",
+            payload={
+                "proposal_revision": _positive_int(
+                    envelope.payload, "current_proposal_revision"
+                ),
+                "proposal_content_hash": _content_hash(
+                    _required_string(
+                        envelope.payload, "current_proposal_content_hash"
+                    )
+                ),
+                "reason": reason,
+                "status": request.status.value,
+            },
+        )
+        uow.events.append_with_outbox(event)
+        uow.projection_changes.changed(
+            workspace_id=request.workspace_id,
+            projection_type="planning_request",
+            resource_id=request.id,
+            change_type="PlanningProposalRejected",
+            resource_version=request.version,
+            correlation_id=envelope.correlation_id,
+        )
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=(event.id,),
+            data={
+                "planning_request_id": str(request.id),
+                "status": request.status.value,
+            },
+        )
+
+    def _retry_blocked_run(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        self._require_operator(envelope)
+        run = self._run_for_mutation(uow, envelope)
+        if run.status is not PlanningRunStatus.BLOCKED:
+            raise ValidationError("planning run is not blocked")
+        decision = _required_string(envelope.payload, "unknown_outcome_decision")
+        if decision != "retry":
+            raise ValidationError("unknown_outcome_decision must be retry")
+        request = uow.planning_requests.get(
+            run.planning_request_id, envelope.workspace_id, for_update=True
+        )
+        if request is None:
+            raise NotFound("planning request not found")
+        if request.runs[-1].id != run.id:
+            raise ValidationError("blocked run is not the current planning run")
+        previous_request_version = request.version
+        request.retry_blocked(new_run_id=uuid4(), now=self._clock())
+        new_run = request.runs[-1]
+        uow.planning_runs.add(new_run)
+        uow.planning_requests.save(request, previous_request_version)
+        event = _event(
+            envelope,
+            aggregate_type="planning_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type="PlanningBlockedRunRetried",
+            payload={
+                "blocked_run_id": str(run.id),
+                "planning_run_id": str(new_run.id),
+                "attempt": new_run.attempt,
+                "unknown_outcome_decision": decision,
+            },
+        )
+        uow.events.append_with_outbox(event)
+        uow.projection_changes.changed(
+            workspace_id=request.workspace_id,
+            projection_type="planning_request",
+            resource_id=request.id,
+            change_type="PlanningBlockedRunRetried",
+            resource_version=request.version,
+            correlation_id=envelope.correlation_id,
+        )
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=(event.id,),
+            data={
+                "planning_request_id": str(request.id),
+                "planning_run_id": str(new_run.id),
+                "attempt": new_run.attempt,
+                "unknown_outcome_decision": decision,
+            },
+        )
+
+    def _request_for_mutation(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> PlanningRequest:
+        if envelope.target_id is None or envelope.expected_version is None:
+            raise ValidationError("planning request mutation requires target_id and expected_version")
+        request = uow.planning_requests.get(
+            envelope.target_id, envelope.workspace_id, for_update=True
+        )
+        if request is None:
+            raise NotFound("planning request not found")
+        if request.version != envelope.expected_version:
+            raise VersionConflict(envelope.expected_version, request.version)
+        return request
+
+    def _run_for_mutation(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> PlanningRun:
+        if envelope.target_id is None or envelope.expected_version is None:
+            raise ValidationError("planning run mutation requires target_id and expected_version")
+        run = uow.planning_runs.get(
+            envelope.target_id, envelope.workspace_id, for_update=True
+        )
+        if run is None:
+            raise NotFound("planning run not found")
+        if run.version != envelope.expected_version:
+            raise VersionConflict(envelope.expected_version, run.version)
+        return run
+
+    def _assert_current_proposal(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        payload: Mapping[str, object],
+    ) -> None:
+        proposal = uow.planning_records.get_current_proposal(
+            request.id, request.workspace_id
+        )
+        if proposal is None:
+            raise NotFound("current planning proposal not found")
+        revision = _positive_int(payload, "current_proposal_revision")
+        content_hash = _content_hash(
+            _required_string(payload, "current_proposal_content_hash")
+        )
+        if proposal.revision != revision:
+            raise ValidationError("proposal revision does not match current proposal")
+        if proposal.content_hash != content_hash:
+            raise ValidationError("proposal content hash does not match current proposal")
+
+    def _persist_appended_revision(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        *,
+        brief: PlanningBriefRevision,
+        previous_request_version: int,
+        previous_clarification_versions: Mapping[UUID, int] | None = None,
+    ) -> None:
+        uow.planning_records.add_brief(brief)
+        uow.planning_runs.add(request.runs[-1])
+        uow.planning_requests.save(request, previous_request_version)
+        previous_clarification_versions = previous_clarification_versions or {}
+        for clarification in request.clarifications:
+            previous_version = previous_clarification_versions.get(clarification.id)
+            if previous_version is not None and clarification.version != previous_version:
+                uow.planning_records.save_clarification(
+                    clarification, previous_version
+                )
+
+    def _persist_run_changes(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        previous_run_versions: Mapping[UUID, int],
+    ) -> None:
+        now = self._clock()
+        for run in request.runs:
+            previous_version = previous_run_versions.get(run.id)
+            if previous_version is None:
+                continue
+            uow.planning_runs.save(run, previous_version)
+            if run.lease_id is None:
+                continue
+            lease = uow.planning_leases.get(
+                run.lease_id, request.workspace_id, for_update=True
+            )
+            if lease is not None and lease.status is PlanningRunLeaseStatus.ACTIVE:
+                lease.status = PlanningRunLeaseStatus.EXPIRED
+                lease.released_at = now
+                lease.version += 1
+                uow.planning_leases.save(lease, lease.version - 1)
+
     def _require_operator(self, envelope: CommandEnvelope) -> None:
         if (
             envelope.actor_type != self._local_actor_type
@@ -435,6 +822,83 @@ def _planner_capabilities(
             _positive_ints(value.get("proposal_schema_versions"), "proposal_schema_versions")
         ),
     )
+
+
+def _current_brief(request: PlanningRequest) -> PlanningBriefRevision:
+    if not request.briefs:
+        raise ValidationError("planning request has no current brief")
+    return request.briefs[-1]
+
+
+def _next_brief(
+    request: PlanningRequest,
+    *,
+    current_brief: PlanningBriefRevision,
+    user_feedback: str,
+    actor: str,
+    correlation_id: UUID,
+    now: datetime,
+) -> PlanningBriefRevision:
+    return PlanningBriefRevision.create(
+        planning_request_id=request.id,
+        revision=request.current_brief_revision + 1,
+        objective=current_brief.objective,
+        constraints=current_brief.constraints,
+        acceptance_criteria=current_brief.acceptance_criteria,
+        context_refs=current_brief.context_refs,
+        requested_outputs=current_brief.requested_outputs,
+        user_feedback=user_feedback,
+        source_correlation=correlation_id,
+        created_by=actor,
+        created_at=now,
+    )
+
+
+def _append_feedback(previous: str | None, addition: str) -> str:
+    if previous is None:
+        return addition
+    return f"{previous}\n\n{addition}"
+
+
+def _clarification_feedback(answers: Mapping[UUID, str]) -> str:
+    entries = "; ".join(
+        f"{clarification_id}={answers[clarification_id]}"
+        for clarification_id in sorted(answers, key=str)
+    )
+    return f"clarification answers: {entries}"
+
+
+def _validate_clarification_answer(
+    clarification: PlanningClarification, answer: str
+) -> None:
+    if clarification.options and answer not in clarification.options:
+        raise ValidationError("clarification answer is not one of the options")
+    answer_type = clarification.answer_type.strip().lower()
+    if answer_type in {"boolean", "bool"} and answer.lower() not in {
+        "true",
+        "false",
+    }:
+        raise ValidationError("clarification answer must be a boolean")
+    if answer_type in {"integer", "number", "float"}:
+        try:
+            float(answer)
+        except ValueError as exc:
+            raise ValidationError("clarification answer must be numeric") from exc
+
+
+def _active_run_versions(request: PlanningRequest) -> dict[UUID, int]:
+    return {
+        run.id: run.version
+        for run in request.runs
+        if run.status not in RUN_TERMINAL_STATUSES
+        and run.status is not PlanningRunStatus.NEEDS_CLARIFICATION
+    }
+
+
+def _content_hash(value: str) -> str:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValidationError("content hash must be a lowercase SHA-256 value")
+    return value
 
 
 def _budget(value: object) -> PlanningBudgetPolicy:

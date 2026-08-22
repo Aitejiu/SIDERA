@@ -161,6 +161,41 @@ class CancelPlanningRequestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlanningClarificationAnswerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    clarification_id: UUID
+    answer: NonEmptyString
+
+
+class AnswerPlanningClarificationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answers: tuple[PlanningClarificationAnswerPayload, ...] = Field(min_length=1)
+
+
+class RequestProposalRevisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_proposal_revision: int = Field(ge=1)
+    current_proposal_content_hash: NonEmptyString
+    feedback: NonEmptyString
+
+
+class RejectPlanningProposalPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_proposal_revision: int = Field(ge=1)
+    current_proposal_content_hash: NonEmptyString
+    reason: NonEmptyString
+
+
+class RetryBlockedPlanningRunPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    unknown_outcome_decision: Literal["retry"]
+
+
 class AcknowledgeAttentionItemPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1026,6 +1061,21 @@ class CommandRequest(BaseModel):
         elif self.command_type == "CancelPlanningRequest":
             self._require_mutation_target("planning_request")
             parsed = CancelPlanningRequestPayload.model_validate(self.payload)
+        elif self.command_type in {
+            "AnswerPlanningClarification",
+            "RequestProposalRevision",
+            "RejectPlanningProposal",
+        }:
+            self._require_mutation_target("planning_request")
+            payload_types = {
+                "AnswerPlanningClarification": AnswerPlanningClarificationPayload,
+                "RequestProposalRevision": RequestProposalRevisionPayload,
+                "RejectPlanningProposal": RejectPlanningProposalPayload,
+            }
+            parsed = payload_types[self.command_type].model_validate(self.payload)
+        elif self.command_type == "RetryBlockedPlanningRun":
+            self._require_mutation_target("planning_run")
+            parsed = RetryBlockedPlanningRunPayload.model_validate(self.payload)
         elif self.command_type == "PublishPlanSnapshot":
             self._require_mutation_target("task")
             parsed = PublishPlanSnapshotPayload.model_validate(self.payload)
