@@ -1,11 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { RouterProvider } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestRouter } from "./router";
 
 describe("app shell", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
   it("opens the task control room with workspace navigation", async () => {
     const router = createTestRouter([
       "/workspaces/20000000-0000-0000-0000-000000000001/tasks",
@@ -44,5 +49,47 @@ describe("app shell", () => {
     expect(screen.getByRole("link", { name: "能力" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "任务总览" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /任务 30000000/ })).toBeInTheDocument();
+  });
+
+  it("returns to the previous semantic tab when a direct child tab is closed", async () => {
+    const workspaceId = "20000000-0000-0000-0000-000000000001";
+    const rootTaskId = "30000000-0000-0000-0000-000000000001";
+    const router = createTestRouter([
+      `/workspaces/${workspaceId}/tasks/${rootTaskId}?view=dag`,
+    ]);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: /任务 30000000/ })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      await router.navigate(
+        `/workspaces/${workspaceId}/tasks/${rootTaskId}/subtasks/implementation?view=trace`,
+      );
+    });
+    const closeSubtask = await screen.findByRole("button", { name: "关闭implementation" });
+    await user.click(closeSubtask);
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(
+        `/workspaces/${workspaceId}/tasks/${rootTaskId}`,
+      );
+      expect(router.state.location.search).toBe("?view=dag");
+    });
+
+    await user.click(screen.getByRole("button", { name: /关闭任务 30000000/ }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/workspaces/${workspaceId}/tasks`);
+      expect(router.state.location.search).toBe("");
+    });
   });
 });

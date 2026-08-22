@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
 import { WorkspaceStreamProvider, useWorkspaceStream } from "./WorkspaceStreamProvider";
-import { WorkspaceTabs } from "./WorkspaceTabs";
+import { WorkspaceTabs, WorkspaceTabsProvider } from "./WorkspaceTabs";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { NotificationCenter } from "@/features/attention/NotificationCenter";
@@ -16,7 +16,9 @@ export function App() {
 
   return (
     <WorkspaceStreamProvider workspaceId={resolvedWorkspaceId}>
-      <AppFrame workspaceId={resolvedWorkspaceId} />
+      <WorkspaceTabsProvider key={resolvedWorkspaceId} workspaceId={resolvedWorkspaceId}>
+        <AppFrame workspaceId={resolvedWorkspaceId} />
+      </WorkspaceTabsProvider>
     </WorkspaceStreamProvider>
   );
 }
@@ -119,6 +121,38 @@ export function TaskRoutePlaceholder() {
           <h1 id="workspace-title">任务</h1>
         </div>
         <span className="mono-label">SNAPSHOT · WAITING FOR API</span>
+      </div>
+      <div className="placeholder-line" aria-hidden="true" />
+    </section>
+  );
+}
+
+export function SubtaskRoutePlaceholder() {
+  return (
+    <section className="route-placeholder" aria-labelledby="subtask-placeholder-title">
+      <div className="breadcrumb">任务 / 子任务</div>
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">SUBTASK WORKSPACE</span>
+          <h1 id="subtask-placeholder-title">正在打开子任务</h1>
+        </div>
+        <span className="mono-label">WORKSPACE LOADING</span>
+      </div>
+      <div className="placeholder-line" aria-hidden="true" />
+    </section>
+  );
+}
+
+export function WorkerItemRoutePlaceholder() {
+  return (
+    <section className="route-placeholder" aria-labelledby="worker-item-placeholder-title">
+      <div className="breadcrumb">任务 / WorkerItem</div>
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">WORKERITEM WORKSPACE</span>
+          <h1 id="worker-item-placeholder-title">正在打开 WorkerItem</h1>
+        </div>
+        <span className="mono-label">WORKSPACE LOADING</span>
       </div>
       <div className="placeholder-line" aria-hidden="true" />
     </section>

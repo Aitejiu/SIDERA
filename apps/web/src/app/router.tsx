@@ -5,7 +5,12 @@ import {
   type RouteObject,
 } from "react-router-dom";
 
-import { App, TaskRoutePlaceholder } from "./App";
+import {
+  App,
+  SubtaskRoutePlaceholder,
+  TaskRoutePlaceholder,
+  WorkerItemRoutePlaceholder,
+} from "./App";
 import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
 import { TaskListPage } from "@/features/tasks/TaskListPage";
 import { PlanDiffPage } from "@/features/tasks/PlanDiffPage";
@@ -32,6 +37,14 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId",
         element: <TaskDetailPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/tasks/:rootTaskId/subtasks/:subtaskKey",
+        element: <SubtaskRoutePlaceholder />,
+      },
+      {
+        path: "/workspaces/:workspaceId/worker-items/:workerItemId",
+        element: <WorkerItemRoutePlaceholder />,
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/plan/:generation",
