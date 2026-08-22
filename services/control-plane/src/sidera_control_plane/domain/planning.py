@@ -1,0 +1,913 @@
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from uuid import NAMESPACE_URL, UUID, uuid5
+
+from sidera_control_plane.domain.errors import (
+    InvalidTransition,
+    StaleFencingToken,
+    ValidationError,
+)
+from sidera_control_plane.domain.modules import PlannerAdapterCapabilityProfile
+from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
+
+
+class PlanningRequestKind(StrEnum):
+    CREATE = "create"
+    REVISION = "revision"
+
+
+class PlanningRequestStatus(StrEnum):
+    SUBMITTED = "submitted"
+    PLANNING = "planning"
+    WAITING_FOR_USER = "waiting_for_user"
+    PROPOSAL_READY = "proposal_ready"
+    MATERIALIZED = "materialized"
+    FAILED = "failed"
+    CONFLICTED = "conflicted"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class PlanningRunStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+
+RUN_TERMINAL_STATUSES = {
+    PlanningRunStatus.SUCCEEDED,
+    PlanningRunStatus.FAILED,
+    PlanningRunStatus.BLOCKED,
+    PlanningRunStatus.CANCELLED,
+}
+
+MAX_ERROR_MESSAGE_LENGTH = 2048
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningUsage:
+    input_tokens: int
+    output_tokens: int
+    cost_microunits: int
+    runtime_seconds: int
+    context_bytes: int
+
+    @classmethod
+    def zero(cls) -> "PlanningUsage":
+        return cls(
+            input_tokens=0,
+            output_tokens=0,
+            cost_microunits=0,
+            runtime_seconds=0,
+            context_bytes=0,
+        )
+
+    def __post_init__(self) -> None:
+        for name in (
+            "input_tokens",
+            "output_tokens",
+            "cost_microunits",
+            "runtime_seconds",
+            "context_bytes",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValidationError(f"{name} cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningBriefRevision:
+    planning_request_id: UUID
+    revision: int
+    objective: str
+    constraints: tuple[str, ...]
+    acceptance_criteria: tuple[str, ...]
+    context_refs: tuple[str, ...]
+    requested_outputs: tuple[str, ...]
+    user_feedback: str | None
+    source_correlation: UUID
+    created_by: str
+    created_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        planning_request_id: UUID,
+        revision: int,
+        objective: str,
+        constraints: Sequence[str],
+        acceptance_criteria: Sequence[str],
+        context_refs: Sequence[str],
+        requested_outputs: Sequence[str],
+        user_feedback: str | None,
+        source_correlation: UUID,
+        created_by: str,
+        created_at: datetime,
+    ) -> "PlanningBriefRevision":
+        return cls(
+            planning_request_id=planning_request_id,
+            revision=revision,
+            objective=objective,
+            constraints=_text_tuple(constraints, "constraints"),
+            acceptance_criteria=_text_tuple(
+                acceptance_criteria, "acceptance_criteria", allow_empty=False
+            ),
+            context_refs=_text_tuple(context_refs, "context_refs"),
+            requested_outputs=_text_tuple(
+                requested_outputs, "requested_outputs", allow_empty=False
+            ),
+            user_feedback=_optional_text(user_feedback, "user_feedback"),
+            source_correlation=source_correlation,
+            created_by=_required_text(created_by, "created_by"),
+            created_at=_aware(created_at, "created_at"),
+        )
+
+    def __post_init__(self) -> None:
+        if self.revision < 1:
+            raise ValidationError("brief revision must be positive")
+        _required_text(self.objective, "objective")
+        if not self.acceptance_criteria or not self.requested_outputs:
+            raise ValidationError(
+                "acceptance_criteria and requested_outputs cannot be empty"
+            )
+        _aware(self.created_at, "created_at")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningClarification:
+    id: UUID
+    planning_request_id: UUID
+    planning_run_id: UUID
+    question: str
+    rationale: str
+    answer_type: str
+    options: tuple[str, ...]
+    blocking: bool
+    answer: str | None
+    answered_by: str | None
+    answered_at: datetime | None
+    answer_brief_revision: int | None
+    created_at: datetime
+    version: int
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        clarification_id: UUID,
+        planning_request_id: UUID,
+        planning_run_id: UUID,
+        question: str,
+        rationale: str,
+        answer_type: str,
+        options: Sequence[str],
+        blocking: bool,
+        created_at: datetime,
+    ) -> "PlanningClarification":
+        return cls(
+            id=clarification_id,
+            planning_request_id=planning_request_id,
+            planning_run_id=planning_run_id,
+            question=_required_text(question, "clarification question"),
+            rationale=_required_text(rationale, "clarification rationale"),
+            answer_type=_required_text(answer_type, "clarification answer_type"),
+            options=_text_tuple(options, "clarification options"),
+            blocking=blocking,
+            answer=None,
+            answered_by=None,
+            answered_at=None,
+            answer_brief_revision=None,
+            created_at=_aware(created_at, "clarification created_at"),
+            version=1,
+        )
+
+    def __post_init__(self) -> None:
+        if self.version < 1:
+            raise ValidationError("clarification version must be positive")
+        if not isinstance(self.blocking, bool):
+            raise ValidationError("clarification blocking must be a boolean")
+        if self.answered_at is None and any(
+            value is not None
+            for value in (self.answer, self.answered_by, self.answer_brief_revision)
+        ):
+            raise ValidationError("unanswered clarification cannot contain answer facts")
+        if self.answered_at is not None:
+            _aware(self.answered_at, "clarification answered_at")
+            if not self.answer or not self.answered_by or self.answer_brief_revision is None:
+                raise ValidationError("answered clarification facts are incomplete")
+            if self.answer_brief_revision < 1:
+                raise ValidationError("answer_brief_revision must be positive")
+        if self.answer_type == "choice" and not self.options:
+            raise ValidationError("choice clarification requires options")
+
+    def answer_question(
+        self,
+        *,
+        answer: str,
+        actor: str,
+        brief_revision: int,
+        answered_at: datetime,
+    ) -> "PlanningClarification":
+        if self.answer is not None:
+            raise InvalidTransition("clarification has already been answered")
+        clean_answer = _required_text(answer, "clarification answer")
+        if self.options and clean_answer not in self.options:
+            raise ValidationError("clarification answer is not one of the options")
+        if brief_revision < 1:
+            raise ValidationError("answer_brief_revision must be positive")
+        return PlanningClarification(
+            id=self.id,
+            planning_request_id=self.planning_request_id,
+            planning_run_id=self.planning_run_id,
+            question=self.question,
+            rationale=self.rationale,
+            answer_type=self.answer_type,
+            options=self.options,
+            blocking=self.blocking,
+            answer=clean_answer,
+            answered_by=_required_text(actor, "clarification actor"),
+            answered_at=_aware(answered_at, "clarification answered_at"),
+            answer_brief_revision=brief_revision,
+            created_at=self.created_at,
+            version=self.version + 1,
+        )
+
+
+@dataclass(slots=True)
+class PlanningRun:
+    id: UUID
+    planning_request_id: UUID
+    workspace_id: UUID
+    brief_revision: int
+    attempt: int
+    operation_id: UUID
+    profile_snapshot: PlanningProfileSnapshot
+    planner_module_instance_id: UUID
+    planner_module_config_version: int
+    capability_snapshot: PlannerAdapterCapabilityProfile
+    status: PlanningRunStatus
+    lease_id: UUID | None
+    fencing_token: int
+    queued_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    provider_ref: str | None
+    structured_result_type: str | None
+    usage: PlanningUsage
+    error_code: str | None
+    error_message: str | None
+    diagnostic_artifact_ref: str | None
+    version: int
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: UUID,
+        planning_request_id: UUID,
+        workspace_id: UUID,
+        brief_revision: int,
+        attempt: int,
+        profile_snapshot: PlanningProfileSnapshot,
+        queued_at: datetime,
+    ) -> "PlanningRun":
+        if brief_revision < 1 or attempt < 1:
+            raise ValidationError("brief revision and attempt must be positive")
+        if profile_snapshot.workspace_id != workspace_id:
+            raise ValidationError("planning profile snapshot belongs to another workspace")
+        return cls(
+            id=run_id,
+            planning_request_id=planning_request_id,
+            workspace_id=workspace_id,
+            brief_revision=brief_revision,
+            attempt=attempt,
+            operation_id=planning_operation_id(run_id, attempt),
+            profile_snapshot=profile_snapshot,
+            planner_module_instance_id=profile_snapshot.planner_module_instance_id,
+            planner_module_config_version=profile_snapshot.planner_module_config_version,
+            capability_snapshot=profile_snapshot.planner_capabilities,
+            status=PlanningRunStatus.QUEUED,
+            lease_id=None,
+            fencing_token=0,
+            queued_at=_aware(queued_at, "run queued_at"),
+            started_at=None,
+            finished_at=None,
+            provider_ref=None,
+            structured_result_type=None,
+            usage=PlanningUsage.zero(),
+            error_code=None,
+            error_message=None,
+            diagnostic_artifact_ref=None,
+            version=1,
+        )
+
+    def start(self, *, lease_id: UUID, fencing_token: int, now: datetime) -> None:
+        if self.status is not PlanningRunStatus.QUEUED:
+            raise InvalidTransition("only a queued planning run can start")
+        if fencing_token < 1:
+            raise ValidationError("planning fencing_token must be positive")
+        self.lease_id = lease_id
+        self.fencing_token = fencing_token
+        self.started_at = _aware(now, "run started_at")
+        self.status = PlanningRunStatus.RUNNING
+        self.version += 1
+
+    def succeed(
+        self,
+        *,
+        lease_id: UUID,
+        fencing_token: int,
+        provider_ref: str,
+        structured_result_type: str,
+        usage: PlanningUsage,
+        now: datetime,
+        diagnostic_artifact_ref: str | None = None,
+    ) -> None:
+        self._assert_running_fence(lease_id=lease_id, fencing_token=fencing_token)
+        self.provider_ref = _required_text(provider_ref, "provider_ref")
+        self.structured_result_type = _required_text(
+            structured_result_type, "structured_result_type"
+        )
+        self.usage = usage
+        self.diagnostic_artifact_ref = _optional_text(
+            diagnostic_artifact_ref, "diagnostic_artifact_ref"
+        )
+        self._finish(PlanningRunStatus.SUCCEEDED, now=now)
+
+    def needs_clarification(
+        self, *, lease_id: UUID, fencing_token: int, now: datetime
+    ) -> None:
+        self._assert_running_fence(lease_id=lease_id, fencing_token=fencing_token)
+        self._finish(PlanningRunStatus.NEEDS_CLARIFICATION, now=now)
+
+    def fail(
+        self,
+        *,
+        lease_id: UUID,
+        fencing_token: int,
+        error_code: str,
+        error_message: str,
+        now: datetime,
+        diagnostic_artifact_ref: str | None = None,
+    ) -> None:
+        self._assert_running_fence(lease_id=lease_id, fencing_token=fencing_token)
+        self._record_error(
+            error_code=error_code,
+            error_message=error_message,
+            diagnostic_artifact_ref=diagnostic_artifact_ref,
+        )
+        self._finish(PlanningRunStatus.FAILED, now=now)
+
+    def block_unknown(
+        self,
+        *,
+        lease_id: UUID,
+        fencing_token: int,
+        error_code: str,
+        error_message: str,
+        now: datetime,
+        diagnostic_artifact_ref: str | None = None,
+    ) -> None:
+        self._assert_running_fence(lease_id=lease_id, fencing_token=fencing_token)
+        self._record_error(
+            error_code=error_code,
+            error_message=error_message,
+            diagnostic_artifact_ref=diagnostic_artifact_ref,
+        )
+        self._finish(PlanningRunStatus.BLOCKED, now=now)
+
+    def cancel(self, *, now: datetime) -> None:
+        if self.status in RUN_TERMINAL_STATUSES:
+            raise InvalidTransition("planning run is already terminal")
+        self.status = PlanningRunStatus.CANCELLED
+        self.finished_at = _aware(now, "run finished_at")
+        self.version += 1
+
+    def _assert_running_fence(self, *, lease_id: UUID, fencing_token: int) -> None:
+        if self.status is not PlanningRunStatus.RUNNING:
+            raise InvalidTransition("only a running planning run can finish")
+        if self.lease_id != lease_id or self.fencing_token != fencing_token:
+            raise StaleFencingToken("planning run is owned by another lease or fence")
+
+    def _record_error(
+        self,
+        *,
+        error_code: str,
+        error_message: str,
+        diagnostic_artifact_ref: str | None,
+    ) -> None:
+        self.error_code = _required_text(error_code, "error_code")
+        self.error_message = _safe_error_message(error_message)
+        self.diagnostic_artifact_ref = _optional_text(
+            diagnostic_artifact_ref, "diagnostic_artifact_ref"
+        )
+
+    def _finish(self, status: PlanningRunStatus, *, now: datetime) -> None:
+        self.status = status
+        self.finished_at = _aware(now, "run finished_at")
+        self.version += 1
+
+
+@dataclass(slots=True)
+class PlanningRequest:
+    id: UUID
+    workspace_id: UUID
+    kind: PlanningRequestKind
+    status: PlanningRequestStatus
+    current_brief_revision: int
+    current_proposal_revision: int | None
+    current_proposal_content_hash: str | None
+    planning_profile_id: UUID
+    planning_profile_version: int
+    profile_snapshot: PlanningProfileSnapshot
+    source_type: str
+    source_ref: str | None
+    actor: str
+    correlation_id: UUID
+    briefs: tuple[PlanningBriefRevision, ...]
+    runs: tuple[PlanningRun, ...]
+    clarifications: tuple[PlanningClarification, ...]
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        request_id: UUID,
+        workspace_id: UUID,
+        profile_snapshot: PlanningProfileSnapshot,
+        objective: str,
+        constraints: Sequence[str],
+        acceptance_criteria: Sequence[str],
+        context_refs: Sequence[str],
+        requested_outputs: Sequence[str],
+        source_type: str,
+        source_ref: str | None,
+        actor: str,
+        correlation_id: UUID,
+        run_id: UUID,
+        now: datetime,
+        kind: PlanningRequestKind = PlanningRequestKind.CREATE,
+    ) -> "PlanningRequest":
+        if kind is not PlanningRequestKind.CREATE:
+            raise ValidationError("R5.1 only accepts planning request kind=create")
+        if profile_snapshot.workspace_id != workspace_id:
+            raise ValidationError("planning profile snapshot belongs to another workspace")
+        timestamp = _aware(now, "planning request timestamp")
+        brief = PlanningBriefRevision.create(
+            planning_request_id=request_id,
+            revision=1,
+            objective=objective,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+            context_refs=context_refs,
+            requested_outputs=requested_outputs,
+            user_feedback=None,
+            source_correlation=correlation_id,
+            created_by=actor,
+            created_at=timestamp,
+        )
+        run = PlanningRun.create(
+            run_id=run_id,
+            planning_request_id=request_id,
+            workspace_id=workspace_id,
+            brief_revision=brief.revision,
+            attempt=1,
+            profile_snapshot=profile_snapshot,
+            queued_at=timestamp,
+        )
+        return cls(
+            id=request_id,
+            workspace_id=workspace_id,
+            kind=kind,
+            status=PlanningRequestStatus.SUBMITTED,
+            current_brief_revision=brief.revision,
+            current_proposal_revision=None,
+            current_proposal_content_hash=None,
+            planning_profile_id=profile_snapshot.profile_id,
+            planning_profile_version=profile_snapshot.profile_version,
+            profile_snapshot=profile_snapshot,
+            source_type=_required_text(source_type, "source_type"),
+            source_ref=_optional_text(source_ref, "source_ref"),
+            actor=_required_text(actor, "actor"),
+            correlation_id=correlation_id,
+            briefs=(brief,),
+            runs=(run,),
+            clarifications=(),
+            version=1,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    @property
+    def current_run_id(self) -> UUID:
+        if not self.runs:
+            raise ValidationError("planning request has no planning run")
+        return self.runs[-1].id
+
+    def run(self, run_id: UUID) -> PlanningRun:
+        for item in self.runs:
+            if item.id == run_id:
+                return item
+        raise ValidationError("planning run does not belong to request")
+
+    def start_planning(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+        now: datetime,
+    ) -> None:
+        if self.status in {
+            PlanningRequestStatus.MATERIALIZED,
+            PlanningRequestStatus.REJECTED,
+            PlanningRequestStatus.CANCELLED,
+        }:
+            raise InvalidTransition("terminal planning request cannot start")
+        run = self.run(run_id)
+        if run.brief_revision != self.current_brief_revision:
+            raise ValidationError("planning run is not for the current brief revision")
+        run.start(lease_id=lease_id, fencing_token=fencing_token, now=now)
+        self.status = PlanningRequestStatus.PLANNING
+        self._touch(now)
+
+    def succeed_run(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+        provider_ref: str,
+        structured_result_type: str,
+        usage: PlanningUsage,
+        now: datetime,
+        diagnostic_artifact_ref: str | None = None,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PLANNING:
+            raise InvalidTransition("only a planning request in planning can succeed")
+        run = self.run(run_id)
+        run.succeed(
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            provider_ref=provider_ref,
+            structured_result_type=structured_result_type,
+            usage=usage,
+            now=now,
+            diagnostic_artifact_ref=diagnostic_artifact_ref,
+        )
+        self._touch(now)
+
+    def mark_needs_clarification(
+        self,
+        *,
+        run_id: UUID,
+        clarifications: Sequence[PlanningClarification],
+        lease_id: UUID,
+        fencing_token: int,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PLANNING:
+            raise InvalidTransition("only a planning request in planning can wait")
+        items = tuple(clarifications)
+        if not items or not any(item.blocking and item.answer is None for item in items):
+            raise ValidationError("waiting_for_user requires a blocking clarification")
+        for item in items:
+            if item.planning_request_id != self.id or item.planning_run_id != run_id:
+                raise ValidationError("clarification belongs to another planning run")
+        run = self.run(run_id)
+        run.needs_clarification(
+            lease_id=lease_id, fencing_token=fencing_token, now=now
+        )
+        self.clarifications = (*self.clarifications, *items)
+        self.status = PlanningRequestStatus.WAITING_FOR_USER
+        self._touch(now)
+
+    def answer_clarifications(
+        self,
+        *,
+        run_id: UUID,
+        answers: Mapping[UUID, str],
+        brief: PlanningBriefRevision,
+        new_run_id: UUID,
+        actor: str,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.WAITING_FOR_USER:
+            raise InvalidTransition("planning request is not waiting for user")
+        run = self.run(run_id)
+        if run.status is not PlanningRunStatus.NEEDS_CLARIFICATION:
+            raise InvalidTransition("planning run is not waiting for clarification")
+        pending = {
+            item.id
+            for item in self.clarifications
+            if item.planning_run_id == run_id and item.blocking and item.answer is None
+        }
+        if set(answers) != pending:
+            raise ValidationError("all blocking clarifications must be answered together")
+        self._validate_new_brief(brief, actor)
+        updated: list[PlanningClarification] = []
+        for item in self.clarifications:
+            answer = answers.get(item.id)
+            if answer is not None:
+                updated.append(
+                    item.answer_question(
+                        answer=answer,
+                        actor=actor,
+                        brief_revision=brief.revision,
+                        answered_at=now,
+                    )
+                )
+            else:
+                updated.append(item)
+        self.clarifications = tuple(updated)
+        self._append_brief_and_run(brief=brief, run_id=new_run_id, now=now, attempt=run.attempt + 1)
+
+    def mark_proposal_ready(
+        self,
+        *,
+        run_id: UUID,
+        proposal_revision: int,
+        content_hash: str,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PLANNING:
+            raise InvalidTransition("planning request is not planning")
+        run = self.run(run_id)
+        if run.status is not PlanningRunStatus.SUCCEEDED:
+            raise InvalidTransition("proposal requires a succeeded planning run")
+        if proposal_revision < 1:
+            raise ValidationError("proposal revision must be positive")
+        _validate_content_hash(content_hash)
+        self.current_proposal_revision = proposal_revision
+        self.current_proposal_content_hash = content_hash
+        self.status = PlanningRequestStatus.PROPOSAL_READY
+        self._touch(now)
+
+    def materialize(
+        self, *, proposal_revision: int, content_hash: str, now: datetime
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PROPOSAL_READY:
+            raise InvalidTransition("only a proposal-ready request can materialize")
+        self._assert_current_proposal(proposal_revision, content_hash)
+        self.status = PlanningRequestStatus.MATERIALIZED
+        self._touch(now)
+
+    def request_revision(
+        self,
+        *,
+        expected_proposal_revision: int,
+        expected_content_hash: str,
+        feedback: str,
+        brief: PlanningBriefRevision,
+        new_run_id: UUID,
+        actor: str,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PROPOSAL_READY:
+            raise InvalidTransition("only a proposal-ready request can be revised")
+        self._assert_current_proposal(expected_proposal_revision, expected_content_hash)
+        clean_feedback = _required_text(feedback, "revision feedback")
+        if brief.user_feedback != clean_feedback:
+            raise ValidationError("brief user_feedback must match revision feedback")
+        self._validate_new_brief(brief, actor)
+        self._append_brief_and_run(
+            brief=brief,
+            run_id=new_run_id,
+            now=now,
+            attempt=self.runs[-1].attempt + 1,
+        )
+        self.current_proposal_revision = None
+        self.current_proposal_content_hash = None
+
+    def fail_run(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+        error_code: str,
+        error_message: str,
+        now: datetime,
+        diagnostic_artifact_ref: str | None = None,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PLANNING:
+            raise InvalidTransition("only a planning request in planning can fail")
+        run = self.run(run_id)
+        run.fail(
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            error_code=error_code,
+            error_message=error_message,
+            now=now,
+            diagnostic_artifact_ref=diagnostic_artifact_ref,
+        )
+        self.status = PlanningRequestStatus.FAILED
+        self._touch(now)
+
+    def block_run_unknown(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+        error_code: str,
+        error_message: str,
+        now: datetime,
+        diagnostic_artifact_ref: str | None = None,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.PLANNING:
+            raise InvalidTransition("only a planning request in planning can block")
+        run = self.run(run_id)
+        run.block_unknown(
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            error_code=error_code,
+            error_message=error_message,
+            now=now,
+            diagnostic_artifact_ref=diagnostic_artifact_ref,
+        )
+        self.status = PlanningRequestStatus.FAILED
+        self._touch(now)
+
+    def retry_blocked(self, *, new_run_id: UUID, now: datetime) -> None:
+        self._retry_run(
+            expected_status=PlanningRunStatus.BLOCKED,
+            new_run_id=new_run_id,
+            now=now,
+        )
+
+    def retry_failed(self, *, new_run_id: UUID, now: datetime) -> None:
+        self._retry_run(
+            expected_status=PlanningRunStatus.FAILED,
+            new_run_id=new_run_id,
+            now=now,
+        )
+
+    def mark_conflicted(self, *, now: datetime) -> None:
+        if self.status is not PlanningRequestStatus.PROPOSAL_READY:
+            raise InvalidTransition("only a proposal-ready request can conflict")
+        self.status = PlanningRequestStatus.CONFLICTED
+        self._touch(now)
+
+    def reject(self, *, now: datetime) -> None:
+        self._assert_request_mutable()
+        self._cancel_active_runs(now)
+        self.status = PlanningRequestStatus.REJECTED
+        self._touch(now)
+
+    def cancel(self, *, now: datetime) -> None:
+        self._assert_request_mutable()
+        self._cancel_active_runs(now)
+        self.status = PlanningRequestStatus.CANCELLED
+        self._touch(now)
+
+    def _retry_run(
+        self,
+        *,
+        expected_status: PlanningRunStatus,
+        new_run_id: UUID,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.FAILED:
+            raise InvalidTransition("only a failed planning request can be retried")
+        previous = self.runs[-1]
+        if previous.status is not expected_status:
+            raise InvalidTransition(f"latest planning run is not {expected_status}")
+        self._append_brief_and_run(
+            brief=self.briefs[-1],
+            run_id=new_run_id,
+            now=now,
+            attempt=previous.attempt + 1,
+        )
+
+    def _append_brief_and_run(
+        self,
+        *,
+        brief: PlanningBriefRevision,
+        run_id: UUID,
+        now: datetime,
+        attempt: int,
+    ) -> None:
+        run = PlanningRun.create(
+            run_id=run_id,
+            planning_request_id=self.id,
+            workspace_id=self.workspace_id,
+            brief_revision=brief.revision,
+            attempt=attempt,
+            profile_snapshot=self.profile_snapshot,
+            queued_at=now,
+        )
+        self.briefs = (*self.briefs, brief)
+        self.runs = (*self.runs, run)
+        self.current_brief_revision = brief.revision
+        self.status = PlanningRequestStatus.PLANNING
+        self._touch(now)
+
+    def _validate_new_brief(self, brief: PlanningBriefRevision, actor: str) -> None:
+        if brief.planning_request_id != self.id:
+            raise ValidationError("brief belongs to another planning request")
+        if brief.revision != self.current_brief_revision + 1:
+            raise ValidationError("brief revision must increment by one")
+        if brief.created_by != _required_text(actor, "actor"):
+            raise ValidationError("brief actor does not match command actor")
+
+    def _assert_current_proposal(self, revision: int, content_hash: str) -> None:
+        if self.current_proposal_revision != revision:
+            raise ValidationError("proposal revision does not match current proposal")
+        _validate_content_hash(content_hash)
+        if self.current_proposal_content_hash != content_hash:
+            raise ValidationError("proposal content hash does not match current proposal")
+
+    def _cancel_active_runs(self, now: datetime) -> None:
+        for run in self.runs:
+            if run.status not in RUN_TERMINAL_STATUSES:
+                run.cancel(now=now)
+
+    def _assert_request_mutable(self) -> None:
+        if self.status in {
+            PlanningRequestStatus.MATERIALIZED,
+            PlanningRequestStatus.REJECTED,
+            PlanningRequestStatus.CANCELLED,
+        }:
+            raise InvalidTransition(f"planning request is terminal: {self.status}")
+
+    def _touch(self, now: datetime) -> None:
+        self.updated_at = _aware(now, "planning request updated_at")
+        self.version += 1
+
+
+def planning_operation_id(run_id: UUID, attempt: int) -> UUID:
+    if attempt < 1:
+        raise ValidationError("planning attempt must be positive")
+    return uuid5(NAMESPACE_URL, f"sidera.planning.run:{run_id}:attempt:{attempt}")
+
+
+def _text_tuple(
+    values: Sequence[str], name: str, *, allow_empty: bool = True
+) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise ValidationError(f"{name} must be a sequence of strings")
+    clean: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = _required_text(value, name)
+        if item not in seen:
+            seen.add(item)
+            clean.append(item)
+    if not allow_empty and not clean:
+        raise ValidationError(f"{name} cannot be empty")
+    return tuple(clean)
+
+
+def _required_text(value: str, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} is required")
+    return value.strip()
+
+
+def _optional_text(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    return _required_text(value, name)
+
+
+def _aware(value: datetime, name: str) -> datetime:
+    if value.tzinfo is None:
+        raise ValidationError(f"{name} must be timezone-aware")
+    return value
+
+
+def _enum_value(value: object, enum_type: type[StrEnum], label: str) -> StrEnum:
+    if isinstance(value, enum_type):
+        return value
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported {label}: {value!r}") from exc
+
+
+def _safe_error_message(value: str) -> str:
+    clean = _required_text(value, "error_message")
+    lowered = clean.lower()
+    if any(
+        marker in lowered
+        for marker in ("api_key", "access_token", "secret_value", "password=")
+    ):
+        raise ValidationError("error message cannot contain secret fields")
+    return clean[:MAX_ERROR_MESSAGE_LENGTH]
+
+
+def _validate_content_hash(value: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValidationError("content hash must be a lowercase SHA-256 value")
