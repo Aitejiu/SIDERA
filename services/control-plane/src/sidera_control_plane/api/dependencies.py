@@ -29,6 +29,9 @@ from sidera_control_plane.application.worker_commands import WorkerCommandHandle
 from sidera_control_plane.application.worker_trace_queries import (
     WorkerTraceQueryService,
 )
+from sidera_control_plane.application.worker_workspace_queries import (
+    WorkerWorkspaceQueryService,
+)
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
@@ -48,6 +51,9 @@ from sidera_control_plane.persistence.task_first_query_store import (
 )
 from sidera_control_plane.persistence.task_query_store import SqlAlchemyTaskQueryStore
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from sidera_control_plane.persistence.worker_workspace_query_store import (
+    SqlAlchemyWorkerWorkspaceQueryStore,
+)
 
 
 def get_database(request: Request) -> Database:
@@ -131,6 +137,14 @@ def get_worker_trace_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> WorkerTraceQueryService:
     return WorkerTraceQueryService(SqlAlchemyTaskFirstQueryStore(database))
+
+
+def get_worker_workspace_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> WorkerWorkspaceQueryService:
+    return WorkerWorkspaceQueryService(
+        SqlAlchemyWorkerWorkspaceQueryStore(database)
+    )
 
 
 def get_artifact_content_service(

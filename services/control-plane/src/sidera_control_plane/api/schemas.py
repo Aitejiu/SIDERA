@@ -401,6 +401,183 @@ class SubtaskWorkspaceProjectionResponse(BaseModel):
     as_of: datetime
 
 
+class WorkerItemIdentityProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    root_task_id: UUID
+    stable_key: str
+    title: str
+    responsibility: str
+    status: str
+    context_version: int
+    acknowledged_context_version: int
+    version: int
+    updated_at: datetime
+
+
+class WorkerItemPlacementProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_snapshot_id: UUID
+    plan_generation: int
+    worker_item_key: str
+    subtask_key: str
+    subtask_task_id: UUID | None
+    role: str
+    capability_requirements: tuple[str, ...]
+
+
+class WorkerRuntimeProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    task_id: UUID
+    execution_status: str
+    attempt: int
+    session_id: UUID | None
+    session_status: str | None
+    session_version: int | None
+    input_mode: str | None
+    worker_id: UUID | None
+    worker_display_name: str | None
+    adapter_type: str | None
+    lease_id: UUID | None
+    fencing_token: int | None
+
+
+class WorkerExecutionSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    task_id: UUID
+    status: str
+    attempt: int
+    worker_id: UUID | None
+    session_id: UUID | None
+    failure_code: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkerCheckpointSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    sequence: int
+    title: str
+    artifact_ids: tuple[UUID, ...]
+    occurred_at: datetime
+
+
+class UsageSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    cost_microunits: int
+
+
+class WorkerInterventionContextProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_id: UUID
+    plan_generation: int
+    context_version: int
+    execution_id: UUID
+    session_id: UUID
+    session_version: int
+    worker_id: UUID
+
+
+class TraceDescriptorProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_task_id: UUID
+    execution_id: UUID
+    session_id: UUID
+    route: str
+    raw_ref: str | None
+
+
+class WorkerArtifactSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+    task_id: UUID
+    execution_id: UUID
+    artifact_type: str
+    media_type: str
+    size_bytes: int
+    content_available: bool
+    created_at: datetime
+
+
+class WorkerEvidenceSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: UUID
+    task_id: UUID
+    execution_id: UUID
+    acceptance_ref: str
+    conclusion: str
+    artifact_ids: tuple[UUID, ...]
+    created_at: datetime
+
+
+class WorkerActivityProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activity_id: UUID
+    source_type: str
+    source_id: UUID
+    execution_id: UUID | None
+    session_id: UUID | None
+    occurred_at: datetime
+    kind: str
+    title: str
+    summary: str
+    correlation_id: UUID
+    body: str | None
+    delivery_status: str | None
+    artifact_ids: tuple[UUID, ...]
+    trace_descriptor: TraceDescriptorProjectionResponse | None
+
+
+class WorkerWorkspaceProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    worker_item: WorkerItemIdentityProjectionResponse
+    current_placement: WorkerItemPlacementProjectionResponse
+    placement_history: tuple[WorkerItemPlacementProjectionResponse, ...]
+    current_runtime: WorkerRuntimeProjectionResponse | None
+    execution_history: tuple[WorkerExecutionSummaryProjectionResponse, ...]
+    current_step: str | None
+    next_action: str | None
+    latest_checkpoint: WorkerCheckpointSummaryProjectionResponse | None
+    usage: UsageSummaryProjectionResponse
+    artifacts: tuple[WorkerArtifactSummaryProjectionResponse, ...]
+    evidence: tuple[WorkerEvidenceSummaryProjectionResponse, ...]
+    can_intervene: bool
+    read_only_reason: str | None
+    intervention_context: WorkerInterventionContextProjectionResponse | None
+    trace_descriptor: TraceDescriptorProjectionResponse | None
+    last_change_cursor: int
+    as_of: datetime
+
+
+class WorkerActivityPageProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    last_change_cursor: int
+    items: tuple[WorkerActivityProjectionResponse, ...]
+    next_cursor: str | None
+
+
 class ExecutionSummaryProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

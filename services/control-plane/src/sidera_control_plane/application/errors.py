@@ -33,3 +33,7 @@ class IdempotencyConflict(ApplicationError):
 
 class UnsupportedCommand(ApplicationError):
     code = "unsupported_command"
+
+
+class InvalidCursor(ApplicationError):
+    code = "invalid_cursor"
