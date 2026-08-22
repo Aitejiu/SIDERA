@@ -189,6 +189,7 @@ class Reconciler:
                     execution_id=uuid4(),
                     workspace_id=execution.workspace_id,
                     task_id=execution.task_id,
+                    worker_item_id=execution.worker_item_id,
                     lineage_id=execution.lineage_id,
                     attempt=execution.attempt + 1,
                     max_attempts=execution.max_attempts,
@@ -403,6 +404,11 @@ def _event(
 def _execution_payload(execution: Execution) -> dict[str, object]:
     return {
         "task_id": str(execution.task_id),
+        "worker_item_id": (
+            str(execution.worker_item_id)
+            if execution.worker_item_id is not None
+            else None
+        ),
         "lineage_id": str(execution.lineage_id),
         "attempt": execution.attempt,
         "max_attempts": execution.max_attempts,

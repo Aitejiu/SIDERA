@@ -37,6 +37,7 @@ class ExecutionRepository:
                 id=execution.id,
                 workspace_id=execution.workspace_id,
                 task_id=execution.task_id,
+                worker_item_id=execution.worker_item_id,
                 lineage_id=execution.lineage_id,
                 attempt=execution.attempt,
                 max_attempts=execution.max_attempts,
@@ -68,6 +69,7 @@ class ExecutionRepository:
             )
             .values(
                 task_id=execution.task_id,
+                worker_item_id=execution.worker_item_id,
                 lineage_id=execution.lineage_id,
                 attempt=execution.attempt,
                 max_attempts=execution.max_attempts,
@@ -210,6 +212,7 @@ def _to_domain_execution(row: ExecutionModel) -> Execution:
         id=row.id,
         workspace_id=row.workspace_id,
         task_id=row.task_id,
+        worker_item_id=row.worker_item_id,
         lineage_id=row.lineage_id,
         attempt=row.attempt,
         max_attempts=row.max_attempts,

@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -16,13 +16,20 @@ from sidera_control_plane.domain.execution import (
 )
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+WORKER_ITEM_ID = UUID("73000000-0000-0000-0000-000000000001")
 
 
-def make_execution(*, attempt: int = 1, max_attempts: int = 3) -> Execution:
+def make_execution(
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+    worker_item_id: UUID | None = None,
+) -> Execution:
     return Execution.create(
         execution_id=uuid4(),
         workspace_id=uuid4(),
         task_id=uuid4(),
+        worker_item_id=worker_item_id,
         lineage_id=uuid4(),
         attempt=attempt,
         max_attempts=max_attempts,
@@ -31,6 +38,14 @@ def make_execution(*, attempt: int = 1, max_attempts: int = 3) -> Execution:
         pinned_worker_id=None,
         not_before=NOW,
     )
+
+
+def test_execution_can_be_standalone_or_bound_to_a_worker_item() -> None:
+    standalone = make_execution()
+    bound = make_execution(worker_item_id=WORKER_ITEM_ID)
+
+    assert standalone.worker_item_id is None
+    assert bound.worker_item_id == WORKER_ITEM_ID
 
 
 def test_execution_rejects_invalid_attempts_requirements_and_time() -> None:

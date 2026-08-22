@@ -10,6 +10,7 @@ from sidera_control_plane.application.worker_policy import LowestCostWorkerPolic
 from sidera_control_plane.domain.execution import Execution, ExecutionSession
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
@@ -32,6 +33,7 @@ def seed_running_execution(
     workspace_id: UUID,
     *,
     max_attempts: int,
+    worker_item_id: UUID | None = None,
 ) -> tuple[Execution, Worker, UUID]:
     task = Task.create(
         task_id=uuid4(),
@@ -54,11 +56,24 @@ def seed_running_execution(
         startup_latency_ms=1,
         now=NOW,
     )
+    worker_item = (
+        WorkerItem.create(
+            item_id=worker_item_id,
+            workspace_id=workspace_id,
+            root_task_id=task.id,
+            title="Reconciler WorkerItem",
+            responsibility="Keep retry context stable.",
+            now=NOW,
+        )
+        if worker_item_id is not None
+        else None
+    )
     execution_id = uuid4()
     execution = Execution.create(
         execution_id=execution_id,
         workspace_id=workspace_id,
         task_id=task.id,
+        worker_item_id=worker_item_id,
         lineage_id=execution_id,
         attempt=1,
         max_attempts=max_attempts,
@@ -70,6 +85,8 @@ def seed_running_execution(
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.tasks.add(task)
         uow.workers.add(worker)
+        if worker_item is not None:
+            uow.worker_items.add(worker_item)
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.executions.add(execution)
 
@@ -125,6 +142,7 @@ def test_reconciler_expires_lease_and_queues_bounded_retry(
         database,
         workspace_id,
         max_attempts=3,
+        worker_item_id=uuid4(),
     )
     reconcile_now = NOW + timedelta(seconds=31)
     reconciler = Reconciler(
@@ -158,6 +176,7 @@ def test_reconciler_expires_lease_and_queues_bounded_retry(
     assert executions[0].active_lease_id is None
     assert executions[1].status == "queued"
     assert executions[1].attempt == 2
+    assert executions[1].worker_item_id == executions[0].worker_item_id
     assert executions[1].not_before == reconcile_now + timedelta(seconds=2)
     assert lease is not None
     assert lease.status == "expired"

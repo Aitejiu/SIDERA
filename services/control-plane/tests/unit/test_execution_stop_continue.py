@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -13,14 +13,16 @@ from sidera_control_plane.domain.execution import (
 )
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+WORKER_ITEM_ID = UUID("73000000-0000-0000-0000-000000000001")
 
 
-def _execution() -> Execution:
+def _execution(*, worker_item_id: UUID | None = WORKER_ITEM_ID) -> Execution:
     execution_id = uuid4()
     execution = Execution.create(
         execution_id=execution_id,
         workspace_id=uuid4(),
         task_id=uuid4(),
+        worker_item_id=worker_item_id,
         lineage_id=execution_id,
         attempt=1,
         max_attempts=2,
@@ -109,3 +111,9 @@ def test_continuation_is_pinned_to_the_original_session_worker() -> None:
     )
 
     assert _continuation_worker_id(execution, session) == session_worker_id
+
+
+def test_continuation_source_keeps_worker_item_binding() -> None:
+    execution = _execution()
+
+    assert execution.worker_item_id == WORKER_ITEM_ID

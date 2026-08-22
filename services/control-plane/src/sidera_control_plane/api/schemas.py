@@ -390,6 +390,7 @@ class CreateExecutionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: UUID
+    worker_item_id: UUID | None = None
     purpose: NonEmptyString
     capability_requirements: tuple[NonEmptyString, ...] = Field(min_length=1)
     pinned_worker_id: UUID | None = None
@@ -817,6 +818,7 @@ class ExecutionResponse(BaseModel):
     id: UUID
     workspace_id: UUID
     task_id: UUID
+    worker_item_id: UUID | None
     lineage_id: UUID
     attempt: int
     max_attempts: int
@@ -844,6 +846,7 @@ class ExecutionResponse(BaseModel):
             id=execution.id,
             workspace_id=execution.workspace_id,
             task_id=execution.task_id,
+            worker_item_id=execution.worker_item_id,
             lineage_id=execution.lineage_id,
             attempt=execution.attempt,
             max_attempts=execution.max_attempts,

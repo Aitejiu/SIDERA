@@ -40,6 +40,7 @@ class Execution:
     id: UUID
     workspace_id: UUID
     task_id: UUID
+    worker_item_id: UUID | None
     lineage_id: UUID
     attempt: int
     max_attempts: int
@@ -66,6 +67,7 @@ class Execution:
         execution_id: UUID,
         workspace_id: UUID,
         task_id: UUID,
+        worker_item_id: UUID | None = None,
         lineage_id: UUID,
         attempt: int,
         max_attempts: int,
@@ -90,6 +92,7 @@ class Execution:
             id=execution_id,
             workspace_id=workspace_id,
             task_id=task_id,
+            worker_item_id=worker_item_id,
             lineage_id=lineage_id,
             attempt=attempt,
             max_attempts=max_attempts,

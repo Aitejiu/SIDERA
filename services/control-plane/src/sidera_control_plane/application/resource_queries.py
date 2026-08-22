@@ -30,6 +30,7 @@ class ExecutionView:
     id: UUID
     workspace_id: UUID
     task_id: UUID
+    worker_item_id: UUID | None
     lineage_id: UUID
     attempt: int
     max_attempts: int

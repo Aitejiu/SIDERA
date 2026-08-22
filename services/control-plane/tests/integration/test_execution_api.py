@@ -8,13 +8,25 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.ports import WorkerItemPlacement
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.execution import Execution, ExecutionSession
 from sidera_control_plane.domain.lease import AssignmentLease
+from sidera_control_plane.domain.plans import (
+    SubtaskPlanItem,
+    TaskPlanSnapshot,
+    WorkerItemPlanItem,
+    WorkItemKind,
+)
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.persistence.database import Database
-from sidera_control_plane.persistence.models import EventModel, WorkspaceModel
+from sidera_control_plane.persistence.models import (
+    EventModel,
+    TaskModel,
+    WorkspaceModel,
+)
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.integration
@@ -100,6 +112,7 @@ def create_execution_request(
     *,
     idempotency_key: str,
     pinned_worker_id: UUID | None = None,
+    worker_item_id: UUID | None = None,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
     return {
@@ -114,6 +127,9 @@ def create_execution_request(
         "correlation_id": str(uuid4()),
         "payload": {
             "task_id": str(task_id),
+            "worker_item_id": (
+                str(worker_item_id) if worker_item_id is not None else None
+            ),
             "purpose": "implement",
             "capability_requirements": ["code", "python"],
             "pinned_worker_id": str(pinned_worker_id)
@@ -123,6 +139,115 @@ def create_execution_request(
             "not_before": NOW.isoformat(),
         },
     }
+
+
+def seed_v2_worker_item_context(
+    database: Database, workspace_id: UUID
+) -> tuple[UUID, UUID, UUID]:
+    root_task_id = uuid4()
+    subtask_task_id = uuid4()
+    snapshot_id = uuid4()
+    worker_item_id = uuid4()
+    with database.session() as session:
+        session.add_all(
+            [
+                TaskModel(
+                    id=root_task_id,
+                    workspace_id=workspace_id,
+                    title="Task First root",
+                    description="Task First root",
+                    acceptance_criteria=["root completes"],
+                    status="pending",
+                    priority=50,
+                    requested_by="task-first-test",
+                    version=1,
+                ),
+                TaskModel(
+                    id=subtask_task_id,
+                    workspace_id=workspace_id,
+                    title="Task First subtask",
+                    description="Task First subtask",
+                    acceptance_criteria=["subtask completes"],
+                    status="ready",
+                    priority=50,
+                    requested_by="task-first-test",
+                    version=1,
+                ),
+            ]
+        )
+        session.commit()
+
+    snapshot = TaskPlanSnapshot.create(
+        snapshot_id=snapshot_id,
+        schema_version=2,
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        generation=1,
+        parent_snapshot_id=None,
+        source_type="test",
+        source_ref="execution-api:v2",
+        title="Task First execution plan",
+        goal_summary="Bind execution to a stable WorkerItem.",
+        acceptance_refs=("worker item is required",),
+        published_by="task-first-test",
+        published_at=NOW,
+        subtasks=(
+            SubtaskPlanItem(
+                key="backend",
+                task_id=subtask_task_id,
+                kind=WorkItemKind.CHILD,
+                title="Backend",
+                goal_summary="Implement backend.",
+                acceptance_refs=("backend works",),
+                milestone_key=None,
+                expected_outputs=("api",),
+                source_refs=("test",),
+            ),
+        ),
+        worker_item_plans=(
+            WorkerItemPlanItem(
+                key="backend:implementer",
+                worker_item_id=worker_item_id,
+                subtask_key="backend",
+                title="Backend implementer",
+                role="implementer",
+                responsibility="Implement backend.",
+                capability_requirements=("python",),
+                worker_policy_ref="policy:test",
+                configuration_ref="config:test",
+                concurrency_limit=1,
+                source_refs=("test",),
+            ),
+        ),
+    )
+    item = WorkerItem.create(
+        item_id=worker_item_id,
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        title="Backend implementer",
+        responsibility="Implement backend.",
+        now=NOW,
+    )
+    placement = WorkerItemPlacement(
+        plan_snapshot_id=snapshot_id,
+        plan_generation=1,
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        worker_item_id=worker_item_id,
+        worker_item_key="backend:implementer",
+        subtask_key="backend",
+        subtask_task_id=subtask_task_id,
+        role="implementer",
+        capability_requirements=("python",),
+        worker_policy_ref="policy:test",
+        configuration_ref="config:test",
+        created_at=NOW,
+    )
+    with SqlAlchemyUnitOfWork(database) as uow:
+        uow.plans.add(snapshot)
+        uow.worker_items.add(item)
+        uow.worker_items.add_placement(placement)
+    return subtask_task_id, worker_item_id, root_task_id
 
 
 def execution_mutation_request(
@@ -152,6 +277,7 @@ def seed_active_execution(
     workspace_id: UUID,
     *,
     max_attempts: int = 3,
+    worker_item_id: UUID | None = None,
 ) -> tuple[Task, Worker, Execution, AssignmentLease, ExecutionSession]:
     task = Task.create(
         task_id=uuid4(),
@@ -174,11 +300,24 @@ def seed_active_execution(
         startup_latency_ms=25,
         now=NOW,
     )
+    worker_item = (
+        WorkerItem.create(
+            item_id=worker_item_id,
+            workspace_id=workspace_id,
+            root_task_id=task.id,
+            title="Active WorkerItem",
+            responsibility="Keep the active execution bound.",
+            now=NOW,
+        )
+        if worker_item_id is not None
+        else None
+    )
     execution_id = uuid4()
     execution = Execution.create(
         execution_id=execution_id,
         workspace_id=workspace_id,
         task_id=task.id,
+        worker_item_id=worker_item_id,
         lineage_id=execution_id,
         attempt=1,
         max_attempts=max_attempts,
@@ -213,12 +352,15 @@ def seed_active_execution(
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.tasks.add(task)
         uow.workers.add(worker)
+        if worker_item is not None:
+            uow.worker_items.add(worker_item)
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.executions.add(
             Execution.create(
                 execution_id=execution.id,
                 workspace_id=execution.workspace_id,
                 task_id=execution.task_id,
+                worker_item_id=execution.worker_item_id,
                 lineage_id=execution.lineage_id,
                 attempt=execution.attempt,
                 max_attempts=execution.max_attempts,
@@ -243,11 +385,13 @@ def seed_terminal_execution(
     *,
     status: str,
     max_attempts: int,
+    worker_item_id: UUID | None = None,
 ) -> tuple[Task, Execution]:
     task, worker, execution, lease, _ = seed_active_execution(
         database,
         workspace_id,
         max_attempts=max_attempts,
+        worker_item_id=worker_item_id,
     )
     execution.start(
         lease_id=lease.id,
@@ -352,6 +496,100 @@ def test_create_execution_readiness_parallel_lineages_and_replay(
         "events": 4,
         "outbox_messages": 4,
     }
+
+
+def test_task_first_v2_execution_requires_current_active_worker_item(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    subtask_id, worker_item_id, _root_task_id = seed_v2_worker_item_context(
+        database, workspace_id
+    )
+
+    missing = client.post(
+        "/api/v1/commands",
+        json=create_execution_request(
+            workspace_id,
+            subtask_id,
+            idempotency_key="task-first-v2-missing-worker-item",
+        ),
+    )
+    assert missing.status_code == 422
+    assert missing.json()["error"]["code"] == "validation_error"
+    assert "worker_item_id" in missing.json()["error"]["message"]
+
+    created = client.post(
+        "/api/v1/commands",
+        json=create_execution_request(
+            workspace_id,
+            subtask_id,
+            idempotency_key="task-first-v2-bound",
+            worker_item_id=worker_item_id,
+        ),
+    )
+    assert created.status_code == 201, created.text
+    execution_id = UUID(created.json()["aggregate_id"])
+    detail = client.get(
+        f"/api/v1/executions/{execution_id}",
+        params={"workspace_id": str(workspace_id)},
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["worker_item_id"] == str(worker_item_id)
+
+    with SqlAlchemyUnitOfWork(database) as uow:
+        item = uow.worker_items.get(worker_item_id, workspace_id, for_update=True)
+        assert item is not None
+        previous_version = item.version
+        item.retire(now=NOW + timedelta(minutes=1))
+        uow.worker_items.save(item, previous_version)
+
+    retired = client.post(
+        "/api/v1/commands",
+        json=create_execution_request(
+            workspace_id,
+            subtask_id,
+            idempotency_key="task-first-v2-retired-worker-item",
+            worker_item_id=worker_item_id,
+        ),
+    )
+    assert retired.status_code == 422
+    assert retired.json()["error"]["code"] == "validation_error"
+    assert "active" in retired.json()["error"]["message"]
+
+
+def test_retry_inherits_worker_item_binding(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    worker_item_id = uuid4()
+    _task, source = seed_terminal_execution(
+        database,
+        workspace_id,
+        status="failed",
+        max_attempts=2,
+        worker_item_id=worker_item_id,
+    )
+
+    retried = client.post(
+        "/api/v1/commands",
+        json=execution_mutation_request(
+            workspace_id,
+            source.id,
+            "RetryExecution",
+            source.version,
+            "retry-worker-item-001",
+            {"not_before": (NOW + timedelta(minutes=1)).isoformat()},
+        ),
+    )
+    assert retried.status_code == 201, retried.text
+    retry_detail = client.get(
+        f"/api/v1/executions/{retried.json()['aggregate_id']}",
+        params={"workspace_id": str(workspace_id)},
+    )
+    assert retry_detail.status_code == 200
+    assert retry_detail.json()["worker_item_id"] == str(worker_item_id)
 
 
 def test_execution_rejects_cross_workspace_references(

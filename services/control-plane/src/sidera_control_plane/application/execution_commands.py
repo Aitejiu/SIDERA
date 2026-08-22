@@ -28,8 +28,10 @@ from sidera_control_plane.domain.gateway import (
 )
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
+from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import TaskStatus
+from sidera_control_plane.domain.worker_item import WorkerItemStatus
 
 
 def _continuation_worker_id(execution: Execution, session: ExecutionSession) -> UUID:
@@ -103,12 +105,16 @@ class ExecutionCommandHandler:
             pinned_worker_id, envelope.workspace_id
         ) is None:
             raise NotFound("worker not found")
+        worker_item_id = _validate_execution_worker_item(
+            uow, envelope, task.id
+        )
 
         execution_id = uuid4()
         execution = Execution.create(
             execution_id=execution_id,
             workspace_id=envelope.workspace_id,
             task_id=task.id,
+            worker_item_id=worker_item_id,
             lineage_id=execution_id,
             attempt=1,
             max_attempts=_required_int(envelope.payload, "max_attempts"),
@@ -241,6 +247,7 @@ class ExecutionCommandHandler:
             execution_id=continuation_id,
             workspace_id=execution.workspace_id,
             task_id=execution.task_id,
+            worker_item_id=execution.worker_item_id,
             lineage_id=continuation_id,
             attempt=1,
             max_attempts=execution.max_attempts,
@@ -310,6 +317,7 @@ class ExecutionCommandHandler:
             execution_id=uuid4(),
             workspace_id=source.workspace_id,
             task_id=source.task_id,
+            worker_item_id=source.worker_item_id,
             lineage_id=source.lineage_id,
             attempt=next_attempt,
             max_attempts=source.max_attempts,
@@ -1021,6 +1029,54 @@ def _get_target_execution(
     return execution
 
 
+def _validate_execution_worker_item(
+    uow: ControlPlaneUnitOfWork,
+    envelope: CommandEnvelope,
+    task_id: UUID,
+) -> UUID | None:
+    worker_item_id = _optional_uuid(envelope.payload, "worker_item_id")
+    if worker_item_id is not None and uow.worker_items.get(
+        worker_item_id, envelope.workspace_id
+    ) is None:
+        raise NotFound("worker item not found")
+
+    snapshot = uow.plans.get_current_for_task(task_id, envelope.workspace_id)
+    if snapshot is None or snapshot.schema_version != 2:
+        return worker_item_id
+    canonical = PlanNormalizer().normalize(snapshot)
+    if not any(subtask.task_id == task_id for subtask in canonical.subtasks):
+        return worker_item_id
+    if worker_item_id is None:
+        raise ValidationError(
+            "worker_item_id is required for a Task First v2 Subtask"
+        )
+    worker_item = uow.worker_items.get(
+        worker_item_id, envelope.workspace_id, for_update=True
+    )
+    if worker_item is None:
+        raise NotFound("worker item not found")
+    if worker_item.status is not WorkerItemStatus.ACTIVE:
+        raise ValidationError("WorkerItem must be active")
+    if worker_item.root_task_id != snapshot.root_task_id:
+        raise ValidationError("WorkerItem root task does not match the plan")
+    placement = uow.worker_items.get_current_placement(
+        worker_item_id, envelope.workspace_id
+    )
+    if placement is None:
+        raise ValidationError("WorkerItem has no current plan placement")
+    if placement.plan_snapshot_id != snapshot.id:
+        raise ValidationError("WorkerItem placement is not in the current plan")
+    if placement.workspace_id != envelope.workspace_id:
+        raise ValidationError("WorkerItem placement workspace does not match")
+    if placement.root_task_id != snapshot.root_task_id:
+        raise ValidationError("WorkerItem placement root task does not match")
+    if placement.worker_item_id != worker_item.id:
+        raise ValidationError("WorkerItem placement identity does not match")
+    if placement.subtask_task_id != task_id:
+        raise ValidationError("WorkerItem placement Task does not match execution")
+    return worker_item_id
+
+
 def _get_target_session(
     uow: ControlPlaneUnitOfWork,
     envelope: CommandEnvelope,
@@ -1142,6 +1198,11 @@ def _input_event(
 def _execution_payload(execution: Execution) -> dict[str, object]:
     return {
         "task_id": str(execution.task_id),
+        "worker_item_id": (
+            str(execution.worker_item_id)
+            if execution.worker_item_id is not None
+            else None
+        ),
         "lineage_id": str(execution.lineage_id),
         "attempt": execution.attempt,
         "max_attempts": execution.max_attempts,
