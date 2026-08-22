@@ -81,6 +81,13 @@ def clean_database(database: Database) -> Iterator[None]:
 def _clear_database(database: Database) -> None:
     with database.session() as session:
         session.execute(
+            update(PlanningRequestModel).values(
+                current_brief_revision=None,
+                current_proposal_revision=None,
+                current_proposal_content_hash=None,
+            )
+        )
+        session.execute(
             update(ExecutionModel).values(
                 active_lease_id=None,
                 source_execution_id=None,

@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.planning import PlanningRequestKind
@@ -362,6 +362,7 @@ class ProposalRevision:
     canonical_payload: bytes
     content_hash: str
     created_at: datetime
+    id: UUID = field(default_factory=uuid4)
 
     @classmethod
     def create(

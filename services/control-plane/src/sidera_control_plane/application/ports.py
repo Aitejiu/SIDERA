@@ -22,6 +22,10 @@ from sidera_control_plane.domain.commands import (
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionSession
+from sidera_control_plane.domain.execution_requests import (
+    ExecutionRequest,
+    ExecutionRequestDependency,
+)
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
     AdapterSessionHandle,
@@ -37,6 +41,16 @@ from sidera_control_plane.domain.modules import (
     ModuleInstance,
     WorkerAdapterCapabilityProfile,
 )
+from sidera_control_plane.domain.planning import (
+    PlanningBriefRevision,
+    PlanningClarification,
+    PlanningRequest,
+    PlanningRun,
+    PlanningRunLease,
+    ProposalMaterialization,
+)
+from sidera_control_plane.domain.planning_profiles import PlanningProfile
+from sidera_control_plane.domain.planning_proposals import ProposalRevision
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.domain.task import Task
@@ -92,6 +106,187 @@ class PlanRepositoryPort(Protocol):
         raise NotImplementedError
 
     def list_roots_with_snapshots(self, workspace_id: UUID) -> tuple[UUID, ...]:
+        raise NotImplementedError
+
+
+class PlanningProfileRepositoryPort(Protocol):
+    def add(self, profile: PlanningProfile) -> None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        profile_id: UUID,
+        workspace_id: UUID,
+        *,
+        version: int | None = None,
+    ) -> PlanningProfile | None:
+        raise NotImplementedError
+
+    def list_selectable(self, workspace_id: UUID) -> tuple[PlanningProfile, ...]:
+        raise NotImplementedError
+
+
+class PlanningRequestRepositoryPort(Protocol):
+    def add(self, request: PlanningRequest) -> None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        request_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRequest | None:
+        raise NotImplementedError
+
+    def save(self, request: PlanningRequest, previous_version: int) -> None:
+        raise NotImplementedError
+
+
+class PlanningRunRepositoryPort(Protocol):
+    def add(self, run: PlanningRun) -> None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        run_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRun | None:
+        raise NotImplementedError
+
+    def save(self, run: PlanningRun, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def claim_queued(self, *, now: datetime, limit: int) -> tuple[PlanningRun, ...]:
+        raise NotImplementedError
+
+
+class PlanningLeaseRepositoryPort(Protocol):
+    def add(self, lease: PlanningRunLease) -> None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        lease_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRunLease | None:
+        raise NotImplementedError
+
+    def get_active_for_run(
+        self,
+        run_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRunLease | None:
+        raise NotImplementedError
+
+    def save(self, lease: PlanningRunLease, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def claim_expired(
+        self, *, now: datetime, limit: int
+    ) -> tuple[PlanningRunLease, ...]:
+        raise NotImplementedError
+
+
+class PlanningRecordRepositoryPort(Protocol):
+    def add_brief(self, brief: PlanningBriefRevision) -> None:
+        raise NotImplementedError
+
+    def get_brief(
+        self, request_id: UUID, workspace_id: UUID, revision: int
+    ) -> PlanningBriefRevision | None:
+        raise NotImplementedError
+
+    def list_briefs(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> tuple[PlanningBriefRevision, ...]:
+        raise NotImplementedError
+
+    def add_proposal(self, proposal: ProposalRevision, workspace_id: UUID) -> None:
+        raise NotImplementedError
+
+    def get_proposal(
+        self, proposal_id: UUID, workspace_id: UUID
+    ) -> ProposalRevision | None:
+        raise NotImplementedError
+
+    def list_proposals(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> tuple[ProposalRevision, ...]:
+        raise NotImplementedError
+
+    def get_current_proposal(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> ProposalRevision | None:
+        raise NotImplementedError
+
+    def add_clarification(self, clarification: PlanningClarification) -> None:
+        raise NotImplementedError
+
+    def list_pending_clarifications(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> tuple[PlanningClarification, ...]:
+        raise NotImplementedError
+
+    def save_clarification(
+        self, clarification: PlanningClarification, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+
+class ProposalMaterializationRepositoryPort(Protocol):
+    def add(self, materialization: ProposalMaterialization) -> None:
+        raise NotImplementedError
+
+    def get_by_request(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> ProposalMaterialization | None:
+        raise NotImplementedError
+
+    def get_by_proposal(
+        self, proposal_id: UUID, workspace_id: UUID
+    ) -> ProposalMaterialization | None:
+        raise NotImplementedError
+
+
+class ExecutionRequestRepositoryPort(Protocol):
+    def add(self, request: ExecutionRequest) -> None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        request_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        raise NotImplementedError
+
+    def save(self, request: ExecutionRequest, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def claim_ready(
+        self, *, now: datetime, limit: int
+    ) -> tuple[ExecutionRequest, ...]:
+        raise NotImplementedError
+
+    def add_dependency(self, dependency: ExecutionRequestDependency) -> None:
+        raise NotImplementedError
+
+    def list_dependencies(
+        self, downstream_request_id: UUID, workspace_id: UUID
+    ) -> tuple[ExecutionRequestDependency, ...]:
+        raise NotImplementedError
+
+    def list_downstream_for_upstream(
+        self, upstream_request_id: UUID, workspace_id: UUID
+    ) -> tuple[ExecutionRequest, ...]:
         raise NotImplementedError
 
 
@@ -544,7 +739,14 @@ class ControlPlaneUnitOfWork(Protocol):
     workers: WorkerRepositoryPort
     worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort
+    execution_requests: ExecutionRequestRepositoryPort
     leases: LeaseStorePort
+    planning_profiles: PlanningProfileRepositoryPort
+    planning_requests: PlanningRequestRepositoryPort
+    planning_runs: PlanningRunRepositoryPort
+    planning_leases: PlanningLeaseRepositoryPort
+    planning_records: PlanningRecordRepositoryPort
+    proposal_materializations: ProposalMaterializationRepositoryPort
     sessions: SessionRepositoryPort
     modules: ModuleRepositoryPort
     bindings: ExecutionBindingRepositoryPort

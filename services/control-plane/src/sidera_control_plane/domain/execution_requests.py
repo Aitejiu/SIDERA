@@ -238,6 +238,7 @@ class ExecutionRequest:
     version: int
     created_at: datetime
     updated_at: datetime
+    expected_outputs: tuple[str, ...] = ()
 
     @classmethod
     def create(
@@ -263,6 +264,7 @@ class ExecutionRequest:
         expected_artifact_refs: tuple[str, ...] | Iterable[str],
         expected_evidence_refs: tuple[str, ...] | Iterable[str],
         now: datetime,
+        expected_outputs: tuple[str, ...] | Iterable[str] = (),
     ) -> ExecutionRequest:
         for name, value in (
             ("request_id", request_id),
@@ -294,6 +296,7 @@ class ExecutionRequest:
         _aware(now, "now")
         artifact_refs = _artifact_refs(expected_artifact_refs, "expected artifact refs")
         evidence_refs = _evidence_refs(expected_evidence_refs, "expected evidence refs")
+        outputs = _clean_strings(expected_outputs, "expected outputs")
         return cls(
             id=request_id,
             workspace_id=workspace_id,
@@ -324,6 +327,7 @@ class ExecutionRequest:
             version=1,
             created_at=now,
             updated_at=now,
+            expected_outputs=outputs,
         )
 
     @property

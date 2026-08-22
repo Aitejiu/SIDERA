@@ -15,11 +15,18 @@ from sidera_control_plane.application.ports import (
     ExecutionEventRepositoryPort,
     ExecutionInputRepositoryPort,
     ExecutionRepositoryPort,
+    ExecutionRequestRepositoryPort,
     GatewayOperationRepositoryPort,
     LeaseStorePort,
     ModuleRepositoryPort,
+    PlanningLeaseRepositoryPort,
+    PlanningProfileRepositoryPort,
+    PlanningRecordRepositoryPort,
+    PlanningRequestRepositoryPort,
+    PlanningRunRepositoryPort,
     PlanRepositoryPort,
     ProjectionChangePublisherPort,
+    ProposalMaterializationRepositoryPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
     WorkerItemRepositoryPort,
@@ -34,6 +41,9 @@ from sidera_control_plane.persistence.attention_repository import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
+from sidera_control_plane.persistence.execution_request_repository import (
+    ExecutionRequestRepository,
+)
 from sidera_control_plane.persistence.gateway_repository import (
     ArtifactRepository,
     EvidenceClaimRepository,
@@ -47,6 +57,14 @@ from sidera_control_plane.persistence.module_repository import (
     ModuleRepository,
 )
 from sidera_control_plane.persistence.plan_repository import PlanRepository
+from sidera_control_plane.persistence.planning_repository import (
+    PlanningProfileRepository,
+    PlanningRecordRepository,
+    PlanningRequestRepository,
+    PlanningRunLeaseRepository,
+    PlanningRunRepository,
+    ProposalMaterializationRepository,
+)
 from sidera_control_plane.persistence.projection_change_repository import (
     ProjectionChangeRepository,
 )
@@ -70,7 +88,14 @@ class SqlAlchemyUnitOfWork:
     workers: WorkerRepositoryPort
     worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort
+    execution_requests: ExecutionRequestRepositoryPort
     leases: LeaseStorePort
+    planning_profiles: PlanningProfileRepositoryPort
+    planning_requests: PlanningRequestRepositoryPort
+    planning_runs: PlanningRunRepositoryPort
+    planning_leases: PlanningLeaseRepositoryPort
+    planning_records: PlanningRecordRepositoryPort
+    proposal_materializations: ProposalMaterializationRepositoryPort
     sessions: SessionRepositoryPort
     modules: ModuleRepositoryPort
     bindings: ExecutionBindingRepositoryPort
@@ -103,7 +128,16 @@ class SqlAlchemyUnitOfWork:
         self.workers = WorkerRepository(self.session)
         self.worker_items = WorkerItemRepository(self.session, self.projection_changes)
         self.executions = ExecutionRepository(self.session)
+        self.execution_requests = ExecutionRequestRepository(self.session)
         self.leases = LeaseStore(self.session)
+        self.planning_profiles = PlanningProfileRepository(self.session)
+        self.planning_requests = PlanningRequestRepository(self.session)
+        self.planning_runs = PlanningRunRepository(self.session)
+        self.planning_leases = PlanningRunLeaseRepository(self.session)
+        self.planning_records = PlanningRecordRepository(self.session)
+        self.proposal_materializations = ProposalMaterializationRepository(
+            self.session
+        )
         self.sessions = SessionRepository(self.session)
         self.modules = ModuleRepository(self.session, self.projection_changes)
         self.bindings = ExecutionBindingRepository(self.session)

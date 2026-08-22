@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import (
@@ -39,6 +40,12 @@ class PlanningRunStatus(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
+
+
+class PlanningRunLeaseStatus(StrEnum):
+    ACTIVE = "active"
+    RELEASED = "released"
+    EXPIRED = "expired"
 
 
 RUN_TERMINAL_STATUSES = {
@@ -80,6 +87,97 @@ class PlanningUsage:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValidationError(f"{name} cannot be negative")
+
+
+@dataclass(slots=True)
+class PlanningRunLease:
+    id: UUID
+    workspace_id: UUID
+    planning_run_id: UUID
+    owner_id: str
+    status: PlanningRunLeaseStatus
+    fencing_token: int
+    acquired_at: datetime
+    expires_at: datetime
+    released_at: datetime | None
+    version: int
+
+    def __post_init__(self) -> None:
+        for name in ("id", "workspace_id", "planning_run_id"):
+            if not isinstance(getattr(self, name), UUID):
+                raise ValidationError(f"planning lease {name} must be a UUID")
+        if not isinstance(self.owner_id, str) or not self.owner_id.strip():
+            raise ValidationError("planning lease owner_id is required")
+        try:
+            self.status = (
+                self.status
+                if isinstance(self.status, PlanningRunLeaseStatus)
+                else PlanningRunLeaseStatus(self.status)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"unsupported planning lease status: {self.status!r}"
+            ) from exc
+        if self.fencing_token < 1:
+            raise ValidationError("planning lease fencing_token must be positive")
+        if self.version < 1:
+            raise ValidationError("planning lease version must be positive")
+        _aware(self.acquired_at, "planning lease acquired_at")
+        _aware(self.expires_at, "planning lease expires_at")
+        if self.released_at is not None:
+            _aware(self.released_at, "planning lease released_at")
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalMaterialization:
+    id: UUID
+    workspace_id: UUID
+    planning_request_id: UUID
+    proposal_revision_id: UUID
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    plan_generation: int
+    subtask_task_mapping: Mapping[str, UUID]
+    worker_item_mapping: Mapping[str, UUID]
+    execution_request_mapping: Mapping[str, UUID]
+    deep_link: str
+    confirmed_by: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        for name in (
+            "id",
+            "workspace_id",
+            "planning_request_id",
+            "proposal_revision_id",
+            "root_task_id",
+            "plan_snapshot_id",
+        ):
+            if not isinstance(getattr(self, name), UUID):
+                raise ValidationError(f"materialization {name} must be a UUID")
+        if self.plan_generation < 1:
+            raise ValidationError("materialization plan_generation must be positive")
+        for name in (
+            "subtask_task_mapping",
+            "worker_item_mapping",
+            "execution_request_mapping",
+        ):
+            mapping = getattr(self, name)
+            if not isinstance(mapping, Mapping):
+                raise ValidationError(f"materialization {name} must be a mapping")
+            if any(
+                not isinstance(key, str)
+                or not key.strip()
+                or not isinstance(value, UUID)
+                for key, value in mapping.items()
+            ):
+                raise ValidationError(f"materialization {name} must map keys to UUIDs")
+            object.__setattr__(self, name, MappingProxyType(dict(mapping)))
+        if not isinstance(self.deep_link, str) or not self.deep_link.strip():
+            raise ValidationError("materialization deep_link is required")
+        if not isinstance(self.confirmed_by, str) or not self.confirmed_by.strip():
+            raise ValidationError("materialization confirmed_by is required")
+        _aware(self.created_at, "materialization created_at")
 
 
 @dataclass(frozen=True, slots=True)

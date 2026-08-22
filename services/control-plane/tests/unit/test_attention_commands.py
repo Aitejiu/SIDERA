@@ -143,6 +143,13 @@ class FakeUnitOfWork:
     artifacts: Any
     evidence_claims: Any
     execution_inputs: Any
+    execution_requests: Any
+    planning_profiles: Any
+    planning_requests: Any
+    planning_runs: Any
+    planning_leases: Any
+    planning_records: Any
+    proposal_materializations: Any
 
     def __init__(self) -> None:
         self.tasks = FakeTaskRepository()
