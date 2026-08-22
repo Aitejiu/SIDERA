@@ -41,3 +41,15 @@ def test_r5_1_planning_models_have_workspace_identity_and_revision_columns() -> 
     } <= request_columns
     run_columns = set(Base.metadata.tables["planning_runs"].c.keys())
     assert {"attempt", "operation_id", "capability_snapshot", "usage"} <= run_columns
+
+
+def test_r5_1_materialization_and_activation_tables_are_registered() -> None:
+    expected = {
+        "proposal_materializations",
+        "execution_requests",
+        "execution_request_dependencies",
+    }
+
+    assert expected <= set(Base.metadata.tables)
+    assert "proposal_revision_id" in Base.metadata.tables["execution_requests"].c
+    assert "execution_lineage_id" in Base.metadata.tables["execution_requests"].c

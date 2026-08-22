@@ -71,6 +71,9 @@ class PlanSnapshotModel(TimestampMixin, Base):
         UniqueConstraint(
             "root_task_id", "generation", name="uq_plan_snapshots_root_generation"
         ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_plan_snapshots_id_workspace"
+        ),
         Index(
             "ix_plan_snapshots_workspace_root_generation",
             "workspace_id",
@@ -1799,7 +1802,8 @@ class PlanningProposalRevisionModel(Base):
             ondelete="RESTRICT",
             name="fk_planning_proposals_module_workspace",
         ),
-        PrimaryKeyConstraint("planning_request_id", "revision"),
+        PrimaryKeyConstraint("id"),
+        UniqueConstraint("id", "workspace_id", name="uq_planning_proposals_identity"),
         UniqueConstraint(
             "planning_request_id",
             "workspace_id",
@@ -1814,6 +1818,7 @@ class PlanningProposalRevisionModel(Base):
         ),
     )
 
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
     planning_request_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
@@ -1846,6 +1851,338 @@ class PlanningProposalRevisionModel(Base):
     derived_diff: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     canonical_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ProposalMaterializationModel(TimestampMixin, Base):
+    __tablename__ = "proposal_materializations"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_generation >= 1",
+            name="ck_proposal_materializations_generation",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(subtask_task_mapping) = 'object'",
+            name="ck_proposal_materializations_subtasks_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(worker_item_mapping) = 'object'",
+            name="ck_proposal_materializations_workers_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(execution_request_mapping) = 'object'",
+            name="ck_proposal_materializations_requests_object",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_proposal_materializations_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["proposal_revision_id", "workspace_id"],
+            [
+                "planning_proposal_revisions.id",
+                "planning_proposal_revisions.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_proposal_materializations_proposal_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_proposal_materializations_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_proposal_materializations_snapshot_workspace",
+        ),
+        UniqueConstraint(
+            "planning_request_id", name="uq_proposal_materializations_request"
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_proposal_materializations_identity"
+        ),
+        Index(
+            "ix_proposal_materializations_workspace_created",
+            "workspace_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    proposal_revision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    subtask_task_mapping: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    worker_item_mapping: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    execution_request_mapping: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    deep_link: Mapped[str] = mapped_column(String(500), nullable=False)
+    confirmed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ExecutionRequestModel(TimestampMixin, Base):
+    __tablename__ = "execution_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_generation >= 1", name="ck_execution_requests_generation"
+        ),
+        CheckConstraint("max_attempts >= 1", name="ck_execution_requests_attempts"),
+        CheckConstraint("version >= 1", name="ck_execution_requests_version"),
+        CheckConstraint(
+            "status IN ('blocked', 'ready', 'materialized', 'cancelled', 'obsolete')",
+            name="ck_execution_requests_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(capability_requirements) = 'array'",
+            name="ck_execution_requests_capabilities_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(adapter_preferences) = 'array'",
+            name="ck_execution_requests_preferences_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(expected_outputs) = 'array'",
+            name="ck_execution_requests_outputs_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(expected_artifact_refs) = 'array'",
+            name="ck_execution_requests_artifacts_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(expected_evidence_refs) = 'array'",
+            name="ck_execution_requests_evidence_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(gate_details) = 'object'",
+            name="ck_execution_requests_gate_details_object",
+        ),
+        CheckConstraint(
+            "(status = 'materialized' AND execution_lineage_id IS NOT NULL "
+            "AND first_execution_id IS NOT NULL) OR "
+            "(status <> 'materialized' AND execution_lineage_id IS NULL "
+            "AND first_execution_id IS NULL)",
+            name="ck_execution_requests_materialized_lineage",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["proposal_revision_id", "workspace_id"],
+            [
+                "planning_proposal_revisions.id",
+                "planning_proposal_revisions.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_proposal_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_snapshot_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["subtask_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_subtask_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_lineage_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_lineage_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["first_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_first_execution_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_execution_requests_identity"
+        ),
+        UniqueConstraint(
+            "proposal_revision_id",
+            "worker_item_key",
+            name="uq_execution_requests_proposal_worker_item",
+        ),
+        Index(
+            "uq_execution_requests_lineage",
+            "workspace_id",
+            "execution_lineage_id",
+            unique=True,
+            postgresql_where=text("execution_lineage_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_execution_requests_workspace_status",
+            "workspace_id",
+            "status",
+            "not_before",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    proposal_revision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    subtask_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    intent_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    capability_requirements: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False
+    )
+    adapter_preferences: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    budget_class: Mapped[str] = mapped_column(String(100), nullable=False)
+    not_before: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_outputs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    expected_artifact_refs: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False
+    )
+    expected_evidence_refs: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    gate_reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    gate_details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    gate_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    status_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    execution_lineage_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    first_execution_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ExecutionRequestDependencyModel(Base):
+    __tablename__ = "execution_request_dependencies"
+    __table_args__ = (
+        CheckConstraint(
+            "enforcement IN ('hard', 'informational')",
+            name="ck_execution_request_dependencies_enforcement",
+        ),
+        CheckConstraint(
+            "downstream_request_id <> upstream_request_id",
+            name="ck_execution_request_dependencies_not_self",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(required_artifact_refs) = 'array'",
+            name="ck_execution_request_dependencies_artifacts_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(required_evidence_refs) = 'array'",
+            name="ck_execution_request_dependencies_evidence_array",
+        ),
+        ForeignKeyConstraint(
+            ["downstream_request_id", "workspace_id"],
+            ["execution_requests.id", "execution_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_request_dependencies_downstream_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["upstream_request_id", "workspace_id"],
+            ["execution_requests.id", "execution_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_request_dependencies_upstream_workspace",
+        ),
+        PrimaryKeyConstraint(
+            "workspace_id", "downstream_request_id", "upstream_request_id"
+        ),
+        Index(
+            "ix_execution_request_dependencies_upstream",
+            "workspace_id",
+            "upstream_request_id",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    downstream_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    upstream_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    enforcement: Mapped[str] = mapped_column(String(32), nullable=False)
+    required_artifact_refs: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False
+    )
+    required_evidence_refs: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
