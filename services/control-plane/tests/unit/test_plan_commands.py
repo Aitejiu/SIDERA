@@ -12,7 +12,10 @@ import pytest
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
-from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.ports import (
+    ControlPlaneUnitOfWork,
+    WorkerItemPlacement,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -22,6 +25,7 @@ from sidera_control_plane.domain.errors import PlanGenerationConflict, Validatio
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import Task
+from sidera_control_plane.domain.worker_item import WorkerItem
 
 WORKSPACE_ID = UUID("20000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("30000000-0000-0000-0000-000000000001")
@@ -160,6 +164,76 @@ class FakeEventRepository:
         self.events.append(event)
 
 
+class FakeWorkerItemRepository:
+    def __init__(self) -> None:
+        self.items: dict[UUID, WorkerItem] = {}
+        self.added: list[WorkerItem] = []
+        self.placements: dict[tuple[UUID, UUID], WorkerItemPlacement] = {}
+
+    def get(
+        self, item_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkerItem | None:
+        del for_update
+        item = self.items.get(item_id)
+        if item is None or item.workspace_id != workspace_id:
+            return None
+        return deepcopy(item)
+
+    def add(self, item: WorkerItem) -> None:
+        self.items[item.id] = deepcopy(item)
+        self.added.append(deepcopy(item))
+
+    def save(self, item: WorkerItem, previous_version: int) -> None:
+        del previous_version
+        self.items[item.id] = deepcopy(item)
+
+    def get_by_stable_key(
+        self, root_task_id: UUID, stable_key: str
+    ) -> WorkerItem | None:
+        return next(
+            (
+                deepcopy(item)
+                for item in self.items.values()
+                if item.root_task_id == root_task_id and item.stable_key == stable_key
+            ),
+            None,
+        )
+
+    def add_placement(self, placement: WorkerItemPlacement) -> None:
+        key = (placement.plan_snapshot_id, placement.worker_item_id)
+        existing = self.placements.get(key)
+        if existing is not None and existing != placement:
+            raise AssertionError("fake placement conflict")
+        self.placements[key] = placement
+
+    def get_placement(
+        self, plan_snapshot_id: UUID, worker_item_id: UUID
+    ) -> WorkerItemPlacement | None:
+        return self.placements.get((plan_snapshot_id, worker_item_id))
+
+    def get_current_placement(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> WorkerItemPlacement | None:
+        del worker_item_id, workspace_id
+        return None
+
+    def list_placements(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> tuple[WorkerItemPlacement, ...]:
+        del worker_item_id, workspace_id
+        return ()
+
+    def list_for_subtask(
+        self, plan_snapshot_id: UUID, subtask_key: str
+    ) -> tuple[WorkerItemPlacement, ...]:
+        return tuple(
+            placement
+            for placement in self.placements.values()
+            if placement.plan_snapshot_id == plan_snapshot_id
+            and placement.subtask_key == subtask_key
+        )
+
+
 class FakeUnitOfWork:
     tasks: Any
     attention: Any
@@ -168,6 +242,7 @@ class FakeUnitOfWork:
     events: Any
     projection_changes: Any
     workers: Any
+    worker_items: Any
     executions: Any
     leases: Any
     sessions: Any
@@ -190,6 +265,7 @@ class FakeUnitOfWork:
         self.plans = plans
         self.commands = commands or FakeCommandRepository()
         self.events = FakeEventRepository()
+        self.worker_items = FakeWorkerItemRepository()
 
     def __enter__(self) -> Self:
         return self
@@ -206,11 +282,17 @@ class FakeUnitOfWork:
     def savepoint(self) -> Iterator[None]:
         plans = dict(self.plans.snapshots)
         events = list(self.events.events)
+        worker_items = deepcopy(self.worker_items.items)
+        added_worker_items = list(self.worker_items.added)
+        placements = dict(self.worker_items.placements)
         try:
             yield
         except Exception:
             self.plans.snapshots = plans
             self.events.events = events
+            self.worker_items.items = worker_items
+            self.worker_items.added = added_worker_items
+            self.worker_items.placements = placements
             raise
 
 

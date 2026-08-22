@@ -8,6 +8,7 @@ from sidera_control_plane.domain.attention import (
     AttentionAcknowledgement,
     AttentionSource,
 )
+from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.models import (
     AttentionAcknowledgementModel,
@@ -22,6 +23,7 @@ from sidera_control_plane.persistence.models import (
 class AttentionAcknowledgementRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._normalizer = PlanNormalizer()
 
     def get_current_source(
         self, root_task_id: UUID, workspace_id: UUID, attention_key: str
@@ -53,7 +55,9 @@ class AttentionAcknowledgementRepository:
                     ExecutionModel.workspace_id == workspace_id,
                 )
             )
-            if execution is None or not _snapshot_contains_task(snapshot, execution.task_id):
+            if execution is None or not self._snapshot_contains_task(
+                snapshot, execution.task_id
+            ):
                 return None
             if _execution_attention_state(execution.status) != state:
                 return None
@@ -81,7 +85,7 @@ class AttentionAcknowledgementRepository:
                 TaskModel.workspace_id == workspace_id,
             )
         )
-        if task is None or not _snapshot_contains_task(snapshot, task.id):
+        if task is None or not self._snapshot_contains_task(snapshot, task.id):
             return None
         if _task_attention_state(task.status) != state:
             return None
@@ -151,6 +155,7 @@ class AttentionAcknowledgementRepository:
             acknowledged_command_id=acknowledgement.acknowledged_command_id,
             acknowledged_at=acknowledgement.acknowledged_at,
         )
+
         self._session.execute(
             statement.on_conflict_do_update(
                 index_elements=[
@@ -168,6 +173,12 @@ class AttentionAcknowledgementRepository:
                 },
             )
         )
+
+    def _snapshot_contains_task(
+        self, snapshot: TaskPlanSnapshot, task_id: UUID
+    ) -> bool:
+        canonical = self._normalizer.normalize(snapshot)
+        return any(item.task_id == task_id for item in canonical.subtasks)
 
 
 def _to_domain(row: AttentionAcknowledgementModel) -> AttentionAcknowledgement:
@@ -189,10 +200,6 @@ def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
     if snapshot.id != row.id or snapshot.generation != row.generation:
         raise ValueError("task plan snapshot payload does not match identity columns")
     return snapshot
-
-
-def _snapshot_contains_task(snapshot: TaskPlanSnapshot, task_id: UUID) -> bool:
-    return any(item.task_id == task_id for item in snapshot.work_items)
 
 
 def _attention_key_parts(key: str) -> tuple[str | None, str | None, str | None]:

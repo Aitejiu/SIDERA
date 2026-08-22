@@ -5,12 +5,24 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
-from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.plans import (
+    SubtaskPlanItem,
+    TaskPlanSnapshot,
+    WorkerItemPlanItem,
+    WorkItemKind,
+)
 from sidera_control_plane.persistence.database import Database
-from sidera_control_plane.persistence.models import TaskModel
+from sidera_control_plane.persistence.models import (
+    EventModel,
+    PlanSnapshotModel,
+    TaskModel,
+    WorkerItemModel,
+    WorkerItemPlacementModel,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -18,6 +30,9 @@ pytestmark = pytest.mark.integration
 ROOT_TASK_ID = UUID("30000000-0000-0000-0000-000000000001")
 FIRST_SNAPSHOT_ID = UUID("10000000-0000-0000-0000-000000000001")
 SECOND_SNAPSHOT_ID = UUID("10000000-0000-0000-0000-000000000002")
+V2_FIRST_SNAPSHOT_ID = UUID("10000000-0000-0000-0000-000000000003")
+V2_SECOND_SNAPSHOT_ID = UUID("10000000-0000-0000-0000-000000000004")
+SUBTASK_TASK_ID = UUID("30000000-0000-0000-0000-000000000002")
 
 
 @pytest.fixture
@@ -90,6 +105,190 @@ def seed_root_task(database: Database, workspace_id: UUID) -> None:
             )
         )
         session.commit()
+
+
+def seed_v2_subtask(database: Database, workspace_id: UUID) -> None:
+    with database.session() as session:
+        session.add(
+            TaskModel(
+                id=SUBTASK_TASK_ID,
+                workspace_id=workspace_id,
+                title="Callback subtask",
+                description="Materialized callback subtask",
+                acceptance_criteria=["callbacks are safe"],
+                status="pending",
+                priority=50,
+                requested_by="test",
+                version=1,
+            )
+        )
+        session.commit()
+
+
+def make_v2_snapshot(
+    *,
+    snapshot_id: UUID,
+    generation: int,
+    parent_snapshot_id: UUID | None = None,
+    worker_item_id: UUID | None = None,
+    responsibility: str = "Keep callback retries idempotent.",
+) -> TaskPlanSnapshot:
+    return TaskPlanSnapshot.create(
+        snapshot_id=snapshot_id,
+        schema_version=2,
+        workspace_id=UUID("00000000-0000-0000-0000-000000000001"),
+        root_task_id=ROOT_TASK_ID,
+        generation=generation,
+        parent_snapshot_id=parent_snapshot_id,
+        source_type="test",
+        source_ref=f"api:v2:g{generation}",
+        title="API v2 plan",
+        goal_summary="Materialize WorkerItems from a v2 plan.",
+        acceptance_refs=("test:v2",),
+        published_by="local:test",
+        published_at=datetime(2026, 8, 22, tzinfo=UTC),
+        subtasks=(
+            SubtaskPlanItem(
+                key="callbacks",
+                task_id=SUBTASK_TASK_ID,
+                kind=WorkItemKind.CHILD,
+                title="Callbacks",
+                goal_summary="Keep callbacks safe.",
+                acceptance_refs=("callbacks are safe",),
+                milestone_key=None,
+                expected_outputs=("callback code",),
+                source_refs=("test",),
+            ),
+        ),
+        worker_item_plans=(
+            WorkerItemPlanItem(
+                key="callback-implementer",
+                worker_item_id=worker_item_id,
+                subtask_key="callbacks",
+                title="Callback implementer",
+                role="implementer",
+                responsibility=responsibility,
+                capability_requirements=("python",),
+                worker_policy_ref="policy:balanced",
+                configuration_ref="config:callback",
+                concurrency_limit=1,
+                source_refs=("test",),
+            ),
+        ),
+        subtask_milestones=(),
+        subtask_dependencies=(),
+        worker_item_dependencies=(),
+    )
+
+
+def test_v2_publish_materializes_stable_worker_item_and_events(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    seed_root_task(database, workspace_id)
+    seed_v2_subtask(database, workspace_id)
+    first = make_v2_snapshot(
+        snapshot_id=V2_FIRST_SNAPSHOT_ID,
+        generation=1,
+    )
+
+    response = client.post(
+        "/api/v1/commands",
+        json=publish_request(
+            workspace_id,
+            first,
+            expected_generation=0,
+            idempotency_key="api-v2-publish-1",
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+
+    with database.session() as session:
+        current = session.scalar(
+            select(PlanSnapshotModel).where(
+                PlanSnapshotModel.id == V2_FIRST_SNAPSHOT_ID
+            )
+        )
+        assert current is not None
+        worker_item_id = current.payload["worker_items"][0]["worker_item_id"]
+        worker_item = session.scalar(
+            select(WorkerItemModel).where(WorkerItemModel.id == UUID(worker_item_id))
+        )
+        placement = session.scalar(select(WorkerItemPlacementModel))
+        event_types = session.scalars(select(EventModel.event_type)).all()
+
+    assert worker_item is not None
+    assert worker_item.stable_key == f"worker-item:{worker_item.id}"
+    assert placement is not None
+    assert placement.worker_item_id == worker_item.id
+    assert event_types == [
+        "task.plan_snapshot_published",
+        "worker_item.created",
+        "worker_item.placement_materialized",
+    ]
+
+
+def test_v2_invalid_reuse_rolls_back_snapshot_placement_and_events(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    seed_root_task(database, workspace_id)
+    seed_v2_subtask(database, workspace_id)
+    first = make_v2_snapshot(
+        snapshot_id=V2_FIRST_SNAPSHOT_ID,
+        generation=1,
+    )
+    first_response = client.post(
+        "/api/v1/commands",
+        json=publish_request(
+            workspace_id,
+            first,
+            expected_generation=0,
+            idempotency_key="api-v2-publish-rollback-1",
+        ),
+    )
+    assert first_response.status_code == 200, first_response.text
+
+    with database.session() as session:
+        worker_item = session.scalar(select(WorkerItemModel))
+    assert worker_item is not None
+
+    invalid = make_v2_snapshot(
+        snapshot_id=V2_SECOND_SNAPSHOT_ID,
+        generation=2,
+        parent_snapshot_id=first.id,
+        worker_item_id=worker_item.id,
+        responsibility="Change the callback architecture entirely.",
+    )
+    invalid_response = client.post(
+        "/api/v1/commands",
+        json=publish_request(
+            workspace_id,
+            invalid,
+            expected_generation=1,
+            idempotency_key="api-v2-publish-rollback-2",
+        ),
+    )
+
+    assert invalid_response.status_code == 422
+    assert (
+        invalid_response.json()["error"]["details"]["reason"]
+        == "worker_item_responsibility_change_not_supported"
+    )
+    with database.session() as session:
+        assert session.scalar(select(PlanSnapshotModel).where(
+            PlanSnapshotModel.id == V2_SECOND_SNAPSHOT_ID
+        )) is None
+        assert session.scalar(select(WorkerItemPlacementModel).where(
+            WorkerItemPlacementModel.plan_snapshot_id == V2_SECOND_SNAPSHOT_ID
+        )) is None
+        assert session.scalar(select(EventModel.event_type).where(
+            EventModel.event_type == "worker_item.placement_materialized",
+            EventModel.payload["snapshot_id"].astext == str(V2_SECOND_SNAPSHOT_ID),
+        )) is None
 
 
 def test_publish_and_read_immutable_plan_generations(

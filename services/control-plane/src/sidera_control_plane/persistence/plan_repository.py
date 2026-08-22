@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.models import PlanSnapshotModel
 
@@ -10,6 +11,7 @@ from sidera_control_plane.persistence.models import PlanSnapshotModel
 class PlanRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._normalizer = PlanNormalizer()
 
     def add(self, snapshot: TaskPlanSnapshot) -> None:
         self._session.add(
@@ -70,7 +72,8 @@ class PlanRepository:
                 continue
             seen_roots.add(row.root_task_id)
             snapshot = _to_domain(row)
-            if any(item.task_id == task_id for item in snapshot.work_items):
+            canonical = self._normalizer.normalize(snapshot)
+            if any(item.task_id == task_id for item in canonical.subtasks):
                 return snapshot
         return None
 
