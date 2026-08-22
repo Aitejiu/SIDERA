@@ -8,10 +8,20 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
+from test_worker_workspace_api import (
+    EXECUTION_TWO_ID,
+    ROOT_TASK_ID,
+    WORKER_ITEM_ID,
+)
+from test_worker_workspace_api import (
+    _seed as seed_worker_workspace,
+)
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.projection_stream import _event_stream
-from sidera_control_plane.application.projection_changes import ProjectionChangePublisher
+from sidera_control_plane.application.projection_changes import (
+    ProjectionChangePublisher,
+)
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.persistence.database import Database
@@ -24,13 +34,6 @@ from sidera_control_plane.persistence.projection_change_repository import (
     ProjectionChangeRepository,
 )
 from sidera_control_plane.persistence.repositories import EventRepository
-
-from test_worker_workspace_api import (
-    EXECUTION_TWO_ID,
-    ROOT_TASK_ID,
-    WORKER_ITEM_ID,
-    _seed as seed_worker_workspace,
-)
 
 pytestmark = pytest.mark.integration
 

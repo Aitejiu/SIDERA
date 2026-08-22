@@ -138,6 +138,7 @@ class FakeUnitOfWork:
     bindings: Any
     gateway_operations: Any
     workspaces: Any
+    worker_items: Any
     execution_events: Any
     artifacts: Any
     evidence_claims: Any
@@ -148,6 +149,7 @@ class FakeUnitOfWork:
         self.attention = FakeAttentionRepository()
         self.commands = FakeCommandRepository()
         self.events = FakeEventRepository()
+        self.worker_items = None
 
     def __enter__(self):
         return self

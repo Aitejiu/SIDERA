@@ -207,7 +207,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                     .order_by(ProjectionChangeModel.cursor.desc())
                     .limit(1)
                 ) or 0
-            as_of = max(
+            as_of = max((
                 worker_item.updated_at,
                 *(execution.updated_at for execution in execution_rows),
                 *(session.last_activity_at for session in sessions),
@@ -215,7 +215,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 *(item.updated_at for item in inputs),
                 *(artifact.created_at for artifact in artifacts),
                 *(claim.created_at for claim in evidence),
-            )
+            ))
             return WorkerWorkspaceQuerySnapshot(
                 worker_item=worker_item,
                 placements=placements,

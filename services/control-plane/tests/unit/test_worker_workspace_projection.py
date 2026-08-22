@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -179,7 +180,7 @@ def _events() -> tuple[WorkerEventFact, ...]:
 
 
 def _service(**changes: object) -> WorkerItemProjectionService:
-    values: dict[str, object] = {
+    values: dict[str, Any] = {
         "worker_item": _worker_item(),
         "placements": _placements(),
         "executions": _executions(),

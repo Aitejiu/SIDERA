@@ -121,6 +121,54 @@ uv run --project services/control-plane python \
 `StdoutEventSink` is a development diagnostic, not a production transport or a
 delivery contract. External delivery is at least once.
 
+## R4.1 WorkerItem Migration Runbook
+
+Use this order when upgrading an existing PostgreSQL workspace to the R4.1
+three-level model:
+
+1. Take a PostgreSQL backup and verify that it can be restored in an isolated
+   database. Keep the backup identifier with the deployment record.
+2. Stop writers that can publish plans or create Executions, then run the
+   additive migration:
+
+   ```bash
+   uv run --project services/control-plane alembic \
+     -c services/control-plane/alembic.ini upgrade head
+   ```
+
+   Revision `0012_r4_1_worker_items` creates `worker_items`,
+   `worker_item_placements`, and the nullable `executions.worker_item_id`
+   foreign key. It does not rewrite plan payloads or delete legacy data.
+3. Run the idempotent v1 backfill once per workspace:
+
+   ```bash
+   uv run --project services/control-plane python \
+     -m sidera_control_plane.worker_item_backfill \
+     --workspace-id <workspace-uuid>
+   ```
+
+   The command emits one JSON report per Root Task. Confirm that every report
+   has no `error` and that `ambiguous_execution_ids` is empty before allowing
+   new R4.1 writes. A non-zero exit means at least one Root Task transaction
+   failed; fix that Root Task and rerun the command. Re-running successful
+   roots is safe and does not duplicate WorkerItems or placements.
+4. Review the reports and query projections. A uniquely matchable historical
+   Execution receives `worker_item_id`; ambiguous Executions remain nullable
+   and read-only until an operator resolves their ownership. Historical v1
+   snapshots remain immutable and are normalized at read time.
+5. Start the API and workers again, then verify `/healthz`, the current Task
+   projection, and the WorkerItem workspace before reopening plan or Execution
+   writers.
+
+Rollback is application-first: stop R4.1 writers, restore the application
+version, and keep revision `0012_r4_1_worker_items` and its tables in place.
+Do not run `alembic downgrade` while any R4.1 WorkerItem, placement, or
+Execution association exists. A schema downgrade is permitted only after a
+verified backup and an explicit confirmation that no R4.1 writes remain; it
+must be treated as a separate migration exercise because the downgrade drops
+the new tables and column. Never use recursive deletion commands against the
+repository, PostgreSQL data directory, or database.
+
 Run the Scheduler, Reconciler, and R3 Gateway as independent native processes:
 
 ```bash
@@ -181,6 +229,24 @@ Every list query requires an explicit `workspace_id`; cursors are opaque to
 callers and event history also supports `after_sequence`. The API returns
 stable SIDERA projections instead of raw ACP messages.
 
+R4.1 Task First and WorkerItem paths are:
+
+- `GET /api/v1/workspaces/{workspace_id}/task-overviews`
+- `GET /api/v1/tasks/{root_task_id}/overview`
+- `GET /api/v1/tasks/{root_task_id}/graph`
+- `GET /api/v1/tasks/{root_task_id}/subtasks/{subtask_key}`
+- `GET /api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace`
+- `GET /api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity`
+- `GET /api/v1/tasks/{root_task_id}/executions/{execution_id}/sessions/{session_id}/trace`
+- `GET /api/v1/tasks/{root_task_id}/plan/current`
+- `GET /api/v1/tasks/{root_task_id}/plan/generations`
+- `GET /api/v1/tasks/{root_task_id}/plan-diff`
+- `GET /api/v1/workspaces/{workspace_id}/projection-changes`
+
+User acknowledgements, exact WorkerItem intervention, and exact Execution stop
+are submitted through `POST /api/v1/commands`. The command envelope remains
+the concurrency boundary; the Web does not write control-plane tables.
+
 ## R4 Web And E2E
 
 The standalone Web is in `apps/web`. It reads Task First projections, durable
@@ -198,9 +264,11 @@ python tests/e2e/seed_r4_workspace.py --scenario task-first
 npm --prefix ../../apps/web run test:e2e
 ```
 
-The scale scenario verifies 200 WorkItems, 400 informational edges and
-50,000 reverse-paginated trace events. The fixture never truncates shared
-tables. The real browser gate uses the fixed OpenCode integration workspace
+The scale scenario verifies 200 Subtasks, 400 Subtask dependency edges, 40
+WorkerItems with 80 same-Subtask graph edges, 2,000 WorkerItem activities and
+50,000 reverse-paginated trace events. The fixture is isolated by its explicit
+workspace name and stable fixture IDs; it never truncates shared tables. The
+real browser gate uses the fixed OpenCode integration workspace
 and cleans it after the test:
 
 ```bash

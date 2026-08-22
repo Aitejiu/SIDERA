@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -41,6 +42,7 @@ RETRY_TASK_ID = UUID("33000000-0000-0000-0000-000000000003")
 SNAPSHOT_ONE_ID = UUID("13000000-0000-0000-0000-000000000001")
 SNAPSHOT_TWO_ID = UUID("13000000-0000-0000-0000-000000000002")
 WORKER_ITEM_ID = UUID("43000000-0000-0000-0000-000000000001")
+EMPTY_RUNTIME_WORKER_ITEM_ID = UUID("43000000-0000-0000-0000-000000000002")
 WORKER_ID = UUID("73000000-0000-0000-0000-000000000001")
 EXECUTION_ONE_ID = UUID("53000000-0000-0000-0000-000000000001")
 EXECUTION_TWO_ID = UUID("53000000-0000-0000-0000-000000000002")
@@ -193,6 +195,21 @@ def _seed(database: Database) -> None:
                     created_at=NOW,
                     updated_at=NOW + timedelta(minutes=8),
                 ),
+                WorkerItemModel(
+                    id=EMPTY_RUNTIME_WORKER_ITEM_ID,
+                    workspace_id=WORKSPACE_ID,
+                    root_task_id=ROOT_TASK_ID,
+                    stable_key="legacy-without-runtime",
+                    title="无运行历史",
+                    responsibility="保留没有运行记录的历史 WorkerItem。",
+                    status="retired",
+                    context_version=1,
+                    acknowledged_context_version=1,
+                    derived_from_worker_item_ids=[],
+                    version=1,
+                    created_at=NOW,
+                    updated_at=NOW + timedelta(minutes=2),
+                ),
                 WorkerModel(
                     id=WORKER_ID,
                     workspace_id=WORKSPACE_ID,
@@ -279,6 +296,21 @@ def _seed(database: Database) -> None:
                     worker_policy_ref=None,
                     configuration_ref=None,
                     created_at=NOW + timedelta(minutes=2),
+                ),
+                WorkerItemPlacementModel(
+                    plan_snapshot_id=SNAPSHOT_ONE_ID,
+                    plan_generation=1,
+                    workspace_id=WORKSPACE_ID,
+                    root_task_id=ROOT_TASK_ID,
+                    worker_item_id=EMPTY_RUNTIME_WORKER_ITEM_ID,
+                    worker_item_key="legacy-without-runtime",
+                    subtask_key="callback-idempotency",
+                    subtask_task_id=CALLBACK_TASK_ID,
+                    role="reviewer",
+                    capability_requirements=["python"],
+                    worker_policy_ref=None,
+                    configuration_ref=None,
+                    created_at=NOW,
                 ),
             ]
         )
@@ -518,7 +550,7 @@ def test_worker_item_workspace_and_activity_are_stable_and_scoped(
     assert workspace["artifacts"][0]["artifact_id"] == str(ARTIFACT_ID)
     assert workspace["evidence"][0]["acceptance_ref"] == "acceptance:callback"
 
-    pages: list[dict[str, object]] = []
+    pages: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
         params: dict[str, str | int] = {"limit": 2}
@@ -567,3 +599,33 @@ def test_worker_item_workspace_and_activity_are_stable_and_scoped(
         "/api/v1/workspaces/00000000-0000-0000-0000-000000000099/"
         f"worker-items/{WORKER_ITEM_ID}/workspace"
     ).status_code == 404
+
+
+def test_worker_item_without_runtime_history_is_read_only_and_loadable(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    _seed(database)
+    workspace_url = (
+        f"/api/v1/workspaces/{workspace_id}/worker-items/"
+        f"{EMPTY_RUNTIME_WORKER_ITEM_ID}/workspace"
+    )
+    activity_url = (
+        f"/api/v1/workspaces/{workspace_id}/worker-items/"
+        f"{EMPTY_RUNTIME_WORKER_ITEM_ID}/activity"
+    )
+
+    workspace_response = client.get(workspace_url)
+
+    assert workspace_response.status_code == 200, workspace_response.text
+    workspace = workspace_response.json()
+    assert workspace["current_runtime"] is None
+    assert workspace["can_intervene"] is False
+    assert workspace["read_only_reason"] == "worker_item_retired"
+    assert workspace["as_of"] == "2026-08-22T20:02:00+08:00"
+
+    activity_response = client.get(activity_url)
+
+    assert activity_response.status_code == 200, activity_response.text
+    assert activity_response.json()["items"] == []

@@ -1,8 +1,12 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
-from sidera_control_plane.application.ports import WorkerItemPlacement
+from sidera_control_plane.application.ports import (
+    ControlPlaneUnitOfWork,
+    WorkerItemPlacement,
+)
 from sidera_control_plane.application.worker_item_backfill import (
     WorkerItemBackfillService,
     responsibility_fingerprint,
@@ -196,7 +200,7 @@ def test_changed_legacy_fingerprint_creates_derived_generation_item() -> None:
     uow = FakeUnitOfWork((first_snapshot, second_snapshot))
 
     report = WorkerItemBackfillService().backfill_root(
-        uow, WORKSPACE_ID, ROOT_TASK_ID
+        cast(ControlPlaneUnitOfWork, uow), WORKSPACE_ID, ROOT_TASK_ID
     )
 
     first, second = uow.worker_items.added
