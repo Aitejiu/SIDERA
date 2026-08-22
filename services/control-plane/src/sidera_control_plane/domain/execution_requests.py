@@ -1,0 +1,519 @@
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from types import MappingProxyType
+from uuid import UUID
+
+from sidera_control_plane.domain.artifacts import ArtifactType, EvidenceClaimStatus
+from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
+from sidera_control_plane.domain.execution import ExecutionStatus
+
+
+class ExecutionRequestStatus(StrEnum):
+    BLOCKED = "blocked"
+    READY = "ready"
+    MATERIALIZED = "materialized"
+    CANCELLED = "cancelled"
+    OBSOLETE = "obsolete"
+
+
+class DependencyEnforcement(StrEnum):
+    HARD = "hard"
+    INFORMATIONAL = "informational"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRequestDependency:
+    downstream_request_id: UUID
+    upstream_request_id: UUID
+    enforcement: DependencyEnforcement
+    required_artifact_refs: tuple[str, ...] = ()
+    required_evidence_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.downstream_request_id, UUID) or not isinstance(
+            self.upstream_request_id, UUID
+        ):
+            raise ValidationError("execution request dependency ids must be UUIDs")
+        if self.downstream_request_id == self.upstream_request_id:
+            raise ValidationError("execution request dependency cannot be a self edge")
+        object.__setattr__(
+            self,
+            "enforcement",
+            _dependency_enforcement(self.enforcement),
+        )
+        object.__setattr__(
+            self,
+            "required_artifact_refs",
+            _artifact_refs(self.required_artifact_refs, "required artifact refs"),
+        )
+        object.__setattr__(
+            self,
+            "required_evidence_refs",
+            _evidence_refs(self.required_evidence_refs, "required evidence refs"),
+        )
+
+    @property
+    def is_blocking(self) -> bool:
+        return self.enforcement is DependencyEnforcement.HARD
+
+
+@dataclass(frozen=True, slots=True)
+class UpstreamActivationFact:
+    request_id: UUID
+    execution_status: ExecutionStatus | None = None
+    execution_lineage_id: UUID | None = None
+    artifact_refs: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    evidence_status: EvidenceClaimStatus | str = EvidenceClaimStatus.CANDIDATE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_id, UUID):
+            raise ValidationError("upstream activation request_id must be a UUID")
+        if self.execution_status is not None:
+            object.__setattr__(
+                self,
+                "execution_status",
+                _execution_status(self.execution_status),
+            )
+        if self.execution_lineage_id is not None and not isinstance(
+            self.execution_lineage_id, UUID
+        ):
+            raise ValidationError("execution_lineage_id must be a UUID")
+        object.__setattr__(
+            self,
+            "artifact_refs",
+            _artifact_refs(self.artifact_refs, "artifact refs"),
+        )
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            _evidence_refs(self.evidence_refs, "evidence refs"),
+        )
+        object.__setattr__(
+            self,
+            "evidence_status",
+            _evidence_status(self.evidence_status),
+        )
+
+    @property
+    def produced_artifact_refs(self) -> tuple[str, ...]:
+        return self.artifact_refs
+
+    @property
+    def candidate_evidence_refs(self) -> tuple[str, ...]:
+        return self.evidence_refs
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationDecision:
+    ready: bool
+    reason: str
+    missing_upstream_request_ids: tuple[UUID, ...] = ()
+    blocked_upstream_request_ids: tuple[UUID, ...] = ()
+    missing_artifact_refs: tuple[str, ...] = ()
+    missing_evidence_refs: tuple[str, ...] = ()
+    details: Mapping[str, object] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ValidationError("activation decision reason is required")
+        object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ready
+
+    @property
+    def code(self) -> str:
+        return self.reason
+
+
+class ActivationGate:
+    """Pure evaluator for static ExecutionRequest activation dependencies."""
+
+    @staticmethod
+    def evaluate(
+        *,
+        dependencies: Iterable[ExecutionRequestDependency] = (),
+        upstream_facts: Mapping[UUID, UpstreamActivationFact]
+        | Iterable[UpstreamActivationFact]
+        | None = None,
+        facts: Mapping[UUID, UpstreamActivationFact]
+        | Iterable[UpstreamActivationFact]
+        | None = None,
+    ) -> ActivationDecision:
+        if upstream_facts is not None and facts is not None:
+            raise ValidationError("provide upstream_facts or facts, not both")
+        source = upstream_facts if upstream_facts is not None else facts
+        facts_by_id = _fact_map(source or ())
+
+        missing_upstream: list[UUID] = []
+        blocked_upstream: list[UUID] = []
+        missing_artifacts: list[str] = []
+        missing_evidence: list[str] = []
+
+        for dependency in dependencies:
+            if not dependency.is_blocking:
+                continue
+            upstream = facts_by_id.get(dependency.upstream_request_id)
+            if upstream is None:
+                _append_unique(missing_upstream, dependency.upstream_request_id)
+                continue
+            if (
+                upstream.execution_status is not ExecutionStatus.SUCCEEDED
+                or upstream.execution_lineage_id is None
+            ):
+                _append_unique(blocked_upstream, dependency.upstream_request_id)
+                continue
+            for ref in dependency.required_artifact_refs:
+                if ref not in upstream.artifact_refs:
+                    _append_unique(missing_artifacts, ref)
+            for ref in dependency.required_evidence_refs:
+                if (
+                    upstream.evidence_status is not EvidenceClaimStatus.CANDIDATE
+                    or ref not in upstream.evidence_refs
+                ):
+                    _append_unique(missing_evidence, ref)
+
+        ready = not (
+            missing_upstream
+            or blocked_upstream
+            or missing_artifacts
+            or missing_evidence
+        )
+        reason = "ready" if ready else "dependencies_blocked"
+        return ActivationDecision(
+            ready=ready,
+            reason=reason,
+            missing_upstream_request_ids=tuple(missing_upstream),
+            blocked_upstream_request_ids=tuple(blocked_upstream),
+            missing_artifact_refs=tuple(missing_artifacts),
+            missing_evidence_refs=tuple(missing_evidence),
+            details=MappingProxyType(
+                {
+                    "missing_upstream_request_ids": tuple(missing_upstream),
+                    "blocked_upstream_request_ids": tuple(blocked_upstream),
+                    "missing_artifact_refs": tuple(missing_artifacts),
+                    "missing_evidence_refs": tuple(missing_evidence),
+                }
+            ),
+        )
+
+
+@dataclass(slots=True)
+class ExecutionRequest:
+    id: UUID
+    workspace_id: UUID
+    planning_request_id: UUID
+    proposal_revision_id: UUID
+    plan_snapshot_id: UUID
+    plan_generation: int
+    root_task_id: UUID
+    subtask_id: UUID
+    worker_item_id: UUID
+    worker_item_key: str
+    intent_key: str
+    purpose: str
+    capability_requirements: frozenset[str]
+    adapter_preferences: tuple[str, ...]
+    budget_class: str
+    not_before: datetime
+    max_attempts: int
+    expected_artifact_refs: tuple[str, ...]
+    expected_evidence_refs: tuple[str, ...]
+    status: ExecutionRequestStatus
+    gate_reason: str
+    gate_details: Mapping[str, object]
+    gate_evaluated_at: datetime | None
+    status_changed_at: datetime
+    execution_lineage_id: UUID | None
+    first_execution_id: UUID | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        request_id: UUID,
+        workspace_id: UUID,
+        planning_request_id: UUID,
+        proposal_revision_id: UUID,
+        plan_snapshot_id: UUID,
+        plan_generation: int,
+        root_task_id: UUID,
+        subtask_id: UUID,
+        worker_item_id: UUID,
+        worker_item_key: str,
+        intent_key: str,
+        purpose: str,
+        capability_requirements: frozenset[str] | Iterable[str],
+        adapter_preferences: tuple[str, ...] | Iterable[str],
+        budget_class: str,
+        not_before: datetime,
+        max_attempts: int,
+        expected_artifact_refs: tuple[str, ...] | Iterable[str],
+        expected_evidence_refs: tuple[str, ...] | Iterable[str],
+        now: datetime,
+    ) -> ExecutionRequest:
+        for name, value in (
+            ("request_id", request_id),
+            ("workspace_id", workspace_id),
+            ("planning_request_id", planning_request_id),
+            ("proposal_revision_id", proposal_revision_id),
+            ("plan_snapshot_id", plan_snapshot_id),
+            ("root_task_id", root_task_id),
+            ("subtask_id", subtask_id),
+            ("worker_item_id", worker_item_id),
+        ):
+            if not isinstance(value, UUID):
+                raise ValidationError(f"{name} must be a UUID")
+        if plan_generation < 1:
+            raise ValidationError("plan_generation must be positive")
+        clean_key = _required_text(worker_item_key, "worker_item_key")
+        clean_intent = _required_text(intent_key, "intent_key")
+        clean_purpose = _required_text(purpose, "purpose")
+        clean_budget = _required_text(budget_class, "budget_class")
+        capabilities = frozenset(
+            _clean_strings(capability_requirements, "capability_requirements")
+        )
+        if not capabilities:
+            raise ValidationError("capability_requirements are required")
+        preferences = _clean_strings(adapter_preferences, "adapter_preferences")
+        if max_attempts < 1:
+            raise ValidationError("max_attempts must be positive")
+        _aware(not_before, "not_before")
+        _aware(now, "now")
+        artifact_refs = _artifact_refs(expected_artifact_refs, "expected artifact refs")
+        evidence_refs = _evidence_refs(expected_evidence_refs, "expected evidence refs")
+        return cls(
+            id=request_id,
+            workspace_id=workspace_id,
+            planning_request_id=planning_request_id,
+            proposal_revision_id=proposal_revision_id,
+            plan_snapshot_id=plan_snapshot_id,
+            plan_generation=plan_generation,
+            root_task_id=root_task_id,
+            subtask_id=subtask_id,
+            worker_item_id=worker_item_id,
+            worker_item_key=clean_key,
+            intent_key=clean_intent,
+            purpose=clean_purpose,
+            capability_requirements=capabilities,
+            adapter_preferences=preferences,
+            budget_class=clean_budget,
+            not_before=not_before,
+            max_attempts=max_attempts,
+            expected_artifact_refs=artifact_refs,
+            expected_evidence_refs=evidence_refs,
+            status=ExecutionRequestStatus.BLOCKED,
+            gate_reason="not_evaluated",
+            gate_details=MappingProxyType({}),
+            gate_evaluated_at=None,
+            status_changed_at=now,
+            execution_lineage_id=None,
+            first_execution_id=None,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @property
+    def subtask_task_id(self) -> UUID:
+        return self.subtask_id
+
+    @property
+    def dependency_key(self) -> tuple[UUID, str]:
+        return self.proposal_revision_id, self.worker_item_key
+
+    def mark_ready(
+        self,
+        *,
+        now: datetime,
+        decision: ActivationDecision | None = None,
+    ) -> None:
+        if self.status not in {
+            ExecutionRequestStatus.BLOCKED,
+            ExecutionRequestStatus.READY,
+        }:
+            raise InvalidTransition(f"request cannot become ready from {self.status}")
+        if decision is not None and not decision.ready:
+            raise ValidationError("a blocked activation decision cannot mark ready")
+        _aware(now, "now")
+        self.status = ExecutionRequestStatus.READY
+        self._record_gate(decision=decision, now=now)
+
+    def refresh_gate(self, *, decision: ActivationDecision, now: datetime) -> None:
+        if self.status in {
+            ExecutionRequestStatus.MATERIALIZED,
+            ExecutionRequestStatus.CANCELLED,
+            ExecutionRequestStatus.OBSOLETE,
+        }:
+            raise InvalidTransition(f"request gate is closed from {self.status}")
+        _aware(now, "now")
+        if decision.ready:
+            self.status = ExecutionRequestStatus.READY
+        else:
+            self.status = ExecutionRequestStatus.BLOCKED
+        self._record_gate(decision=decision, now=now)
+
+    def materialize(
+        self,
+        *,
+        execution_lineage_id: UUID,
+        first_execution_id: UUID,
+        now: datetime,
+    ) -> None:
+        if self.status is not ExecutionRequestStatus.READY:
+            raise InvalidTransition(
+                f"only a ready request can be materialized, got {self.status}"
+            )
+        if not isinstance(execution_lineage_id, UUID) or not isinstance(
+            first_execution_id, UUID
+        ):
+            raise ValidationError("execution lineage and first execution ids are required")
+        if self.execution_lineage_id is not None or self.first_execution_id is not None:
+            raise InvalidTransition("execution request has already been materialized")
+        _aware(now, "now")
+        self.status = ExecutionRequestStatus.MATERIALIZED
+        self.execution_lineage_id = execution_lineage_id
+        self.first_execution_id = first_execution_id
+        self.status_changed_at = now
+        self.updated_at = now
+        self.version += 1
+
+    def cancel(self, *, now: datetime, reason: str = "cancelled") -> None:
+        self._close(status=ExecutionRequestStatus.CANCELLED, now=now, reason=reason)
+
+    def obsolete(self, *, now: datetime, reason: str = "obsolete") -> None:
+        self._close(status=ExecutionRequestStatus.OBSOLETE, now=now, reason=reason)
+
+    def _close(
+        self,
+        *,
+        status: ExecutionRequestStatus,
+        now: datetime,
+        reason: str,
+    ) -> None:
+        if self.status not in {
+            ExecutionRequestStatus.BLOCKED,
+            ExecutionRequestStatus.READY,
+        }:
+            raise InvalidTransition(f"request cannot close from {self.status}")
+        _aware(now, "now")
+        clean_reason = _required_text(reason, "reason")
+        self.status = status
+        self.gate_reason = clean_reason
+        self.gate_details = MappingProxyType({"reason": clean_reason})
+        self.status_changed_at = now
+        self.updated_at = now
+        self.version += 1
+
+    def _record_gate(
+        self,
+        *,
+        decision: ActivationDecision | None,
+        now: datetime,
+    ) -> None:
+        self.gate_reason = decision.reason if decision is not None else "ready"
+        self.gate_details = (
+            decision.details if decision is not None else MappingProxyType({})
+        )
+        self.gate_evaluated_at = now
+        self.status_changed_at = now
+        self.updated_at = now
+        self.version += 1
+
+
+def _fact_map(
+    facts: Mapping[UUID, UpstreamActivationFact]
+    | Iterable[UpstreamActivationFact],
+) -> dict[UUID, UpstreamActivationFact]:
+    values = facts.values() if isinstance(facts, Mapping) else facts
+    result: dict[UUID, UpstreamActivationFact] = {}
+    for fact in values:
+        if fact.request_id in result:
+            raise ValidationError(
+                f"duplicate upstream activation fact: {fact.request_id}"
+            )
+        result[fact.request_id] = fact
+    return result
+
+
+def _dependency_enforcement(value: DependencyEnforcement | str) -> DependencyEnforcement:
+    try:
+        return value if isinstance(value, DependencyEnforcement) else DependencyEnforcement(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported dependency enforcement: {value!r}") from exc
+
+
+def _execution_status(value: ExecutionStatus | str) -> ExecutionStatus:
+    try:
+        return value if isinstance(value, ExecutionStatus) else ExecutionStatus(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported execution status: {value!r}") from exc
+
+
+def _evidence_status(value: EvidenceClaimStatus | str) -> EvidenceClaimStatus:
+    try:
+        return value if isinstance(value, EvidenceClaimStatus) else EvidenceClaimStatus(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            "R5.1 activation only supports candidate evidence claims"
+        ) from exc
+
+
+def _artifact_refs(values: Iterable[str], label: str) -> tuple[str, ...]:
+    refs = _clean_strings(values, label)
+    for ref in refs:
+        match = re.fullmatch(r"artifact_type:([a-z_]+)", ref)
+        if match is None:
+            raise ValidationError(f"{label} must use artifact_type:<type>")
+        try:
+            ArtifactType(match.group(1))
+        except ValueError as exc:
+            raise ValidationError(f"unsupported artifact type in {label}: {ref}") from exc
+    return refs
+
+
+def _evidence_refs(values: Iterable[str], label: str) -> tuple[str, ...]:
+    refs = _clean_strings(values, label)
+    for ref in refs:
+        if re.fullmatch(r"acceptance:\S+", ref) is None:
+            raise ValidationError(f"{label} must use acceptance:<criterion-ref>")
+    return refs
+
+
+def _clean_strings(values: Iterable[str], label: str) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValidationError(f"{label} must contain strings")
+        item = value.strip()
+        if item and item not in cleaned:
+            cleaned.append(item)
+    return tuple(cleaned)
+
+
+def _required_text(value: str, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} is required")
+    return value.strip()
+
+
+def _aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None:
+        raise ValidationError(f"{name} must be timezone-aware")
+
+
+def _append_unique[ValueT](values: list[ValueT], value: ValueT) -> None:
+    if value not in values:
+        values.append(value)
