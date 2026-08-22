@@ -16,6 +16,9 @@ from sidera_control_plane.api.plan_queries import router as plan_queries_router
 from sidera_control_plane.api.projection_stream import (
     router as projection_stream_router,
 )
+from sidera_control_plane.api.subtask_queries import (
+    router as subtask_queries_router,
+)
 from sidera_control_plane.api.task_commands import router as task_commands_router
 from sidera_control_plane.api.task_first_queries import (
     router as task_first_queries_router,
@@ -59,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(app)
     app.include_router(task_commands_router)
     app.include_router(task_first_queries_router)
+    app.include_router(subtask_queries_router)
     app.include_router(task_queries_router)
     app.include_router(plan_queries_router)
     app.include_router(projection_stream_router)

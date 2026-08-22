@@ -272,6 +272,135 @@ class TaskConsoleGraphProjectionResponse(BaseModel):
     milestones: tuple[SubtaskMilestoneProjectionResponse, ...]
 
 
+class SubtaskSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    task_id: UUID | None
+    kind: str
+    title: str
+    goal_summary: str
+    state: str
+    milestone_key: str | None
+    acceptance_refs: tuple[str, ...]
+    evidence_required: int
+    evidence_satisfied: int
+    current_action: str | None
+
+
+class RelatedSubtaskProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtask_key: str
+    title: str
+    state: str
+
+
+class WorkerItemSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_id: UUID
+    stable_key: str
+    title: str
+    responsibility: str
+    role: str
+    status: str
+    context_version: int
+    current_step: str | None
+    blocker: str | None
+    current_agent_summary: str | None
+    recent_activity_at: datetime | None
+
+
+class WorkerItemGraphEdgeProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upstream_worker_item_id: UUID
+    downstream_worker_item_id: UUID
+    kind: str
+
+
+class WorkerItemGraphProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_ids: tuple[UUID, ...]
+    edges: tuple[WorkerItemGraphEdgeProjectionResponse, ...]
+
+
+class SubtaskArtifactSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+    artifact_type: str
+    media_type: str
+    size_bytes: int
+    content_available: bool
+
+
+class SubtaskEvidenceSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: UUID
+    acceptance_ref: str
+    conclusion: str
+    artifact_ids: tuple[UUID, ...]
+
+
+class SubtaskCheckpointSummaryProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    sequence: int
+    title: str
+    artifact_ids: tuple[UUID, ...]
+    occurred_at: datetime
+
+
+class SubtaskAttentionProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    kind: str
+    worker_item_id: UUID | None
+    worker_item_title: str | None
+    reason: str
+    occurred_at: datetime
+
+
+class SubtaskActivityProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    source_id: UUID
+    occurred_at: datetime
+    kind: str
+    summary: str
+    correlation_id: UUID
+    worker_item_id: UUID | None
+
+
+class SubtaskWorkspaceProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    task_title: str
+    plan_snapshot_id: UUID
+    plan_generation: int
+    subtask: SubtaskSummaryProjectionResponse
+    upstream_subtasks: tuple[RelatedSubtaskProjectionResponse, ...]
+    downstream_subtasks: tuple[RelatedSubtaskProjectionResponse, ...]
+    worker_items: tuple[WorkerItemSummaryProjectionResponse, ...]
+    worker_graph: WorkerItemGraphProjectionResponse
+    artifacts: tuple[SubtaskArtifactSummaryProjectionResponse, ...]
+    evidence: tuple[SubtaskEvidenceSummaryProjectionResponse, ...]
+    checkpoints: tuple[SubtaskCheckpointSummaryProjectionResponse, ...]
+    attention_items: tuple[SubtaskAttentionProjectionResponse, ...]
+    recent_activity: tuple[SubtaskActivityProjectionResponse, ...]
+    last_change_cursor: int
+    as_of: datetime
+
+
 class ExecutionSummaryProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

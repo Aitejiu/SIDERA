@@ -16,6 +16,9 @@ from sidera_control_plane.application.execution_commands import (
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
+from sidera_control_plane.application.subtask_workspace_queries import (
+    SubtaskWorkspaceQueryService,
+)
 from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.application.task_console_queries import (
     TaskConsoleQueryService,
@@ -33,6 +36,9 @@ from sidera_control_plane.persistence.artifact_content_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
+)
+from sidera_control_plane.persistence.subtask_workspace_query_store import (
+    SqlAlchemySubtaskWorkspaceQueryStore,
 )
 from sidera_control_plane.persistence.task_console_query_store import (
     SqlAlchemyTaskConsoleQueryStore,
@@ -110,6 +116,14 @@ def get_task_console_query_service(
         SqlAlchemyTaskConsoleQueryStore(database),
         actor_type=settings.local_actor_type,
         actor_id=settings.local_actor_id,
+    )
+
+
+def get_subtask_workspace_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> SubtaskWorkspaceQueryService:
+    return SubtaskWorkspaceQueryService(
+        SqlAlchemySubtaskWorkspaceQueryStore(database)
     )
 
 
