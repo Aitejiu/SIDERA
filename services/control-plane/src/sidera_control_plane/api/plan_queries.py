@@ -42,7 +42,10 @@ def list_plan_generations(
         snapshots = PlanRepository(session).list_for_root(root_task_id, workspace_id)
     if not snapshots:
         raise NotFound("task plan not found")
-    return tuple(TaskPlanSnapshotResponse.from_snapshot(item) for item in snapshots)
+    return tuple(
+        TaskPlanSnapshotResponse.from_snapshot(item)
+        for item in reversed(snapshots)
+    )
 
 
 @router.get(

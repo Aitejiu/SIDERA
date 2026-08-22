@@ -159,6 +159,42 @@ class ExecutionRepository:
             statement = statement.where(ExecutionModel.id != excluding)
         return (self._session.scalar(statement) or 0) > 0
 
+    def list_ids_for_task_window(
+        self,
+        task_id: UUID,
+        workspace_id: UUID,
+        start: datetime,
+        end: datetime | None,
+    ) -> tuple[UUID, ...]:
+        statement = select(ExecutionModel.id).where(
+            ExecutionModel.task_id == task_id,
+            ExecutionModel.workspace_id == workspace_id,
+            ExecutionModel.created_at >= start,
+        )
+        if end is not None:
+            statement = statement.where(ExecutionModel.created_at < end)
+        rows = self._session.scalars(
+            statement.order_by(ExecutionModel.created_at, ExecutionModel.id)
+        ).all()
+        return tuple(rows)
+
+    def assign_worker_item_if_unset(
+        self, execution_id: UUID, workspace_id: UUID, worker_item_id: UUID
+    ) -> bool:
+        result = self._session.execute(
+            update(ExecutionModel)
+            .where(
+                ExecutionModel.id == execution_id,
+                ExecutionModel.workspace_id == workspace_id,
+                ExecutionModel.worker_item_id.is_(None),
+            )
+            .values(
+                worker_item_id=worker_item_id,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        return isinstance(result, CursorResult) and result.rowcount == 1
+
     def _current_version(self, execution_id: UUID, workspace_id: UUID) -> int:
         version = self._session.scalar(
             select(ExecutionModel.version).where(

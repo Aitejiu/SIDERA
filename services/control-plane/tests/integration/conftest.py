@@ -75,6 +75,7 @@ def _clear_database(database: Database) -> None:
                 active_lease_id=None,
                 source_execution_id=None,
                 source_session_id=None,
+                worker_item_id=None,
             )
         )
         for model in (

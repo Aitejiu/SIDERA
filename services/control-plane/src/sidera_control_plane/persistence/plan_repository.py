@@ -98,9 +98,18 @@ class PlanRepository:
                 PlanSnapshotModel.root_task_id == root_task_id,
                 PlanSnapshotModel.workspace_id == workspace_id,
             )
-            .order_by(PlanSnapshotModel.generation.desc())
+            .order_by(PlanSnapshotModel.generation.asc())
         ).all()
         return tuple(_to_domain(row) for row in rows)
+
+    def list_roots_with_snapshots(self, workspace_id: UUID) -> tuple[UUID, ...]:
+        rows = self._session.scalars(
+            select(PlanSnapshotModel.root_task_id)
+            .where(PlanSnapshotModel.workspace_id == workspace_id)
+            .distinct()
+            .order_by(PlanSnapshotModel.root_task_id)
+        ).all()
+        return tuple(rows)
 
 
 def _to_domain(row: PlanSnapshotModel) -> TaskPlanSnapshot:

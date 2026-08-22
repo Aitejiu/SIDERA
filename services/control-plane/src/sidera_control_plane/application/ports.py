@@ -91,6 +91,9 @@ class PlanRepositoryPort(Protocol):
     ) -> tuple[TaskPlanSnapshot, ...]:
         raise NotImplementedError
 
+    def list_roots_with_snapshots(self, workspace_id: UUID) -> tuple[UUID, ...]:
+        raise NotImplementedError
+
 
 class AttentionAcknowledgementRepositoryPort(Protocol):
     def get_current_source(
@@ -250,6 +253,20 @@ class ExecutionRepositoryPort(Protocol):
 
     def has_live_for_task(
         self, task_id: UUID, *, excluding: UUID | None = None
+    ) -> bool:
+        raise NotImplementedError
+
+    def list_ids_for_task_window(
+        self,
+        task_id: UUID,
+        workspace_id: UUID,
+        start: datetime,
+        end: datetime | None,
+    ) -> tuple[UUID, ...]:
+        raise NotImplementedError
+
+    def assign_worker_item_if_unset(
+        self, execution_id: UUID, workspace_id: UUID, worker_item_id: UUID
     ) -> bool:
         raise NotImplementedError
 
