@@ -7,10 +7,10 @@ import {
 
 import {
   App,
-  SubtaskRoutePlaceholder,
   TaskRoutePlaceholder,
   WorkerItemRoutePlaceholder,
 } from "./App";
+import { SubtaskPage } from "@/features/subtasks/SubtaskPage";
 import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
 import { TaskListPage } from "@/features/tasks/TaskListPage";
 import { PlanDiffPage } from "@/features/tasks/PlanDiffPage";
@@ -40,7 +40,7 @@ export const routes: RouteObject[] = [
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/subtasks/:subtaskKey",
-        element: <SubtaskRoutePlaceholder />,
+        element: <SubtaskPage />,
       },
       {
         path: "/workspaces/:workspaceId/worker-items/:workerItemId",
