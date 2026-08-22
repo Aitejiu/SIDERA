@@ -9,14 +9,19 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
     ExecutionInputCommandHandler,
 )
+from sidera_control_plane.application.ports import WorkerItemPlacement
 from sidera_control_plane.domain.commands import CommandEnvelope
-from sidera_control_plane.domain.errors import InvalidTransition
+from sidera_control_plane.domain.errors import (
+    ExecutionContextChanged,
+    InvalidTransition,
+)
 from sidera_control_plane.domain.plans import (
+    SubtaskPlanItem,
     TaskPlanSnapshot,
-    WorkerSlot,
-    WorkItem,
+    WorkerItemPlanItem,
     WorkItemKind,
 )
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
@@ -27,6 +32,7 @@ from sidera_control_plane.persistence.models import (
     OutboxMessageModel,
     PlanSnapshotModel,
     TaskModel,
+    WorkerItemModel,
     WorkerModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -40,13 +46,14 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
     task_id = uuid4()
     plan_snapshot_id = uuid4()
     worker_id = uuid4()
+    worker_item_id = uuid4()
     execution_id = uuid4()
     lease_id = uuid4()
     session_id = uuid4()
     with database.session() as db_session:
         snapshot = TaskPlanSnapshot.create(
             snapshot_id=plan_snapshot_id,
-            schema_version=1,
+            schema_version=2,
             workspace_id=workspace_id,
             root_task_id=task_id,
             generation=1,
@@ -56,8 +63,8 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
             title="Input task",
             goal_summary="Accept direct user input",
             acceptance_refs=("input is delivered",),
-            work_items=(
-                WorkItem(
+            subtasks=(
+                SubtaskPlanItem(
                     key="input",
                     task_id=task_id,
                     kind=WorkItemKind.CHILD,
@@ -65,23 +72,25 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
                     goal_summary="Accept direct user input",
                     acceptance_refs=("input is delivered",),
                     milestone_key=None,
-                    worker_slot_key="input",
                     expected_outputs=(),
                     source_refs=(),
                 ),
             ),
-            worker_slots=(
-                WorkerSlot(
-                    key="input",
+            worker_item_plans=(
+                WorkerItemPlanItem(
+                    key="input:worker",
+                    worker_item_id=worker_item_id,
+                    subtask_key="input",
+                    title="Input WorkerItem",
                     role="implementation",
+                    responsibility="Accept direct user input",
                     capability_requirements=("python",),
                     worker_policy_ref=None,
                     configuration_ref=None,
                     concurrency_limit=1,
+                    source_refs=(),
                 ),
             ),
-            milestones=(),
-            dependencies=(),
             published_by="integration",
             published_at=NOW,
         )
@@ -134,11 +143,38 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
             )
         )
         db_session.commit()
+    worker_item = WorkerItem.create(
+        item_id=worker_item_id,
+        workspace_id=workspace_id,
+        root_task_id=task_id,
+        title="Input WorkerItem",
+        responsibility="Accept direct user input",
+        now=NOW,
+    )
+    placement = WorkerItemPlacement(
+        plan_snapshot_id=plan_snapshot_id,
+        plan_generation=1,
+        workspace_id=workspace_id,
+        root_task_id=task_id,
+        worker_item_id=worker_item_id,
+        worker_item_key="input:worker",
+        subtask_key="input",
+        subtask_task_id=task_id,
+        role="implementation",
+        capability_requirements=("python",),
+        worker_policy_ref=None,
+        configuration_ref=None,
+        created_at=NOW,
+    )
+    with SqlAlchemyUnitOfWork(database) as uow:
+        uow.worker_items.add(worker_item)
+        uow.worker_items.add_placement(placement)
     with database.session() as db_session:
         execution = ExecutionModel(
             id=execution_id,
             workspace_id=workspace_id,
             task_id=task_id,
+            worker_item_id=worker_item_id,
             lineage_id=execution_id,
             attempt=1,
             max_attempts=2,
@@ -207,6 +243,7 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
     return {
         "task_id": task_id,
         "plan_snapshot_id": plan_snapshot_id,
+        "worker_item_id": worker_item_id,
         "worker_id": worker_id,
         "execution_id": execution_id,
         "lease_id": lease_id,
@@ -250,13 +287,13 @@ def _envelope(
 
 def _context(ids: dict[str, UUID]) -> dict[str, object]:
     return {
-        "plan_snapshot_id": str(ids["plan_snapshot_id"]),
-        "root_task_id": str(ids["task_id"]),
-        "work_item_key": "input",
-        "worker_slot_key": "input",
-        "worker_id": str(ids["worker_id"]),
+        "worker_item_id": str(ids["worker_item_id"]),
+        "plan_generation": 1,
+        "context_version": 1,
         "execution_id": str(ids["execution_id"]),
         "session_id": str(ids["session_id"]),
+        "session_version": 1,
+        "worker_id": str(ids["worker_id"]),
     }
 
 
@@ -352,3 +389,129 @@ def test_input_commands_enforce_one_pending_and_allow_update_cancel(
         item = db_session.query(ExecutionInputModel).one()
         assert item.status == "cancelled"
         assert item.text == "updated"
+
+
+@pytest.mark.parametrize(
+    "changed_field,changed_value",
+    [
+        ("worker_item_id", str(uuid4())),
+        ("plan_generation", 2),
+        ("context_version", 2),
+        ("execution_id", str(uuid4())),
+        ("session_id", str(uuid4())),
+        ("session_version", 2),
+        ("worker_id", str(uuid4())),
+    ],
+)
+def test_send_input_revalidates_each_worker_item_context_field(
+    database: Database,
+    workspace_id: UUID,
+    changed_field: str,
+    changed_value: object,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    service = _service(database)
+    context = _context(ids)
+    context[changed_field] = changed_value
+    envelope = _envelope(
+        workspace_id,
+        ids["session_id"],
+        ids["execution_id"],
+        "SendExecutionInput",
+        f"changed-{changed_field}",
+        payload={"text": "fresh context", "attachment_refs": []},
+        context=context,
+    )
+
+    with pytest.raises(ExecutionContextChanged) as error:
+        service.handle(envelope)
+
+    assert changed_field in error.value.changed_fields
+    current = error.value.details["current"]
+    assert isinstance(current, dict)
+    assert current[changed_field] != changed_value
+
+
+@pytest.mark.parametrize("status", ["paused", "retired"])
+def test_send_input_rejects_non_active_worker_item(
+    database: Database,
+    workspace_id: UUID,
+    status: str,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    with database.session() as session:
+        session.execute(
+            update(WorkerItemModel)
+            .where(WorkerItemModel.id == ids["worker_item_id"])
+            .values(status=status)
+        )
+        session.commit()
+
+    with pytest.raises(InvalidTransition, match="not active"):
+        _service(database).handle(
+            _envelope(
+                workspace_id,
+                ids["session_id"],
+                ids["execution_id"],
+                "SendExecutionInput",
+                f"status-{status}",
+                payload={"text": "blocked", "attachment_refs": []},
+                context=_context(ids),
+            )
+        )
+
+
+def test_send_input_rejects_unacknowledged_worker_item_context(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    with database.session() as session:
+        session.execute(
+            update(WorkerItemModel)
+            .where(WorkerItemModel.id == ids["worker_item_id"])
+            .values(context_version=2, acknowledged_context_version=1)
+        )
+        session.commit()
+    context = _context(ids)
+    context["context_version"] = 2
+
+    with pytest.raises(InvalidTransition, match="not acknowledged"):
+        _service(database).handle(
+            _envelope(
+                workspace_id,
+                ids["session_id"],
+                ids["execution_id"],
+                "SendExecutionInput",
+                "unacknowledged-context",
+                payload={"text": "blocked", "attachment_refs": []},
+                context=context,
+            )
+        )
+
+
+def test_send_input_rejects_non_active_session(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    with database.session() as session:
+        session.execute(
+            update(ExecutionSessionModel)
+            .where(ExecutionSessionModel.id == ids["session_id"])
+            .values(status="closed")
+        )
+        session.commit()
+
+    with pytest.raises(InvalidTransition, match="active Session"):
+        _service(database).handle(
+            _envelope(
+                workspace_id,
+                ids["session_id"],
+                ids["execution_id"],
+                "SendExecutionInput",
+                "closed-session",
+                payload={"text": "blocked", "attachment_refs": []},
+                context=_context(ids),
+            )
+        )

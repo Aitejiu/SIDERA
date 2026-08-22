@@ -434,13 +434,13 @@ class ExecutionInputTargetPayload(BaseModel):
 class ExecutionContextAddressPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    plan_snapshot_id: UUID
-    root_task_id: UUID
-    work_item_key: NonEmptyString
-    worker_slot_key: NonEmptyString
-    worker_id: UUID
+    worker_item_id: UUID
+    plan_generation: int = Field(ge=1)
+    context_version: int = Field(ge=1)
     execution_id: UUID
     session_id: UUID
+    session_version: int = Field(ge=1)
+    worker_id: UUID
 
 
 class SendExecutionInputPayload(BaseModel):

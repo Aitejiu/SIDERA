@@ -21,8 +21,7 @@ def _request(command_type: str, payload: dict[str, object]) -> dict[str, object]
 
 
 def test_send_execution_input_requires_exact_session_and_preserves_text() -> None:
-    plan_snapshot_id = uuid4()
-    root_task_id = uuid4()
+    worker_item_id = uuid4()
     session_id = uuid4()
     execution_id = uuid4()
     worker_id = uuid4()
@@ -32,13 +31,13 @@ def test_send_execution_input_requires_exact_session_and_preserves_text() -> Non
             "SendExecutionInput",
             {
                 "context": {
-                    "plan_snapshot_id": str(plan_snapshot_id),
-                    "root_task_id": str(root_task_id),
-                    "work_item_key": "backend",
-                    "worker_slot_key": "backend",
-                    "worker_id": str(worker_id),
+                    "worker_item_id": str(worker_item_id),
+                    "plan_generation": 3,
+                    "context_version": 2,
                     "execution_id": str(execution_id),
                     "session_id": str(session_id),
+                    "session_version": 4,
+                    "worker_id": str(worker_id),
                 },
                 "client_idempotency_key": "client-1",
                 "text": text,
@@ -94,13 +93,13 @@ def test_input_schema_rejects_empty_text() -> None:
                 "SendExecutionInput",
                 {
                     "context": {
-                        "plan_snapshot_id": str(uuid4()),
-                        "root_task_id": str(uuid4()),
-                        "work_item_key": "backend",
-                        "worker_slot_key": "backend",
-                        "worker_id": str(uuid4()),
+                        "worker_item_id": str(uuid4()),
+                        "plan_generation": 1,
+                        "context_version": 1,
                         "execution_id": str(uuid4()),
                         "session_id": str(uuid4()),
+                        "session_version": 1,
+                        "worker_id": str(uuid4()),
                     },
                     "client_idempotency_key": "client-1",
                     "text": "",

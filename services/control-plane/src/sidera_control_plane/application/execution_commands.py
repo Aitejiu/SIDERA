@@ -4,7 +4,10 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.errors import NotFound
-from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.ports import (
+    ControlPlaneUnitOfWork,
+    WorkerItemPlacement,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     ExecutionContextChanged,
@@ -31,7 +34,7 @@ from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import TaskStatus
-from sidera_control_plane.domain.worker_item import WorkerItemStatus
+from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
 
 
 def _continuation_worker_id(execution: Execution, session: ExecutionSession) -> UUID:
@@ -850,7 +853,9 @@ class ExecutionInputCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         context = _required_context(envelope.payload)
-        _validate_input_target(envelope, context["session_id"])
+        context_session_id = cast(UUID, context["session_id"])
+        context_worker_item_id = cast(UUID, context["worker_item_id"])
+        _validate_input_target(envelope, context_session_id)
 
         # Discover the Session without a lock, then keep the execution/root-task
         # lock order aligned with plan publication before revalidating the Session.
@@ -860,46 +865,38 @@ class ExecutionInputCommandHandler:
         )
         if session_probe is None:
             raise NotFound("execution session not found")
+        # Keep intervention revalidation deterministic: WorkerItem -> Execution
+        # -> active Session -> Binding -> runtime Worker.
+        worker_item = uow.worker_items.get(
+            context_worker_item_id, envelope.workspace_id, for_update=True
+        )
         execution = uow.executions.get(
             session_probe.execution_id, envelope.workspace_id, for_update=True
         )
         if execution is None:
             raise NotFound("execution not found")
+        current_worker_item = worker_item
+        if execution.worker_item_id is not None and (
+            current_worker_item is None
+            or current_worker_item.id != execution.worker_item_id
+        ):
+            current_worker_item = uow.worker_items.get(
+                execution.worker_item_id, envelope.workspace_id
+            )
         snapshot = uow.plans.get_current_for_task(
             execution.task_id, envelope.workspace_id
         )
-        if snapshot is None:
-            raise ExecutionContextChanged(
-                (
-                    "plan_snapshot_id",
-                    "root_task_id",
-                    "work_item_key",
-                    "worker_slot_key",
-                ),
-                current={
-                    "execution_id": str(execution.id),
-                    "session_id": str(session_probe.id),
-                },
+        if snapshot is not None:
+            snapshot = uow.plans.get_current_for_root(
+                snapshot.root_task_id, envelope.workspace_id
             )
-        root_task = uow.tasks.get(
-            snapshot.root_task_id, envelope.workspace_id, for_update=True
+        session = uow.sessions.get_any(
+            session_probe.id, envelope.workspace_id, for_update=True
         )
-        if root_task is None:
-            raise NotFound("root task not found")
-        snapshot = uow.plans.get_current_for_root(
-            root_task.id, envelope.workspace_id
-        )
-        if snapshot is None:
-            raise ExecutionContextChanged(
-                ("plan_snapshot_id",),
-                current={
-                    "root_task_id": str(root_task.id),
-                    "execution_id": str(execution.id),
-                    "session_id": str(session_probe.id),
-                },
-            )
-
-        session = self._load_session(uow, envelope)
+        if session is None:
+            raise NotFound("execution session not found")
+        if session.status is not ExecutionSessionStatus.ACTIVE:
+            raise InvalidTransition("input requires an active Session")
         binding = uow.bindings.get_for_execution(
             execution.id, envelope.workspace_id, for_update=True
         )
@@ -914,6 +911,14 @@ class ExecutionInputCommandHandler:
         changed_fields, current = _execution_context_mismatches(
             context=context,
             snapshot=snapshot,
+            placement=(
+                uow.worker_items.get_current_placement(
+                    current_worker_item.id, envelope.workspace_id
+                )
+                if current_worker_item is not None
+                else None
+            ),
+            worker_item=current_worker_item,
             execution=execution,
             session=session,
             binding_worker_id=binding.worker_id if binding is not None else None,
@@ -921,6 +926,12 @@ class ExecutionInputCommandHandler:
         )
         if changed_fields:
             raise ExecutionContextChanged(changed_fields, current=current)
+        if worker_item is None:
+            raise ExecutionContextChanged(("worker_item_id",), current=current)
+        if worker_item.status is not WorkerItemStatus.ACTIVE:
+            raise InvalidTransition("WorkerItem is not active")
+        if not worker_item.context_is_synchronized:
+            raise InvalidTransition("WorkerItem context is not acknowledged")
 
         client_key = _required_str(envelope.payload, "client_idempotency_key")
         text = _required_str(envelope.payload, "text")
@@ -1236,23 +1247,23 @@ def _required_str(payload: Mapping[str, Any], name: str) -> str:
     return value
 
 
-def _required_context(payload: dict[str, Any]) -> dict[str, UUID | str]:
+def _required_context(payload: dict[str, Any]) -> dict[str, UUID | int]:
     raw_context = payload.get("context")
     if not isinstance(raw_context, Mapping):
         raise ValidationError("context is required for SendExecutionInput")
     context = cast(Mapping[str, Any], raw_context)
     return {
-        "plan_snapshot_id": _required_uuid(context, "plan_snapshot_id"),
-        "root_task_id": _required_uuid(context, "root_task_id"),
-        "work_item_key": _required_str(context, "work_item_key"),
-        "worker_slot_key": _required_str(context, "worker_slot_key"),
-        "worker_id": _required_uuid(context, "worker_id"),
+        "worker_item_id": _required_uuid(context, "worker_item_id"),
+        "plan_generation": _required_positive_int(context, "plan_generation"),
+        "context_version": _required_positive_int(context, "context_version"),
         "execution_id": _required_uuid(context, "execution_id"),
         "session_id": _required_uuid(context, "session_id"),
+        "session_version": _required_positive_int(context, "session_version"),
+        "worker_id": _required_uuid(context, "worker_id"),
     }
 
 
-def _context_payload(context: Mapping[str, UUID | str]) -> dict[str, str]:
+def _context_payload(context: Mapping[str, UUID | int]) -> dict[str, str]:
     return {key: str(value) for key, value in context.items()}
 
 
@@ -1272,21 +1283,15 @@ def _validate_input_target(
 
 def _execution_context_mismatches(
     *,
-    context: Mapping[str, UUID | str],
-    snapshot: TaskPlanSnapshot,
+    context: Mapping[str, UUID | int],
+    snapshot: TaskPlanSnapshot | None,
+    placement: WorkerItemPlacement | None,
+    worker_item: WorkerItem | None,
     execution: Execution,
     session: ExecutionSession,
     binding_worker_id: UUID | None,
     worker_loaded: bool,
 ) -> tuple[tuple[str, ...], dict[str, object]]:
-    work_item = next(
-        (item for item in snapshot.work_items if item.key == context["work_item_key"]),
-        None,
-    )
-    worker_slot = next(
-        (slot for slot in snapshot.worker_slots if slot.key == context["worker_slot_key"]),
-        None,
-    )
     worker_ids = {
         worker_id
         for worker_id in (
@@ -1298,36 +1303,36 @@ def _execution_context_mismatches(
     }
     current_worker_id = next(iter(worker_ids), None) if len(worker_ids) == 1 else None
     current = {
-        "plan_snapshot_id": str(snapshot.id),
-        "root_task_id": str(snapshot.root_task_id),
-        "work_item_key": work_item.key if work_item is not None else None,
-        "worker_slot_key": (
-            worker_slot.key
-            if worker_slot is not None
-            else work_item.worker_slot_key if work_item is not None else None
+        "worker_item_id": (
+            str(execution.worker_item_id)
+            if execution.worker_item_id is not None
+            else None
         ),
+        "plan_generation": placement.plan_generation if placement is not None else (
+            snapshot.generation if snapshot is not None else None
+        ),
+        "context_version": worker_item.context_version if worker_item is not None else None,
         "worker_id": str(current_worker_id) if current_worker_id is not None else None,
         "execution_id": str(execution.id),
         "session_id": str(session.id),
+        "session_version": session.version,
     }
     changed: set[str] = set()
-    if context["plan_snapshot_id"] != snapshot.id:
-        changed.add("plan_snapshot_id")
-    if context["root_task_id"] != snapshot.root_task_id:
-        changed.add("root_task_id")
     if (
-        work_item is None
-        or work_item.task_id != execution.task_id
-        or context["work_item_key"] != work_item.key
+        worker_item is None
+        or execution.worker_item_id != context["worker_item_id"]
     ):
-        changed.add("work_item_key")
+        changed.add("worker_item_id")
     if (
-        worker_slot is None
-        or work_item is None
-        or work_item.worker_slot_key != worker_slot.key
-        or context["worker_slot_key"] != worker_slot.key
+        placement is None
+        or context["plan_generation"] != placement.plan_generation
     ):
-        changed.add("worker_slot_key")
+        changed.add("plan_generation")
+    if (
+        worker_item is None
+        or context["context_version"] != worker_item.context_version
+    ):
+        changed.add("context_version")
     if (
         len(worker_ids) != 1
         or current_worker_id != context["worker_id"]
@@ -1338,17 +1343,19 @@ def _execution_context_mismatches(
         changed.add("execution_id")
     if context["session_id"] != session.id:
         changed.add("session_id")
+    if context["session_version"] != session.version:
+        changed.add("session_version")
     return tuple(field for field in _CONTEXT_FIELDS if field in changed), current
 
 
 _CONTEXT_FIELDS = (
-    "plan_snapshot_id",
-    "root_task_id",
-    "work_item_key",
-    "worker_slot_key",
-    "worker_id",
+    "worker_item_id",
+    "plan_generation",
+    "context_version",
     "execution_id",
     "session_id",
+    "session_version",
+    "worker_id",
 )
 
 
@@ -1356,6 +1363,13 @@ def _required_int(payload: Mapping[str, Any], name: str) -> int:
     value = payload.get(name)
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValidationError(f"{name} must be an integer")
+    return value
+
+
+def _required_positive_int(payload: Mapping[str, Any], name: str) -> int:
+    value = _required_int(payload, name)
+    if value < 1:
+        raise ValidationError(f"{name} must be positive")
     return value
 
 
