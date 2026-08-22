@@ -145,6 +145,13 @@ def test_unit_of_work_commits_task_command_event_and_outbox_atomically(
     }
 
 
+def test_unit_of_work_exposes_worker_item_repository_on_shared_session(
+    uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+) -> None:
+    with uow_factory() as uow:
+        assert uow.worker_items is not None
+
+
 class MutateAndRejectHandler:
     command_types = frozenset({"MutateAndRejectTask"})
 

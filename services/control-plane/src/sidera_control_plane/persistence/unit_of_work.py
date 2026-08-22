@@ -22,6 +22,7 @@ from sidera_control_plane.application.ports import (
     ProjectionChangePublisherPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
+    WorkerItemRepositoryPort,
     WorkerRepositoryPort,
     WorkspaceRepositoryPort,
 )
@@ -55,6 +56,7 @@ from sidera_control_plane.persistence.repositories import (
     TaskRepository,
 )
 from sidera_control_plane.persistence.session_repository import SessionRepository
+from sidera_control_plane.persistence.worker_item_repository import WorkerItemRepository
 from sidera_control_plane.persistence.worker_repository import WorkerRepository
 from sidera_control_plane.persistence.workspace_repository import WorkspaceRepository
 
@@ -66,6 +68,7 @@ class SqlAlchemyUnitOfWork:
     attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
+    worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort
     sessions: SessionRepositoryPort
@@ -98,6 +101,7 @@ class SqlAlchemyUnitOfWork:
             )
         )
         self.workers = WorkerRepository(self.session)
+        self.worker_items = WorkerItemRepository(self.session)
         self.executions = ExecutionRepository(self.session)
         self.leases = LeaseStore(self.session)
         self.sessions = SessionRepository(self.session)

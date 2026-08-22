@@ -1,5 +1,6 @@
 from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import datetime
 from types import TracebackType
 from typing import Protocol, Self
@@ -40,6 +41,7 @@ from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
@@ -157,6 +159,64 @@ class WorkerRepositoryPort(Protocol):
     def claim_stale(
         self, *, heartbeat_cutoff: datetime, limit: int
     ) -> tuple[Worker, ...]:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerItemPlacement:
+    plan_snapshot_id: UUID
+    plan_generation: int
+    workspace_id: UUID
+    root_task_id: UUID
+    worker_item_id: UUID
+    worker_item_key: str
+    subtask_key: str
+    subtask_task_id: UUID | None
+    role: str
+    capability_requirements: tuple[str, ...]
+    worker_policy_ref: str | None
+    configuration_ref: str | None
+    created_at: datetime
+
+
+class WorkerItemRepositoryPort(Protocol):
+    def get(
+        self, item_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkerItem | None:
+        raise NotImplementedError
+
+    def add(self, item: WorkerItem) -> None:
+        raise NotImplementedError
+
+    def save(self, item: WorkerItem, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def get_by_stable_key(
+        self, root_task_id: UUID, stable_key: str
+    ) -> WorkerItem | None:
+        raise NotImplementedError
+
+    def add_placement(self, placement: WorkerItemPlacement) -> None:
+        raise NotImplementedError
+
+    def get_placement(
+        self, plan_snapshot_id: UUID, worker_item_id: UUID
+    ) -> WorkerItemPlacement | None:
+        raise NotImplementedError
+
+    def get_current_placement(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> WorkerItemPlacement | None:
+        raise NotImplementedError
+
+    def list_placements(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> tuple[WorkerItemPlacement, ...]:
+        raise NotImplementedError
+
+    def list_for_subtask(
+        self, plan_snapshot_id: UUID, subtask_key: str
+    ) -> tuple[WorkerItemPlacement, ...]:
         raise NotImplementedError
 
 
@@ -465,6 +525,7 @@ class ControlPlaneUnitOfWork(Protocol):
     attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
+    worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort
     leases: LeaseStorePort
     sessions: SessionRepositoryPort
