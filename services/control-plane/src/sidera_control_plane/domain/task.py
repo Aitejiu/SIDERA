@@ -97,3 +97,29 @@ class Task:
         self._assert_mutable()
         self.status = TaskStatus.CANCELED
         self.version += 1
+
+    def mark_ready(self) -> None:
+        self._assert_mutable()
+        if self.status not in {
+            TaskStatus.PENDING,
+            TaskStatus.WAITING,
+            TaskStatus.RUNNING,
+        }:
+            raise InvalidTransition(f"task cannot become ready from {self.status}")
+        self.status = TaskStatus.READY
+        self.version += 1
+
+    def mark_running(self) -> None:
+        self._assert_mutable()
+        if self.status not in {TaskStatus.READY, TaskStatus.RUNNING}:
+            raise InvalidTransition(f"task cannot run from {self.status}")
+        if self.status is not TaskStatus.RUNNING:
+            self.status = TaskStatus.RUNNING
+            self.version += 1
+
+    def wait_for_decision(self) -> None:
+        self._assert_mutable()
+        if self.status not in {TaskStatus.READY, TaskStatus.RUNNING}:
+            raise InvalidTransition(f"task cannot wait from {self.status}")
+        self.status = TaskStatus.WAITING
+        self.version += 1

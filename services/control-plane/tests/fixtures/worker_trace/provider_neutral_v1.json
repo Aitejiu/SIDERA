@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "workspace_id": "20000000-0000-0000-0000-000000000001",
+  "root_task_id": "30000000-0000-0000-0000-000000000001",
+  "plan_snapshot_id": "10000000-0000-0000-0000-000000000001",
+  "work_item_key": "backend",
+  "execution_id": "70000000-0000-0000-0000-000000000001",
+  "session_id": "80000000-0000-0000-0000-000000000001",
+  "events": [
+    {
+      "sequence": 1,
+      "occurred_at": "2026-08-21T12:00:00+00:00",
+      "event_type": "input.accepted",
+      "status": "accepted",
+      "payload": {"summary": "Implement the backend"}
+    },
+    {
+      "sequence": 2,
+      "occurred_at": "2026-08-21T12:00:01+00:00",
+      "event_type": "progress.updated",
+      "status": "running",
+      "payload": {"sessionUpdate": "agent_message_chunk", "text": "Inspecting the repository"}
+    },
+    {
+      "sequence": 3,
+      "occurred_at": "2026-08-21T12:00:02+00:00",
+      "event_type": "session.heartbeat",
+      "status": "running",
+      "payload": {"sessionUpdate": "usage_update", "usage": {"input_tokens": 12, "output_tokens": 8, "cached_tokens": 2}}
+    },
+    {
+      "sequence": 4,
+      "occurred_at": "2026-08-21T12:00:03+00:00",
+      "event_type": "progress.updated",
+      "status": "running",
+      "payload": {"sessionUpdate": "tool_call", "tool": "rg", "title": "Search sources"}
+    },
+    {
+      "sequence": 5,
+      "occurred_at": "2026-08-21T12:00:04+00:00",
+      "event_type": "progress.updated",
+      "status": "running",
+      "payload": {"sessionUpdate": "tool_call_update", "parent_tool": "rg", "tool": "shell"}
+    },
+    {
+      "sequence": 6,
+      "occurred_at": "2026-08-21T12:00:05+00:00",
+      "event_type": "artifact.created",
+      "status": "succeeded",
+      "payload": {"artifact_refs": ["a0000000-0000-0000-0000-000000000001"]}
+    },
+    {
+      "sequence": 7,
+      "occurred_at": "2026-08-21T12:00:06+00:00",
+      "event_type": "checkpoint.created",
+      "status": "succeeded",
+      "payload": {"title": "Repository inspected"}
+    },
+    {
+      "sequence": 8,
+      "occurred_at": "2026-08-21T12:00:07+00:00",
+      "event_type": "ExecutionLeased",
+      "status": "assigned",
+      "payload": {"worker_id": "60000000-0000-0000-0000-000000000001", "fencing_token": 9}
+    },
+    {
+      "sequence": 9,
+      "occurred_at": "2026-08-21T12:00:08+00:00",
+      "event_type": "event.ingestion.error",
+      "status": "failed",
+      "payload": {"summary": "Provider event was rejected", "authorization": "secret", "absolute_path": "/Users/private/file"}
+    },
+    {
+      "sequence": 10,
+      "occurred_at": "2026-08-21T12:00:09+00:00",
+      "event_type": "provider.unknown",
+      "status": "running",
+      "payload": {"kind": "future_provider_event", "value": "kept as summary"}
+    }
+  ]
+}

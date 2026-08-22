@@ -8,6 +8,7 @@ class CommandEnvelope:
     id: UUID
     workspace_id: UUID
     command_type: str
+    target_type: str
     actor_type: str
     actor_id: str
     target_id: UUID | None
@@ -28,6 +29,7 @@ class CommandResult:
 @dataclass(frozen=True, slots=True)
 class StoredCommand:
     id: UUID
+    target_type: str
     request_hash: str
     status: str
     result: dict[str, Any]

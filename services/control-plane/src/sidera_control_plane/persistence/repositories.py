@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -5,6 +6,10 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.application.ports import ProjectionChangePublisherPort
+from sidera_control_plane.application.projection_invalidation import (
+    projection_targets_for_event,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -20,20 +25,41 @@ from sidera_control_plane.persistence.models import (
     TaskModel,
     WorkspaceModel,
 )
+from sidera_control_plane.persistence.projection_scope import (
+    resolve_worker_item_scope,
+)
 
 
 class TaskRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def get(self, task_id: UUID, workspace_id: UUID) -> Task | None:
-        row = self._session.scalar(
+    def get(
+        self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> Task | None:
+        statement = select(TaskModel).where(
+            TaskModel.id == task_id,
+            TaskModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_task(row) if row is not None else None
+
+    def get_many(
+        self, task_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Task, ...]:
+        ordered_ids = tuple(dict.fromkeys(task_ids))
+        if not ordered_ids:
+            return ()
+        rows = self._session.scalars(
             select(TaskModel).where(
-                TaskModel.id == task_id,
+                TaskModel.id.in_(ordered_ids),
                 TaskModel.workspace_id == workspace_id,
             )
-        )
-        return _to_domain_task(row) if row is not None else None
+        ).all()
+        tasks_by_id = {row.id: _to_domain_task(row) for row in rows}
+        return tuple(tasks_by_id[task_id] for task_id in ordered_ids if task_id in tasks_by_id)
 
     def workspace_exists(self, workspace_id: UUID) -> bool:
         return (
@@ -111,6 +137,7 @@ class CommandRepository:
             return None
         return StoredCommand(
             id=row.id,
+            target_type=row.target_type,
             request_hash=row.request_hash,
             status=row.status,
             result=dict(row.result or {}),
@@ -157,8 +184,13 @@ class CommandRepository:
 
 
 class EventRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def append_with_outbox(self, event: EventData) -> None:
         self._session.add(
@@ -193,6 +225,65 @@ class EventRepository:
                 },
             )
         )
+        if self._projection_changes is not None:
+            worker_item_id, root_task_id = _resolve_event_scope(self._session, event)
+            for target in projection_targets_for_event(
+                event,
+                worker_item_id=worker_item_id,
+                root_task_id=root_task_id,
+            ):
+                self._projection_changes.changed(
+                    workspace_id=event.workspace_id,
+                    projection_type=target.projection_type,
+                    resource_id=target.resource_id,
+                    change_type=event.event_type,
+                    resource_version=event.aggregate_version,
+                    correlation_id=event.correlation_id,
+                )
+
+
+def _resolve_event_scope(
+    session: Session, event: EventData
+) -> tuple[UUID | None, UUID | None]:
+    worker_item_id = _payload_uuid(event.payload, "worker_item_id")
+    root_task_id = _payload_uuid(event.payload, "root_task_id")
+    context = event.payload.get("execution_context")
+    if worker_item_id is None and isinstance(context, dict):
+        worker_item_id = _value_uuid(context.get("worker_item_id"))
+
+    execution_id = _value_uuid(event.payload.get("execution_id"))
+    session_id = _value_uuid(event.payload.get("session_id"))
+    if execution_id is None and event.aggregate_type == "execution":
+        execution_id = event.aggregate_id
+    if session_id is None and event.aggregate_type == "execution_session":
+        session_id = event.aggregate_id
+    scope = resolve_worker_item_scope(
+        session,
+        event.workspace_id,
+        execution_id=execution_id,
+        session_id=session_id,
+        worker_item_id=worker_item_id,
+        root_task_id=root_task_id,
+    )
+    worker_item_id = scope.worker_item_id
+    root_task_id = scope.root_task_id
+
+    if root_task_id is None and event.aggregate_type == "task":
+        root_task_id = event.aggregate_id
+    return worker_item_id, root_task_id
+
+
+def _payload_uuid(payload: dict[str, object], key: str) -> UUID | None:
+    return _value_uuid(payload.get(key))
+
+
+def _value_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_domain_task(row: TaskModel) -> Task:
@@ -223,7 +314,7 @@ def _command_model(
         command_type=envelope.command_type,
         actor_type=envelope.actor_type,
         actor_id=envelope.actor_id,
-        target_type="task",
+        target_type=envelope.target_type,
         target_id=envelope.target_id,
         payload=envelope.payload,
         expected_version=envelope.expected_version,

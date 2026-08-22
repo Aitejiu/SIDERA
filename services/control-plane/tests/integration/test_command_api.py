@@ -1,3 +1,5 @@
+import hashlib
+import json
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +11,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from sidera_control_plane.api.app import create_app
-from sidera_control_plane.application.command_service import TaskCommandService
+from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import VersionConflict
@@ -34,6 +37,7 @@ def create_task_request(workspace_id: UUID) -> dict[str, Any]:
         "command_id": str(uuid4()),
         "workspace_id": str(workspace_id),
         "command_type": "CreateTask",
+        "target_type": "task",
         "actor": {"type": "user", "id": "user:test"},
         "target_id": None,
         "expected_version": None,
@@ -60,6 +64,7 @@ def mutation_request(
         "command_id": str(uuid4()),
         "workspace_id": str(workspace_id),
         "command_type": command_type,
+        "target_type": "task",
         "actor": {"type": "user", "id": "user:test"},
         "target_id": str(task_id),
         "expected_version": expected_version,
@@ -70,9 +75,44 @@ def mutation_request(
 
 
 def create_task(client: TestClient, workspace_id: UUID) -> UUID:
-    response = client.post("/api/commands", json=create_task_request(workspace_id))
+    response = client.post(
+        "/api/v1/commands", json=create_task_request(workspace_id)
+    )
     assert response.status_code == 201, response.text
     return UUID(response.json()["aggregate_id"])
+
+
+def legacy_request_hash(request: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        {
+            "command_type": request["command_type"],
+            "target_id": request["target_id"],
+            "expected_version": request["expected_version"],
+            "payload": request["payload"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def test_versioned_command_route_persists_explicit_target_type(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    request = create_task_request(workspace_id)
+
+    versioned = client.post("/api/v1/commands", json=request)
+    unversioned = client.post("/api/commands", json=request)
+
+    assert versioned.status_code == 201
+    assert unversioned.status_code == 404
+
+    with database.session() as session:
+        command = session.scalar(select(CommandModel))
+    assert command is not None
+    assert command.target_type == "task"
 
 
 def test_create_task_is_idempotent(
@@ -82,7 +122,7 @@ def test_create_task_is_idempotent(
 ) -> None:
     request = create_task_request(workspace_id)
 
-    first = client.post("/api/commands", json=request)
+    first = client.post("/api/v1/commands", json=request)
 
     assert first.status_code == 201, first.text
     assert first.json()["aggregate_version"] == 1
@@ -98,7 +138,7 @@ def test_create_task_is_idempotent(
         "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
-    second = client.post("/api/commands", json=replay)
+    second = client.post("/api/v1/commands", json=replay)
 
     assert second.status_code == 200
     assert second.json() == first.json()
@@ -114,7 +154,7 @@ def test_create_task_is_idempotent(
         "command_id": str(uuid4()),
         "payload": {**request["payload"], "title": "Different task"},
     }
-    conflict = client.post("/api/commands", json=changed_request)
+    conflict = client.post("/api/v1/commands", json=changed_request)
 
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "idempotency_conflict"
@@ -126,6 +166,61 @@ def test_create_task_is_idempotent(
     }
 
 
+def test_legacy_request_hash_replays_after_target_versioning(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+    row_counts: Callable[[], dict[str, int]],
+) -> None:
+    request = create_task_request(workspace_id)
+    first = client.post("/api/v1/commands", json=request)
+    assert first.status_code == 201, first.text
+
+    with database.session() as session:
+        command = session.scalar(select(CommandModel))
+        assert command is not None
+        command.request_hash = legacy_request_hash(request)
+        session.commit()
+
+    replay = {
+        **request,
+        "command_id": str(uuid4()),
+        "correlation_id": str(uuid4()),
+    }
+    second = client.post("/api/v1/commands", json=replay)
+
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert row_counts() == {
+        "tasks": 1,
+        "commands": 1,
+        "events": 1,
+        "outbox_messages": 1,
+    }
+
+
+@pytest.mark.parametrize("target_type", ["bogus", "worker"])
+def test_task_command_rejects_invalid_target_type(
+    client: TestClient,
+    workspace_id: UUID,
+    row_counts: Callable[[], dict[str, int]],
+    target_type: str,
+) -> None:
+    request = create_task_request(workspace_id)
+    request["target_type"] = target_type
+
+    response = client.post("/api/v1/commands", json=request)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert row_counts() == {
+        "tasks": 0,
+        "commands": 0,
+        "events": 0,
+        "outbox_messages": 0,
+    }
+
+
 def test_create_task_rejects_invalid_payload(
     client: TestClient,
     workspace_id: UUID,
@@ -134,7 +229,7 @@ def test_create_task_rejects_invalid_payload(
     request = create_task_request(workspace_id)
     del request["payload"]["acceptance_criteria"]
 
-    response = client.post("/api/commands", json=request)
+    response = client.post("/api/v1/commands", json=request)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
@@ -150,7 +245,7 @@ def test_create_task_requires_existing_workspace(
     client: TestClient,
     row_counts: Callable[[], dict[str, int]],
 ) -> None:
-    response = client.post("/api/commands", json=create_task_request(uuid4()))
+    response = client.post("/api/v1/commands", json=create_task_request(uuid4()))
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
@@ -187,7 +282,7 @@ def test_versioned_task_mutations_and_successful_replay(
 
     responses = []
     for request, expected_version in commands:
-        response = client.post("/api/commands", json=request)
+        response = client.post("/api/v1/commands", json=request)
         assert response.status_code == 200, response.text
         assert response.json()["aggregate_version"] == expected_version
         responses.append(response)
@@ -197,7 +292,7 @@ def test_versioned_task_mutations_and_successful_replay(
         "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
-    replayed = client.post("/api/commands", json=replay)
+    replayed = client.post("/api/v1/commands", json=replay)
 
     assert replayed.status_code == 200
     assert replayed.json() == responses[0].json()
@@ -242,7 +337,7 @@ def test_stale_version_records_one_rejection_and_replays_it(
 ) -> None:
     task_id = create_task(client, workspace_id)
     updated = client.post(
-        "/api/commands",
+        "/api/v1/commands",
         json=mutation_request(
             workspace_id,
             task_id,
@@ -257,7 +352,7 @@ def test_stale_version_records_one_rejection_and_replays_it(
         workspace_id, task_id, "PauseTask", 1, "stale-pause-001"
     )
 
-    stale = client.post("/api/commands", json=stale_request)
+    stale = client.post("/api/v1/commands", json=stale_request)
 
     assert stale.status_code == 409
     assert stale.json() == {
@@ -279,7 +374,7 @@ def test_stale_version_records_one_rejection_and_replays_it(
         "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
-    replayed = client.post("/api/commands", json=replay)
+    replayed = client.post("/api/v1/commands", json=replay)
 
     assert replayed.status_code == 409
     assert replayed.json() == stale.json()
@@ -305,7 +400,7 @@ def test_terminal_task_mutation_records_rejection_without_event(
 ) -> None:
     task_id = create_task(client, workspace_id)
     canceled = client.post(
-        "/api/commands",
+        "/api/v1/commands",
         json=mutation_request(
             workspace_id, task_id, "CancelTask", 1, "cancel-001"
         ),
@@ -313,7 +408,7 @@ def test_terminal_task_mutation_records_rejection_without_event(
     assert canceled.status_code == 200, canceled.text
 
     rejected = client.post(
-        "/api/commands",
+        "/api/v1/commands",
         json=mutation_request(
             workspace_id,
             task_id,
@@ -349,12 +444,12 @@ def test_mutation_requires_target_and_expected_version(
         workspace_id, uuid4(), "PauseTask", 1, "pause-without-target"
     )
     request["target_id"] = None
-    without_target = client.post("/api/commands", json=request)
+    without_target = client.post("/api/v1/commands", json=request)
 
     request = mutation_request(
         workspace_id, uuid4(), "PauseTask", None, "pause-without-version"
     )
-    without_version = client.post("/api/commands", json=request)
+    without_version = client.post("/api/v1/commands", json=request)
 
     assert without_target.status_code == 422
     assert without_version.status_code == 422
@@ -388,12 +483,13 @@ def test_two_session_race_applies_one_mutation_and_audits_one_rejection(
         return task
 
     monkeypatch.setattr(TaskRepository, "get", synchronized_get)
-    service = TaskCommandService(uow_factory)
+    service = CommandService(uow_factory, (TaskCommandHandler(),))
     envelopes = tuple(
         CommandEnvelope(
             id=uuid4(),
             workspace_id=workspace_id,
             command_type="SetTaskPriority",
+            target_type="task",
             actor_type="user",
             actor_id=f"user:race-{priority}",
             target_id=task_id,

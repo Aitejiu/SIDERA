@@ -42,6 +42,7 @@ def create_task(
         "command_id": str(uuid4()),
         "workspace_id": str(workspace_id),
         "command_type": "CreateTask",
+        "target_type": "task",
         "actor": {"type": "user", "id": "user:test"},
         "target_id": None,
         "expected_version": None,
@@ -54,7 +55,7 @@ def create_task(
             "priority": 50,
         },
     }
-    response = client.post("/api/commands", json=request)
+    response = client.post("/api/v1/commands", json=request)
     assert response.status_code == 201, response.text
     return UUID(response.json()["aggregate_id"]), request
 
@@ -71,7 +72,7 @@ def test_task_list_detail_pagination_and_workspace_isolation(
     workspace_b_task_id, _ = create_task(client, workspace_b_id, "Workspace B task")
 
     listed = client.get(
-        "/api/tasks",
+        "/api/v1/tasks",
         params={"workspace_id": str(workspace_id), "limit": 100, "offset": 0},
     )
 
@@ -85,7 +86,7 @@ def test_task_list_detail_pagination_and_workspace_isolation(
     ]
 
     paged = client.get(
-        "/api/tasks",
+        "/api/v1/tasks",
         params={"workspace_id": str(workspace_id), "limit": 1, "offset": 1},
     )
     assert paged.status_code == 200
@@ -93,7 +94,7 @@ def test_task_list_detail_pagination_and_workspace_isolation(
     assert [item["id"] for item in paged.json()["items"]] == [str(first_id)]
 
     detail = client.get(
-        f"/api/tasks/{second_id}",
+        f"/api/v1/tasks/{second_id}",
         params={"workspace_id": str(workspace_id)},
     )
     assert detail.status_code == 200
@@ -114,18 +115,34 @@ def test_task_list_detail_pagination_and_workspace_isolation(
     assert detail.json()["updated_at"]
 
     isolated = client.get(
-        f"/api/tasks/{workspace_b_task_id}",
+        f"/api/v1/tasks/{workspace_b_task_id}",
         params={"workspace_id": str(workspace_id)},
     )
     assert isolated.status_code == 404
     assert isolated.json()["error"]["code"] == "not_found"
 
     isolated_timeline = client.get(
-        f"/api/tasks/{workspace_b_task_id}/timeline",
+        f"/api/v1/tasks/{workspace_b_task_id}/timeline",
         params={"workspace_id": str(workspace_id)},
     )
     assert isolated_timeline.status_code == 404
     assert isolated_timeline.json()["error"]["code"] == "not_found"
+
+    legacy_list = client.get(
+        "/api/tasks",
+        params={"workspace_id": str(workspace_id)},
+    )
+    legacy_detail = client.get(
+        f"/api/tasks/{second_id}",
+        params={"workspace_id": str(workspace_id)},
+    )
+    legacy_timeline = client.get(
+        f"/api/tasks/{second_id}/timeline",
+        params={"workspace_id": str(workspace_id)},
+    )
+    assert legacy_list.status_code == 404
+    assert legacy_detail.status_code == 404
+    assert legacy_timeline.status_code == 404
 
 
 def test_task_timeline_is_ordered_and_contains_audit_links(
@@ -137,6 +154,7 @@ def test_task_timeline_is_ordered_and_contains_audit_links(
         "command_id": str(uuid4()),
         "workspace_id": str(workspace_id),
         "command_type": "SetTaskPriority",
+        "target_type": "task",
         "actor": {"type": "user", "id": "user:test"},
         "target_id": str(task_id),
         "expected_version": 1,
@@ -144,11 +162,11 @@ def test_task_timeline_is_ordered_and_contains_audit_links(
         "correlation_id": str(uuid4()),
         "payload": {"priority": 90},
     }
-    changed = client.post("/api/commands", json=mutation_request)
+    changed = client.post("/api/v1/commands", json=mutation_request)
     assert changed.status_code == 200, changed.text
 
     timeline = client.get(
-        f"/api/tasks/{task_id}/timeline",
+        f"/api/v1/tasks/{task_id}/timeline",
         params={"workspace_id": str(workspace_id)},
     )
 
@@ -173,11 +191,11 @@ def test_task_list_bounds_are_validated(
     workspace_id: UUID,
 ) -> None:
     too_many = client.get(
-        "/api/tasks",
+        "/api/v1/tasks",
         params={"workspace_id": str(workspace_id), "limit": 101},
     )
     negative_offset = client.get(
-        "/api/tasks",
+        "/api/v1/tasks",
         params={"workspace_id": str(workspace_id), "offset": -1},
     )
 

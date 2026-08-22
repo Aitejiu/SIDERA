@@ -20,6 +20,7 @@ def test_application_restart_preserves_task_timeline_and_idempotency(
         "command_id": str(uuid4()),
         "workspace_id": str(workspace_id),
         "command_type": "CreateTask",
+        "target_type": "task",
         "actor": {"type": "user", "id": "user:test"},
         "target_id": None,
         "expected_version": None,
@@ -34,7 +35,7 @@ def test_application_restart_preserves_task_timeline_and_idempotency(
     }
 
     with TestClient(create_app(settings)) as first_client:
-        created = first_client.post("/api/commands", json=create_request)
+        created = first_client.post("/api/v1/commands", json=create_request)
         assert created.status_code == 201, created.text
 
     replay_request = {
@@ -45,14 +46,14 @@ def test_application_restart_preserves_task_timeline_and_idempotency(
     task_id = created.json()["aggregate_id"]
     with TestClient(create_app(settings)) as second_client:
         detail = second_client.get(
-            f"/api/tasks/{task_id}",
+            f"/api/v1/tasks/{task_id}",
             params={"workspace_id": str(workspace_id)},
         )
         timeline = second_client.get(
-            f"/api/tasks/{task_id}/timeline",
+            f"/api/v1/tasks/{task_id}/timeline",
             params={"workspace_id": str(workspace_id)},
         )
-        replayed = second_client.post("/api/commands", json=replay_request)
+        replayed = second_client.post("/api/v1/commands", json=replay_request)
 
     assert detail.status_code == 200
     assert detail.json()["title"] == "Survive API restart"

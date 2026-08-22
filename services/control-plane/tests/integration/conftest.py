@@ -6,15 +6,35 @@ from uuid import UUID
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ArtifactModel,
+    AssignmentLeaseModel,
+    AttentionAcknowledgementModel,
     CommandModel,
     EventModel,
+    EvidenceClaimModel,
+    ExecutionBindingModel,
+    ExecutionEventModel,
+    ExecutionInputModel,
+    ExecutionModel,
+    ExecutionSessionModel,
+    ExecutionWorkspaceModel,
+    GatewayOperationModel,
+    ModuleDefinitionModel,
+    ModuleInstanceModel,
     OutboxMessageModel,
+    PlanSnapshotModel,
+    ProcessDescriptorModel,
+    ProjectionChangeModel,
     TaskModel,
+    WorkerItemModel,
+    WorkerItemPlacementModel,
+    WorkerModel,
     WorkspaceModel,
+    WorkspaceProjectionCursorModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -41,9 +61,44 @@ def database(database_url: str) -> Iterator[Database]:
 
 @pytest.fixture(autouse=True)
 def clean_database(database: Database) -> Iterator[None]:
+    _clear_database(database)
     yield
+    if os.environ.get("SIDERA_KEEP_OPENCODE_E2E") == "1":
+        return
+    _clear_database(database)
+
+
+def _clear_database(database: Database) -> None:
     with database.session() as session:
+        session.execute(
+            update(ExecutionModel).values(
+                active_lease_id=None,
+                source_execution_id=None,
+                source_session_id=None,
+                worker_item_id=None,
+            )
+        )
         for model in (
+            ProjectionChangeModel,
+            AttentionAcknowledgementModel,
+            WorkspaceProjectionCursorModel,
+            WorkerItemPlacementModel,
+            PlanSnapshotModel,
+            ExecutionInputModel,
+            EvidenceClaimModel,
+            ArtifactModel,
+            WorkerItemModel,
+            ExecutionEventModel,
+            GatewayOperationModel,
+            ProcessDescriptorModel,
+            ExecutionWorkspaceModel,
+            ExecutionBindingModel,
+            ExecutionSessionModel,
+            AssignmentLeaseModel,
+            ExecutionModel,
+            ModuleInstanceModel,
+            ModuleDefinitionModel,
+            WorkerModel,
             OutboxMessageModel,
             EventModel,
             CommandModel,

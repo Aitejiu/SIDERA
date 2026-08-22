@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
 from sidera_control_plane.api.app import create_app
@@ -25,3 +28,45 @@ def test_healthz_identifies_control_plane():
         "status": "ok",
         "service": "sidera-control-plane",
     }
+
+
+def test_scheduler_settings_are_positive():
+    settings = Settings(
+        database_url="postgresql+psycopg://test",
+        assignment_lease_seconds=30,
+        worker_heartbeat_timeout_seconds=45,
+        scheduler_batch_size=20,
+        scheduler_poll_interval_seconds=1.0,
+        reconciler_batch_size=50,
+        reconciler_poll_interval_seconds=2.0,
+        gateway_batch_size=15,
+        gateway_poll_interval_seconds=1.5,
+        opencode_executable="opencode",
+    )
+
+    assert settings.assignment_lease_seconds == 30
+    assert settings.worker_heartbeat_timeout_seconds == 45
+    assert settings.scheduler_batch_size == 20
+    assert settings.scheduler_poll_interval_seconds == 1.0
+    assert settings.reconciler_batch_size == 50
+    assert settings.reconciler_poll_interval_seconds == 2.0
+    assert settings.gateway_batch_size == 15
+    assert settings.gateway_poll_interval_seconds == 1.5
+    assert settings.opencode_executable == "opencode"
+
+    with pytest.raises(ValueError):
+        Settings(database_url="postgresql+psycopg://test", scheduler_batch_size=0)
+
+
+def test_workspace_settings_have_safe_defaults_and_validate_retention():
+    settings = Settings(database_url="postgresql+psycopg://test")
+
+    assert settings.workspace_root == Path(".sidera/workspaces")
+    assert settings.workspace_retention_seconds == 86_400
+    assert settings.git_executable == "git"
+
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            workspace_retention_seconds=0,
+        )

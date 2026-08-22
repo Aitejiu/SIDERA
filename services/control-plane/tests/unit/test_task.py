@@ -86,3 +86,33 @@ def test_paused_task_cannot_be_paused_again():
 
     with pytest.raises(InvalidTransition, match="already paused"):
         task.pause()
+
+
+def test_task_readiness_lifecycle_supports_waiting_and_retry():
+    task = make_task()
+
+    task.mark_ready()
+    assert task.status is TaskStatus.READY
+    assert task.version == 2
+
+    task.mark_running()
+    assert task.status is TaskStatus.RUNNING
+    assert task.version == 3
+
+    task.wait_for_decision()
+    assert task.status is TaskStatus.WAITING
+    assert task.version == 4
+
+    task.mark_ready()
+    assert task.status is TaskStatus.READY
+    assert task.version == 5
+
+
+def test_task_readiness_transitions_reject_invalid_states():
+    task = make_task()
+    with pytest.raises(InvalidTransition):
+        task.wait_for_decision()
+
+    task.cancel()
+    with pytest.raises(InvalidTransition):
+        task.mark_ready()

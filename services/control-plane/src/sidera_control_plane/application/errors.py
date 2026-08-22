@@ -15,9 +15,25 @@ class NotFound(ApplicationError):
     code = "not_found"
 
 
+class Conflict(ApplicationError):
+    code = "conflict"
+
+
+class ServiceUnavailable(ApplicationError):
+    code = "service_unavailable"
+
+
+class NoCurrentPlan(Conflict):
+    code = "no_current_plan"
+
+
 class IdempotencyConflict(ApplicationError):
     code = "idempotency_conflict"
 
 
 class UnsupportedCommand(ApplicationError):
     code = "unsupported_command"
+
+
+class InvalidCursor(ApplicationError):
+    code = "invalid_cursor"
