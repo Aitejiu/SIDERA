@@ -1,7 +1,7 @@
 import type { components } from "@/shared/api/schema";
 
 export type TaskGraph = components["schemas"]["TaskConsoleGraphProjectionResponse"];
-export type TaskNode = components["schemas"]["SubtaskNodeProjectionResponse"];
+export type SubtaskNode = components["schemas"]["SubtaskNodeProjectionResponse"];
 export type TaskEdge = components["schemas"]["SubtaskEdgeProjectionResponse"];
 export type Milestone = components["schemas"]["SubtaskMilestoneProjectionResponse"];
 export type TaskDetail = components["schemas"]["TaskDetailProjectionResponse"];

@@ -90,7 +90,9 @@ export function AttentionPanel({
                   <span className="mono-label">{item.kind}</span>
                 </div>
                 <p>{item.reason}</p>
-                <span className="mono-label">SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}</span>
+                <span className="mono-label">
+                  持续 {formatElapsed(item.occurred_at)} · SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}
+                </span>
               </div>
               <button
                 className="quiet-button attention-item__action"
@@ -107,4 +109,23 @@ export function AttentionPanel({
       )}
     </section>
   );
+}
+
+function formatElapsed(value: string): string {
+  const occurredAt = new Date(value).getTime();
+  if (Number.isNaN(occurredAt)) {
+    return "未知";
+  }
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - occurredAt) / 60_000));
+  if (elapsedMinutes < 1) {
+    return "刚刚";
+  }
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes} 分钟`;
+  }
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) {
+    return `${elapsedHours} 小时`;
+  }
+  return `${Math.floor(elapsedHours / 24)} 天`;
 }

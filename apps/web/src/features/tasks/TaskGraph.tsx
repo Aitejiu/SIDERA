@@ -16,12 +16,10 @@ const nodeTypes = { task: TaskNode };
 
 export function TaskGraph({
   graph,
-  selectedWorkItemKey,
-  onSelect,
+  onOpen,
 }: {
   graph: TaskGraphProjection;
-  selectedWorkItemKey: string | null;
-  onSelect: (subtaskKey: string) => void;
+  onOpen: (subtaskKey: string) => void;
 }) {
   const graphKey = `${graph.nodes.map((node) => node.subtask_key).join(",")}|${graph.edges.map((edge) => `${edge.upstream_subtask_key}:${edge.downstream_subtask_key}:${edge.kind}`).join(",")}`;
   const [layoutState, setLayoutState] = useState<{
@@ -59,7 +57,7 @@ export function TaskGraph({
     return (
       <div className="task-graph task-graph--error">
         <div className="graph-error" role="alert">{error}</div>
-        <FallbackNodes graph={graph} selectedWorkItemKey={selectedWorkItemKey} onSelect={onSelect} />
+        <FallbackNodes graph={graph} onOpen={onOpen} />
       </div>
     );
   }
@@ -74,7 +72,6 @@ export function TaskGraph({
     position: { x: node.x, y: node.y },
     data: {
       ...(node.data as TaskFlowNodeData),
-      selected: node.id === selectedWorkItemKey,
     },
     draggable: false,
     selectable: false,
@@ -93,7 +90,7 @@ export function TaskGraph({
     },
   }));
   const onNodeClick: NodeMouseHandler<TaskFlowNode> = (_event, node) => {
-    onSelect(node.id);
+    onOpen(node.id);
   };
 
   return (
@@ -116,7 +113,7 @@ export function TaskGraph({
             <Controls showInteractive={false} />
           </ReactFlow>
         ) : (
-          <FallbackLayoutNodes layout={layout} selectedWorkItemKey={selectedWorkItemKey} onSelect={onSelect} />
+          <FallbackLayoutNodes layout={layout} onOpen={onOpen} />
         )}
       </div>
       <div className="task-graph__edge-summary" role="group" aria-label="依赖关系">
@@ -132,12 +129,10 @@ export function TaskGraph({
 
 function FallbackNodes({
   graph,
-  selectedWorkItemKey,
-  onSelect,
+  onOpen,
 }: {
   graph: TaskGraphProjection;
-  selectedWorkItemKey: string | null;
-  onSelect: (workItemKey: string) => void;
+  onOpen: (subtaskKey: string) => void;
 }) {
   return (
     <div className="task-graph__fallback">
@@ -146,9 +141,8 @@ function FallbackNodes({
           key={node.subtask_key}
           type="button"
           className="task-graph__fallback-node"
-          data-selected={node.subtask_key === selectedWorkItemKey ? "true" : "false"}
-          onClick={() => onSelect(node.subtask_key)}
-          aria-label={`选择 ${node.subtask_key}`}
+          onClick={() => onOpen(node.subtask_key)}
+          aria-label={`打开子任务：${node.title}`}
         >
           {node.title}
         </button>
@@ -159,12 +153,10 @@ function FallbackNodes({
 
 function FallbackLayoutNodes({
   layout,
-  selectedWorkItemKey,
-  onSelect,
+  onOpen,
 }: {
   layout: TaskGraphLayout;
-  selectedWorkItemKey: string | null;
-  onSelect: (workItemKey: string) => void;
+  onOpen: (subtaskKey: string) => void;
 }) {
   return (
     <div className="task-graph__fallback-layout" style={{ minHeight: `${Math.max(layout.height, 240)}px` }}>
@@ -174,9 +166,8 @@ function FallbackLayoutNodes({
           type="button"
           className="task-graph__fallback-node"
           style={{ left: `${node.x}px`, top: `${node.y}px` }}
-          data-selected={node.id === selectedWorkItemKey ? "true" : "false"}
-          onClick={() => onSelect(node.id)}
-          aria-label={`选择 ${node.id}`}
+          onClick={() => onOpen(node.id)}
+          aria-label={`打开子任务：${(node.data as { title?: string }).title ?? node.id}`}
         >
           {(node.data as { title?: string }).title ?? node.id}
         </button>

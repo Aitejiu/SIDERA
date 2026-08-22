@@ -28,7 +28,7 @@ export function TaskActivity({
         <div className="section-heading">
           <div>
             <span className="eyebrow">TASK ACTIVITY</span>
-            <h2 id="activity-title">动态</h2>
+            <h2 id="activity-title">最近动态</h2>
           </div>
         </div>
         <div className="activity-error" role="alert">
@@ -39,14 +39,14 @@ export function TaskActivity({
     );
   }
   if (activity === undefined || isLoading) {
-    return <div className="activity-panel" role="status">正在读取任务动态</div>;
+    return <div className="activity-panel" role="status">正在读取最近动态</div>;
   }
   return (
     <section className="activity-panel" aria-labelledby="activity-title">
       <div className="section-heading">
         <div>
           <span className="eyebrow">TASK ACTIVITY</span>
-          <h2 id="activity-title">动态</h2>
+          <h2 id="activity-title">最近动态</h2>
         </div>
         <span className="mono-label">CURSOR {activity.last_change_cursor}</span>
       </div>

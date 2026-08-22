@@ -1,36 +1,35 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { History } from "lucide-react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
+import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 import { AttentionPanel } from "@/features/attention/AttentionPanel";
 
 import {
-  getTaskActivity,
-  getTaskDetail,
-  getTaskGraph,
   getTask,
+  getTaskActivity,
+  getTaskGraph,
   taskActivityQueryKey,
-  taskDetailQueryKey,
   taskGraphQueryKey,
   taskQueryKey,
+  TASK_ACTIVITY_PAGE_SIZE,
 } from "./api";
 import { ExecutionHorizon } from "./ExecutionHorizon";
 import { MilestoneTrack } from "./MilestoneTrack";
 import { TaskActivity } from "./TaskActivity";
 import { TaskBoard } from "./TaskBoard";
 import { TaskGraph } from "./TaskGraph";
-import { TaskInspector } from "./TaskInspector";
-import { TaskLedger } from "./TaskLedger";
+import type { TaskActivity as TaskActivityProjection, TaskGraph as TaskGraphProjection } from "./types";
 
 export function TaskDetailPage() {
   const { workspaceId, rootTaskId } = useParams<{ workspaceId: string; rootTaskId: string }>();
   const resolvedWorkspaceId = workspaceId ?? "";
   const resolvedRootTaskId = rootTaskId ?? "";
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const selectedFromUrl = searchParams.get("subtask");
-  const [viewMode, setViewMode] = useState<"board" | "dag" | "ledger">("board");
+  const viewMode = searchParams.get("view") === "dag" ? "dag" : "board";
 
   const graphQuery = useQuery({
     queryKey: taskGraphQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
@@ -50,7 +49,9 @@ export function TaskDetailPage() {
     queryFn: ({ signal, pageParam }) => getTaskActivity(
       resolvedWorkspaceId,
       resolvedRootTaskId,
-      pageParam === undefined ? { signal } : { after: pageParam, signal },
+      pageParam === undefined
+        ? { limit: TASK_ACTIVITY_PAGE_SIZE, signal }
+        : { after: pageParam, limit: TASK_ACTIVITY_PAGE_SIZE, signal },
     ),
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     enabled: resolvedWorkspaceId.length > 0 && resolvedRootTaskId.length > 0,
@@ -67,34 +68,21 @@ export function TaskDetailPage() {
       next_cursor: pages.at(-1)?.next_cursor ?? null,
     };
   }, [activityQuery.data?.pages]);
-  const preferredWorkItemKey = useMemo(() => {
-    const nodes = graphQuery.data?.nodes;
-    if (!nodes || nodes.length === 0) {
-      return null;
-    }
-    if (selectedFromUrl !== null && nodes.some((node) => node.subtask_key === selectedFromUrl)) {
-      return selectedFromUrl;
-    }
-    return nodes.find((node) => node.state !== "planned" || node.worker_item_count > 0)?.subtask_key ?? nodes[0]?.subtask_key ?? null;
-  }, [graphQuery.data?.nodes, selectedFromUrl]);
-  const selectedWorkItemKey = preferredWorkItemKey;
-  const detailQuery = useQuery({
-    queryKey: selectedWorkItemKey
-      ? taskDetailQueryKey(resolvedWorkspaceId, resolvedRootTaskId, selectedWorkItemKey)
-      : ["task-detail", resolvedWorkspaceId, resolvedRootTaskId, "none"],
-    queryFn: ({ signal }) => getTaskDetail(resolvedWorkspaceId, resolvedRootTaskId, selectedWorkItemKey ?? "", signal),
-    enabled: selectedWorkItemKey !== null,
-  });
 
-  useEffect(() => {
-    if (preferredWorkItemKey === null || selectedFromUrl === preferredWorkItemKey) {
-      return;
+  const setViewMode = (nextMode: "board" | "dag") => {
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextMode === "dag") {
+      nextParams.set("view", "dag");
+    } else {
+      nextParams.delete("view");
     }
-    setSearchParams({ subtask: preferredWorkItemKey }, { replace: true });
-  }, [preferredWorkItemKey, selectedFromUrl, setSearchParams]);
+    setSearchParams(nextParams);
+  };
 
-  const selectWorkItem = (workItemKey: string) => {
-    setSearchParams({ subtask: workItemKey });
+  const openSubtask = (subtaskKey: string) => {
+    navigate(
+      `/workspaces/${encodeURIComponent(resolvedWorkspaceId)}/tasks/${encodeURIComponent(resolvedRootTaskId)}/subtasks/${encodeURIComponent(subtaskKey)}`,
+    );
   };
 
   return (
@@ -110,67 +98,144 @@ export function TaskDetailPage() {
         onRetry={() => void graphQuery.refetch()}
       >
         {graphQuery.data ? (
-          <>
-            <div className="task-detail-heading">
-              <div>
-                <span className="eyebrow">TASK GRAPH · GEN {graphQuery.data.overview.generation}</span>
-                <h1 id="task-detail-title">{graphQuery.data.overview.title}</h1>
-                <p>{graphQuery.data.overview.goal_summary}</p>
-              </div>
-              <div className="task-detail-heading__meta">
-                <Link className="quiet-button" to={`/workspaces/${resolvedWorkspaceId}/tasks/${resolvedRootTaskId}/plan/${graphQuery.data.overview.generation}`}>
-                  <History size={14} aria-hidden="true" />计划历史
-                </Link>
-                <span className="mono-label">CURSOR {graphQuery.data.overview.last_change_cursor}</span>
-              </div>
-            </div>
-
-            <div className="task-detail-layout">
-              <div className="task-detail-main">
-                <MilestoneTrack milestones={graphQuery.data.milestones} />
-                <AttentionPanel
-                  workspaceId={resolvedWorkspaceId}
-                  rootTaskId={resolvedRootTaskId}
-                  rootTaskVersion={rootTaskQuery.data?.version}
-                  rootTaskTitle={graphQuery.data.overview.title}
-                  items={graphQuery.data.overview.attention_items}
-                  onAcknowledged={() => {
-                    void graphQuery.refetch();
-                    void rootTaskQuery.refetch();
-                  }}
-                />
-                <ExecutionHorizon graph={graphQuery.data} />
-                <div className="graph-ledger-switch" role="tablist" aria-label="任务状态视图">
-                  <button className={viewMode === "board" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "board"} onClick={() => setViewMode("board")}>看板</button>
-                  <button className={viewMode === "dag" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "dag"} onClick={() => setViewMode("dag")}>DAG</button>
-                  <button className={viewMode === "ledger" ? "is-active" : ""} type="button" role="tab" aria-selected={viewMode === "ledger"} onClick={() => setViewMode("ledger")}>任务表</button>
-                </div>
-                {viewMode === "board" ? <TaskBoard nodes={graphQuery.data.nodes} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
-                {viewMode === "dag" ? <TaskGraph graph={graphQuery.data} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
-                {viewMode === "ledger" ? <TaskLedger nodes={graphQuery.data.nodes} selectedWorkItemKey={selectedWorkItemKey} onSelect={selectWorkItem} /> : null}
-                <TaskActivity
-                  activity={activity}
-                  workspaceId={resolvedWorkspaceId}
-                  rootTaskId={resolvedRootTaskId}
-                  onLoadMore={() => void activityQuery.fetchNextPage()}
-                  isLoadingMore={activityQuery.isFetchingNextPage}
-                  isLoading={activityQuery.isPending}
-                  isError={activityQuery.isError}
-                  onRetry={() => void activityQuery.refetch()}
-                />
-              </div>
-              <TaskInspector
-                detail={detailQuery.data}
-                isLoading={detailQuery.isPending}
-                isError={detailQuery.isError}
-                workspaceId={resolvedWorkspaceId}
-                rootTaskId={resolvedRootTaskId}
-                onRetry={() => void detailQuery.refetch()}
-              />
-            </div>
-          </>
+          <TaskDeliveryContent
+            graph={graphQuery.data}
+            activity={activity}
+            activityError={activityQuery.isError}
+            activityLoading={activityQuery.isPending}
+            activityLoadingMore={activityQuery.isFetchingNextPage}
+            onLoadMore={() => void activityQuery.fetchNextPage()}
+            onRetryActivity={() => void activityQuery.refetch()}
+            onOpenSubtask={openSubtask}
+            rootTaskVersion={rootTaskQuery.data?.version}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            workspaceId={resolvedWorkspaceId}
+            rootTaskId={resolvedRootTaskId}
+            onAcknowledged={() => {
+              void graphQuery.refetch();
+              void rootTaskQuery.refetch();
+            }}
+          />
         ) : null}
       </AsyncState>
     </section>
   );
+}
+
+function TaskDeliveryContent({
+  graph,
+  activity,
+  activityError,
+  activityLoading,
+  activityLoadingMore,
+  onLoadMore,
+  onRetryActivity,
+  onOpenSubtask,
+  rootTaskVersion,
+  viewMode,
+  onViewModeChange,
+  workspaceId,
+  rootTaskId,
+  onAcknowledged,
+}: {
+  graph: TaskGraphProjection;
+  activity: TaskActivityProjection | undefined;
+  activityError: boolean;
+  activityLoading: boolean;
+  activityLoadingMore: boolean;
+  onLoadMore: () => void;
+  onRetryActivity: () => void;
+  onOpenSubtask: (subtaskKey: string) => void;
+  rootTaskVersion: number | undefined;
+  viewMode: "board" | "dag";
+  onViewModeChange: (mode: "board" | "dag") => void;
+  workspaceId: string;
+  rootTaskId: string;
+  onAcknowledged: () => void;
+}) {
+  const status = taskStatus(graph);
+
+  return (
+    <>
+      <header className="task-detail-heading">
+        <div>
+          <span className="eyebrow">TASK CONTROL ROOM · GEN {graph.overview.generation}</span>
+          <h1 id="task-detail-title">{graph.overview.title}</h1>
+          <p>{graph.overview.goal_summary}</p>
+        </div>
+        <div className="task-detail-heading__meta">
+          <StatusMark kind={status.kind} label={status.label} />
+          <Link
+            className="quiet-button"
+            to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/plan/${graph.overview.generation}`}
+          >
+            <History size={14} aria-hidden="true" />计划历史
+          </Link>
+          <span className="mono-label">CURSOR {graph.overview.last_change_cursor}</span>
+        </div>
+      </header>
+
+      <div className="task-detail-main">
+        <AttentionPanel
+          workspaceId={workspaceId}
+          rootTaskId={rootTaskId}
+          rootTaskVersion={rootTaskVersion}
+          rootTaskTitle={graph.overview.title}
+          items={graph.overview.attention_items}
+          onAcknowledged={onAcknowledged}
+        />
+        <MilestoneTrack milestones={graph.milestones} />
+        <ExecutionHorizon graph={graph} />
+        <div className="task-view-switch" role="tablist" aria-label="子任务状态视图">
+          <button
+            className={viewMode === "board" ? "is-active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={viewMode === "board"}
+            onClick={() => onViewModeChange("board")}
+          >
+            看板
+          </button>
+          <button
+            className={viewMode === "dag" ? "is-active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={viewMode === "dag"}
+            onClick={() => onViewModeChange("dag")}
+          >
+            DAG
+          </button>
+        </div>
+        {viewMode === "board" ? <TaskBoard nodes={graph.nodes} onOpen={onOpenSubtask} /> : null}
+        {viewMode === "dag" ? <TaskGraph graph={graph} onOpen={onOpenSubtask} /> : null}
+        <TaskActivity
+          activity={activity}
+          workspaceId={workspaceId}
+          rootTaskId={rootTaskId}
+          onLoadMore={onLoadMore}
+          isLoadingMore={activityLoadingMore}
+          isLoading={activityLoading}
+          isError={activityError}
+          onRetry={onRetryActivity}
+        />
+      </div>
+    </>
+  );
+}
+
+function taskStatus(graph: TaskGraphProjection): { kind: StatusMarkKind; label: string } {
+  if (graph.overview.failed_subtask_count > 0) {
+    return { kind: "failed", label: "有失败子任务" };
+  }
+  if (graph.overview.attention_items.length > 0) {
+    return { kind: "stale", label: "需要处理" };
+  }
+  if (graph.overview.completed_subtask_count === graph.overview.subtask_count && graph.overview.subtask_count > 0) {
+    return { kind: "completed", label: "已完成" };
+  }
+  if (graph.overview.running_subtask_count > 0) {
+    return { kind: "running", label: "执行中" };
+  }
+  return { kind: "planned", label: "计划中" };
 }

@@ -2,9 +2,9 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
-import type { TaskNode as TaskNodeProjection } from "./types";
+import type { SubtaskNode } from "./types";
 
-export type TaskFlowNodeData = TaskNodeProjection & { selected: boolean };
+export type TaskFlowNodeData = SubtaskNode;
 export type TaskFlowNode = Node<TaskFlowNodeData, "task">;
 
 export function TaskNode({ data }: NodeProps<TaskFlowNode>) {
@@ -12,10 +12,9 @@ export function TaskNode({ data }: NodeProps<TaskFlowNode>) {
     <>
       <Handle type="target" position={Position.Left} aria-hidden="true" />
       <button
-        className={`task-flow-node${data.selected ? " is-selected" : ""}`}
+        className="task-flow-node"
         type="button"
-        data-selected={data.selected ? "true" : "false"}
-        aria-label={`选择 ${data.subtask_key}`}
+        aria-label={`打开子任务：${data.title}`}
       >
         <span className="task-flow-node__topline">
           <span className="eyebrow">{data.subtask_key}</span>

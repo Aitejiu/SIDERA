@@ -3,7 +3,7 @@ import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, LoaderCircle, Move
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { statusKind } from "./TaskNode";
-import type { TaskNode } from "./types";
+import type { SubtaskNode } from "./types";
 
 type BoardColumnKey = "attention" | "running" | "waiting" | "next" | "completed";
 
@@ -24,14 +24,12 @@ const columns: BoardColumn[] = [
 
 export function TaskBoard({
   nodes,
-  selectedWorkItemKey,
-  onSelect,
+  onOpen,
 }: {
-  nodes: readonly TaskNode[];
-  selectedWorkItemKey: string | null;
-  onSelect: (workItemKey: string) => void;
+  nodes: readonly SubtaskNode[];
+  onOpen: (subtaskKey: string) => void;
 }) {
-  const grouped = new Map<BoardColumnKey, TaskNode[]>();
+  const grouped = new Map<BoardColumnKey, SubtaskNode[]>();
   for (const column of columns) grouped.set(column.key, []);
   for (const node of nodes) grouped.get(columnFor(node))?.push(node);
 
@@ -39,8 +37,8 @@ export function TaskBoard({
     <section className="task-board" aria-labelledby="task-board-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">TASK FIRST / STATUS BOARD</span>
-          <h2 id="task-board-title">任务状态看板</h2>
+          <span className="eyebrow">SUBTASK STATUS BOARD</span>
+          <h2 id="task-board-title">子任务状态看板</h2>
         </div>
         <span className="mono-label">{nodes.length} 个子任务</span>
       </div>
@@ -55,7 +53,7 @@ export function TaskBoard({
               </header>
               <div className="task-board__list">
                 {items.length === 0 ? <div className="task-board__empty"><MoveRight size={14} aria-hidden="true" />{column.empty}</div> : null}
-                {items.map((node) => <TaskBoardCard key={node.subtask_key} node={node} selected={node.subtask_key === selectedWorkItemKey} onSelect={onSelect} />)}
+                {items.map((node) => <TaskBoardCard key={node.subtask_key} node={node} onOpen={onOpen} />)}
               </div>
             </section>
           );
@@ -65,11 +63,11 @@ export function TaskBoard({
   );
 }
 
-function TaskBoardCard({ node, selected, onSelect }: { node: TaskNode; selected: boolean; onSelect: (workItemKey: string) => void }) {
+function TaskBoardCard({ node, onOpen }: { node: SubtaskNode; onOpen: (subtaskKey: string) => void }) {
   const action = node.current_action ?? (node.state === "planned" ? "等待物化" : node.state === "succeeded" ? "验收已完成" : "等待活动");
   const hasWorkerItems = node.worker_item_count > 0;
   return (
-    <button className={`task-board-card${selected ? " is-selected" : ""}`} type="button" data-selected={selected ? "true" : "false"} onClick={() => onSelect(node.subtask_key)} aria-label={`查看${node.title}`}>
+    <button className="task-board-card" type="button" onClick={() => onOpen(node.subtask_key)} aria-label={`打开子任务：${node.title}`}>
       <span className="task-board-card__topline"><span className="eyebrow">{node.subtask_key}</span><StatusMark kind={statusKind(node.state)} /></span>
       <strong>{node.title}</strong>
       <span className="task-board-card__action">{action}</span>
@@ -82,7 +80,7 @@ function TaskBoardCard({ node, selected, onSelect }: { node: TaskNode; selected:
   );
 }
 
-function columnFor(node: TaskNode): BoardColumnKey {
+function columnFor(node: SubtaskNode): BoardColumnKey {
   if (node.state === "waiting_user" || node.state === "blocked" || node.state === "failed") return "attention";
   if (node.state === "running" || node.state === "assigned" || node.state === "queued" || node.state === "retrying") return "running";
   if (node.state === "waiting_dependency") return "waiting";

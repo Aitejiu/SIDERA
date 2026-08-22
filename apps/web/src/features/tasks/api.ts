@@ -14,6 +14,8 @@ import type {
 
 export type TaskOverview = components["schemas"]["TaskConsoleOverviewProjectionResponse"];
 
+export const TASK_ACTIVITY_PAGE_SIZE = 8;
+
 const TASK_OVERVIEWS_PATH = "/api/v1/workspaces/{workspace_id}/task-overviews" as const;
 
 export function taskOverviewQueryKey(workspaceId: string) {
@@ -110,7 +112,7 @@ export async function getTaskActivity(
 ): Promise<TaskActivity> {
   const params = new URLSearchParams({
     workspace_id: workspaceId,
-    limit: String(options.limit ?? 50),
+    limit: String(options.limit ?? TASK_ACTIVITY_PAGE_SIZE),
   });
   if (options.after !== undefined) {
     params.set("after", options.after);
