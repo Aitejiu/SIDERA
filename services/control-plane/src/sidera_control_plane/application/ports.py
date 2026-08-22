@@ -6,6 +6,11 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
+from sidera_control_plane.application.planner_runtime import (
+    PlannerInput,
+    PlannerResult,
+    PlannerRunControl,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -39,6 +44,7 @@ from sidera_control_plane.domain.modules import (
     ExecutionBinding,
     ModuleDefinition,
     ModuleInstance,
+    PlannerAdapterCapabilityProfile,
     WorkerAdapterCapabilityProfile,
 )
 from sidera_control_plane.domain.planning import (
@@ -667,6 +673,21 @@ class WorkerAdapter(Protocol):
     def collect_artifacts(
         self, handle: AdapterSessionHandle, *, operation_id: UUID
     ) -> tuple[ArtifactCandidate, ...]:
+        raise NotImplementedError
+
+
+class PlannerAdapter(Protocol):
+    def probe(self, config: Mapping[str, object]) -> PlannerAdapterCapabilityProfile:
+        raise NotImplementedError
+
+    def plan(
+        self,
+        planner_input: PlannerInput,
+        control: PlannerRunControl,
+    ) -> PlannerResult:
+        raise NotImplementedError
+
+    def cancel(self, operation_id: UUID) -> None:
         raise NotImplementedError
 
 
