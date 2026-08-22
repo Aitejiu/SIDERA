@@ -22,7 +22,7 @@ test.describe("projection stream recovery", () => {
     });
 
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks`);
-    await expect(page.getByRole("link", { name: "打开任务 R4 control room delivery" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "打开任务 支付重构" })).toBeVisible();
     await expect.poll(() => attempts).toBeGreaterThan(0);
 
     const response = await request.post("/api/v1/commands", {
@@ -45,7 +45,7 @@ test.describe("projection stream recovery", () => {
       async () => Number(await page.evaluate((key) => localStorage.getItem(key), cursorKey)),
       { timeout: 10_000 },
     ).toBeGreaterThanOrEqual(4);
-    await expect(page.getByRole("link", { name: "打开任务 R4 control room delivery" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "打开任务 支付重构" })).toBeVisible();
   });
 
   test("resyncs the canonical snapshot after a server gap notification", async ({ page }) => {
@@ -64,7 +64,7 @@ test.describe("projection stream recovery", () => {
     });
 
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks`);
-    await expect(page.getByRole("link", { name: "打开任务 R4 control room delivery" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "打开任务 支付重构" })).toBeVisible();
     await expect.poll(() => attempts).toBeGreaterThanOrEqual(2);
     await expect(page.getByRole("heading", { name: "任务", exact: true })).toBeVisible();
     await expect(page.getByText("CANONICAL SNAPSHOT", { exact: false })).toBeVisible();

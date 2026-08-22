@@ -3,24 +3,24 @@ import {
   expect,
   ROOT_TASK_ID,
   SCALE_EXECUTION_ID,
+  SCALE_WORKER_ITEM_ID,
   SCALE_SESSION_ID,
   WORKSPACE_ID,
 } from "./fixtures";
 
 test.describe("large Task First graph", () => {
-  test("renders 200 WorkItems and 400 dependency edges without dropping the ledger", async ({ page, seedR4 }) => {
+  test("renders 200 Subtasks and 400 dependency edges without dropping the board", async ({ page, seedR4 }) => {
     seedR4("scale");
     const startedAt = Date.now();
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}`);
     await expect(page.locator("#task-detail-title")).toHaveText("Scale graph");
-    await page.getByRole("tab", { name: "任务表", exact: true }).click();
-    await expect(page.locator(".ledger-row")).toHaveCount(200, { timeout: 15_000 });
-    const ledgerElapsedMs = Date.now() - startedAt;
-    test.info().attach("scale-ledger-timing", {
-      body: JSON.stringify({ ledgerElapsedMs, rows: 200 }),
+    await expect(page.locator(".task-board-card")).toHaveCount(200, { timeout: 15_000 });
+    const boardElapsedMs = Date.now() - startedAt;
+    test.info().attach("scale-board-timing", {
+      body: JSON.stringify({ boardElapsedMs, cards: 200 }),
       contentType: "application/json",
     });
-    expect(ledgerElapsedMs).toBeLessThan(8_000);
+    expect(boardElapsedMs).toBeLessThan(8_000);
 
     await page.getByRole("tab", { name: "DAG", exact: true }).click();
     await expect(page.locator(".edge-summary")).toHaveCount(400, { timeout: 20_000 });
@@ -52,5 +52,30 @@ test.describe("large Task First graph", () => {
     await expect(page.locator(".trace-row")).not.toHaveCount(0);
     await expect(page.locator(".trace-row[aria-current='true']")).toHaveCount(1);
     expect(await page.locator(".trace-row").count()).toBeLessThanOrEqual(120);
+  });
+
+  test("pages a WorkerItem activity stream with 2,000 items", async ({ request, seedR4 }) => {
+    seedR4("scale");
+    const workspaceResponse = await request.get(
+      `/api/v1/tasks/${ROOT_TASK_ID}/subtasks/work-001?workspace_id=${WORKSPACE_ID}`,
+    );
+    expect(workspaceResponse.ok()).toBeTruthy();
+    const workspaceBody = await workspaceResponse.json() as {
+      worker_items?: unknown[];
+      worker_graph?: { edges?: unknown[] };
+    };
+    expect(workspaceBody.worker_items).toHaveLength(40);
+    expect(workspaceBody.worker_graph?.edges).toHaveLength(80);
+
+    const response = await request.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${SCALE_WORKER_ITEM_ID}/activity?limit=100`,
+    );
+    expect(response.ok()).toBeTruthy();
+    const body = await response.json() as {
+      items?: unknown[];
+      next_cursor?: string | null;
+    };
+    expect(body.items).toHaveLength(100);
+    expect(body.next_cursor).toBeTruthy();
   });
 });

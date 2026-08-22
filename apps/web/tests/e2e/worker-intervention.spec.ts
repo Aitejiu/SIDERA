@@ -1,31 +1,33 @@
-import { randomUUID } from "node:crypto";
+import type { Page } from "@playwright/test";
 
-import type { APIRequestContext, Page } from "@playwright/test";
-
-import { test, expect, EXECUTION_ID, ROOT_TASK_ID, SESSION_ID, WORKSPACE_ID } from "./fixtures";
+import { test, expect, IMPLEMENTER_WORKER_ITEM_ID, WORKSPACE_ID } from "./fixtures";
 
 test.describe("exact worker intervention", () => {
   test.beforeEach(({ seedR4 }) => {
     seedR4();
   });
 
-  test("queues input against the exact Session address", async ({ page, request }) => {
-    await openTrace(page, request);
+  test("queues input against the exact WorkerItem Session address", async ({ page }) => {
+    await openWorker(page);
 
-    const address = page.getByRole("group", { name: "精确执行地址" });
-    await expect(address).toBeVisible();
-    await expect(address.getByText("Plan", { exact: true })).toBeVisible();
-    await expect(address.getByText("WorkItem", { exact: true })).toBeVisible();
-    await expect(address.getByText("Session", { exact: true })).toBeVisible();
+    await page.getByText("查看精确 context", { exact: true }).click();
+    const address = page.locator("details").filter({ hasText: "查看精确 context" });
+    await expect(address).toContainText("WorkerItem");
+    await expect(address).toContainText("Plan generation");
+    await expect(address).toContainText("Execution");
+    await expect(address).toContainText("Session");
+    await expect(address).toContainText("Worker");
 
-    await page.getByLabel("介入内容").fill("继续验证 backend checkpoint");
+    await page.getByRole("textbox", { name: "介入这个 Worker" }).fill("继续验证回调 checkpoint");
     await page.getByRole("button", { name: "发送到当前 Session" }).click();
-    await expect(page.getByLabel("介入当前 Session").getByText("已排队", { exact: true })).toBeVisible();
-    await expect(page.getByLabel("介入内容")).toHaveValue("");
+    await expect(page.getByText("已接受", { exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "介入这个 Worker" })).toHaveValue("");
+    await expect(page.getByText("继续验证回调 checkpoint", { exact: true })).toBeVisible();
   });
 
   test("stops only the exact Execution after explicit confirmation", async ({ page, request }) => {
-    await openTrace(page, request);
+    void request;
+    await openWorker(page);
 
     page.once("dialog", (dialog) => void dialog.accept());
     await page.getByRole("button", { name: "停止 Execution" }).click();
@@ -33,7 +35,8 @@ test.describe("exact worker intervention", () => {
   });
 
   test("preserves the draft when the execution context changes", async ({ page, request }) => {
-    await openTrace(page, request);
+    void request;
+    await openWorker(page);
     await page.route("**/api/v1/commands", async (route) => {
       if (route.request().method() !== "POST") {
         await route.continue();
@@ -54,41 +57,17 @@ test.describe("exact worker intervention", () => {
     });
 
     const draft = "保留这段输入，不要自动切换到后继 Session";
-    await page.getByLabel("介入内容").fill(draft);
+    await page.getByRole("textbox", { name: "介入这个 Worker" }).fill(draft);
     await page.getByRole("button", { name: "发送到当前 Session" }).click();
 
-    await expect(page.getByRole("alert")).toContainText("执行地址已变化");
-    await expect(page.getByLabel("介入内容")).toHaveValue(draft);
-    await expect(page.getByText("没有自动切换目标", { exact: false })).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText("上下文已变化");
+    await expect(page.getByRole("textbox", { name: "介入这个 Worker" })).toHaveValue(draft);
+    await expect(page.getByText("请刷新后确认当前 Session", { exact: false })).toBeVisible();
   });
 });
 
-async function openTrace(page: Page, request: APIRequestContext): Promise<void> {
-  await page.goto(`/workspaces/${WORKSPACE_ID}/tasks`);
-  await expect(page.getByRole("link", { name: "打开任务 R4 control room delivery" })).toBeVisible();
-  const wakeResponse = await request.post("/api/v1/commands", {
-    data: {
-      command_id: randomUUID(),
-      workspace_id: WORKSPACE_ID,
-      command_type: "SetTaskPriority",
-      target_type: "task",
-      actor: { type: "local", id: "aitejiu" },
-      target_id: ROOT_TASK_ID,
-      expected_version: 1,
-      idempotency_key: `e2e-wake-${randomUUID()}`,
-      correlation_id: randomUUID(),
-      payload: { priority: 51 },
-    },
-  });
-  if (!wakeResponse.ok()) {
-    throw new Error(`failed to wake projection stream: ${wakeResponse.status()}`);
-  }
-  await expect(page.locator(".topbar .status-mark--live")).toBeVisible();
-  await page.getByRole("link", { name: "打开任务 R4 control room delivery" }).click();
-  await page.getByRole("tab", { name: "任务表", exact: true }).click();
-  await page.getByRole("link", { name: /查看执行过程/ }).click();
-  await expect(page.locator("#execution-page-title")).toBeVisible();
-  await expect(page).toHaveURL(new RegExp(`${EXECUTION_ID}/sessions/${SESSION_ID}$`));
-  await expect(page.locator(".trace-row")).toHaveCount(3);
-  await expect(page.locator("textarea[aria-label='介入内容']")).toBeVisible();
+async function openWorker(page: Page): Promise<void> {
+  await page.goto(`/workspaces/${WORKSPACE_ID}/worker-items/${IMPLEMENTER_WORKER_ITEM_ID}`);
+  await expect(page.locator("#worker-item-title")).toHaveText("实现者");
+  await expect(page.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
 }

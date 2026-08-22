@@ -40,7 +40,9 @@ export function WorkerComposer({
   const [draft, setDraft] = useState(() => loadWorkerItemDraft(draftKey));
   const [status, setStatus] = useState("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const streamReady = stream === null || stream.streamState.status === "live";
+  const streamReady = stream === null
+    || stream.streamState.status === "live"
+    || stream.streamState.status === "connecting";
   const contextChanged = draft.text.trim().length > 0
     && draft.lastContextFingerprint.length > 0
     && draft.lastContextFingerprint !== fingerprint;

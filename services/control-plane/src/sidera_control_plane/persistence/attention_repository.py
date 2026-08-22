@@ -40,6 +40,14 @@ class AttentionAcknowledgementRepository:
         if snapshot_row is None:
             return None
         snapshot = _plan(snapshot_row)
+        subtask_parts = _subtask_attention_key_parts(attention_key, root_task_id)
+        if subtask_parts is not None:
+            return self._get_current_subtask_source(
+                snapshot,
+                workspace_id,
+                attention_key,
+                *subtask_parts,
+            )
         kind, raw_resource_id, state = _attention_key_parts(attention_key)
         if kind is None or raw_resource_id is None or state is None:
             return None
@@ -102,6 +110,84 @@ class AttentionAcknowledgementRepository:
         return AttentionSource(
             attention_key=attention_key,
             root_task_id=root_task_id,
+            resource_id=task.id,
+            resource_version=task.version,
+            correlation_id=correlation_id,
+        )
+
+    def _get_current_subtask_source(
+        self,
+        snapshot: TaskPlanSnapshot,
+        workspace_id: UUID,
+        attention_key: str,
+        subtask_key: str,
+        state: str,
+    ) -> AttentionSource | None:
+        canonical = self._normalizer.normalize(snapshot)
+        subtask = next(
+            (item for item in canonical.subtasks if item.key == subtask_key),
+            None,
+        )
+        if subtask is None or subtask.task_id is None:
+            return None
+        task = self._session.scalar(
+            select(TaskModel).where(
+                TaskModel.id == subtask.task_id,
+                TaskModel.workspace_id == workspace_id,
+            )
+        )
+        if task is None:
+            return None
+        execution_rows = self._session.scalars(
+            select(ExecutionModel)
+            .where(
+                ExecutionModel.workspace_id == workspace_id,
+                ExecutionModel.task_id == task.id,
+            )
+            .order_by(ExecutionModel.updated_at.desc(), ExecutionModel.id.desc())
+        ).all()
+        execution_states = tuple(
+            current_state
+            for execution in execution_rows
+            for current_state in (_execution_attention_state(execution.status),)
+            if current_state is not None
+        )
+        current_state = _subtask_attention_state(task.status, execution_states)
+        if current_state != state:
+            return None
+
+        correlation_id = self._session.scalar(
+            select(ExecutionEventModel.id)
+            .join(
+                ExecutionModel,
+                ExecutionModel.id == ExecutionEventModel.execution_id,
+            )
+            .where(
+                ExecutionEventModel.workspace_id == workspace_id,
+                ExecutionModel.workspace_id == workspace_id,
+                ExecutionModel.task_id == task.id,
+            )
+            .order_by(
+                ExecutionEventModel.occurred_at.desc(),
+                ExecutionEventModel.sequence.desc(),
+                ExecutionEventModel.id.desc(),
+            )
+            .limit(1)
+        )
+        if correlation_id is None:
+            correlation_id = self._session.scalar(
+                select(EventModel.id)
+                .where(
+                    EventModel.aggregate_type == "task",
+                    EventModel.aggregate_id == task.id,
+                    EventModel.workspace_id == workspace_id,
+                )
+                .order_by(EventModel.created_at.desc(), EventModel.id.desc())
+                .limit(1)
+            ) or UUID(int=0)
+        return AttentionSource(
+            attention_key=attention_key,
+            root_task_id=snapshot.root_task_id,
             resource_id=task.id,
             resource_version=task.version,
             correlation_id=correlation_id,
@@ -209,8 +295,31 @@ def _attention_key_parts(key: str) -> tuple[str | None, str | None, str | None]:
     return parts[0], parts[1], parts[2]
 
 
+def _subtask_attention_key_parts(
+    key: str, root_task_id: UUID
+) -> tuple[str, str] | None:
+    parts = key.split(":")
+    if len(parts) < 4 or parts[0] != "subtask" or parts[1] != str(root_task_id):
+        return None
+    return ":".join(parts[2:-1]), parts[-1]
+
+
+def _subtask_attention_state(
+    task_status: str, execution_states: tuple[str, ...]
+) -> str | None:
+    if "waiting_user" in execution_states or task_status in {"waiting", "waiting_user"}:
+        return "waiting_user"
+    if "blocked" in execution_states or task_status == "blocked":
+        return "blocked"
+    if "failed" in execution_states or task_status == "failed":
+        return "failed"
+    return None
+
+
 def _execution_attention_state(status: str) -> str | None:
     return {
+        "waiting_user": "waiting_user",
+        "blocked": "blocked",
         "failed": "failed",
     }.get(status)
 

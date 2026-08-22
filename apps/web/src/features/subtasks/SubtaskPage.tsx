@@ -155,7 +155,7 @@ function SubtaskContent({
       ) : null}
 
       <div className="subtask-page__layout">
-        <main className="subtask-page__main">
+        <div className="subtask-page__main">
           <div className="subtask-view-switch" role="tablist" aria-label="Worker 工作区视图">
             <button
               className={viewMode === "board" ? "is-active" : ""}
@@ -182,7 +182,7 @@ function SubtaskContent({
             <WorkerGraph workspace={workspace} onOpen={onOpenWorker} />
           )}
           <SubtaskActivity workspace={workspace} />
-        </main>
+        </div>
         <WorkerSummary workspace={workspace} />
       </div>
     </>

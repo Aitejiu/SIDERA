@@ -30,6 +30,8 @@ from sidera_control_plane.persistence.models import (
     ProcessDescriptorModel,
     ProjectionChangeModel,
     TaskModel,
+    WorkerItemModel,
+    WorkerItemPlacementModel,
     WorkerModel,
     WorkspaceModel,
     WorkspaceProjectionCursorModel,
@@ -56,12 +58,17 @@ def main() -> int:
             session.execute(
                 update(ExecutionModel)
                 .where(ExecutionModel.workspace_id == WORKSPACE_ID)
-                .values(active_lease_id=None, source_execution_id=None, source_session_id=None)
+                .values(
+                    active_lease_id=None,
+                    source_execution_id=None,
+                    source_session_id=None,
+                )
             )
             for model in (
                 AttentionAcknowledgementModel,
                 ProjectionChangeModel,
                 WorkspaceProjectionCursorModel,
+                WorkerItemPlacementModel,
                 PlanSnapshotModel,
                 ExecutionInputModel,
                 EvidenceClaimModel,
@@ -76,6 +83,7 @@ def main() -> int:
                 ExecutionModel,
                 ModuleInstanceModel,
                 ModuleDefinitionModel,
+                WorkerItemModel,
                 WorkerModel,
                 OutboxMessageModel,
                 EventModel,
@@ -93,7 +101,11 @@ def main() -> int:
                         )
                     )
                 else:
-                    session.execute(delete(model).where(cast(Any, model).workspace_id == WORKSPACE_ID))
+                    session.execute(
+                        delete(model).where(
+                            cast(Any, model).workspace_id == WORKSPACE_ID
+                        )
+                    )
             if workspace is not None:
                 session.delete(workspace)
             session.commit()

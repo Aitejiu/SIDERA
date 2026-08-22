@@ -1,8 +1,9 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, RefreshCcw } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
+import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
@@ -26,6 +27,7 @@ export function WorkerItemPage() {
     workspaceId: string;
     workerItemId: string;
   }>();
+  const stream = useWorkspaceStreamOptional();
   const workspaceQuery = useQuery({
     queryKey: workerWorkspaceQueryKey(workspaceId, workerItemId),
     queryFn: ({ signal }) => getWorkerItemWorkspace(workspaceId, workerItemId, signal),
@@ -56,6 +58,12 @@ export function WorkerItemPage() {
     queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
     enabled: Boolean(workspaceId && executionId),
   });
+  useEffect(() => {
+    const cursor = workspaceQuery.data?.last_change_cursor;
+    if (stream !== null && cursor !== undefined) {
+      stream.seedSnapshotCursor(cursor);
+    }
+  }, [stream, workspaceQuery.data?.last_change_cursor]);
   const activity = useMemo(() => flattenActivities(activityQuery.data?.pages), [activityQuery.data?.pages]);
 
   const refreshWorkerItem = async () => {
@@ -148,7 +156,7 @@ function WorkerItemContent({
       </header>
 
       <div className="worker-item-page__layout">
-        <main className="worker-item-page__main">
+        <div className="worker-item-page__main">
           <div className="worker-item-page__scope">
             <span className="eyebrow">LONG-LIVED WORKSPACE</span>
             <strong>{workspace.worker_item.responsibility}</strong>
@@ -179,7 +187,7 @@ function WorkerItemContent({
             execution={execution}
             onRefresh={onRefresh}
           />
-        </main>
+        </div>
         <WorkerSidebar workspace={workspace} taskTitle={taskTitle} subtaskTitle={subtaskTitle} />
       </div>
       {traceDescriptor ? (

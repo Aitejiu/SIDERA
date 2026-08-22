@@ -129,7 +129,7 @@ def _request(*, command_id: UUID, source_version: int = 3) -> dict[str, object]:
         "idempotency_key": f"attention:{command_id}",
         "correlation_id": str(uuid4()),
         "payload": {
-            "attention_key": f"task:{BLOCKED_TASK_ID}:blocked",
+            "attention_key": f"subtask:{ROOT_TASK_ID}:blocked:blocked",
             "source_correlation_id": str(UUID(int=0)),
             "source_resource_version": source_version,
         },
@@ -147,7 +147,9 @@ def test_attention_acknowledgement_is_actor_local_and_source_bound(
     before = client.get(f"/api/v1/tasks/{ROOT_TASK_ID}/overview", params=params)
     assert before.status_code == 200, before.text
     attention = before.json()["attention_items"]
-    assert [item["key"] for item in attention] == [f"task:{BLOCKED_TASK_ID}:blocked"]
+    assert [item["key"] for item in attention] == [
+        f"subtask:{ROOT_TASK_ID}:blocked:blocked"
+    ]
 
     request = _request(command_id=uuid4())
     acknowledged = client.post("/api/v1/commands", json=request)
