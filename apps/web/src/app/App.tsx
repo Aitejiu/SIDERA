@@ -142,19 +142,3 @@ export function SubtaskRoutePlaceholder() {
     </section>
   );
 }
-
-export function WorkerItemRoutePlaceholder() {
-  return (
-    <section className="route-placeholder" aria-labelledby="worker-item-placeholder-title">
-      <div className="breadcrumb">任务 / WorkerItem</div>
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">WORKERITEM WORKSPACE</span>
-          <h1 id="worker-item-placeholder-title">正在打开 WorkerItem</h1>
-        </div>
-        <span className="mono-label">WORKSPACE LOADING</span>
-      </div>
-      <div className="placeholder-line" aria-hidden="true" />
-    </section>
-  );
-}

@@ -8,7 +8,6 @@ import {
 import {
   App,
   TaskRoutePlaceholder,
-  WorkerItemRoutePlaceholder,
 } from "./App";
 import { SubtaskPage } from "@/features/subtasks/SubtaskPage";
 import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
@@ -18,6 +17,7 @@ import { PlanGenerationPage } from "@/features/tasks/PlanGenerationPage";
 import { ArtifactPage } from "@/features/trace/ArtifactPage";
 import { WorkerTracePage } from "@/features/trace/WorkerTracePage";
 import { ExecutionPage } from "@/features/trace/ExecutionPage";
+import { WorkerItemPage } from "@/features/worker-items/WorkerItemPage";
 import { CapabilitiesPage, ChatPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
@@ -44,7 +44,7 @@ export const routes: RouteObject[] = [
       },
       {
         path: "/workspaces/:workspaceId/worker-items/:workerItemId",
-        element: <WorkerItemRoutePlaceholder />,
+        element: <WorkerItemPage />,
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/plan/:generation",
