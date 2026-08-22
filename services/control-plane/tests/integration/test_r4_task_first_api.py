@@ -13,10 +13,14 @@ from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
     DependencyKind,
     Milestone,
-        TaskPlanSnapshot,
-        WorkerSlot,
-        WorkItem,
-        WorkItemKind,
+    SubtaskDependency,
+    SubtaskMilestone,
+    SubtaskPlanItem,
+    TaskPlanSnapshot,
+    WorkerItemPlanItem,
+    WorkerSlot,
+    WorkItem,
+    WorkItemKind,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -32,6 +36,8 @@ from sidera_control_plane.persistence.models import (
     PlanSnapshotModel,
     ProjectionChangeModel,
     TaskModel,
+    WorkerItemModel,
+    WorkerItemPlacementModel,
     WorkerModel,
 )
 
@@ -50,6 +56,15 @@ LEASE_ID = UUID("90000000-0000-0000-0000-000000000001")
 ARTIFACT_ID = UUID("a0000000-0000-0000-0000-000000000001")
 GENERATION_ONE_ID = UUID("10000000-0000-0000-0000-000000000001")
 GENERATION_TWO_ID = UUID("10000000-0000-0000-0000-000000000002")
+CONSOLE_ROOT_TASK_ID = UUID("30000000-0000-0000-0000-000000000101")
+CONSOLE_CALLBACK_TASK_ID = UUID("30000000-0000-0000-0000-000000000102")
+CONSOLE_INTEGRATION_TASK_ID = UUID("30000000-0000-0000-0000-000000000103")
+CONSOLE_SNAPSHOT_ID = UUID("10000000-0000-0000-0000-000000000101")
+CONSOLE_IMPLEMENTER_ID = UUID("40000000-0000-0000-0000-000000000101")
+CONSOLE_REVIEWER_ID = UUID("40000000-0000-0000-0000-000000000102")
+CONSOLE_INTEGRATOR_ID = UUID("40000000-0000-0000-0000-000000000103")
+CONSOLE_RUNNING_EXECUTION_ID = UUID("70000000-0000-0000-0000-000000000101")
+CONSOLE_WAITING_EXECUTION_ID = UUID("70000000-0000-0000-0000-000000000102")
 
 
 @pytest.fixture
@@ -557,25 +572,40 @@ def test_task_first_read_paths_share_one_projection_contract(
 
     assert overview.json()["schema_version"] == 1
     assert overview.json()["generation"] == 2
-    assert overview.json()["planned_count"] == 2
+    assert overview.json()["subtask_count"] == 4
+    assert overview.json()["planned_subtask_count"] == 2
     assert graph.json()["overview"] == overview.json()
     nodes = graph.json()["nodes"]
-    assert [node["work_item_key"] for node in nodes] == [
+    assert [node["subtask_key"] for node in nodes] == [
         "backend",
         "frontend",
         "planned",
         "added",
     ]
     assert nodes[0]["state"] == "running"
-    assert nodes[0]["worker_display_name"] == "OpenCode backend worker"
-    assert nodes[1]["state"] == "queued"
-    assert all(edge["scheduler_enforced"] is False for edge in graph.json()["edges"])
-    assert detail.json()["node"] == nodes[0]
+    assert nodes[1]["state"] == "running"
+    assert set(nodes[0]) >= {
+        "subtask_key",
+        "task_id",
+        "title",
+        "goal_summary",
+        "state",
+        "worker_item_count",
+        "running_worker_item_count",
+        "attention_worker_item_count",
+        "evidence_required",
+        "evidence_satisfied",
+    }
+    assert "work_item_key" not in nodes[0]
+    assert "worker_display_name" not in nodes[0]
+    assert "execution_id" not in nodes[0]
+    assert detail.json()["node"]["work_item_key"] == "backend"
     assert len(detail.json()["executions"]) == 1
     assert detail.json()["artifacts"][0]["artifact_id"] == str(ARTIFACT_ID)
     assert detail.json()["evidence"][0]["acceptance_ref"] == "acceptance:backend"
     assert activity.json()["schema_version"] == 1
     assert activity.json()["items"]
+    assert activity.json()["items"][0]["subtask_key"] == "backend"
     diff_entries = {entry["work_item_key"]: entry for entry in diff.json()["entries"]}
     assert diff_entries["backend"]["change"] == "unchanged"
     assert diff_entries["frontend"]["change"] == "patched"
@@ -585,3 +615,381 @@ def test_task_first_read_paths_share_one_projection_contract(
         "request_revision_supported": False,
         "entry_uri": "http://127.0.0.1:18080/main-agent",
     }
+
+
+def _console_snapshot() -> TaskPlanSnapshot:
+    return TaskPlanSnapshot.create(
+        snapshot_id=CONSOLE_SNAPSHOT_ID,
+        schema_version=2,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=CONSOLE_ROOT_TASK_ID,
+        generation=3,
+        parent_snapshot_id=None,
+        source_type="test",
+        source_ref="api:task-console",
+        title="支付重构",
+        goal_summary="完成支付回调链路重构",
+        acceptance_refs=("acceptance:root",),
+        published_by="local:test",
+        published_at=NOW,
+        subtasks=(
+            SubtaskPlanItem(
+                key="callback-idempotency",
+                task_id=CONSOLE_CALLBACK_TASK_ID,
+                kind=WorkItemKind.CHILD,
+                title="回调幂等",
+                goal_summary="保证支付回调可安全重试",
+                acceptance_refs=("acceptance:callback",),
+                milestone_key="implementation",
+                expected_outputs=("callback patch",),
+                source_refs=("planner:callback",),
+            ),
+            SubtaskPlanItem(
+                key="integration",
+                task_id=CONSOLE_INTEGRATION_TASK_ID,
+                kind=WorkItemKind.INTEGRATION,
+                title="支付集成",
+                goal_summary="完成支付链路集成验证",
+                acceptance_refs=("acceptance:integration",),
+                milestone_key="verification",
+                expected_outputs=("integration report",),
+                source_refs=("planner:integration",),
+            ),
+        ),
+        worker_item_plans=(
+            WorkerItemPlanItem(
+                key="callback-implementer",
+                worker_item_id=CONSOLE_IMPLEMENTER_ID,
+                subtask_key="callback-idempotency",
+                title="回调实现",
+                role="implementer",
+                responsibility="实现回调幂等逻辑",
+                capability_requirements=("python",),
+                worker_policy_ref=None,
+                configuration_ref=None,
+                concurrency_limit=1,
+                source_refs=("planner:callback-implementer",),
+            ),
+            WorkerItemPlanItem(
+                key="callback-reviewer",
+                worker_item_id=CONSOLE_REVIEWER_ID,
+                subtask_key="callback-idempotency",
+                title="回调复核",
+                role="reviewer",
+                responsibility="确认重试规则和验收证据",
+                capability_requirements=("python",),
+                worker_policy_ref=None,
+                configuration_ref=None,
+                concurrency_limit=1,
+                source_refs=("planner:callback-reviewer",),
+            ),
+            WorkerItemPlanItem(
+                key="payment-integrator",
+                worker_item_id=CONSOLE_INTEGRATOR_ID,
+                subtask_key="integration",
+                title="支付集成",
+                role="integrator",
+                responsibility="执行支付链路集成验证",
+                capability_requirements=("python",),
+                worker_policy_ref=None,
+                configuration_ref=None,
+                concurrency_limit=1,
+                source_refs=("planner:payment-integrator",),
+            ),
+        ),
+        subtask_milestones=(
+            SubtaskMilestone(
+                key="implementation",
+                title="实现",
+                subtask_keys=("callback-idempotency",),
+                acceptance_refs=(),
+                order_hint=1,
+            ),
+            SubtaskMilestone(
+                key="verification",
+                title="验证",
+                subtask_keys=("integration",),
+                acceptance_refs=(),
+                order_hint=2,
+            ),
+        ),
+        subtask_dependencies=(
+            SubtaskDependency(
+                upstream_subtask_key="callback-idempotency",
+                downstream_subtask_key="integration",
+                kind=DependencyKind.HARD,
+                required_evidence_refs=(),
+                enforcement=DependencyEnforcement.CONTROL_PLANE,
+            ),
+        ),
+    )
+
+
+def _seed_console(database: Database) -> None:
+    snapshot = _console_snapshot()
+    with database.session() as session:
+        session.add_all(
+            [
+                TaskModel(
+                    id=CONSOLE_ROOT_TASK_ID,
+                    workspace_id=WORKSPACE_ID,
+                    title="支付重构",
+                    description="完成支付回调链路重构",
+                    acceptance_criteria=["acceptance:root"],
+                    status="running",
+                    priority=50,
+                    requested_by="test",
+                    version=1,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                TaskModel(
+                    id=CONSOLE_CALLBACK_TASK_ID,
+                    workspace_id=WORKSPACE_ID,
+                    title="回调幂等",
+                    description="保证支付回调可安全重试",
+                    acceptance_criteria=["acceptance:callback"],
+                    status="running",
+                    priority=50,
+                    requested_by="test",
+                    version=4,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                TaskModel(
+                    id=CONSOLE_INTEGRATION_TASK_ID,
+                    workspace_id=WORKSPACE_ID,
+                    title="支付集成",
+                    description="完成支付链路集成验证",
+                    acceptance_criteria=["acceptance:integration"],
+                    status="pending",
+                    priority=50,
+                    requested_by="test",
+                    version=1,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                *[
+                    WorkerItemModel(
+                        id=item_id,
+                        workspace_id=WORKSPACE_ID,
+                        root_task_id=CONSOLE_ROOT_TASK_ID,
+                        stable_key=stable_key,
+                        title=title,
+                        responsibility=responsibility,
+                        status="active",
+                        context_version=1,
+                        acknowledged_context_version=1,
+                        derived_from_worker_item_ids=[],
+                        version=1,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                    for item_id, stable_key, title, responsibility in (
+                        (
+                            CONSOLE_IMPLEMENTER_ID,
+                            "callback-implementer",
+                            "回调实现",
+                            "实现回调幂等逻辑",
+                        ),
+                        (
+                            CONSOLE_REVIEWER_ID,
+                            "callback-reviewer",
+                            "回调复核",
+                            "确认重试规则和验收证据",
+                        ),
+                        (
+                            CONSOLE_INTEGRATOR_ID,
+                            "payment-integrator",
+                            "支付集成",
+                            "执行支付链路集成验证",
+                        ),
+                    )
+                ],
+            ]
+        )
+        session.flush()
+        session.add(
+            PlanSnapshotModel(
+                id=snapshot.id,
+                schema_version=snapshot.schema_version,
+                workspace_id=snapshot.workspace_id,
+                root_task_id=snapshot.root_task_id,
+                generation=snapshot.generation,
+                parent_snapshot_id=None,
+                source_type=snapshot.source_type,
+                source_ref=snapshot.source_ref,
+                title=snapshot.title,
+                goal_summary=snapshot.goal_summary,
+                payload=snapshot.to_payload(),
+                published_by=snapshot.published_by,
+                published_at=snapshot.published_at,
+            )
+        )
+        session.flush()
+        session.add_all(
+            [
+                WorkerItemPlacementModel(
+                    plan_snapshot_id=CONSOLE_SNAPSHOT_ID,
+                    plan_generation=3,
+                    workspace_id=WORKSPACE_ID,
+                    root_task_id=CONSOLE_ROOT_TASK_ID,
+                    worker_item_id=item_id,
+                    worker_item_key=worker_item_key,
+                    subtask_key=subtask_key,
+                    subtask_task_id=task_id,
+                    role=role,
+                    capability_requirements=["python"],
+                    worker_policy_ref=None,
+                    configuration_ref=None,
+                    created_at=NOW,
+                )
+                for item_id, worker_item_key, subtask_key, task_id, role in (
+                    (
+                        CONSOLE_IMPLEMENTER_ID,
+                        "callback-implementer",
+                        "callback-idempotency",
+                        CONSOLE_CALLBACK_TASK_ID,
+                        "implementer",
+                    ),
+                    (
+                        CONSOLE_REVIEWER_ID,
+                        "callback-reviewer",
+                        "callback-idempotency",
+                        CONSOLE_CALLBACK_TASK_ID,
+                        "reviewer",
+                    ),
+                    (
+                        CONSOLE_INTEGRATOR_ID,
+                        "payment-integrator",
+                        "integration",
+                        CONSOLE_INTEGRATION_TASK_ID,
+                        "integrator",
+                    ),
+                )
+            ]
+        )
+        session.add_all(
+            [
+                ExecutionModel(
+                    id=CONSOLE_RUNNING_EXECUTION_ID,
+                    workspace_id=WORKSPACE_ID,
+                    task_id=CONSOLE_CALLBACK_TASK_ID,
+                    lineage_id=CONSOLE_RUNNING_EXECUTION_ID,
+                    attempt=1,
+                    max_attempts=3,
+                    purpose="implement callback",
+                    status="running",
+                    capability_requirements=["python"],
+                    pinned_worker_id=None,
+                    assigned_worker_id=None,
+                    active_lease_id=None,
+                    worker_item_id=CONSOLE_IMPLEMENTER_ID,
+                    last_fencing_token=0,
+                    not_before=NOW,
+                    failure_code=None,
+                    started_at=NOW,
+                    finished_at=None,
+                    version=2,
+                    stop_requested=False,
+                    source_execution_id=None,
+                    source_session_id=None,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                ExecutionModel(
+                    id=CONSOLE_WAITING_EXECUTION_ID,
+                    workspace_id=WORKSPACE_ID,
+                    task_id=CONSOLE_CALLBACK_TASK_ID,
+                    lineage_id=CONSOLE_WAITING_EXECUTION_ID,
+                    attempt=1,
+                    max_attempts=3,
+                    purpose="review callback",
+                    status="waiting_user",
+                    capability_requirements=["python"],
+                    pinned_worker_id=None,
+                    assigned_worker_id=None,
+                    active_lease_id=None,
+                    worker_item_id=CONSOLE_REVIEWER_ID,
+                    last_fencing_token=0,
+                    not_before=NOW,
+                    failure_code=None,
+                    started_at=NOW,
+                    finished_at=None,
+                    version=1,
+                    stop_requested=False,
+                    source_execution_id=None,
+                    source_session_id=None,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+            ]
+        )
+        session.flush()
+        session.add_all(
+            [
+                EvidenceClaimModel(
+                    id=uuid4(),
+                    workspace_id=WORKSPACE_ID,
+                    task_id=CONSOLE_CALLBACK_TASK_ID,
+                    execution_id=CONSOLE_RUNNING_EXECUTION_ID,
+                    acceptance_criterion_ref="acceptance:callback",
+                    conclusion="回调重试规则已有测试证据",
+                    environment_ref="task-console",
+                    artifact_ids=[],
+                    producer="integration",
+                    status="candidate",
+                    created_at=NOW,
+                ),
+                ProjectionChangeModel(
+                    workspace_id=WORKSPACE_ID,
+                    cursor=17,
+                    schema_version=1,
+                    projection_type="task_console",
+                    resource_id=CONSOLE_ROOT_TASK_ID,
+                    change_type="worker_item.updated",
+                    resource_version=1,
+                    occurred_at=NOW,
+                    correlation_id=uuid4(),
+                ),
+            ]
+        )
+        session.commit()
+
+
+def test_task_console_graph_exposes_subtasks_and_worker_item_summary(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    _seed_console(database)
+    response = client.get(
+        f"/api/v1/tasks/{CONSOLE_ROOT_TASK_ID}/graph",
+        params={"workspace_id": str(workspace_id)},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert [node["subtask_key"] for node in payload["nodes"]] == [
+        "callback-idempotency",
+        "integration",
+    ]
+    callback = payload["nodes"][0]
+    assert callback["worker_item_count"] == 2
+    assert callback["running_worker_item_count"] == 1
+    assert callback["attention_worker_item_count"] == 1
+    assert callback["state"] == "waiting_user"
+    assert callback["evidence_required"] == 1
+    assert callback["evidence_satisfied"] == 1
+    assert "work_item_key" not in callback
+    assert "worker_display_name" not in callback
+    assert "execution_id" not in callback
+    assert payload["edges"] == [
+        {
+            "upstream_subtask_key": "callback-idempotency",
+            "downstream_subtask_key": "integration",
+            "kind": "hard",
+        }
+    ]
+    assert payload["overview"]["attention_items"][0]["task_title"] == "支付重构"
+    assert payload["overview"]["attention_items"][0]["subtask_title"] == "回调幂等"

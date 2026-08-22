@@ -186,6 +186,92 @@ class TaskGraphProjectionResponse(BaseModel):
     milestones: tuple[MilestoneProjectionResponse, ...]
 
 
+class TaskConsoleAttentionProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    kind: str
+    task_title: str
+    subtask_key: str
+    subtask_title: str
+    reason: str
+    resource_id: UUID
+    resource_version: int
+    correlation_id: UUID
+    occurred_at: datetime
+
+
+class TaskConsoleOverviewProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    generation: int
+    title: str
+    goal_summary: str
+    acceptance_refs: tuple[str, ...]
+    current_milestone_key: str | None
+    subtask_count: int
+    planned_subtask_count: int
+    running_subtask_count: int
+    completed_subtask_count: int
+    failed_subtask_count: int
+    next_subtask_keys: tuple[str, ...]
+    attention_items: tuple[TaskConsoleAttentionProjectionResponse, ...]
+    last_change_cursor: int
+    as_of: datetime
+
+
+class SubtaskNodeProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtask_key: str
+    task_id: UUID | None
+    kind: str
+    title: str
+    goal_summary: str
+    state: str
+    milestone_key: str | None
+    worker_item_count: int
+    running_worker_item_count: int
+    attention_worker_item_count: int
+    evidence_required: int
+    evidence_satisfied: int
+    current_action: str | None
+
+
+class SubtaskEdgeProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upstream_subtask_key: str
+    downstream_subtask_key: str
+    kind: str
+
+
+class SubtaskMilestoneProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    title: str
+    state: str
+    subtask_count: int
+    completed_count: int
+    planned_count: int
+    order_hint: int
+
+
+class TaskConsoleGraphProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    overview: TaskConsoleOverviewProjectionResponse
+    nodes: tuple[SubtaskNodeProjectionResponse, ...]
+    edges: tuple[SubtaskEdgeProjectionResponse, ...]
+    milestones: tuple[SubtaskMilestoneProjectionResponse, ...]
+
+
 class ExecutionSummaryProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -261,6 +347,29 @@ class TaskActivityProjectionResponse(BaseModel):
     schema_version: int
     last_change_cursor: int
     items: tuple[ActivityItemProjectionResponse, ...]
+    next_cursor: str | None
+
+
+class TaskConsoleActivityItemProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    source_id: UUID
+    occurred_at: datetime
+    kind: str
+    title: str
+    summary: str
+    correlation_id: UUID
+    subtask_key: str | None
+    subtask_title: str | None
+
+
+class TaskConsoleActivityProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    last_change_cursor: int
+    items: tuple[TaskConsoleActivityItemProjectionResponse, ...]
     next_cursor: str | None
 
 

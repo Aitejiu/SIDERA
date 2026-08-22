@@ -17,6 +17,9 @@ from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHa
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.task_commands import TaskCommandHandler
+from sidera_control_plane.application.task_console_queries import (
+    TaskConsoleQueryService,
+)
 from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
@@ -30,6 +33,9 @@ from sidera_control_plane.persistence.artifact_content_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
+)
+from sidera_control_plane.persistence.task_console_query_store import (
+    SqlAlchemyTaskConsoleQueryStore,
 )
 from sidera_control_plane.persistence.task_first_query_store import (
     SqlAlchemyTaskFirstQueryStore,
@@ -91,6 +97,17 @@ def get_task_first_query_service(
     return TaskFirstQueryService(
         SqlAlchemyTaskFirstQueryStore(database),
         main_agent_entry_uri=settings.main_agent_entry_uri,
+        actor_type=settings.local_actor_type,
+        actor_id=settings.local_actor_id,
+    )
+
+
+def get_task_console_query_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> TaskConsoleQueryService:
+    return TaskConsoleQueryService(
+        SqlAlchemyTaskConsoleQueryStore(database),
         actor_type=settings.local_actor_type,
         actor_id=settings.local_actor_id,
     )
