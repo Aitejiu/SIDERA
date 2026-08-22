@@ -17,6 +17,7 @@ class ProjectionChangePublisher:
     ) -> None:
         self._repository = repository
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._published: dict[tuple[object, ...], ProjectionChange] = {}
 
     def changed(
         self,
@@ -28,7 +29,18 @@ class ProjectionChangePublisher:
         resource_version: int | None,
         correlation_id: UUID,
     ) -> ProjectionChange:
-        return self._repository.append(
+        key = (
+            workspace_id,
+            projection_type,
+            resource_id,
+            change_type,
+            resource_version,
+            correlation_id if resource_id is None else None,
+        )
+        existing = self._published.get(key)
+        if existing is not None:
+            return existing
+        change = self._repository.append(
             workspace_id=workspace_id,
             schema_version=1,
             projection_type=projection_type,
@@ -38,3 +50,5 @@ class ProjectionChangePublisher:
             occurred_at=self._clock(),
             correlation_id=correlation_id,
         )
+        self._published[key] = change
+        return change

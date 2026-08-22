@@ -4,6 +4,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.application.ports import ProjectionChangePublisherPort
+from sidera_control_plane.application.projection_invalidation import (
+    projection_targets_for_module,
+)
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     CapabilityProfile,
@@ -25,8 +29,13 @@ from sidera_control_plane.persistence.models import (
 
 
 class ModuleRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def get_definition(
         self, module_id: UUID, workspace_id: UUID
@@ -63,6 +72,12 @@ class ModuleRepository:
                 lifecycle=definition.lifecycle.value,
             )
         )
+        self._publish_module_change(
+            workspace_id=definition.workspace_id,
+            resource_version=definition.config_schema_version,
+            change_type="module.definition_created",
+            correlation_id=definition.id,
+        )
 
     def add_instance(self, instance: ModuleInstance) -> None:
         self._session.add(
@@ -78,6 +93,32 @@ class ModuleRepository:
                 lifecycle=instance.lifecycle.value,
             )
         )
+        self._publish_module_change(
+            workspace_id=instance.workspace_id,
+            resource_version=instance.config_version,
+            change_type="module.instance_created",
+            correlation_id=instance.id,
+        )
+
+    def _publish_module_change(
+        self,
+        *,
+        workspace_id: UUID,
+        resource_version: int,
+        change_type: str,
+        correlation_id: UUID,
+    ) -> None:
+        if self._projection_changes is None:
+            return
+        for target in projection_targets_for_module():
+            self._projection_changes.changed(
+                workspace_id=workspace_id,
+                projection_type=target.projection_type,
+                resource_id=target.resource_id,
+                change_type=change_type,
+                resource_version=resource_version,
+                correlation_id=correlation_id,
+            )
 
 
 class ExecutionBindingRepository:

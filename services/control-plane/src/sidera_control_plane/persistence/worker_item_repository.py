@@ -6,8 +6,12 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import (
+    ProjectionChangePublisherPort,
     WorkerItemPlacement,
     WorkerItemRepositoryPort,
+)
+from sidera_control_plane.application.projection_invalidation import (
+    projection_targets_for_worker_item_change,
 )
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
@@ -19,8 +23,13 @@ from sidera_control_plane.persistence.models import (
 
 
 class WorkerItemRepository(WorkerItemRepositoryPort):
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        projection_changes: ProjectionChangePublisherPort | None = None,
+    ) -> None:
         self._session = session
+        self._projection_changes = projection_changes
 
     def get(
         self, item_id: UUID, workspace_id: UUID, *, for_update: bool = False
@@ -54,6 +63,7 @@ class WorkerItemRepository(WorkerItemRepositoryPort):
                 updated_at=item.updated_at,
             )
         )
+        self._publish_change(item, "worker_item.created", item.version)
 
     def save(self, item: WorkerItem, previous_version: int) -> None:
         statement = (
@@ -82,6 +92,7 @@ class WorkerItemRepository(WorkerItemRepositoryPort):
         if not isinstance(result, CursorResult) or result.rowcount != 1:
             actual = self._current_version(item.id, item.workspace_id)
             raise VersionConflict(previous_version, actual)
+        self._publish_change(item, "worker_item.updated", item.version)
 
     def get_by_stable_key(
         self, root_task_id: UUID, stable_key: str
@@ -122,6 +133,33 @@ class WorkerItemRepository(WorkerItemRepositoryPort):
                 created_at=placement.created_at,
             )
         )
+        self._publish_change(
+            placement,
+            "worker_item.placement_materialized",
+            placement.plan_generation,
+        )
+
+    def _publish_change(
+        self,
+        item: WorkerItem | WorkerItemPlacement,
+        change_type: str,
+        resource_version: int,
+    ) -> None:
+        if self._projection_changes is None:
+            return
+        for target in projection_targets_for_worker_item_change(
+            worker_item_id=item.id if isinstance(item, WorkerItem) else item.worker_item_id,
+            root_task_id=item.root_task_id,
+            change_type=change_type,
+        ):
+            self._projection_changes.changed(
+                workspace_id=item.workspace_id,
+                projection_type=target.projection_type,
+                resource_id=target.resource_id,
+                change_type=change_type,
+                resource_version=resource_version,
+                correlation_id=item.id if isinstance(item, WorkerItem) else item.worker_item_id,
+            )
 
     def get_placement(
         self, plan_snapshot_id: UUID, worker_item_id: UUID

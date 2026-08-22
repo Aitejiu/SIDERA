@@ -79,14 +79,17 @@ class ProjectionChangeRepository:
         return tuple(_to_domain(row) for row in rows)
 
     def latest_cursor(self, workspace_id: UUID) -> int:
-        return (
-            self._session.scalar(
-                select(WorkspaceProjectionCursorModel.last_cursor).where(
-                    WorkspaceProjectionCursorModel.workspace_id == workspace_id
-                )
+        cursor_table_value = self._session.scalar(
+            select(WorkspaceProjectionCursorModel.last_cursor).where(
+                WorkspaceProjectionCursorModel.workspace_id == workspace_id
             )
-            or 0
-        )
+        ) or 0
+        projection_value = self._session.scalar(
+            select(func.max(ProjectionChangeModel.cursor)).where(
+                ProjectionChangeModel.workspace_id == workspace_id
+            )
+        ) or 0
+        return max(int(cursor_table_value), int(projection_value))
 
     def cursor_expired(self, workspace_id: UUID, cursor: int) -> bool:
         latest = self.latest_cursor(workspace_id)
@@ -101,13 +104,25 @@ class ProjectionChangeRepository:
         return next_cursor is None or next_cursor != cursor + 1
 
     def _allocate_cursor(self, workspace_id: UUID) -> int:
+        latest_projection_cursor = self._session.scalar(
+            select(func.max(ProjectionChangeModel.cursor)).where(
+                ProjectionChangeModel.workspace_id == workspace_id
+            )
+        ) or 0
         statement = (
             insert(WorkspaceProjectionCursorModel)
-            .values(workspace_id=workspace_id, last_cursor=1)
+            .values(
+                workspace_id=workspace_id,
+                last_cursor=int(latest_projection_cursor) + 1,
+            )
             .on_conflict_do_update(
                 index_elements=[WorkspaceProjectionCursorModel.workspace_id],
                 set_={
-                    "last_cursor": WorkspaceProjectionCursorModel.last_cursor + 1
+                    "last_cursor": func.greatest(
+                        WorkspaceProjectionCursorModel.last_cursor,
+                        int(latest_projection_cursor),
+                    )
+                    + 1
                 },
             )
             .returning(WorkspaceProjectionCursorModel.last_cursor)

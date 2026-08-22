@@ -11,14 +11,25 @@ from sqlalchemy import delete
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.projection_stream import _event_stream
+from sidera_control_plane.application.projection_changes import ProjectionChangePublisher
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    CommandModel,
     ProjectionChangeModel,
     WorkspaceModel,
 )
 from sidera_control_plane.persistence.projection_change_repository import (
     ProjectionChangeRepository,
+)
+from sidera_control_plane.persistence.repositories import EventRepository
+
+from test_worker_workspace_api import (
+    EXECUTION_TWO_ID,
+    ROOT_TASK_ID,
+    WORKER_ITEM_ID,
+    _seed as seed_worker_workspace,
 )
 
 pytestmark = pytest.mark.integration
@@ -51,7 +62,7 @@ def append_change(
         change = ProjectionChangeRepository(session).append(
             workspace_id=workspace_id,
             schema_version=1,
-            projection_type="task_first",
+            projection_type="task_overview",
             resource_id=resource_id,
             change_type="upsert",
             resource_version=1,
@@ -93,6 +104,32 @@ def test_concurrent_cursor_allocation_is_unique_and_workspace_scoped(
     assert [change.cursor for change in changes] == [2]
 
 
+def test_cursor_allocation_reconciles_legacy_projection_rows(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    with database.session() as session:
+        session.add(
+            ProjectionChangeModel(
+                workspace_id=workspace_id,
+                cursor=7,
+                schema_version=1,
+                projection_type="task_overview",
+                resource_id=None,
+                change_type="legacy.seed",
+                resource_version=1,
+                occurred_at=datetime(2026, 8, 21, tzinfo=UTC),
+                correlation_id=uuid4(),
+            )
+        )
+        session.commit()
+
+    assert append_change(database, workspace_id) == 8
+
+    with database.session() as session:
+        assert ProjectionChangeRepository(session).latest_cursor(workspace_id) == 8
+
+
 def test_sse_replays_after_cursor_and_emits_only_invalidation_metadata(
     database: Database,
     database_url: str,
@@ -126,7 +163,7 @@ def test_sse_replays_after_cursor_and_emits_only_invalidation_metadata(
     assert lines[1] == "event: projection.changed"
     payload = json.loads(lines[2].removeprefix("data: "))
     assert payload["cursor"] == 2
-    assert payload["projection_type"] == "task_first"
+    assert payload["projection_type"] == "task_overview"
     assert "projection" not in payload
 
 
@@ -255,6 +292,79 @@ def test_event_and_projection_change_commit_atomically(
             workspace_id, cursor=0, limit=10
         )
 
-    assert len(changes) == 1
-    assert changes[0].projection_type == "task_first"
-    assert changes[0].resource_id == task_id
+    assert len(changes) == 2
+    assert {change.projection_type for change in changes} == {
+        "task_overview",
+        "task_graph",
+    }
+    assert {change.resource_id for change in changes} == {task_id}
+
+
+def test_execution_event_targets_stable_worker_item_resources(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    seed_worker_workspace(database)
+    event = EventData(
+        id=UUID("b3000000-0000-0000-0000-000000000001"),
+        workspace_id=workspace_id,
+        aggregate_type="execution",
+        aggregate_id=EXECUTION_TWO_ID,
+        aggregate_version=4,
+        event_type="ExecutionStarted",
+        payload={"status": "running"},
+        actor_type="test",
+        actor_id="projection-test",
+        causation_id=UUID("b3000000-0000-0000-0000-000000000002"),
+        correlation_id=UUID("b3000000-0000-0000-0000-000000000003"),
+    )
+
+    with database.session() as session:
+        session.add(
+            CommandModel(
+                id=event.causation_id,
+                workspace_id=event.workspace_id,
+                command_type="ProjectionTest",
+                actor_type=event.actor_type,
+                actor_id=event.actor_id,
+                target_type="execution",
+                target_id=event.aggregate_id,
+                payload={},
+                expected_version=None,
+                idempotency_key="projection-event-test",
+                request_hash="a" * 64,
+                correlation_id=event.correlation_id,
+                status="applied",
+                result={},
+                rejection_reason=None,
+            )
+        )
+        session.flush()
+        EventRepository(
+            session,
+            ProjectionChangePublisher(ProjectionChangeRepository(session)),
+        ).append_with_outbox(event)
+        session.commit()
+        changes = ProjectionChangeRepository(session).list_after(
+            event.workspace_id, cursor=0, limit=100
+        )
+
+    event_changes = [
+        change for change in changes if change.correlation_id == event.correlation_id
+    ]
+    assert {change.projection_type for change in event_changes} == {
+        "task_graph",
+        "subtask_workspace",
+        "worker_item_workspace",
+        "worker_item_activity",
+    }
+    assert {
+        change.resource_id
+        for change in event_changes
+        if change.projection_type == "subtask_workspace"
+    } == {ROOT_TASK_ID}
+    assert {
+        change.resource_id
+        for change in event_changes
+        if change.projection_type.startswith("worker_item_")
+    } == {WORKER_ITEM_ID}

@@ -7,6 +7,9 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import ProjectionChangePublisherPort
+from sidera_control_plane.application.projection_invalidation import (
+    projection_targets_for_event,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -21,6 +24,9 @@ from sidera_control_plane.persistence.models import (
     OutboxMessageModel,
     TaskModel,
     WorkspaceModel,
+)
+from sidera_control_plane.persistence.projection_scope import (
+    resolve_worker_item_scope,
 )
 
 
@@ -220,27 +226,64 @@ class EventRepository:
             )
         )
         if self._projection_changes is not None:
-            self._projection_changes.changed(
-                workspace_id=event.workspace_id,
-                projection_type="task_first",
-                resource_id=_event_resource_id(event),
-                change_type=event.event_type,
-                resource_version=event.aggregate_version,
-                correlation_id=event.correlation_id,
-            )
+            worker_item_id, root_task_id = _resolve_event_scope(self._session, event)
+            for target in projection_targets_for_event(
+                event,
+                worker_item_id=worker_item_id,
+                root_task_id=root_task_id,
+            ):
+                self._projection_changes.changed(
+                    workspace_id=event.workspace_id,
+                    projection_type=target.projection_type,
+                    resource_id=target.resource_id,
+                    change_type=event.event_type,
+                    resource_version=event.aggregate_version,
+                    correlation_id=event.correlation_id,
+                )
 
 
-def _event_resource_id(event: EventData) -> UUID | None:
-    if event.aggregate_type == "task":
-        return event.aggregate_id
-    if event.aggregate_type in {"task_plan", "attention"}:
-        root_task_id = event.payload.get("root_task_id")
-        if isinstance(root_task_id, str):
-            try:
-                return UUID(root_task_id)
-            except ValueError:
-                pass
-    return None
+def _resolve_event_scope(
+    session: Session, event: EventData
+) -> tuple[UUID | None, UUID | None]:
+    worker_item_id = _payload_uuid(event.payload, "worker_item_id")
+    root_task_id = _payload_uuid(event.payload, "root_task_id")
+    context = event.payload.get("execution_context")
+    if worker_item_id is None and isinstance(context, dict):
+        worker_item_id = _value_uuid(context.get("worker_item_id"))
+
+    execution_id = _value_uuid(event.payload.get("execution_id"))
+    session_id = _value_uuid(event.payload.get("session_id"))
+    if execution_id is None and event.aggregate_type == "execution":
+        execution_id = event.aggregate_id
+    if session_id is None and event.aggregate_type == "execution_session":
+        session_id = event.aggregate_id
+    scope = resolve_worker_item_scope(
+        session,
+        event.workspace_id,
+        execution_id=execution_id,
+        session_id=session_id,
+        worker_item_id=worker_item_id,
+        root_task_id=root_task_id,
+    )
+    worker_item_id = scope.worker_item_id
+    root_task_id = scope.root_task_id
+
+    if root_task_id is None and event.aggregate_type == "task":
+        root_task_id = event.aggregate_id
+    return worker_item_id, root_task_id
+
+
+def _payload_uuid(payload: dict[str, object], key: str) -> UUID | None:
+    return _value_uuid(payload.get(key))
+
+
+def _value_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_domain_task(row: TaskModel) -> Task:

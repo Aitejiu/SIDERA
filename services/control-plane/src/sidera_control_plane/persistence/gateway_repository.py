@@ -6,6 +6,11 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import ProjectionChangePublisherPort
+from sidera_control_plane.application.projection_invalidation import (
+    projection_targets_for_artifact,
+    projection_targets_for_evidence,
+    projection_targets_for_execution_event,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactType,
@@ -26,6 +31,9 @@ from sidera_control_plane.persistence.models import (
     ExecutionEventModel,
     ExecutionInputModel,
     GatewayOperationModel,
+)
+from sidera_control_plane.persistence.projection_scope import (
+    resolve_worker_item_scope,
 )
 
 
@@ -130,14 +138,24 @@ class ExecutionEventRepository:
             )
         )
         if self._projection_changes is not None:
-            self._projection_changes.changed(
-                workspace_id=event.workspace_id,
-                projection_type="worker_trace",
-                resource_id=event.execution_id,
-                change_type=event.event_type,
-                resource_version=event.sequence,
-                correlation_id=event.id,
+            scope = resolve_worker_item_scope(
+                self._session,
+                event.workspace_id,
+                execution_id=event.execution_id,
             )
+            for target in projection_targets_for_execution_event(
+                worker_item_id=scope.worker_item_id,
+                root_task_id=scope.root_task_id,
+                execution_id=event.execution_id,
+            ):
+                self._projection_changes.changed(
+                    workspace_id=event.workspace_id,
+                    projection_type=target.projection_type,
+                    resource_id=target.resource_id,
+                    change_type=event.event_type,
+                    resource_version=event.sequence,
+                    correlation_id=event.id,
+                )
 
     def get(
         self, session_id: UUID, sequence: int, workspace_id: UUID
@@ -178,14 +196,23 @@ class ArtifactRepository:
             )
         )
         if self._projection_changes is not None:
-            self._projection_changes.changed(
-                workspace_id=artifact.workspace_id,
-                projection_type="worker_trace",
-                resource_id=artifact.execution_id,
-                change_type="artifact",
-                resource_version=None,
-                correlation_id=artifact.id,
+            scope = resolve_worker_item_scope(
+                self._session,
+                artifact.workspace_id,
+                execution_id=artifact.execution_id,
             )
+            for target in projection_targets_for_artifact(
+                worker_item_id=scope.worker_item_id,
+                root_task_id=scope.root_task_id,
+            ):
+                self._projection_changes.changed(
+                    workspace_id=artifact.workspace_id,
+                    projection_type=target.projection_type,
+                    resource_id=target.resource_id,
+                    change_type="ArtifactRecorded",
+                    resource_version=None,
+                    correlation_id=artifact.id,
+                )
 
     def list_for_execution(
         self, execution_id: UUID, workspace_id: UUID
@@ -227,14 +254,23 @@ class EvidenceClaimRepository:
             )
         )
         if self._projection_changes is not None:
-            self._projection_changes.changed(
-                workspace_id=claim.workspace_id,
-                projection_type="task_first",
-                resource_id=claim.task_id,
-                change_type="evidence_claim",
-                resource_version=None,
-                correlation_id=claim.id,
+            scope = resolve_worker_item_scope(
+                self._session,
+                claim.workspace_id,
+                execution_id=claim.execution_id,
             )
+            for target in projection_targets_for_evidence(
+                worker_item_id=scope.worker_item_id,
+                root_task_id=scope.root_task_id,
+            ):
+                self._projection_changes.changed(
+                    workspace_id=claim.workspace_id,
+                    projection_type=target.projection_type,
+                    resource_id=target.resource_id,
+                    change_type="EvidenceRecorded",
+                    resource_version=None,
+                    correlation_id=claim.id,
+                )
 
     def list_for_task(
         self, task_id: UUID, workspace_id: UUID

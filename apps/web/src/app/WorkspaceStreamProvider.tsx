@@ -130,7 +130,7 @@ export function useWorkspaceStreamOptional(): WorkspaceStreamContextValue | null
   return useContext(WorkspaceStreamContext);
 }
 
-function matchesProjectionQuery(
+export function matchesProjectionQuery(
   queryKey: readonly unknown[],
   workspaceId: string,
   change: ProjectionChange,
@@ -138,21 +138,28 @@ function matchesProjectionQuery(
   if (!queryKey.includes(workspaceId)) {
     return false;
   }
-  if (change.projection_type === "task_first" || change.projection_type === "task_overview") {
-    if (queryKey[0] === "task-overviews") {
-      return true;
-    }
-    return queryKey[0] === "task-overview" &&
-      (change.resource_id === null || queryKey[2] === change.resource_id);
+  const queryType = queryKey[0];
+  const matchesResource = (resourceQueryIndex = 2) =>
+    change.resource_id === null || queryKey[resourceQueryIndex] === change.resource_id;
+
+  switch (change.projection_type) {
+    case "task_overview":
+      return queryType === "task-overviews" ||
+        (queryType === "task-overview" && matchesResource());
+    case "task_graph":
+      return queryType === "task-graph" && matchesResource();
+    case "subtask_workspace":
+      return queryType === "subtask-workspace" && matchesResource();
+    case "worker_item_workspace":
+      return queryType === "worker-item-workspace" && matchesResource();
+    case "worker_item_activity":
+      return queryType === "worker-item-activity" && matchesResource();
+    case "worker_trace":
+      return queryType === "worker-traces" ||
+        (queryType === "worker-trace" && matchesResource());
+    default:
+      return false;
   }
-  if (change.projection_type === "worker_trace") {
-    if (queryKey[0] === "worker-traces") {
-      return true;
-    }
-    return queryKey[0] === "worker-trace" &&
-      (change.resource_id === null || queryKey[2] === change.resource_id);
-  }
-  return false;
 }
 
 function createInvalidationQueue(queryClient: QueryClient, workspaceId: string) {
