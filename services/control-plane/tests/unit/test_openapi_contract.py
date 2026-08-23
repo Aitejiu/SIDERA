@@ -42,6 +42,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "ConfirmPlanningProposal": "ConfirmPlanningProposalPayload",
     "ConfigureWorkerRuntime": "ConfigureWorkerRuntimePayload",
     "SetModuleLifecycle": "SetModuleLifecyclePayload",
+    "PinExecutionWorker": "PinExecutionWorkerPayload",
+    "ClearExecutionWorkerPin": "ClearExecutionWorkerPinPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {

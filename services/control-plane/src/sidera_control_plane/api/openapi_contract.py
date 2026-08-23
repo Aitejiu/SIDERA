@@ -9,11 +9,13 @@ from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.schemas import (
     AnswerPlanningClarificationPayload,
     CancelPlanningRequestPayload,
+    ClearExecutionWorkerPinPayload,
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ErrorBody,
     ErrorResponse,
     ExecutionContextAddressPayload,
+    PinExecutionWorkerPayload,
     RegisterPlannerModulePayload,
     RegisterPlanningProfilePayload,
     RejectPlanningProposalPayload,
@@ -39,6 +41,8 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("ConfigureWorkerRuntime", ConfigureWorkerRuntimePayload),
     ("SetModuleLifecycle", SetModuleLifecyclePayload),
+    ("PinExecutionWorker", PinExecutionWorkerPayload),
+    ("ClearExecutionWorkerPin", ClearExecutionWorkerPinPayload),
 )
 
 _COMMAND_PAYLOADS = _PLANNING_COMMAND_PAYLOADS + _RUNTIME_COMMAND_PAYLOADS

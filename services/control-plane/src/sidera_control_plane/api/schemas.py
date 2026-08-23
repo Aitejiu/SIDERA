@@ -973,6 +973,16 @@ class SetModuleLifecyclePayload(BaseModel):
     lifecycle: Literal["active", "draining", "disabled"]
 
 
+class PinExecutionWorkerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: UUID
+
+
+class ClearExecutionWorkerPinPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class CreateExecutionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1151,6 +1161,12 @@ class CommandRequest(BaseModel):
                 )
             self._require_mutation_target()
             parsed = SetModuleLifecyclePayload.model_validate(self.payload)
+        elif self.command_type == "PinExecutionWorker":
+            self._require_mutation_target("execution")
+            parsed = PinExecutionWorkerPayload.model_validate(self.payload)
+        elif self.command_type == "ClearExecutionWorkerPin":
+            self._require_mutation_target("execution")
+            parsed = ClearExecutionWorkerPinPayload.model_validate(self.payload)
         elif self.command_type == "CreateExecution":
             self._require_create("execution")
             parsed = CreateExecutionPayload.model_validate(self.payload)

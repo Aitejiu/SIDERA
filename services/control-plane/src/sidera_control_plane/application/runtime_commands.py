@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -13,13 +13,21 @@ from sidera_control_plane.application.worker_runtime import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.modules import ModuleLifecycle
 from sidera_control_plane.domain.scheduling import SchedulingIssue
 from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
 
 
 class RuntimeCommandHandler:
-    command_types = frozenset({"ConfigureWorkerRuntime", "SetModuleLifecycle"})
+    command_types = frozenset(
+        {
+            "ConfigureWorkerRuntime",
+            "SetModuleLifecycle",
+            "PinExecutionWorker",
+            "ClearExecutionWorkerPin",
+        }
+    )
 
     def __init__(
         self,
@@ -36,7 +44,94 @@ class RuntimeCommandHandler:
             return self._configure_worker_runtime(uow, envelope)
         if envelope.command_type == "SetModuleLifecycle":
             return self._set_module_lifecycle(uow, envelope)
+        if envelope.command_type == "PinExecutionWorker":
+            return self._pin_execution_worker(uow, envelope)
+        if envelope.command_type == "ClearExecutionWorkerPin":
+            return self._clear_execution_worker_pin(uow, envelope)
         raise ValidationError(f"unsupported runtime command: {envelope.command_type}")
+
+    def _pin_execution_worker(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        execution = _get_target_execution(uow, envelope)
+        worker_id = _required_uuid(envelope.payload, "worker_id")
+        worker = uow.workers.get(
+            worker_id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        if worker is None:
+            raise NotFound("worker not found")
+        missing_capabilities = execution.capability_requirements - worker.capabilities
+        if missing_capabilities:
+            raise ValidationError(
+                "worker does not satisfy execution capabilities",
+                details={
+                    "worker_id": str(worker.id),
+                    "missing_capabilities": sorted(missing_capabilities),
+                },
+            )
+        if worker.adapter_type in execution.adapter_forbidden:
+            raise ValidationError(
+                "worker adapter is forbidden for execution",
+                details={
+                    "worker_id": str(worker.id),
+                    "adapter_type": worker.adapter_type,
+                },
+            )
+        configuration = uow.worker_runtime_configurations.get_for_worker(
+            worker.id,
+            execution.workspace_id,
+        )
+        previous_version = execution.version
+        execution.pin_worker(worker.id)
+        uow.executions.save(execution, previous_version)
+        event = _runtime_event(
+            envelope,
+            workspace_id=execution.workspace_id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_type="ExecutionWorkerPinned",
+            payload={
+                "worker_id": str(worker.id),
+                "adapter_type": worker.adapter_type,
+                "runtime_configuration_present": configuration is not None,
+            },
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_ids=(event.id,),
+        )
+
+    def _clear_execution_worker_pin(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        execution = _get_target_execution(uow, envelope)
+        previous_worker_id = execution.pinned_worker_id
+        previous_version = execution.version
+        execution.clear_worker_pin()
+        uow.executions.save(execution, previous_version)
+        event = _runtime_event(
+            envelope,
+            workspace_id=execution.workspace_id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_type="ExecutionWorkerPinCleared",
+            payload={
+                "previous_worker_id": str(previous_worker_id),
+                "worker_id": None,
+            },
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=execution.id,
+            aggregate_version=execution.version,
+            event_ids=(event.id,),
+        )
 
     def _configure_worker_runtime(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -253,7 +348,7 @@ def _configuration_values(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _required_uuid(payload: dict[str, Any], name: str) -> UUID:
+def _required_uuid(payload: Mapping[str, Any], name: str) -> UUID:
     value = payload.get(name)
     if isinstance(value, UUID):
         return value
@@ -286,4 +381,52 @@ def _raise_runtime_issue(issue: SchedulingIssue) -> None:
     raise ValidationError(
         "worker runtime configuration is invalid",
         details={"reason_code": issue.reason_code.value, **dict(issue.reason_details)},
+    )
+
+
+def _get_target_execution(
+    uow: ControlPlaneUnitOfWork,
+    envelope: CommandEnvelope,
+) -> Execution:
+    if envelope.target_type != "execution":
+        raise ValidationError("execution routing commands require target_type=execution")
+    if envelope.target_id is None or envelope.expected_version is None:
+        raise ValidationError(
+            "execution routing commands require target_id and expected_version"
+        )
+    if envelope.expected_version < 1:
+        raise ValidationError("expected_version must be positive")
+    execution = uow.executions.get(
+        envelope.target_id,
+        envelope.workspace_id,
+        for_update=True,
+    )
+    if execution is None:
+        raise NotFound("execution not found")
+    if execution.version != envelope.expected_version:
+        raise VersionConflict(envelope.expected_version, execution.version)
+    return execution
+
+
+def _runtime_event(
+    envelope: CommandEnvelope,
+    *,
+    workspace_id: UUID,
+    aggregate_id: UUID,
+    aggregate_version: int,
+    event_type: str,
+    payload: dict[str, Any],
+) -> EventData:
+    return EventData(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        aggregate_type="execution",
+        aggregate_id=aggregate_id,
+        aggregate_version=aggregate_version,
+        event_type=event_type,
+        payload=payload,
+        actor_type=envelope.actor_type,
+        actor_id=envelope.actor_id,
+        causation_id=envelope.id,
+        correlation_id=envelope.correlation_id,
     )
