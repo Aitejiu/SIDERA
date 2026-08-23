@@ -8,16 +8,21 @@ import pytest
 from sidera_task_bridge.state import (
     STATE_KEY,
     BridgeStateStore,
+    NotificationSnapshot,
     OutboundCommand,
+    PendingNotification,
     PrivateRoute,
+    ResourceSourceBinding,
     StateConflict,
     StateCorrupt,
+    UndeliverableAudit,
 )
 
 
 class MemoryKV:
     def __init__(self, value: object = None) -> None:
         self.value = value
+        self.writes = 0
 
     def get(self, key: str, default: object = None) -> object:
         assert key == STATE_KEY
@@ -26,6 +31,7 @@ class MemoryKV:
     def set(self, key: str, value: object) -> None:
         assert key == STATE_KEY
         self.value = value
+        self.writes += 1
 
 
 def command(
@@ -152,3 +158,179 @@ def test_private_route_is_plugin_data_and_does_not_accept_arbitrary_values() -> 
         "chat_id": "chat-42",
         "session_key": "telegram:chat-42",
     }
+
+
+def notification(
+    notice_id: str,
+    *,
+    cursor: int,
+    created_at: datetime,
+) -> PendingNotification:
+    return PendingNotification(
+        notice_id=notice_id,
+        cursor=cursor,
+        resource_key="planning_request:00000000-0000-0000-0000-000000000040",
+        source_ref="src_private",
+        kind="planning_clarification",
+        message="需要补充规划信息",
+        web_url="http://127.0.0.1:4174/workspaces/ws/inbox",
+        created_at=created_at,
+        last_attempted_at=None,
+        attempts=0,
+    )
+
+
+def test_v1_state_migrates_once_and_preserves_every_legacy_field() -> None:
+    async def scenario() -> None:
+        item = command()
+        legacy = {
+            "schema_version": 1,
+            "unresolved_commands": {str(item.command_id): item.model_dump(mode="json")},
+            "source_routes": {
+                "src_private": {
+                    "channel": "telegram",
+                    "chat_id": "chat-42",
+                    "session_key": "telegram:chat-42",
+                }
+            },
+            "settled_commands": [
+                {
+                    "command_id": str(item.command_id),
+                    "outcome": "rejected",
+                    "error_code": "conflict",
+                    "settled_at": item.created_at.isoformat(),
+                }
+            ],
+        }
+        kv = MemoryKV(legacy)
+        state = await BridgeStateStore(kv).snapshot()
+
+        assert state.schema_version == 2
+        assert state.unresolved_commands[str(item.command_id)] == item
+        assert state.source_routes["src_private"].chat_id == "chat-42"
+        assert state.settled_commands[0].error_code == "conflict"
+        assert state.notification_cursor == 0
+        assert state.pending_notifications == []
+        assert kv.value["schema_version"] == 2
+        assert kv.writes == 1
+
+    asyncio.run(scenario())
+
+
+def test_v2_state_rejects_unknown_schema_bad_uuid_negative_cursor_and_duplicate_pending() -> None:
+    async def scenario() -> None:
+        invalid_states = (
+            {"schema_version": 3},
+            {
+                "schema_version": 2,
+                "resource_sources": {
+                    "task:not-a-uuid": {
+                        "resource_kind": "task",
+                        "resource_id": "not-a-uuid",
+                        "source_type": "akashic_private",
+                        "source_ref": "src",
+                        "bound_at": "2026-08-24T03:30:00Z",
+                    }
+                },
+            },
+            {"schema_version": 2, "notification_cursor": -1},
+            {
+                "schema_version": 2,
+                "pending_notifications": [
+                    notification(
+                        "duplicate",
+                        cursor=1,
+                        created_at=datetime(2026, 8, 24, 3, 30, tzinfo=UTC),
+                    ).model_dump(mode="json"),
+                    notification(
+                        "duplicate",
+                        cursor=2,
+                        created_at=datetime(2026, 8, 24, 3, 31, tzinfo=UTC),
+                    ).model_dump(mode="json"),
+                ],
+            },
+        )
+        for raw in invalid_states:
+            with pytest.raises(StateCorrupt):
+                await BridgeStateStore(MemoryKV(raw)).snapshot()
+
+    asyncio.run(scenario())
+
+
+def test_notification_state_is_sorted_bounded_and_cursor_cannot_cross_pending() -> None:
+    async def scenario() -> None:
+        store = BridgeStateStore(MemoryKV())
+        first_at = datetime(2026, 8, 24, 3, 30, tzinfo=UTC)
+        await store.enqueue_notification(notification("second", cursor=2, created_at=first_at + timedelta(seconds=2)))
+        await store.enqueue_notification(notification("first", cursor=1, created_at=first_at))
+        assert [item.notice_id for item in await store.list_pending_notifications()] == [
+            "first",
+            "second",
+        ]
+
+        with pytest.raises(StateConflict):
+            await store.advance_notification_cursor(3)
+        await store.advance_notification_cursor(1)
+        assert (await store.snapshot()).notification_cursor == 1
+
+        for index in range(140):
+            await store.save_notification_snapshot(
+                f"task:{index}",
+                NotificationSnapshot(
+                    status="running",
+                    version=index,
+                    milestone_fingerprint=f"milestone-{index}",
+                    attention_fingerprint=None,
+                ),
+            )
+            await store.record_undeliverable(
+                UndeliverableAudit(
+                    notice_id=f"notice-{index}",
+                    resource_key=f"task:{index}",
+                    kind="task_blocked",
+                    reason_code="route_missing",
+                    recorded_at=first_at + timedelta(seconds=index),
+                )
+            )
+        state = await store.snapshot()
+        assert len(state.notification_snapshots) == 128
+        assert len(state.undeliverable_notifications) == 128
+        assert "task:0" not in state.notification_snapshots
+        assert state.undeliverable_notifications[0].notice_id == "notice-12"
+
+    asyncio.run(scenario())
+
+
+def test_resource_source_binding_is_immutable_and_materialized_task_inherits_owner() -> None:
+    async def scenario() -> None:
+        store = BridgeStateStore(MemoryKV())
+        request_id = UUID("00000000-0000-0000-0000-000000000040")
+        task_id = UUID("00000000-0000-0000-0000-000000000041")
+        await store.bind_resource_source(
+            "planning_request",
+            request_id,
+            "akashic_private",
+            "src_private",
+        )
+        await store.bind_resource_source(
+            "planning_request",
+            request_id,
+            "akashic_private",
+            "src_private",
+        )
+        with pytest.raises(StateConflict):
+            await store.bind_resource_source(
+                "planning_request",
+                request_id,
+                "akashic_private",
+                "src_other",
+            )
+
+        await store.bind_materialized_task(request_id, task_id)
+        state = await store.snapshot()
+        binding = state.resource_sources[f"task:{task_id}"]
+        assert isinstance(binding, ResourceSourceBinding)
+        assert binding.source_ref == "src_private"
+        assert binding.source_type == "akashic_private"
+
+    asyncio.run(scenario())

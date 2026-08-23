@@ -14,6 +14,7 @@ from .contracts import JsonValue
 from .state import (
     BridgeStateStore,
     OutboundCommand,
+    SourceType,
     StateConflict,
     same_logical_request,
 )
@@ -471,11 +472,7 @@ class CommandDispatcher:
             )
 
         if execution.status == "applied":
-            await self._state.settle(
-                stored.command_id,
-                outcome="applied",
-                error_code=None,
-            )
+            await self._settle_applied(stored, execution.result)
             return DispatchResult(
                 status="applied",
                 command_id=stored.command_id,
@@ -520,11 +517,10 @@ class CommandDispatcher:
 
     async def _settle_status(self, status: CommandStatus) -> DispatchResult:
         if status.status == "applied":
-            await self._state.settle(
-                status.command_id,
-                outcome="applied",
-                error_code=None,
-            )
+            command = await self._state.get_unresolved(status.command_id)
+            if command is None:
+                raise StateConflict("cannot settle an unknown command")
+            await self._settle_applied(command, status.result)
             return DispatchResult(
                 status="applied",
                 command_id=status.command_id,
@@ -543,6 +539,27 @@ class CommandDispatcher:
             execution=status,
         )
 
+    async def _settle_applied(
+        self,
+        command: OutboundCommand,
+        result: CommandResponse | None,
+    ) -> None:
+        binding = _submitted_brief_binding(command, result)
+        if binding is None:
+            await self._state.settle(
+                command.command_id,
+                outcome="applied",
+                error_code=None,
+            )
+            return
+        request_id, source_type, source_ref = binding
+        await self._state.settle_applied_command(
+            command.command_id,
+            planning_request_id=request_id,
+            source_type=source_type,
+            source_ref=source_ref,
+        )
+
     @staticmethod
     def _busy(command: OutboundCommand) -> DispatchResult:
         return DispatchResult(
@@ -558,3 +575,28 @@ class CommandDispatcher:
             command_id=command_id,
             error_code="service_unavailable",
         )
+
+
+def _submitted_brief_binding(
+    command: OutboundCommand,
+    result: CommandResponse | None,
+) -> tuple[UUID, SourceType, str] | None:
+    if result is None or command.request_json.get("command_type") != "SubmitPlanningRequest":
+        return None
+    payload = command.request_json.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    source_type = payload.get("source_type")
+    source_ref = payload.get("source_ref")
+    request_id_value = result.data.get("planning_request_id")
+    if source_type not in {"akashic_private", "sidera_web_chat"}:
+        return None
+    if not isinstance(source_ref, str) or not source_ref.strip():
+        return None
+    if not isinstance(request_id_value, str):
+        return None
+    try:
+        request_id = UUID(request_id_value)
+    except ValueError:
+        return None
+    return request_id, source_type, source_ref

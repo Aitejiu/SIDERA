@@ -168,6 +168,55 @@ def test_unknown_post_queries_terminal_status_before_settling() -> None:
     run(scenario())
 
 
+def test_unknown_submit_recovery_persists_private_source_binding() -> None:
+    async def scenario() -> None:
+        item = envelope()
+        item = item.model_copy(
+            update={
+                "payload": {
+                    "objective": "first",
+                    "source_type": "akashic_private",
+                    "source_ref": "src_private",
+                }
+            }
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                raise httpx.ReadTimeout("wire detail", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "command_id": str(item.command_id),
+                    "status": "applied",
+                    "result": {
+                        **applied(item.command_id),
+                        "data": {
+                            "planning_request_id": str(
+                                UUID("00000000-0000-0000-0000-000000000022")
+                            )
+                        },
+                    },
+                },
+            )
+
+        client = ControlPlaneClient(config(), transport=httpx.MockTransport(handler))
+        store = BridgeStateStore(MemoryKV())
+        result = await CommandDispatcher(client, store).execute(
+            "planning:source:src_private", item
+        )
+        await client.close()
+
+        assert result.status == "applied"
+        binding = (await store.snapshot()).resource_sources[
+            "planning_request:00000000-0000-0000-0000-000000000022"
+        ]
+        assert binding.source_type == "akashic_private"
+        assert binding.source_ref == "src_private"
+
+    run(scenario())
+
+
 def test_pending_result_keeps_exact_body_and_reuses_it_on_next_dispatch() -> None:
     async def scenario() -> None:
         bodies: list[dict[str, Any]] = []

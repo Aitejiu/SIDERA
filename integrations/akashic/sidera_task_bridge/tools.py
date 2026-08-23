@@ -20,7 +20,7 @@ from .source_routes import (
     SourceContextResolver,
     SourceResolution,
 )
-from .state import BridgeStateStore
+from .state import BridgeStateStore, StateConflict
 
 _CONFLICT_CODES = {
     "planning_conflict",
@@ -107,6 +107,23 @@ class SideraTaskTools:
                         outcome="failed",
                         summary="The control plane accepted the brief without a request reference.",
                         error_code="invalid_control_plane_response",
+                    )
+                )
+            try:
+                await self._state.bind_resource_source(
+                    "planning_request",
+                    planning_request_id,
+                    source.source_type,
+                    source.source_ref,
+                )
+            except StateConflict:
+                return _encode(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The planning request owner binding conflicts with existing state.",
+                        resource_ref=f"planning:{planning_request_id}",
+                        web_url=self._planning_url(planning_request_id),
+                        error_code="source_binding_conflict",
                     )
                 )
             data = _result_data(result)
