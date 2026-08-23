@@ -12,6 +12,7 @@ from sidera_control_plane.api.execution_queries import (
     router as execution_queries_router,
 )
 from sidera_control_plane.api.gateway_queries import router as gateway_queries_router
+from sidera_control_plane.api.module_queries import router as module_queries_router
 from sidera_control_plane.api.plan_queries import router as plan_queries_router
 from sidera_control_plane.api.planning_queries import router as planning_queries_router
 from sidera_control_plane.api.projection_stream import (
@@ -72,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(planning_queries_router)
     app.include_router(projection_stream_router)
     app.include_router(worker_queries_router)
+    app.include_router(module_queries_router)
     app.include_router(worker_item_queries_router)
     app.include_router(worker_trace_queries_router)
     app.include_router(execution_queries_router)

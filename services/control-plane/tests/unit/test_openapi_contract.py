@@ -19,6 +19,11 @@ EXPECTED_PATHS = {
     "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity",
+    "/api/v1/workers",
+    "/api/v1/workers/{worker_id}",
+    "/api/v1/executions",
+    "/api/v1/executions/{execution_id}",
+    "/api/v1/modules",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -28,6 +33,8 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}": "SubtaskWorkspaceProjectionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace": "WorkerWorkspaceProjectionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity": "WorkerItemActivityPageResponse",
+    "/api/v1/workers/{worker_id}": "WorkerResponse",
+    "/api/v1/executions/{execution_id}": "ExecutionResponse",
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
@@ -55,6 +62,14 @@ EXPECTED_PLANNING_RESPONSE_SCHEMAS = {
     "PlanningRequestDetailResponse",
     "PlanningProposalResponse",
     "PlanningMaterializationResponse",
+}
+
+EXPECTED_RUNTIME_RESPONSE_SCHEMAS = {
+    "WorkerResponse",
+    "ExecutionResponse",
+    "ModuleSummaryResponse",
+    "WorkerSummaryResponse",
+    "ExecutionBindingSummaryResponse",
 }
 
 
@@ -119,6 +134,14 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     for schema_name in EXPECTED_PLANNING_RESPONSE_SCHEMAS:
         assert schemas[schema_name]["type"] == "object"
         assert schemas[schema_name]["additionalProperties"] is False
+
+    assert EXPECTED_RUNTIME_RESPONSE_SCHEMAS <= schemas.keys()
+    assert (
+        first["paths"]["/api/v1/modules"]["get"]["responses"]["200"][
+            "content"
+        ]["application/json"]["schema"]["type"]
+        == "array"
+    )
 
     command_request = schemas["CommandRequest"]
     assert command_request["properties"]["payload"] == {

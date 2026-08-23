@@ -11,6 +11,7 @@ from pydantic import (
     model_validator,
 )
 
+from sidera_control_plane.application.module_queries import ModuleSummaryView
 from sidera_control_plane.application.planning_metrics import PlanningMetricsView
 from sidera_control_plane.application.planning_queries import (
     PlanningBriefView,
@@ -27,6 +28,7 @@ from sidera_control_plane.application.planning_queries import (
 from sidera_control_plane.application.resource_queries import (
     ArtifactView,
     EvidenceClaimView,
+    ExecutionBindingSummaryView,
     ExecutionBindingView,
     ExecutionEventView,
     ExecutionInputView,
@@ -34,6 +36,7 @@ from sidera_control_plane.application.resource_queries import (
     ExecutionView,
     ExecutionWorkspaceView,
     LeaseView,
+    WorkerSummaryView,
     WorkerView,
 )
 from sidera_control_plane.application.task_queries import (
@@ -1432,6 +1435,82 @@ class TaskResponse(BaseModel):
         )
 
 
+class ModuleSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    instance_name: str
+    provider: str
+    module_type: str
+    config_version: int
+    definition_lifecycle: str
+    instance_lifecycle: str
+
+    @classmethod
+    def from_view(cls, module: ModuleSummaryView) -> "ModuleSummaryResponse":
+        return cls(
+            id=module.id,
+            instance_name=module.instance_name,
+            provider=module.provider,
+            module_type=module.module_type,
+            config_version=module.config_version,
+            definition_lifecycle=module.definition_lifecycle,
+            instance_lifecycle=module.instance_lifecycle,
+        )
+
+
+class WorkerSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    display_name: str
+    adapter_type: str
+    status: str
+    desired_state: str
+    current_load: int
+    capacity: int
+
+    @classmethod
+    def from_view(cls, worker: WorkerSummaryView) -> "WorkerSummaryResponse":
+        return cls(
+            id=worker.id,
+            display_name=worker.display_name,
+            adapter_type=worker.adapter_type,
+            status=worker.status,
+            desired_state=worker.desired_state,
+            current_load=worker.current_load,
+            capacity=worker.capacity,
+        )
+
+
+class ExecutionBindingSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    worker_id: UUID
+    adapter_module_id: UUID
+    workspace_module_id: UUID
+    adapter_config_version: int
+    workspace_config_version: int
+    fencing_token: int
+    version: int
+
+    @classmethod
+    def from_view(
+        cls, binding: ExecutionBindingSummaryView
+    ) -> "ExecutionBindingSummaryResponse":
+        return cls(
+            id=binding.id,
+            worker_id=binding.worker_id,
+            adapter_module_id=binding.adapter_module_id,
+            workspace_module_id=binding.workspace_module_id,
+            adapter_config_version=binding.adapter_config_version,
+            workspace_config_version=binding.workspace_config_version,
+            fencing_token=binding.fencing_token,
+            version=binding.version,
+        )
+
+
 class WorkerResponse(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -1448,6 +1527,12 @@ class WorkerResponse(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+    runtime_configuration_status: str
+    runtime_configuration_reason: str | None
+    runtime_configuration_version: int | None
+    adapter_module_summary: ModuleSummaryResponse | None
+    workspace_module_summary: ModuleSummaryResponse | None
+    runtime_configured_at: datetime | None
 
     @classmethod
     def from_view(cls, worker: WorkerView) -> "WorkerResponse":
@@ -1467,6 +1552,20 @@ class WorkerResponse(BaseModel):
             version=worker.version,
             created_at=worker.created_at,
             updated_at=worker.updated_at,
+            runtime_configuration_status=worker.runtime_configuration_status,
+            runtime_configuration_reason=worker.runtime_configuration_reason,
+            runtime_configuration_version=worker.runtime_configuration_version,
+            adapter_module_summary=(
+                ModuleSummaryResponse.from_view(worker.adapter_module_summary)
+                if worker.adapter_module_summary is not None
+                else None
+            ),
+            workspace_module_summary=(
+                ModuleSummaryResponse.from_view(worker.workspace_module_summary)
+                if worker.workspace_module_summary is not None
+                else None
+            ),
+            runtime_configured_at=worker.runtime_configured_at,
         )
 
 
@@ -1495,6 +1594,16 @@ class ExecutionResponse(BaseModel):
     source_session_id: UUID | None
     created_at: datetime
     updated_at: datetime
+    adapter_preferences: tuple[str, ...]
+    adapter_forbidden: tuple[str, ...]
+    scheduling_status: str
+    waiting_reason: str | None
+    waiting_details_summary: str | None
+    requires_operator: bool
+    blocked_since: datetime | None
+    pinned_worker_summary: WorkerSummaryResponse | None
+    assigned_worker_summary: WorkerSummaryResponse | None
+    binding_summary: ExecutionBindingSummaryResponse | None
 
     @classmethod
     def from_view(cls, execution: ExecutionView) -> "ExecutionResponse":
@@ -1523,6 +1632,28 @@ class ExecutionResponse(BaseModel):
             source_session_id=execution.source_session_id,
             created_at=execution.created_at,
             updated_at=execution.updated_at,
+            adapter_preferences=execution.adapter_preferences,
+            adapter_forbidden=execution.adapter_forbidden,
+            scheduling_status=execution.scheduling_status,
+            waiting_reason=execution.waiting_reason,
+            waiting_details_summary=execution.waiting_details_summary,
+            requires_operator=execution.requires_operator,
+            blocked_since=execution.blocked_since,
+            pinned_worker_summary=(
+                WorkerSummaryResponse.from_view(execution.pinned_worker_summary)
+                if execution.pinned_worker_summary is not None
+                else None
+            ),
+            assigned_worker_summary=(
+                WorkerSummaryResponse.from_view(execution.assigned_worker_summary)
+                if execution.assigned_worker_summary is not None
+                else None
+            ),
+            binding_summary=(
+                ExecutionBindingSummaryResponse.from_view(execution.binding_summary)
+                if execution.binding_summary is not None
+                else None
+            ),
         )
 
 

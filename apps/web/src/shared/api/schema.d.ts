@@ -191,6 +191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/modules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Modules */
+        get: operations["list_modules_api_v1_modules_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks": {
         parameters: {
             query?: never;
@@ -881,6 +898,8 @@ export interface components {
             /** Title */
             title: string;
         };
+        /** ClearExecutionWorkerPinPayload */
+        ClearExecutionWorkerPinPayload: Record<string, never>;
         /** CommandRequest */
         CommandRequest: {
             actor: components["schemas"]["ActorRequest"];
@@ -910,7 +929,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "worker_runtime_configuration" | "module_definition" | "module_instance";
             /**
              * Workspace Id
              * Format: uuid
@@ -937,6 +956,23 @@ export interface components {
             };
             /** Event Ids */
             event_ids: string[];
+        };
+        /** ConfigureWorkerRuntimePayload */
+        ConfigureWorkerRuntimePayload: {
+            /** Adapter Module Config Version */
+            adapter_module_config_version: number;
+            /**
+             * Adapter Module Instance Id
+             * Format: uuid
+             */
+            adapter_module_instance_id: string;
+            /** Workspace Module Config Version */
+            workspace_module_config_version: number;
+            /**
+             * Workspace Module Instance Id
+             * Format: uuid
+             */
+            workspace_module_instance_id: string;
         };
         /** ConfirmPlanningProposalPayload */
         ConfirmPlanningProposalPayload: {
@@ -1106,6 +1142,37 @@ export interface components {
              */
             workspace_module_id: string;
         };
+        /** ExecutionBindingSummaryResponse */
+        ExecutionBindingSummaryResponse: {
+            /** Adapter Config Version */
+            adapter_config_version: number;
+            /**
+             * Adapter Module Id
+             * Format: uuid
+             */
+            adapter_module_id: string;
+            /** Fencing Token */
+            fencing_token: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Version */
+            version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /** Workspace Config Version */
+            workspace_config_version: number;
+            /**
+             * Workspace Module Id
+             * Format: uuid
+             */
+            workspace_module_id: string;
+        };
         /** ExecutionContextAddressPayload */
         ExecutionContextAddressPayload: {
             /** Context Version */
@@ -1238,10 +1305,18 @@ export interface components {
         ExecutionResponse: {
             /** Active Lease Id */
             active_lease_id: string | null;
+            /** Adapter Forbidden */
+            adapter_forbidden: string[];
+            /** Adapter Preferences */
+            adapter_preferences: string[];
             /** Assigned Worker Id */
             assigned_worker_id: string | null;
+            assigned_worker_summary: components["schemas"]["WorkerSummaryResponse"] | null;
             /** Attempt */
             attempt: number;
+            binding_summary: components["schemas"]["ExecutionBindingSummaryResponse"] | null;
+            /** Blocked Since */
+            blocked_since: string | null;
             /** Capability Requirements */
             capability_requirements: string[];
             /**
@@ -1274,8 +1349,13 @@ export interface components {
             not_before: string;
             /** Pinned Worker Id */
             pinned_worker_id: string | null;
+            pinned_worker_summary: components["schemas"]["WorkerSummaryResponse"] | null;
             /** Purpose */
             purpose: string;
+            /** Requires Operator */
+            requires_operator: boolean;
+            /** Scheduling Status */
+            scheduling_status: string;
             /** Source Execution Id */
             source_execution_id: string | null;
             /** Source Session Id */
@@ -1298,6 +1378,10 @@ export interface components {
             updated_at: string;
             /** Version */
             version: number;
+            /** Waiting Details Summary */
+            waiting_details_summary: string | null;
+            /** Waiting Reason */
+            waiting_reason: string | null;
             /** Worker Item Id */
             worker_item_id: string | null;
             /**
@@ -1507,6 +1591,34 @@ export interface components {
             title: string;
             /** Work Item Keys */
             work_item_keys: string[];
+        };
+        /** ModuleSummaryResponse */
+        ModuleSummaryResponse: {
+            /** Config Version */
+            config_version: number;
+            /** Definition Lifecycle */
+            definition_lifecycle: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Instance Lifecycle */
+            instance_lifecycle: string;
+            /** Instance Name */
+            instance_name: string;
+            /** Module Type */
+            module_type: string;
+            /** Provider */
+            provider: string;
+        };
+        /** PinExecutionWorkerPayload */
+        PinExecutionWorkerPayload: {
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
         };
         /** PlanDiffEntryResponse */
         PlanDiffEntryResponse: {
@@ -2223,6 +2335,14 @@ export interface components {
              * @constant
              */
             unknown_outcome_decision: "retry";
+        };
+        /** SetModuleLifecyclePayload */
+        SetModuleLifecyclePayload: {
+            /**
+             * Lifecycle
+             * @enum {string}
+             */
+            lifecycle: "active" | "draining" | "disabled";
         };
         /** SubmitPlanningRequestPayload */
         SubmitPlanningRequestPayload: {
@@ -3247,6 +3367,7 @@ export interface components {
         };
         /** WorkerResponse */
         WorkerResponse: {
+            adapter_module_summary: components["schemas"]["ModuleSummaryResponse"] | null;
             /** Adapter Type */
             adapter_type: string;
             /** Capabilities */
@@ -3276,6 +3397,14 @@ export interface components {
              * Format: date-time
              */
             last_heartbeat_at: string;
+            /** Runtime Configuration Reason */
+            runtime_configuration_reason: string | null;
+            /** Runtime Configuration Status */
+            runtime_configuration_status: string;
+            /** Runtime Configuration Version */
+            runtime_configuration_version: number | null;
+            /** Runtime Configured At */
+            runtime_configured_at: string | null;
             /** Startup Latency Ms */
             startup_latency_ms: number;
             /** Status */
@@ -3292,6 +3421,7 @@ export interface components {
              * Format: uuid
              */
             workspace_id: string;
+            workspace_module_summary: components["schemas"]["ModuleSummaryResponse"] | null;
         };
         /** WorkerRuntimeProjectionResponse */
         WorkerRuntimeProjectionResponse: {
@@ -3342,6 +3472,26 @@ export interface components {
             role: string;
             /** Worker Policy Ref */
             worker_policy_ref: string | null;
+        };
+        /** WorkerSummaryResponse */
+        WorkerSummaryResponse: {
+            /** Adapter Type */
+            adapter_type: string;
+            /** Capacity */
+            capacity: number;
+            /** Current Load */
+            current_load: number;
+            /** Desired State */
+            desired_state: string;
+            /** Display Name */
+            display_name: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Status */
+            status: string;
         };
         /** WorkerTraceEventResponse */
         WorkerTraceEventResponse: {
@@ -3844,6 +3994,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExecutionSessionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_modules_api_v1_modules_get: {
+        parameters: {
+            query: {
+                workspace_id: string;
+                module_type?: ("worker_adapter" | "workspace_provider") | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModuleSummaryResponse"][];
                 };
             };
             /** @description Validation Error */

@@ -13,6 +13,7 @@ from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
     ExecutionInputCommandHandler,
 )
+from sidera_control_plane.application.module_queries import ModuleQueryService
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.planning_metrics import PlanningMetricsService
@@ -47,6 +48,7 @@ from sidera_control_plane.persistence.planning_query_store import (
     SqlAlchemyPlanningQueryStore,
 )
 from sidera_control_plane.persistence.resource_query_store import (
+    SqlAlchemyModuleQueryStore,
     SqlAlchemyResourceQueryStore,
 )
 from sidera_control_plane.persistence.subtask_workspace_query_store import (
@@ -130,6 +132,12 @@ def get_resource_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> ResourceQueryService:
     return ResourceQueryService(SqlAlchemyResourceQueryStore(database))
+
+
+def get_module_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> ModuleQueryService:
+    return ModuleQueryService(SqlAlchemyModuleQueryStore(database))
 
 
 def get_task_first_query_service(

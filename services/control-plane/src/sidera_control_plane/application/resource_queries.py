@@ -4,6 +4,30 @@ from typing import Protocol, TypeVar
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.module_queries import ModuleSummaryView
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerSummaryView:
+    id: UUID
+    display_name: str
+    adapter_type: str
+    status: str
+    desired_state: str
+    current_load: int
+    capacity: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionBindingSummaryView:
+    id: UUID
+    worker_id: UUID
+    adapter_module_id: UUID
+    workspace_module_id: UUID
+    adapter_config_version: int
+    workspace_config_version: int
+    fencing_token: int
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +47,12 @@ class WorkerView:
     version: int
     created_at: datetime
     updated_at: datetime
+    runtime_configuration_status: str
+    runtime_configuration_reason: str | None
+    runtime_configuration_version: int | None
+    adapter_module_summary: ModuleSummaryView | None
+    workspace_module_summary: ModuleSummaryView | None
+    runtime_configured_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +81,16 @@ class ExecutionView:
     source_session_id: UUID | None
     created_at: datetime
     updated_at: datetime
+    adapter_preferences: tuple[str, ...]
+    adapter_forbidden: tuple[str, ...]
+    scheduling_status: str
+    waiting_reason: str | None
+    waiting_details_summary: str | None
+    requires_operator: bool
+    blocked_since: datetime | None
+    pinned_worker_summary: WorkerSummaryView | None
+    assigned_worker_summary: WorkerSummaryView | None
+    binding_summary: ExecutionBindingSummaryView | None
 
 
 @dataclass(frozen=True, slots=True)
