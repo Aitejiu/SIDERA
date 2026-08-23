@@ -1,7 +1,14 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
-import { test, expect, IMPLEMENTER_WORKER_ITEM_ID, WORKSPACE_ID } from "./fixtures";
+import {
+  test,
+  expect,
+  IMPLEMENTER_WORKER_ITEM_ID,
+  R5_WORKSPACE_ID,
+  runPlanningWorkerOnce,
+  WORKSPACE_ID,
+} from "./fixtures";
 
 test.describe("accessible R4 routes", () => {
   test.beforeEach(({ seedR4 }) => {
@@ -81,6 +88,28 @@ test.describe("accessible R4 routes", () => {
     await stop.focus();
     await page.keyboard.press("Enter");
     await expect(page.getByText("停止已请求", { exact: true })).toBeVisible();
+  });
+
+  test("has no axe violations on the planning proposal review surfaces", async ({ page, seedR5 }) => {
+    seedR5("proposal");
+    await page.goto(`/workspaces/${R5_WORKSPACE_ID}/tasks`);
+    await page.getByRole("region", { name: "任务" }).getByRole("link", { name: "新建任务" }).click();
+    await page.getByLabel("需求目标").fill("验证规划方案审阅界面的可访问性");
+    await page.getByRole("textbox", { name: "验收条件" }).first().fill("键盘和辅助技术可以审阅执行架构");
+    await page.getByRole("button", { name: "提交需求" }).click();
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${R5_WORKSPACE_ID}/planning/[0-9a-f-]{36}$`));
+    expect(runPlanningWorkerOnce().succeeded).toBe(1);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "执行架构", exact: true })).toBeVisible();
+    await audit(page, "planning architecture");
+
+    await page.getByRole("tab", { name: "依赖 DAG", exact: true }).click();
+    await expect(page.getByTestId("proposal-graph-canvas")).toBeVisible();
+    await audit(page, "planning DAG");
+
+    await page.getByRole("tab", { name: "变更", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "变更", exact: true })).toBeVisible();
+    await audit(page, "planning diff");
   });
 });
 

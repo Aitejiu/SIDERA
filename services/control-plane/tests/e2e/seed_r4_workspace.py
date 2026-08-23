@@ -35,15 +35,25 @@ from sidera_control_plane.persistence.models import (
     ExecutionEventModel,
     ExecutionInputModel,
     ExecutionModel,
+    ExecutionRequestDependencyModel,
+    ExecutionRequestModel,
     ExecutionSessionModel,
     ExecutionWorkspaceModel,
     GatewayOperationModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
+    PlanningBriefRevisionModel,
+    PlanningClarificationModel,
+    PlanningProfileModel,
+    PlanningProposalRevisionModel,
+    PlanningRequestModel,
+    PlanningRunLeaseModel,
+    PlanningRunModel,
     PlanSnapshotModel,
     ProcessDescriptorModel,
     ProjectionChangeModel,
+    ProposalMaterializationModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
@@ -157,6 +167,15 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         )
 
     session.execute(
+        update(PlanningRequestModel)
+        .where(PlanningRequestModel.workspace_id == workspace_id)
+        .values(
+            current_brief_revision=None,
+            current_proposal_revision=None,
+            current_proposal_content_hash=None,
+        )
+    )
+    session.execute(
         update(ExecutionModel)
         .where(ExecutionModel.workspace_id == workspace_id)
         .values(active_lease_id=None, source_execution_id=None, source_session_id=None)
@@ -165,6 +184,16 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         AttentionAcknowledgementModel,
         ProjectionChangeModel,
         WorkspaceProjectionCursorModel,
+        ExecutionRequestDependencyModel,
+        ExecutionRequestModel,
+        ProposalMaterializationModel,
+        PlanningProposalRevisionModel,
+        PlanningClarificationModel,
+        PlanningRunLeaseModel,
+        PlanningRunModel,
+        PlanningBriefRevisionModel,
+        PlanningRequestModel,
+        PlanningProfileModel,
         WorkerItemPlacementModel,
         PlanSnapshotModel,
         ExecutionInputModel,

@@ -431,11 +431,15 @@ class PlanningRunner:
                         "status": request_run.status.value,
                     },
                 )
-                definition = uow.modules.get_definition(
-                    request_run.planner_module_instance_id, request.workspace_id
-                )
                 instance = uow.modules.get_instance(
                     request_run.planner_module_instance_id, request.workspace_id
+                )
+                definition = (
+                    None
+                    if instance is None
+                    else uow.modules.get_definition(
+                        instance.definition_id, request.workspace_id
+                    )
                 )
                 claimed.append(
                     _ClaimedRun(

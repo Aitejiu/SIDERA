@@ -1,4 +1,11 @@
-import { test, expect, ROOT_TASK_ID, WORKSPACE_ID } from "./fixtures";
+import {
+  test,
+  expect,
+  ROOT_TASK_ID,
+  R5_WORKSPACE_ID,
+  runPlanningWorkerOnce,
+  WORKSPACE_ID,
+} from "./fixtures";
 
 test.describe("responsive control room visuals", () => {
   test.beforeEach(({ seedR4 }) => {
@@ -23,6 +30,24 @@ test.describe("responsive control room visuals", () => {
       fullPage: true,
       animations: "disabled",
       mask: [page.locator(".mono-label"), page.locator(".freshness-label")],
+    });
+  });
+
+  test("keeps the planning proposal surface stable", async ({ page, seedR5 }) => {
+    seedR5("proposal");
+    await page.goto(`/workspaces/${R5_WORKSPACE_ID}/tasks`);
+    await page.getByRole("region", { name: "任务" }).getByRole("link", { name: "新建任务" }).click();
+    await page.getByLabel("需求目标").fill("验证方案审阅视图的稳定布局");
+    await page.getByRole("textbox", { name: "验收条件" }).first().fill("架构信息和确认门保持清晰");
+    await page.getByRole("button", { name: "提交需求" }).click();
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${R5_WORKSPACE_ID}/planning/[0-9a-f-]{36}$`));
+    expect(runPlanningWorkerOnce().succeeded).toBe(1);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "执行架构", exact: true })).toBeVisible();
+    await expect(page).toHaveScreenshot("planning-proposal.png", {
+      fullPage: true,
+      animations: "disabled",
+      mask: [page.locator(".mono-label"), page.locator(".planning-run-status__facts")],
     });
   });
 });

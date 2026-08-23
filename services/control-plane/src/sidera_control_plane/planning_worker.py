@@ -85,6 +85,7 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         allowed = {
             "proposal",
             "clarification",
+            "scale",
             "invalid_schema",
             "timeout",
             "unknown_outcome",

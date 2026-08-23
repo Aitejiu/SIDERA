@@ -40,11 +40,18 @@ from sidera_control_plane.domain.planning_proposals import (
     ProposedSubtask,
     ProposedWorkerItem,
 )
-from sidera_control_plane.domain.plans import WorkItemKind
+from sidera_control_plane.domain.plans import (
+    DependencyEnforcement,
+    DependencyKind,
+    SubtaskDependency,
+    WorkerItemDependency,
+    WorkItemKind,
+)
 
 FakeScenario = Literal[
     "proposal",
     "clarification",
+    "scale",
     "invalid_schema",
     "timeout",
     "unknown_outcome",
@@ -60,6 +67,7 @@ class FakePlannerConfig:
         if self.scenario not in {
             "proposal",
             "clarification",
+            "scale",
             "invalid_schema",
             "timeout",
             "unknown_outcome",
@@ -156,13 +164,14 @@ class FakePlannerAdapter:
                 retryable=False,
                 unknown_outcome=True,
             )
+        payload = _scale_proposal_payload() if self.config.scenario == "scale" else _proposal_payload()
         proposal = ProposalRevision.create(
             planning_request_id=planner_input.planning_request_id,
             revision=1,
             brief_revision=planner_input.brief_revision,
             planning_run_id=planner_input.planning_run_id,
             kind=PlanningRequestKind.CREATE,
-            payload=_proposal_payload(),
+            payload=payload,
             profile_descriptor=PlanningProfileDescriptor.from_snapshot(
                 planner_input.profile_snapshot
             ),
@@ -264,6 +273,107 @@ def _proposal_payload() -> PlanningProposalPayload:
             scope_excludes=(),
             metadata={},
             estimated_tokens=100,
+        ),
+        impact_policy=ImpactPolicy(
+            activate_immediately=True,
+            budget_level="standard",
+            failure_policy="retry_then_block",
+        ),
+        base_descriptor=None,
+    )
+
+
+def _scale_proposal_payload() -> PlanningProposalPayload:
+    count = 200
+    subtasks = tuple(
+        ProposedSubtask(
+            key=f"work-{index:03d}",
+            kind=WorkItemKind.CHILD,
+            title=f"Scale subtask {index:03d}",
+            goal_summary="Exercise the bounded large proposal path.",
+            acceptance_refs=("acceptance:scale",),
+            expected_outputs=("artifact_type:diff",),
+            milestone_key=None,
+            source_refs=("brief:current",),
+        )
+        for index in range(1, count + 1)
+    )
+    workers = tuple(
+        ProposedWorkerItem(
+            key=f"scale-worker-{index:03d}",
+            subtask_key=f"work-{index:03d}",
+            title=f"Scale WorkerItem {index:03d}",
+            role="developer",
+            responsibility="Exercise the large proposal worker row.",
+            capability_requirements=("code",),
+            worker_policy_ref="policy:standard",
+            configuration_ref=None,
+            concurrency_limit=1,
+            source_refs=("brief:current",),
+        )
+        for index in range(1, count + 1)
+    )
+    intents = tuple(
+        ExecutionIntent(
+            worker_item_key=f"scale-worker-{index:03d}",
+            purpose="Exercise the large proposal execution intent.",
+            context_refs=("context:brief",),
+            expected_artifact_refs=("artifact_type:diff",),
+            required_evidence_refs=("acceptance:scale",),
+            capability_requirements=("code",),
+            adapter_preferences=("fake",),
+            budget_class="standard",
+            deadline_seconds=60,
+            not_before_seconds=None,
+            max_attempts=1,
+            activation_dependencies=(),
+        )
+        for index in range(1, count + 1)
+    )
+    subtask_dependencies = tuple(
+        SubtaskDependency(
+            upstream_subtask_key=f"work-{index:03d}",
+            downstream_subtask_key=f"work-{index + 1:03d}",
+            kind=DependencyKind.HARD,
+            required_evidence_refs=(),
+            enforcement=DependencyEnforcement.INFORMATIONAL,
+        )
+        for index in range(1, count)
+    )
+    worker_dependencies = tuple(
+        WorkerItemDependency(
+            upstream_worker_item_key=f"scale-worker-{index:03d}",
+            downstream_worker_item_key=f"scale-worker-{index + 1:03d}",
+            kind="hard",
+            required_artifact_refs=(),
+        )
+        for index in range(1, count)
+    )
+    return PlanningProposalPayload(
+        schema_version=2,
+        kind=PlanningRequestKind.CREATE,
+        root_task=ProposedRootTask(
+            title="Scale planner generated task",
+            goal_summary="Exercise a 200-subtask proposal without unbounded expansion.",
+            acceptance_refs=("acceptance:scale",),
+        ),
+        subtasks=subtasks,
+        worker_items=workers,
+        subtask_milestones=(),
+        subtask_dependencies=subtask_dependencies,
+        worker_item_dependencies=worker_dependencies,
+        execution_intents=intents,
+        decision_summary=DecisionSummary(
+            understanding="Exercise a bounded 200-subtask proposal.",
+            assumptions=("The large graph is deterministic.",),
+            risks=(),
+            estimated_cost_microunits=20_000,
+            estimated_runtime_seconds=600,
+            estimated_concurrency=4,
+            scope_includes=("large proposal",),
+            scope_excludes=(),
+            metadata={"fixture": "scale"},
+            estimated_tokens=20_000,
         ),
         impact_policy=ImpactPolicy(
             activate_immediately=True,

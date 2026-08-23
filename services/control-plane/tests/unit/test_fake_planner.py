@@ -116,6 +116,28 @@ def test_fake_planner_clarification_then_feedback_returns_valid_proposal() -> No
     assert proposal.proposal.content_hash
 
 
+def test_fake_planner_scale_is_deterministic_and_has_a_bounded_large_graph() -> None:
+    planner_input = _input()
+    planner_input = replace(
+        planner_input,
+        profile_snapshot=replace(
+            planner_input.profile_snapshot,
+            budget=replace(planner_input.profile_snapshot.budget, max_nodes=500),
+        ),
+    )
+    adapter = FakePlannerAdapter(FakePlannerConfig(scenario="scale"))
+
+    result = adapter.plan(planner_input, _control(planner_input))
+
+    assert isinstance(result, PlannerProposalResult)
+    assert len(result.proposal.payload.subtasks) == 200
+    assert len(result.proposal.payload.worker_items) == 200
+    assert len(result.proposal.payload.execution_intents) == 200
+    assert len(result.proposal.payload.subtask_dependencies) == 199
+    assert len(result.proposal.payload.worker_item_dependencies) == 199
+    assert result.proposal.content_hash
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_type"),
     [

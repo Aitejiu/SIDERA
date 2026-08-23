@@ -51,6 +51,19 @@ from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[2]
 
+PLANNING_CLEANUP_MODELS = (
+    ExecutionRequestDependencyModel,
+    ExecutionRequestModel,
+    ProposalMaterializationModel,
+    PlanningProposalRevisionModel,
+    PlanningClarificationModel,
+    PlanningRunLeaseModel,
+    PlanningRunModel,
+    PlanningBriefRevisionModel,
+    PlanningRequestModel,
+    PlanningProfileModel,
+)
+
 
 @pytest.fixture(scope="session")
 def database_url() -> str:
@@ -99,16 +112,7 @@ def _clear_database(database: Database) -> None:
             ProjectionChangeModel,
             AttentionAcknowledgementModel,
             WorkspaceProjectionCursorModel,
-            ExecutionRequestDependencyModel,
-            ExecutionRequestModel,
-            ProposalMaterializationModel,
-            PlanningProposalRevisionModel,
-            PlanningClarificationModel,
-            PlanningRunLeaseModel,
-            PlanningRunModel,
-            PlanningBriefRevisionModel,
-            PlanningRequestModel,
-            PlanningProfileModel,
+            *PLANNING_CLEANUP_MODELS,
             WorkerItemPlacementModel,
             PlanSnapshotModel,
             ExecutionInputModel,
