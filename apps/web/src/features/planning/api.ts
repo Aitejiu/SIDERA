@@ -5,6 +5,7 @@ import type {
   PlanningBriefPage,
   AnswerPlanningClarificationPayload,
   CancelPlanningRequestPayload,
+  ConfirmPlanningProposalPayload,
   PlanningClarificationPage,
   PlanningCommandRequest,
   PlanningCommandResponse,
@@ -261,6 +262,30 @@ export function buildRejectPlanningProposalCommand({
     workspaceId,
     actorId,
     commandType: "RejectPlanningProposal",
+    targetType: "planning_request",
+    targetId: requestId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildConfirmPlanningProposalCommand({
+  workspaceId,
+  requestId,
+  expectedVersion,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  requestId: string;
+  expectedVersion: number;
+  payload: ConfirmPlanningProposalPayload;
+  actorId?: string;
+}): PlanningCommandRequest {
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "ConfirmPlanningProposal",
     targetType: "planning_request",
     targetId: requestId,
     expectedVersion,

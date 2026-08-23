@@ -1,30 +1,34 @@
 import { AlertTriangle, ArrowLeft, X } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { ApiProblem } from "@/shared/api/client";
 
 import {
   buildAnswerPlanningClarificationCommand,
   buildCancelPlanningRequestCommand,
+  buildConfirmPlanningProposalCommand,
   buildRejectPlanningProposalCommand,
   buildRequestProposalRevisionCommand,
   executePlanningCommand,
   getPlanningRequest,
+  getPlanningProposal,
   listPlanningBriefs,
   listPlanningClarifications,
   listPlanningRuns,
   planningBriefsQueryKey,
   planningClarificationsQueryKey,
   planningRequestQueryKey,
+  planningProposalQueryKey,
   planningRunsQueryKey,
 } from "./api";
 import { ClarificationPanel } from "./ClarificationPanel";
 import { PlanningInspector } from "./PlanningInspector";
 import { PlanningRunStatus } from "./PlanningRunStatus";
 import { ProposalFeedbackComposer } from "./ProposalFeedbackComposer";
-import type { PlanningClarificationAnswer, PlanningCommandRequest } from "./types";
+import { ProposalView } from "./ProposalView";
+import type { PlanningClarificationAnswer, PlanningCommandRequest, PlanningCommandResponse } from "./types";
 
 type Confirmation = "cancel" | "reject" | null;
 
@@ -34,11 +38,13 @@ export function PlanningPage() {
     planningRequestId = "",
   } = useParams<{ workspaceId: string; planningRequestId: string }>();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedbackLockRevision, setFeedbackLockRevision] = useState<number | null>(null);
   const [pendingCommand, setPendingCommand] = useState<string | null>(null);
   const [commandError, setCommandError] = useState<string | null>(null);
+  const [proposalViewNonce, setProposalViewNonce] = useState(0);
 
   const requestQuery = useQuery({
     queryKey: planningRequestQueryKey(workspaceId, planningRequestId),
@@ -59,6 +65,14 @@ export function PlanningPage() {
     queryKey: planningClarificationsQueryKey(workspaceId, planningRequestId),
     queryFn: ({ signal }) => listPlanningClarifications(workspaceId, planningRequestId, signal),
     enabled: Boolean(workspaceId && planningRequestId),
+  });
+  const proposalRevision = requestQuery.data?.current_proposal_revision ?? null;
+  const proposalQuery = useQuery({
+    queryKey: proposalRevision === null
+      ? ["planning-proposal", workspaceId, planningRequestId, "none"] as const
+      : planningProposalQueryKey(workspaceId, planningRequestId, proposalRevision),
+    queryFn: ({ signal }) => getPlanningProposal(workspaceId, planningRequestId, proposalRevision ?? 0, signal),
+    enabled: requestQuery.data?.status === "proposal_ready" && proposalRevision !== null,
   });
 
   const requestData = requestQuery.data;
@@ -90,18 +104,18 @@ export function PlanningPage() {
     && request.current_proposal_content_hash !== null;
   const isTerminal = ["materialized", "rejected", "cancelled"].includes(request.status);
 
-  async function runCommand(command: PlanningCommandRequest, commandName: string): Promise<boolean> {
+  async function runCommand(command: PlanningCommandRequest, commandName: string): Promise<PlanningCommandResponse | null> {
     setPendingCommand(commandName);
     setCommandError(null);
     try {
-      await executePlanningCommand(command);
+      const response = await executePlanningCommand(command);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: planningRequestQueryKey(workspaceId, planningRequestId) }),
         queryClient.invalidateQueries({ queryKey: planningRunsQueryKey(workspaceId, planningRequestId) }),
         queryClient.invalidateQueries({ queryKey: planningBriefsQueryKey(workspaceId, planningRequestId) }),
         queryClient.invalidateQueries({ queryKey: planningClarificationsQueryKey(workspaceId, planningRequestId) }),
       ]);
-      return true;
+      return response;
     } catch (error) {
       setCommandError(readErrorMessage(error));
       if (
@@ -112,7 +126,7 @@ export function PlanningPage() {
       ) {
         setFeedbackLockRevision(request.current_proposal_revision);
       }
-      return false;
+      return null;
     } finally {
       setPendingCommand(null);
     }
@@ -135,7 +149,7 @@ export function PlanningPage() {
       setCommandError("当前没有可修改的方案");
       return;
     }
-    const succeeded = await runCommand(
+    const succeeded = (await runCommand(
       buildRequestProposalRevisionCommand({
         workspaceId,
         requestId: planningRequestId,
@@ -147,27 +161,57 @@ export function PlanningPage() {
         },
       }),
       "RequestProposalRevision",
-    );
+    )) !== null;
     if (succeeded) {
       setFeedbackOpen(false);
     }
   }
 
+  async function confirmProposal(binding: {
+    requestVersion: number;
+    proposalRevision: number;
+    proposalContentHash: string;
+    profileId: string;
+    profileVersion: number;
+  }) {
+    const response = await runCommand(
+      buildConfirmPlanningProposalCommand({
+        workspaceId,
+        requestId: planningRequestId,
+        expectedVersion: binding.requestVersion,
+        payload: {
+          proposal_revision: binding.proposalRevision,
+          proposal_content_hash: binding.proposalContentHash,
+          profile_id: binding.profileId,
+          profile_version: binding.profileVersion,
+        },
+      }),
+      "ConfirmPlanningProposal",
+    );
+    if (response === null) return;
+    const rootTaskId = readRootTaskId(response.data);
+    if (rootTaskId === null) {
+      setCommandError("确认响应缺少 Root Task 映射，未自动跳转。");
+      return;
+    }
+    navigate(`/workspaces/${workspaceId}/tasks/${encodeURIComponent(rootTaskId)}`);
+  }
+
   async function confirmAction() {
     if (confirmation === "cancel") {
-      const succeeded = await runCommand(
+      const succeeded = (await runCommand(
         buildCancelPlanningRequestCommand({
           workspaceId,
           requestId: planningRequestId,
           expectedVersion: request.version,
         }),
         "CancelPlanningRequest",
-      );
+      )) !== null;
       if (succeeded) setConfirmation(null);
       return;
     }
     if (confirmation === "reject" && request.current_proposal_revision !== null && request.current_proposal_content_hash !== null) {
-      const succeeded = await runCommand(
+      const succeeded = (await runCommand(
         buildRejectPlanningProposalCommand({
           workspaceId,
           requestId: planningRequestId,
@@ -179,7 +223,7 @@ export function PlanningPage() {
           },
         }),
         "RejectPlanningProposal",
-      );
+      )) !== null;
       if (succeeded) setConfirmation(null);
     }
   }
@@ -228,6 +272,30 @@ export function PlanningPage() {
               submitting={pendingCommand === "RequestProposalRevision"}
               disabled={feedbackLockRevision === request.current_proposal_revision}
             />
+          ) : null}
+
+          {request.status === "proposal_ready" && request.current_proposal_revision !== null ? (
+            proposalQuery.data ? (
+              <ProposalView
+                key={proposalViewNonce}
+                proposal={proposalQuery.data}
+                requestVersion={request.version}
+                profileId={request.planning_profile_id}
+                profileVersion={request.planning_profile_version}
+                onConfirm={(binding) => void confirmProposal(binding)}
+                onRevisit={() => {
+                  setProposalViewNonce((current) => current + 1);
+                  void proposalQuery.refetch();
+                }}
+                pending={pendingCommand === "ConfirmPlanningProposal"}
+              />
+            ) : proposalQuery.isPending ? (
+              <div className="planning-proposal__loading" role="status">正在读取方案结构</div>
+            ) : (
+              <div className="planning-proposal__loading planning-proposal__loading--error" role="alert">
+                方案结构读取失败，请重新加载规划请求。
+              </div>
+            )
           ) : null}
 
           <div className="planning-page__brief">
@@ -360,4 +428,10 @@ function requestStatusLabel(status: string): string {
 function readErrorMessage(error: unknown): string {
   if (error instanceof ApiProblem) return error.detail;
   return error instanceof Error ? error.message : "操作未能完成，请稍后重试。";
+}
+
+function readRootTaskId(data: unknown): string | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>).root_task_id;
+  return typeof value === "string" && value.trim() !== "" ? value : null;
 }

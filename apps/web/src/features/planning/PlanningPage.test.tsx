@@ -17,6 +17,7 @@ const SECOND_RUN_ID = "40000000-0000-0000-0000-000000000002";
 const PROFILE_ID = "50000000-0000-0000-0000-000000000001";
 const CLARIFICATION_ID = "60000000-0000-0000-0000-000000000001";
 const SECOND_CLARIFICATION_ID = "60000000-0000-0000-0000-000000000002";
+const ROOT_TASK_ID = "a1000000-0000-0000-0000-000000000001";
 const PROPOSAL_HASH = "a".repeat(64);
 
 const capability = {
@@ -145,6 +146,80 @@ function makeClarification(
   };
 }
 
+function makeProposal() {
+  return {
+    id: "a0000000-0000-0000-0000-000000000001",
+    planning_request_id: REQUEST_ID,
+    revision: 1,
+    brief_revision: 1,
+    planning_run_id: RUN_ID,
+    proposal_schema_version: 2,
+    kind: "create",
+    profile_version: 2,
+    created_at: "2026-08-23T08:00:00Z",
+    content_hash: PROPOSAL_HASH,
+    derived_diff: {
+      root_task_added: true,
+      added_subtask_keys: ["implementation"],
+      added_worker_item_keys: ["implementation-worker"],
+      immediately_ready_worker_item_keys: ["implementation-worker"],
+      blocked_worker_item_keys: [],
+    },
+    display: {
+      root_task: {
+        title: "交付任务控制台",
+        goal_summary: "确认后进入任务工作台。",
+        acceptance_refs: ["可追踪"],
+      },
+      subtasks: [{
+        key: "implementation",
+        kind: "implementation",
+        title: "实现控制台",
+        goal_summary: "交付页面。",
+        acceptance_refs: ["页面可用"],
+        expected_outputs: ["页面"],
+        milestone_key: null,
+        source_refs: ["brief:1"],
+      }],
+      worker_items: [{
+        key: "implementation-worker",
+        subtask_key: "implementation",
+        title: "实现 Worker",
+        role: "frontend",
+        responsibility: "实现页面。",
+        capability_requirements: ["ui"],
+        worker_policy_ref: null,
+        configuration_ref: null,
+        concurrency_limit: 1,
+        source_refs: ["brief:1"],
+        pinned_worker_id: null,
+      }],
+      milestones: [],
+      subtask_dependencies: [],
+      worker_item_dependencies: [],
+      execution_intents: [],
+      decision_summary: {
+        understanding: "交付一个可追踪的任务控制台。",
+        assumptions: [],
+        risks: [],
+        estimated_tokens: 100,
+        estimated_cost_microunits: 1,
+        estimated_runtime_seconds: 10,
+        estimated_concurrency: 1,
+        scope_includes: ["页面"],
+        scope_excludes: [],
+      },
+      impact_policy: {
+        activate_immediately: false,
+        budget_level: "standard",
+        failure_policy: "block_downstream",
+        manual_gate: true,
+        revision_operation: null,
+      },
+    },
+  };
+}
+
 function installHandlers({
   request,
   runs = [request.active_run].filter(Boolean),
@@ -169,6 +244,9 @@ function installHandlers({
     http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-requests/${REQUEST_ID}/clarifications`, () =>
       HttpResponse.json({ items: clarifications }),
     ),
+    http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-requests/${REQUEST_ID}/proposals/1`, () =>
+      HttpResponse.json(makeProposal()),
+    ),
   );
 }
 
@@ -181,6 +259,7 @@ function renderPage() {
       <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE_ID}/planning/${REQUEST_ID}`]}>
         <Routes>
           <Route path="/workspaces/:workspaceId/planning/:planningRequestId" element={<PlanningPage />} />
+          <Route path="/workspaces/:workspaceId/tasks/:rootTaskId" element={<div data-testid="root-task-route">Root Task</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -352,6 +431,42 @@ describe("PlanningPage", () => {
     expect(submittedCommand.command_type).toBe("RejectPlanningProposal");
     expect(submittedCommand.expected_version).toBe(4);
     expect((submittedCommand.payload as { current_proposal_revision: number }).current_proposal_revision).toBe(1);
+  });
+
+  it("confirms the reviewed proposal and opens the returned Root Task", async () => {
+    const request = makeRequest("proposal_ready");
+    installHandlers({ request });
+    let commandBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post("/api/v1/commands", async ({ request: command }) => {
+        commandBody = await command.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          aggregate_id: REQUEST_ID,
+          aggregate_version: 5,
+          command_id: "a0000000-0000-0000-0000-000000000004",
+          event_ids: [],
+          data: { root_task_id: ROOT_TASK_ID },
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "确认并创建任务" }));
+
+    await waitFor(() => expect(commandBody).not.toBeNull());
+    const submittedCommand = commandBody as unknown as Record<string, unknown>;
+    expect(submittedCommand.command_type).toBe("ConfirmPlanningProposal");
+    expect(submittedCommand.target_type).toBe("planning_request");
+    expect(submittedCommand.target_id).toBe(REQUEST_ID);
+    expect(submittedCommand.expected_version).toBe(4);
+    expect(submittedCommand.payload).toEqual({
+      proposal_revision: 1,
+      proposal_content_hash: PROPOSAL_HASH,
+      profile_id: PROFILE_ID,
+      profile_version: 2,
+    });
+    expect(await screen.findByTestId("root-task-route")).toHaveTextContent("Root Task");
   });
 
   it("requires explicit confirmation before cancelling a running request", async () => {

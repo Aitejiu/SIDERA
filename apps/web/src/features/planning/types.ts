@@ -15,5 +15,6 @@ export type PlanningClarificationAnswer = components["schemas"]["PlanningClarifi
 export type AnswerPlanningClarificationPayload = components["schemas"]["AnswerPlanningClarificationPayload"];
 export type RequestProposalRevisionPayload = components["schemas"]["RequestProposalRevisionPayload"];
 export type RejectPlanningProposalPayload = components["schemas"]["RejectPlanningProposalPayload"];
+export type ConfirmPlanningProposalPayload = components["schemas"]["ConfirmPlanningProposalPayload"];
 export type PlanningCommandRequest = components["schemas"]["CommandRequest"];
 export type PlanningCommandResponse = components["schemas"]["CommandResponse"];
