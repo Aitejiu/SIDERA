@@ -287,6 +287,73 @@ class WorkerModel(TimestampMixin, Base):
     )
 
 
+class WorkerRuntimeConfigurationModel(TimestampMixin, Base):
+    __tablename__ = "worker_runtime_configurations"
+    __table_args__ = (
+        CheckConstraint(
+            "adapter_module_config_version >= 1",
+            name="ck_worker_runtime_configurations_adapter_config_version",
+        ),
+        CheckConstraint(
+            "workspace_module_config_version >= 1",
+            name="ck_worker_runtime_configurations_workspace_config_version",
+        ),
+        CheckConstraint(
+            "version >= 1", name="ck_worker_runtime_configurations_version"
+        ),
+        ForeignKeyConstraint(
+            ["worker_id", "workspace_id"],
+            ["workers.id", "workers.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_runtime_configurations_worker_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["adapter_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_runtime_configurations_adapter_module_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_worker_runtime_configurations_workspace_module_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_worker_runtime_configurations_workspace",
+        ),
+    )
+
+    worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    adapter_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    adapter_module_config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    workspace_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    workspace_module_config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class WorkerItemModel(TimestampMixin, Base):
     __tablename__ = "worker_items"
     __table_args__ = (
@@ -441,6 +508,14 @@ class ExecutionModel(TimestampMixin, Base):
             "last_fencing_token >= 0", name="ck_executions_last_fencing_token"
         ),
         CheckConstraint("version >= 1", name="ck_executions_version"),
+        CheckConstraint(
+            "jsonb_typeof(adapter_preferences) = 'array'",
+            name="ck_executions_adapter_preferences_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(adapter_forbidden) = 'array'",
+            name="ck_executions_adapter_forbidden_array",
+        ),
         ForeignKeyConstraint(
             ["task_id", "workspace_id"],
             ["tasks.id", "tasks.workspace_id"],
@@ -506,6 +581,12 @@ class ExecutionModel(TimestampMixin, Base):
     purpose: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     capability_requirements: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    adapter_preferences: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    adapter_forbidden: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     pinned_worker_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
@@ -536,6 +617,90 @@ class ExecutionModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("execution_sessions.id", ondelete="RESTRICT"),
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class SchedulingBlockModel(TimestampMixin, Base):
+    __tablename__ = "scheduling_blocks"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'resolved')",
+            name="ck_scheduling_blocks_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(reason_details) = 'object'",
+            name="ck_scheduling_blocks_reason_details_object",
+        ),
+        CheckConstraint(
+            "occurrence_count >= 1",
+            name="ck_scheduling_blocks_occurrence_count",
+        ),
+        CheckConstraint("version >= 1", name="ck_scheduling_blocks_version"),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_scheduling_blocks_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_scheduling_blocks_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_scheduling_blocks_identity"),
+        Index(
+            "uq_scheduling_blocks_active_execution",
+            "execution_id",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_scheduling_blocks_workspace_status",
+            "workspace_id",
+            "status",
+        ),
+        Index(
+            "ix_scheduling_blocks_workspace_execution",
+            "workspace_id",
+            "execution_id",
+        ),
+        Index(
+            "ix_scheduling_blocks_workspace_last_seen",
+            "workspace_id",
+            "last_seen_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    reason_details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    requires_operator: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -782,6 +947,9 @@ class ModuleDefinitionModel(TimestampMixin, Base):
             "config_schema_version >= 1", name="ck_module_definitions_schema_version"
         ),
         CheckConstraint(
+            "resource_version >= 1", name="ck_module_definitions_resource_version"
+        ),
+        CheckConstraint(
             "lifecycle IN ('active', 'draining', 'disabled')",
             name="ck_module_definitions_lifecycle",
         ),
@@ -801,6 +969,9 @@ class ModuleDefinitionModel(TimestampMixin, Base):
     config_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -813,6 +984,9 @@ class ModuleInstanceModel(TimestampMixin, Base):
     __tablename__ = "module_instances"
     __table_args__ = (
         CheckConstraint("config_version >= 1", name="ck_module_instances_config_version"),
+        CheckConstraint(
+            "resource_version >= 1", name="ck_module_instances_resource_version"
+        ),
         CheckConstraint(
             "lifecycle IN ('active', 'draining', 'disabled')",
             name="ck_module_instances_lifecycle",
@@ -845,6 +1019,9 @@ class ModuleInstanceModel(TimestampMixin, Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     secret_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -1964,6 +2141,10 @@ class ExecutionRequestModel(TimestampMixin, Base):
             name="ck_execution_requests_preferences_array",
         ),
         CheckConstraint(
+            "jsonb_typeof(adapter_forbidden) = 'array'",
+            name="ck_execution_requests_adapter_forbidden_array",
+        ),
+        CheckConstraint(
             "jsonb_typeof(expected_outputs) = 'array'",
             name="ck_execution_requests_outputs_array",
         ),
@@ -2090,6 +2271,9 @@ class ExecutionRequestModel(TimestampMixin, Base):
         JSONB, nullable=False
     )
     adapter_preferences: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    adapter_forbidden: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     budget_class: Mapped[str] = mapped_column(String(100), nullable=False)
     not_before: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
