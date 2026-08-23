@@ -31,3 +31,4 @@ target-version = "py312"
 [tool.pyright]
 pythonVersion = "3.12"
 include = ["sidera_task_bridge", "tests"]
+extraPaths = ["../../akashic-agent"]
