@@ -3,9 +3,36 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from sidera_control_plane.api.app import create_app
-from sidera_control_plane.api.schemas import ExecutionContextAddressPayload
+from sidera_control_plane.api.schemas import (
+    AnswerPlanningClarificationPayload,
+    CancelPlanningRequestPayload,
+    ConfirmPlanningProposalPayload,
+    ErrorBody,
+    ErrorResponse,
+    ExecutionContextAddressPayload,
+    RegisterPlannerModulePayload,
+    RegisterPlanningProfilePayload,
+    RejectPlanningProposalPayload,
+    RequestProposalRevisionPayload,
+    RetryBlockedPlanningRunPayload,
+    SubmitPlanningRequestPayload,
+)
 from sidera_control_plane.config import Settings
+
+_PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("RegisterPlannerModule", RegisterPlannerModulePayload),
+    ("RegisterPlanningProfile", RegisterPlanningProfilePayload),
+    ("SubmitPlanningRequest", SubmitPlanningRequestPayload),
+    ("CancelPlanningRequest", CancelPlanningRequestPayload),
+    ("AnswerPlanningClarification", AnswerPlanningClarificationPayload),
+    ("RequestProposalRevision", RequestProposalRevisionPayload),
+    ("RejectPlanningProposal", RejectPlanningProposalPayload),
+    ("RetryBlockedPlanningRun", RetryBlockedPlanningRunPayload),
+    ("ConfirmPlanningProposal", ConfirmPlanningProposalPayload),
+)
 
 
 def export_openapi(output: Path) -> dict[str, Any]:
@@ -15,11 +42,18 @@ def export_openapi(output: Path) -> dict[str, Any]:
         )
     )
     document = create_app(settings).openapi()
-    document.setdefault("components", {}).setdefault("schemas", {})[
-        "ExecutionContextAddressPayload"
-    ] = ExecutionContextAddressPayload.model_json_schema(
-        ref_template="#/components/schemas/{model}"
-    )
+    schemas = document.setdefault("components", {}).setdefault("schemas", {})
+    _add_component_schema(schemas, ExecutionContextAddressPayload)
+    _add_component_schema(schemas, ErrorBody)
+    _add_component_schema(schemas, ErrorResponse)
+    for _command_name, model in _PLANNING_COMMAND_PAYLOADS:
+        _add_component_schema(schemas, model)
+    document["x-sidera-command-payloads"] = {
+        command_name: {
+            "$ref": f"#/components/schemas/{model.__name__}",
+        }
+        for command_name, model in _PLANNING_COMMAND_PAYLOADS
+    }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -27,6 +61,16 @@ def export_openapi(output: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
     return document
+
+
+def _add_component_schema(
+    schemas: dict[str, Any], model: type[BaseModel]
+) -> None:
+    schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
+    definitions = schema.pop("$defs", {})
+    for name, definition in definitions.items():
+        schemas.setdefault(name, definition)
+    schemas[model.__name__] = schema
 
 
 def main() -> int:

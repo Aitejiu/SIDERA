@@ -30,6 +30,29 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity": "WorkerItemActivityPageResponse",
 }
 
+EXPECTED_PLANNING_COMMAND_PAYLOADS = {
+    "RegisterPlannerModule": "RegisterPlannerModulePayload",
+    "RegisterPlanningProfile": "RegisterPlanningProfilePayload",
+    "SubmitPlanningRequest": "SubmitPlanningRequestPayload",
+    "CancelPlanningRequest": "CancelPlanningRequestPayload",
+    "AnswerPlanningClarification": "AnswerPlanningClarificationPayload",
+    "RequestProposalRevision": "RequestProposalRevisionPayload",
+    "RejectPlanningProposal": "RejectPlanningProposalPayload",
+    "RetryBlockedPlanningRun": "RetryBlockedPlanningRunPayload",
+    "ConfirmPlanningProposal": "ConfirmPlanningProposalPayload",
+}
+
+EXPECTED_PLANNING_RESPONSE_SCHEMAS = {
+    "PlanningProfileResponse",
+    "PlanningBriefResponse",
+    "PlanningRunResponse",
+    "PlanningClarificationResponse",
+    "PlanningRequestSummaryResponse",
+    "PlanningRequestDetailResponse",
+    "PlanningProposalResponse",
+    "PlanningMaterializationResponse",
+}
+
 
 def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) -> None:
     output = tmp_path / "nested" / "openapi.json"
@@ -76,5 +99,40 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         "execution_id",
         "worker_display_name",
     } & graph_node_properties.keys()
+
+    schemas = first["components"]["schemas"]
+    payload_refs = first["x-sidera-command-payloads"]
+    assert payload_refs == {
+        command: {"$ref": f"#/components/schemas/{schema_name}"}
+        for command, schema_name in EXPECTED_PLANNING_COMMAND_PAYLOADS.items()
+    }
+    for schema_name in EXPECTED_PLANNING_COMMAND_PAYLOADS.values():
+        assert schema_name in schemas
+        assert schemas[schema_name]["type"] == "object"
+        assert schemas[schema_name]["additionalProperties"] is False
+
+    assert EXPECTED_PLANNING_RESPONSE_SCHEMAS <= schemas.keys()
+    for schema_name in EXPECTED_PLANNING_RESPONSE_SCHEMAS:
+        assert schemas[schema_name]["type"] == "object"
+        assert schemas[schema_name]["additionalProperties"] is False
+
+    command_request = schemas["CommandRequest"]
+    assert command_request["properties"]["payload"] == {
+        "additionalProperties": True,
+        "title": "Payload",
+        "type": "object",
+    }
+    command_response = schemas["CommandResponse"]
+    assert "data" in command_response["properties"]
+    assert command_response["properties"]["data"]["type"] == "object"
+
+    error_response = schemas["ErrorResponse"]
+    assert error_response["properties"]["error"] == {
+        "$ref": "#/components/schemas/ErrorBody"
+    }
+    error_body = schemas["ErrorBody"]
+    assert error_body["properties"]["code"]["type"] == "string"
+    assert error_body["properties"]["message"]["type"] == "string"
+    assert error_body["properties"]["details"]["type"] == "object"
 
     assert json.loads(first_bytes) == first

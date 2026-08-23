@@ -514,6 +514,159 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/planning-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Planning Metrics */
+        get: operations["get_planning_metrics_api_v1_workspaces__workspace_id__planning_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Planning Profiles */
+        get: operations["list_planning_profiles_api_v1_workspaces__workspace_id__planning_profiles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Planning Requests */
+        get: operations["list_planning_requests_api_v1_workspaces__workspace_id__planning_requests_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Planning Request */
+        get: operations["get_planning_request_api_v1_workspaces__workspace_id__planning_requests__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/briefs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Planning Briefs */
+        get: operations["list_planning_briefs_api_v1_workspaces__workspace_id__planning_requests__request_id__briefs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/clarifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Planning Clarifications */
+        get: operations["list_planning_clarifications_api_v1_workspaces__workspace_id__planning_requests__request_id__clarifications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/materialization": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Planning Materialization */
+        get: operations["get_planning_materialization_api_v1_workspaces__workspace_id__planning_requests__request_id__materialization_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/proposals/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Planning Proposal */
+        get: operations["get_planning_proposal_api_v1_workspaces__workspace_id__planning_requests__request_id__proposals__revision__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Planning Runs */
+        get: operations["list_planning_runs_api_v1_workspaces__workspace_id__planning_requests__request_id__runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projection-changes": {
         parameters: {
             query?: never;
@@ -617,6 +770,11 @@ export interface components {
             /** Type */
             type: string;
         };
+        /** AnswerPlanningClarificationPayload */
+        AnswerPlanningClarificationPayload: {
+            /** Answers */
+            answers: components["schemas"]["PlanningClarificationAnswerPayload"][];
+        };
         /** ArtifactContentDescriptorResponse */
         ArtifactContentDescriptorResponse: {
             /**
@@ -707,6 +865,8 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
+        /** CancelPlanningRequestPayload */
+        CancelPlanningRequestPayload: Record<string, never>;
         /** CheckpointSummaryProjectionResponse */
         CheckpointSummaryProjectionResponse: {
             /** Artifact Ids */
@@ -750,7 +910,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run";
             /**
              * Workspace Id
              * Format: uuid
@@ -771,8 +931,26 @@ export interface components {
              * Format: uuid
              */
             command_id: string;
+            /** Data */
+            data?: {
+                [key: string]: unknown;
+            };
             /** Event Ids */
             event_ids: string[];
+        };
+        /** ConfirmPlanningProposalPayload */
+        ConfirmPlanningProposalPayload: {
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
+            /** Profile Version */
+            profile_version: number;
+            /** Proposal Content Hash */
+            proposal_content_hash: string;
+            /** Proposal Revision */
+            proposal_revision: number;
         };
         /** DependencyResponse */
         DependencyResponse: {
@@ -791,6 +969,21 @@ export interface components {
         DownloadTokenResponse: {
             /** Token */
             token: string;
+        };
+        /** ErrorBody */
+        ErrorBody: {
+            /** Code */
+            code: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Message */
+            message: string;
+        };
+        /** ErrorResponse */
+        ErrorResponse: {
+            error: components["schemas"]["ErrorBody"];
         };
         /** EvidenceClaimPageResponse */
         EvidenceClaimPageResponse: {
@@ -1353,6 +1546,658 @@ export interface components {
             /** Schema Version */
             schema_version: number;
         };
+        /** PlannerCapabilityPayload */
+        PlannerCapabilityPayload: {
+            /** Cancellation */
+            cancellation: string;
+            /** Clarification */
+            clarification: boolean;
+            /** Idempotency */
+            idempotency: string;
+            /** Interface Version */
+            interface_version: string;
+            /** Max Context Bytes */
+            max_context_bytes: number;
+            /** Proposal Schema Versions */
+            proposal_schema_versions: number[];
+            /** Stability */
+            stability: string;
+            /** Structured Output */
+            structured_output: string;
+            /** Usage Reporting */
+            usage_reporting: string;
+        };
+        /** PlanningBriefPageResponse */
+        PlanningBriefPageResponse: {
+            /** Items */
+            items: components["schemas"]["PlanningBriefResponse"][];
+        };
+        /** PlanningBriefResponse */
+        PlanningBriefResponse: {
+            /** Acceptance Criteria */
+            acceptance_criteria: string[];
+            /** Constraints */
+            constraints: string[];
+            /** Context Refs */
+            context_refs: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Objective */
+            objective: string;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /** Requested Outputs */
+            requested_outputs: string[];
+            /** Revision */
+            revision: number;
+            /**
+             * Source Correlation
+             * Format: uuid
+             */
+            source_correlation: string;
+            /** User Feedback */
+            user_feedback: string | null;
+        };
+        /** PlanningBudgetPayload */
+        PlanningBudgetPayload: {
+            /** Max Concurrency */
+            max_concurrency: number;
+            /** Max Context Bytes */
+            max_context_bytes: number;
+            /** Max Cost Microunits */
+            max_cost_microunits: number;
+            /** Max Nodes */
+            max_nodes: number;
+            /** Max Revisions */
+            max_revisions: number;
+            /** Max Runtime Seconds */
+            max_runtime_seconds: number;
+            /** Max Tokens */
+            max_tokens: number;
+        };
+        /** PlanningCapabilityResponse */
+        PlanningCapabilityResponse: {
+            /** Cancellation */
+            cancellation: string;
+            /** Clarification */
+            clarification: boolean;
+            /** Idempotency */
+            idempotency: string;
+            /** Interface Version */
+            interface_version: string;
+            /** Max Context Bytes */
+            max_context_bytes: number;
+            /** Proposal Schema Versions */
+            proposal_schema_versions: number[];
+            /** Stability */
+            stability: string;
+            /** Structured Output */
+            structured_output: string;
+            /** Usage Reporting */
+            usage_reporting: string;
+        };
+        /** PlanningClarificationAnswerPayload */
+        PlanningClarificationAnswerPayload: {
+            /** Answer */
+            answer: string;
+            /**
+             * Clarification Id
+             * Format: uuid
+             */
+            clarification_id: string;
+        };
+        /** PlanningClarificationPageResponse */
+        PlanningClarificationPageResponse: {
+            /** Items */
+            items: components["schemas"]["PlanningClarificationResponse"][];
+        };
+        /** PlanningClarificationResponse */
+        PlanningClarificationResponse: {
+            /** Answer */
+            answer: string | null;
+            /** Answer Brief Revision */
+            answer_brief_revision: number | null;
+            /** Answer Type */
+            answer_type: string;
+            /** Answered At */
+            answered_at: string | null;
+            /** Answered By */
+            answered_by: string | null;
+            /** Blocking */
+            blocking: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Options */
+            options: string[];
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /**
+             * Planning Run Id
+             * Format: uuid
+             */
+            planning_run_id: string;
+            /** Question */
+            question: string;
+            /** Rationale */
+            rationale: string;
+            /** Version */
+            version: number;
+        };
+        /** PlanningExecutionRequestMetricsResponse */
+        PlanningExecutionRequestMetricsResponse: {
+            /** Blocked */
+            blocked: number;
+            /** Gate Wait Seconds */
+            gate_wait_seconds: number;
+            /** Ready */
+            ready: number;
+        };
+        /** PlanningLatencyMetricsResponse */
+        PlanningLatencyMetricsResponse: {
+            /** Materialization Seconds */
+            materialization_seconds: number;
+            /** Planning Seconds */
+            planning_seconds: number;
+            /** Queue Seconds */
+            queue_seconds: number;
+        };
+        /** PlanningLifecycleMetricsResponse */
+        PlanningLifecycleMetricsResponse: {
+            /** Clarifications */
+            clarifications: number;
+            /** Confirmed */
+            confirmed: number;
+            /** Rejected */
+            rejected: number;
+            /** Revisions */
+            revisions: number;
+        };
+        /** PlanningMaterializationResponse */
+        PlanningMaterializationResponse: {
+            /** Confirmed By */
+            confirmed_by: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Deep Link */
+            deep_link: string;
+            /** Execution Request Mapping */
+            execution_request_mapping: {
+                [key: string]: string;
+            };
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /**
+             * Proposal Revision Id
+             * Format: uuid
+             */
+            proposal_revision_id: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Subtask Task Mapping */
+            subtask_task_mapping: {
+                [key: string]: string;
+            };
+            /** Worker Item Mapping */
+            worker_item_mapping: {
+                [key: string]: string;
+            };
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanningMetricsResponse */
+        PlanningMetricsResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            execution_requests: components["schemas"]["PlanningExecutionRequestMetricsResponse"];
+            latency: components["schemas"]["PlanningLatencyMetricsResponse"];
+            outcomes: components["schemas"]["PlanningOutcomeMetricsResponse"];
+            planning: components["schemas"]["PlanningLifecycleMetricsResponse"];
+            runs: components["schemas"]["PlanningRunMetricsResponse"];
+            usage: components["schemas"]["PlanningUsageMetricsResponse"];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanningOutcomeMetricsResponse */
+        PlanningOutcomeMetricsResponse: {
+            /** Invalid Output Rate */
+            invalid_output_rate: number;
+            /** Retry Rate */
+            retry_rate: number;
+            /** Timeout Rate */
+            timeout_rate: number;
+            /** Unknown Outcome Rate */
+            unknown_outcome_rate: number;
+        };
+        /** PlanningProfilePageResponse */
+        PlanningProfilePageResponse: {
+            /** Items */
+            items: components["schemas"]["PlanningProfileResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** PlanningProfileResponse */
+        PlanningProfileResponse: {
+            capabilities: components["schemas"]["PlanningCapabilityResponse"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Display Name */
+            display_name: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Planner Interface Version */
+            planner_interface_version: string;
+            /** Planner Module Config Version */
+            planner_module_config_version: number;
+            /**
+             * Planner Module Instance Id
+             * Format: uuid
+             */
+            planner_module_instance_id: string;
+            /** Planner Provider */
+            planner_provider: string;
+            /** Profile Key */
+            profile_key: string;
+            /** Status */
+            status: string;
+            /** User Selectable */
+            user_selectable: boolean;
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanningProposalResponse */
+        PlanningProposalResponse: {
+            /** Brief Revision */
+            brief_revision: number;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Derived Diff */
+            derived_diff: {
+                [key: string]: unknown;
+            };
+            /** Display */
+            display: {
+                [key: string]: unknown;
+            };
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /**
+             * Planning Run Id
+             * Format: uuid
+             */
+            planning_run_id: string;
+            /** Profile Version */
+            profile_version: number;
+            /** Proposal Schema Version */
+            proposal_schema_version: number;
+            /** Revision */
+            revision: number;
+        };
+        /** PlanningRequestDetailResponse */
+        PlanningRequestDetailResponse: {
+            active_run: components["schemas"]["PlanningRunResponse"] | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Current Brief Revision */
+            current_brief_revision: number;
+            /** Current Proposal Content Hash */
+            current_proposal_content_hash: string | null;
+            /** Current Proposal Revision */
+            current_proposal_revision: number | null;
+            /** Current Run Id */
+            current_run_id: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Pending Clarifications */
+            pending_clarifications: components["schemas"]["PlanningClarificationResponse"][];
+            /**
+             * Planning Profile Id
+             * Format: uuid
+             */
+            planning_profile_id: string;
+            /** Planning Profile Version */
+            planning_profile_version: number;
+            profile: components["schemas"]["PlanningProfileResponse"] | null;
+            /** Profile Key */
+            profile_key: string | null;
+            /** Requires Attention */
+            requires_attention: boolean;
+            /** Status */
+            status: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            usage: components["schemas"]["PlanningUsageResponse"];
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanningRequestPageResponse */
+        PlanningRequestPageResponse: {
+            /** Items */
+            items: components["schemas"]["PlanningRequestSummaryResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** PlanningRequestSummaryResponse */
+        PlanningRequestSummaryResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Current Brief Revision */
+            current_brief_revision: number;
+            /** Current Proposal Content Hash */
+            current_proposal_content_hash: string | null;
+            /** Current Proposal Revision */
+            current_proposal_revision: number | null;
+            /** Current Run Id */
+            current_run_id: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Planning Profile Id
+             * Format: uuid
+             */
+            planning_profile_id: string;
+            /** Planning Profile Version */
+            planning_profile_version: number;
+            /** Profile Key */
+            profile_key: string | null;
+            /** Requires Attention */
+            requires_attention: boolean;
+            /** Status */
+            status: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanningRetryPolicyPayload */
+        PlanningRetryPolicyPayload: {
+            /** Backoff Seconds */
+            backoff_seconds?: number[];
+            /** Invalid Output Policy */
+            invalid_output_policy: string;
+            /** Max Retries */
+            max_retries: number;
+            /** Unknown Outcome Policy */
+            unknown_outcome_policy: string;
+        };
+        /** PlanningRunMetricsResponse */
+        PlanningRunMetricsResponse: {
+            /** Blocked */
+            blocked: number;
+            /** Cancelled */
+            cancelled: number;
+            /** Failed */
+            failed: number;
+            /** Needs Clarification */
+            needs_clarification: number;
+            /** Queued */
+            queued: number;
+            /** Running */
+            running: number;
+            /** Succeeded */
+            succeeded: number;
+        };
+        /** PlanningRunPageResponse */
+        PlanningRunPageResponse: {
+            /** Items */
+            items: components["schemas"]["PlanningRunResponse"][];
+        };
+        /** PlanningRunResponse */
+        PlanningRunResponse: {
+            /** Attempt */
+            attempt: number;
+            /** Brief Revision */
+            brief_revision: number;
+            capability_snapshot: components["schemas"]["PlanningCapabilityResponse"];
+            /** Error Code */
+            error_code: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /** Provider Ref */
+            provider_ref: string | null;
+            /**
+             * Queued At
+             * Format: date-time
+             */
+            queued_at: string;
+            /** Result Kind */
+            result_kind: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            usage: components["schemas"]["PlanningUsageResponse"];
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanningUsageMetricsResponse */
+        PlanningUsageMetricsResponse: {
+            /** Context Bytes */
+            context_bytes: number;
+            /** Cost Microunits */
+            cost_microunits: number;
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+        };
+        /** PlanningUsageResponse */
+        PlanningUsageResponse: {
+            /** Context Bytes */
+            context_bytes: number;
+            /** Cost Microunits */
+            cost_microunits: number;
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+            /** Runtime Seconds */
+            runtime_seconds: number;
+        };
+        /** RegisterPlannerModulePayload */
+        RegisterPlannerModulePayload: {
+            capabilities: components["schemas"]["PlannerCapabilityPayload"];
+            /** Config */
+            config?: {
+                [key: string]: unknown;
+            };
+            /** Config Namespace */
+            config_namespace: string;
+            /** Config Schema Version */
+            config_schema_version: number;
+            /** Instance Name */
+            instance_name: string;
+            /** Interface Version */
+            interface_version: string;
+            /** Provider */
+            provider: string;
+            /** Secret Refs */
+            secret_refs?: string[];
+        };
+        /** RegisterPlanningProfilePayload */
+        RegisterPlanningProfilePayload: {
+            /** Adapter Forbidden */
+            adapter_forbidden?: string[];
+            /** Adapter Preferences */
+            adapter_preferences?: string[];
+            /** Allowed Capabilities */
+            allowed_capabilities: string[];
+            budget: components["schemas"]["PlanningBudgetPayload"];
+            /** Default Priority */
+            default_priority: number;
+            /** Display Name */
+            display_name: string;
+            /** Execution Budget Level */
+            execution_budget_level: string;
+            /** Execution Max Attempts */
+            execution_max_attempts: number;
+            /** Planner Interface Version */
+            planner_interface_version: string;
+            /** Planner Module Config Version */
+            planner_module_config_version: number;
+            /**
+             * Planner Module Instance Id
+             * Format: uuid
+             */
+            planner_module_instance_id: string;
+            /** Planner Secret Refs */
+            planner_secret_refs?: string[];
+            /** Profile Key */
+            profile_key: string;
+            /** Prompt Policy Version */
+            prompt_policy_version: string;
+            /** Proposal Schema Version */
+            proposal_schema_version: number;
+            retry_policy: components["schemas"]["PlanningRetryPolicyPayload"];
+            /** System Policy */
+            system_policy?: {
+                [key: string]: unknown;
+            };
+            /**
+             * User Selectable
+             * @default true
+             */
+            user_selectable: boolean;
+            /** Version */
+            version: number;
+        };
+        /** RejectPlanningProposalPayload */
+        RejectPlanningProposalPayload: {
+            /** Current Proposal Content Hash */
+            current_proposal_content_hash: string;
+            /** Current Proposal Revision */
+            current_proposal_revision: number;
+            /** Reason */
+            reason: string;
+        };
         /** RelatedSubtaskProjectionResponse */
         RelatedSubtaskProjectionResponse: {
             /** State */
@@ -1361,6 +2206,50 @@ export interface components {
             subtask_key: string;
             /** Title */
             title: string;
+        };
+        /** RequestProposalRevisionPayload */
+        RequestProposalRevisionPayload: {
+            /** Current Proposal Content Hash */
+            current_proposal_content_hash: string;
+            /** Current Proposal Revision */
+            current_proposal_revision: number;
+            /** Feedback */
+            feedback: string;
+        };
+        /** RetryBlockedPlanningRunPayload */
+        RetryBlockedPlanningRunPayload: {
+            /**
+             * Unknown Outcome Decision
+             * @constant
+             */
+            unknown_outcome_decision: "retry";
+        };
+        /** SubmitPlanningRequestPayload */
+        SubmitPlanningRequestPayload: {
+            /** Acceptance Criteria */
+            acceptance_criteria: string[];
+            /** Constraints */
+            constraints?: string[];
+            /** Context Refs */
+            context_refs?: string[];
+            /** Objective */
+            objective: string;
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
+            /** Profile Version */
+            profile_version: number;
+            /** Requested Outputs */
+            requested_outputs: string[];
+            /**
+             * Source Ref
+             * @default null
+             */
+            source_ref: string | null;
+            /** Source Type */
+            source_type: string;
         };
         /** SubtaskActivityProjectionResponse */
         SubtaskActivityProjectionResponse: {
@@ -3594,6 +4483,301 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_planning_metrics_api_v1_workspaces__workspace_id__planning_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningMetricsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_planning_profiles_api_v1_workspaces__workspace_id__planning_profiles_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningProfilePageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_planning_requests_api_v1_workspaces__workspace_id__planning_requests_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+                status?: string | null;
+                closed_status?: boolean | null;
+                requires_attention?: boolean;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningRequestPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_planning_request_api_v1_workspaces__workspace_id__planning_requests__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningRequestDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_planning_briefs_api_v1_workspaces__workspace_id__planning_requests__request_id__briefs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningBriefPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_planning_clarifications_api_v1_workspaces__workspace_id__planning_requests__request_id__clarifications_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningClarificationPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_planning_materialization_api_v1_workspaces__workspace_id__planning_requests__request_id__materialization_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningMaterializationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_planning_proposal_api_v1_workspaces__workspace_id__planning_requests__request_id__proposals__revision__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+                revision: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningProposalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_planning_runs_api_v1_workspaces__workspace_id__planning_requests__request_id__runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanningRunPageResponse"];
                 };
             };
             /** @description Validation Error */
