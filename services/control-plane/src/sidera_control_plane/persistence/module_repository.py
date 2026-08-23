@@ -1,15 +1,17 @@
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import ProjectionChangePublisherPort
 from sidera_control_plane.application.projection_invalidation import (
     projection_targets_for_module,
 )
-from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.modules import (
     WORKER_ADAPTER_MODULE_TYPE,
     WORKSPACE_PROVIDER_MODULE_TYPE,
@@ -70,6 +72,54 @@ class ModuleRepository:
         )
         return _to_domain_instance(row) if row is not None else None
 
+    def get_instances(
+        self,
+        module_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ModuleInstance, ...]:
+        ordered_ids = tuple(dict.fromkeys(module_ids))
+        if not ordered_ids:
+            return ()
+        statement = (
+            select(ModuleInstanceModel)
+            .where(
+                ModuleInstanceModel.id.in_(ordered_ids),
+                ModuleInstanceModel.workspace_id == workspace_id,
+            )
+            .order_by(ModuleInstanceModel.id.asc())
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        by_id = {row.id: _to_domain_instance(row) for row in rows}
+        return tuple(by_id[module_id] for module_id in ordered_ids if module_id in by_id)
+
+    def get_definitions(
+        self,
+        module_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ModuleDefinition, ...]:
+        ordered_ids = tuple(dict.fromkeys(module_ids))
+        if not ordered_ids:
+            return ()
+        statement = (
+            select(ModuleDefinitionModel)
+            .where(
+                ModuleDefinitionModel.id.in_(ordered_ids),
+                ModuleDefinitionModel.workspace_id == workspace_id,
+            )
+            .order_by(ModuleDefinitionModel.id.asc())
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        by_id = {row.id: _to_domain_definition(row) for row in rows}
+        return tuple(by_id[module_id] for module_id in ordered_ids if module_id in by_id)
+
     def add_definition(self, definition: ModuleDefinition) -> None:
         self._session.add(
             ModuleDefinitionModel(
@@ -81,6 +131,7 @@ class ModuleRepository:
                 config_schema_version=definition.config_schema_version,
                 capabilities=capability_profile_to_payload(definition.capabilities),
                 lifecycle=definition.lifecycle.value,
+                resource_version=definition.resource_version,
             )
         )
         self._publish_module_change(
@@ -102,6 +153,7 @@ class ModuleRepository:
                 config=dict(instance.config),
                 secret_refs=list(instance.secret_refs),
                 lifecycle=instance.lifecycle.value,
+                resource_version=instance.resource_version,
             )
         )
         self._publish_module_change(
@@ -110,6 +162,80 @@ class ModuleRepository:
             change_type="module.instance_created",
             correlation_id=instance.id,
         )
+
+    def save_definition(
+        self, definition: ModuleDefinition, previous_version: int
+    ) -> None:
+        result = self._session.execute(
+            update(ModuleDefinitionModel)
+            .where(
+                ModuleDefinitionModel.id == definition.id,
+                ModuleDefinitionModel.workspace_id == definition.workspace_id,
+                ModuleDefinitionModel.resource_version == previous_version,
+            )
+            .values(
+                lifecycle=definition.lifecycle.value,
+                resource_version=definition.resource_version,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        if not isinstance(result, CursorResult) or result.rowcount != 1:
+            raise VersionConflict(
+                previous_version,
+                self._current_definition_version(
+                    definition.id, definition.workspace_id
+                ),
+            )
+        self._publish_module_change(
+            workspace_id=definition.workspace_id,
+            resource_version=definition.resource_version,
+            change_type="module.definition_lifecycle_changed",
+            correlation_id=definition.id,
+        )
+
+    def save_instance(self, instance: ModuleInstance, previous_version: int) -> None:
+        result = self._session.execute(
+            update(ModuleInstanceModel)
+            .where(
+                ModuleInstanceModel.id == instance.id,
+                ModuleInstanceModel.workspace_id == instance.workspace_id,
+                ModuleInstanceModel.resource_version == previous_version,
+            )
+            .values(
+                lifecycle=instance.lifecycle.value,
+                resource_version=instance.resource_version,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        if not isinstance(result, CursorResult) or result.rowcount != 1:
+            raise VersionConflict(
+                previous_version,
+                self._current_instance_version(instance.id, instance.workspace_id),
+            )
+        self._publish_module_change(
+            workspace_id=instance.workspace_id,
+            resource_version=instance.resource_version,
+            change_type="module.instance_lifecycle_changed",
+            correlation_id=instance.id,
+        )
+
+    def _current_definition_version(self, module_id: UUID, workspace_id: UUID) -> int:
+        version = self._session.scalar(
+            select(ModuleDefinitionModel.resource_version).where(
+                ModuleDefinitionModel.id == module_id,
+                ModuleDefinitionModel.workspace_id == workspace_id,
+            )
+        )
+        return version if version is not None else 0
+
+    def _current_instance_version(self, module_id: UUID, workspace_id: UUID) -> int:
+        version = self._session.scalar(
+            select(ModuleInstanceModel.resource_version).where(
+                ModuleInstanceModel.id == module_id,
+                ModuleInstanceModel.workspace_id == workspace_id,
+            )
+        )
+        return version if version is not None else 0
 
     def _publish_module_change(
         self,
@@ -283,6 +409,7 @@ def _to_domain_definition(row: ModuleDefinitionModel) -> ModuleDefinition:
             row.module_type, row.capabilities
         ),
         lifecycle=ModuleLifecycle(row.lifecycle),
+        resource_version=row.resource_version,
     )
 
 
@@ -297,6 +424,7 @@ def _to_domain_instance(row: ModuleInstanceModel) -> ModuleInstance:
         config=dict(row.config),
         secret_refs=tuple(row.secret_refs),
         lifecycle=ModuleLifecycle(row.lifecycle),
+        resource_version=row.resource_version,
     )
 
 

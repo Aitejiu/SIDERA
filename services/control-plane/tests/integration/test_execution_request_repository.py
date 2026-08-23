@@ -30,6 +30,7 @@ def test_execution_request_round_trip_save_and_dependency_queries(
     with database.session() as session:
         upstream = request_row(ids, worker_key="upstream")
         downstream = request_row(ids, worker_key="downstream")
+        downstream.adapter_forbidden = ["unsafe"]
         downstream.not_before = NOW + timedelta(seconds=5)
         session.add_all((upstream, downstream))
         session.flush()
@@ -51,6 +52,7 @@ def test_execution_request_round_trip_save_and_dependency_queries(
         assert stored is not None
         assert stored.expected_outputs == ("diff",)
         assert stored.status is ExecutionRequestStatus.BLOCKED
+        assert stored.adapter_forbidden == frozenset({"unsafe"})
         dependencies = repository.list_dependencies(downstream.id, workspace_id)
         assert len(dependencies) == 1
         assert dependencies[0].upstream_request_id == upstream.id

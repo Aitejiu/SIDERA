@@ -27,10 +27,12 @@ from sidera_control_plane.application.ports import (
     PlanRepositoryPort,
     ProjectionChangePublisherPort,
     ProposalMaterializationRepositoryPort,
+    SchedulingBlockRepositoryPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
     WorkerItemRepositoryPort,
     WorkerRepositoryPort,
+    WorkerRuntimeConfigurationRepositoryPort,
     WorkspaceRepositoryPort,
 )
 from sidera_control_plane.application.projection_changes import (
@@ -73,9 +75,15 @@ from sidera_control_plane.persistence.repositories import (
     EventRepository,
     TaskRepository,
 )
+from sidera_control_plane.persistence.scheduling_block_repository import (
+    SqlAlchemySchedulingBlockRepository,
+)
 from sidera_control_plane.persistence.session_repository import SessionRepository
 from sidera_control_plane.persistence.worker_item_repository import WorkerItemRepository
 from sidera_control_plane.persistence.worker_repository import WorkerRepository
+from sidera_control_plane.persistence.worker_runtime_repository import (
+    SqlAlchemyWorkerRuntimeConfigurationRepository,
+)
 from sidera_control_plane.persistence.workspace_repository import WorkspaceRepository
 
 
@@ -87,6 +95,8 @@ class SqlAlchemyUnitOfWork:
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
     worker_items: WorkerItemRepositoryPort
+    worker_runtime_configurations: WorkerRuntimeConfigurationRepositoryPort
+    scheduling_blocks: SchedulingBlockRepositoryPort
     executions: ExecutionRepositoryPort
     execution_requests: ExecutionRequestRepositoryPort
     leases: LeaseStorePort
@@ -127,6 +137,10 @@ class SqlAlchemyUnitOfWork:
         )
         self.workers = WorkerRepository(self.session)
         self.worker_items = WorkerItemRepository(self.session, self.projection_changes)
+        self.worker_runtime_configurations = (
+            SqlAlchemyWorkerRuntimeConfigurationRepository(self.session)
+        )
+        self.scheduling_blocks = SqlAlchemySchedulingBlockRepository(self.session)
         self.executions = ExecutionRepository(self.session)
         self.execution_requests = ExecutionRequestRepository(self.session)
         self.leases = LeaseStore(self.session)

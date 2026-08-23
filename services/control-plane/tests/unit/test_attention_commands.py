@@ -151,6 +151,8 @@ class FakeUnitOfWork:
     planning_leases: Any
     planning_records: Any
     proposal_materializations: Any
+    worker_runtime_configurations: Any
+    scheduling_blocks: Any
 
     def __init__(self) -> None:
         self.tasks = FakeTaskRepository()
@@ -158,6 +160,8 @@ class FakeUnitOfWork:
         self.commands = FakeCommandRepository()
         self.events = FakeEventRepository()
         self.worker_items = None
+        self.worker_runtime_configurations = None
+        self.scheduling_blocks = None
 
     def __enter__(self):
         return self

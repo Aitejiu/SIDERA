@@ -55,6 +55,8 @@ def seed_resources(
         capability_requirements=frozenset({"python"}),
         pinned_worker_id=worker.id,
         not_before=NOW,
+        adapter_preferences=("opencode", "codex"),
+        adapter_forbidden=("unsafe",),
     )
 
     with SqlAlchemyUnitOfWork(database) as uow:
@@ -108,6 +110,8 @@ def test_resource_repositories_round_trip_and_save(
     assert stored_execution is not None
     assert stored_execution.capability_requirements == frozenset({"python"})
     assert stored_execution.pinned_worker_id == worker.id
+    assert stored_execution.adapter_preferences == ("opencode", "codex")
+    assert stored_execution.adapter_forbidden == frozenset({"unsafe"})
     assert stored_lease is not None
     assert stored_lease.assignment_reason == {"capability_match": True}
     assert stored_lease.expires_at == NOW + timedelta(minutes=5)

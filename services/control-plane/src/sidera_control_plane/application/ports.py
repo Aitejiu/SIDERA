@@ -59,9 +59,11 @@ from sidera_control_plane.domain.planning_profiles import PlanningProfile
 from sidera_control_plane.domain.planning_proposals import ProposalRevision
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.projections import ProjectionChange
+from sidera_control_plane.domain.scheduling import SchedulingBlock
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.worker_item import WorkerItem
+from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
 from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
@@ -537,10 +539,83 @@ class ModuleRepositoryPort(Protocol):
     ) -> ModuleInstance | None:
         raise NotImplementedError
 
+    def get_instances(
+        self,
+        module_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ModuleInstance, ...]:
+        raise NotImplementedError
+
+    def get_definitions(
+        self,
+        module_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ModuleDefinition, ...]:
+        raise NotImplementedError
+
     def add_definition(self, definition: ModuleDefinition) -> None:
         raise NotImplementedError
 
     def add_instance(self, instance: ModuleInstance) -> None:
+        raise NotImplementedError
+
+    def save_definition(
+        self, definition: ModuleDefinition, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+    def save_instance(self, instance: ModuleInstance, previous_version: int) -> None:
+        raise NotImplementedError
+
+
+class WorkerRuntimeConfigurationRepositoryPort(Protocol):
+    def get_for_worker(
+        self,
+        worker_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> WorkerRuntimeConfiguration | None:
+        raise NotImplementedError
+
+    def get_for_workers(
+        self,
+        worker_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[WorkerRuntimeConfiguration, ...]:
+        raise NotImplementedError
+
+    def add(self, configuration: WorkerRuntimeConfiguration) -> None:
+        raise NotImplementedError
+
+    def save(
+        self,
+        configuration: WorkerRuntimeConfiguration,
+        previous_version: int,
+    ) -> None:
+        raise NotImplementedError
+
+
+class SchedulingBlockRepositoryPort(Protocol):
+    def get_active_for_execution(
+        self,
+        execution_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> SchedulingBlock | None:
+        raise NotImplementedError
+
+    def add(self, block: SchedulingBlock) -> None:
+        raise NotImplementedError
+
+    def save(self, block: SchedulingBlock, previous_version: int) -> None:
         raise NotImplementedError
 
 
@@ -793,6 +868,8 @@ class ControlPlaneUnitOfWork(Protocol):
     proposal_materializations: ProposalMaterializationRepositoryPort
     sessions: SessionRepositoryPort
     modules: ModuleRepositoryPort
+    worker_runtime_configurations: WorkerRuntimeConfigurationRepositoryPort
+    scheduling_blocks: SchedulingBlockRepositoryPort
     bindings: ExecutionBindingRepositoryPort
     gateway_operations: GatewayOperationRepositoryPort
     workspaces: WorkspaceRepositoryPort
