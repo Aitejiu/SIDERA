@@ -570,10 +570,25 @@ def test_task_first_read_paths_share_one_projection_contract(
     assert diff.status_code == 200, diff.text
     assert capabilities.status_code == 200, capabilities.text
 
-    assert overview.json()["schema_version"] == 1
-    assert overview.json()["generation"] == 2
-    assert overview.json()["subtask_count"] == 4
-    assert overview.json()["planned_subtask_count"] == 2
+    overview_body = overview.json()
+    assert overview_body["schema_version"] == 1
+    assert overview_body["generation"] == 2
+    assert overview_body["title"] == "Task First integration"
+    assert overview_body["goal_summary"] == "Expose the complete delivery graph."
+    assert overview_body["current_milestone_key"] == "m1"
+    assert overview_body["subtask_count"] == 4
+    assert overview_body["planned_subtask_count"] == 2
+    assert overview_body["running_subtask_count"] == 2
+    assert overview_body["completed_subtask_count"] == 0
+    assert overview_body["failed_subtask_count"] == 0
+    assert overview_body["next_subtask_keys"] == [
+        "backend",
+        "frontend",
+        "planned",
+        "added",
+    ]
+    assert overview_body["attention_items"] == []
+    assert overview_body["last_change_cursor"] == 9
     assert graph.json()["overview"] == overview.json()
     nodes = graph.json()["nodes"]
     assert [node["subtask_key"] for node in nodes] == [

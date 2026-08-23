@@ -4,6 +4,7 @@ from pathlib import Path
 from sidera_control_plane.api.openapi_contract import export_openapi
 
 EXPECTED_PATHS = {
+    "/api/v1/workspaces/{workspace_id}/commands/{command_id}",
     "/api/v1/workspaces/{workspace_id}/task-overviews",
     "/api/v1/tasks/{root_task_id}/overview",
     "/api/v1/tasks/{root_task_id}/graph",
@@ -27,6 +28,7 @@ EXPECTED_PATHS = {
 }
 
 EXPECTED_TYPED_RESPONSES = {
+    "/api/v1/workspaces/{workspace_id}/commands/{command_id}": "CommandStatusResponse",
     "/api/v1/tasks/{root_task_id}/graph": "TaskConsoleGraphProjectionResponse",
     "/api/v1/tasks/{root_task_id}/work-items/{work_item_key}": "TaskDetailProjectionResponse",
     "/api/v1/tasks/{root_task_id}/activity": "TaskConsoleActivityProjectionResponse",
@@ -152,6 +154,17 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     command_response = schemas["CommandResponse"]
     assert "data" in command_response["properties"]
     assert command_response["properties"]["data"]["type"] == "object"
+    command_status = schemas["CommandStatusResponse"]
+    assert command_status["additionalProperties"] is False
+    assert command_status["properties"]["status"]["enum"] == [
+        "pending",
+        "applied",
+        "rejected",
+    ]
+    planning_request = schemas["PlanningRequestSummaryResponse"]
+    assert {"source_type", "source_ref"} <= planning_request["properties"].keys()
+    assert "source_type" in planning_request["required"]
+    assert "source_ref" in planning_request["required"]
 
     error_response = schemas["ErrorResponse"]
     assert error_response["properties"]["error"] == {
@@ -163,3 +176,11 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert error_body["properties"]["details"]["type"] == "object"
 
     assert json.loads(first_bytes) == first
+
+
+def test_committed_openapi_matches_current_export(tmp_path: Path) -> None:
+    output = tmp_path / "openapi.json"
+    exported = export_openapi(output)
+    committed_path = Path(__file__).resolve().parents[4] / "apps/web/openapi.json"
+
+    assert json.loads(committed_path.read_text(encoding="utf-8")) == exported
