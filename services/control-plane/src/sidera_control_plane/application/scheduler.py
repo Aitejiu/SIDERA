@@ -34,6 +34,7 @@ from sidera_control_plane.domain.scheduling import SchedulingIssue
 from sidera_control_plane.domain.worker import Worker
 
 ACTIVE_EXECUTION_LEASE_CONSTRAINT = "uq_assignment_leases_active_execution"
+EXECUTION_BINDING_CONSTRAINT = "uq_bindings_execution"
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +213,7 @@ class Scheduler:
                     execution_id=execution_id,
                 )
         except IntegrityError as exc:
-            if execution_id is None or not _is_active_lease_conflict(exc):
+            if execution_id is None or not _is_known_scheduler_conflict(exc):
                 raise
             return 1, 0, 1, execution_id
 
@@ -389,6 +390,18 @@ def _is_active_lease_conflict(error: IntegrityError) -> bool:
         and getattr(getattr(error.orig, "diag", None), "constraint_name", None)
         == ACTIVE_EXECUTION_LEASE_CONSTRAINT
     )
+
+
+def _is_execution_binding_conflict(error: IntegrityError) -> bool:
+    return (
+        isinstance(error.orig, UniqueViolation)
+        and getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+        == EXECUTION_BINDING_CONSTRAINT
+    )
+
+
+def _is_known_scheduler_conflict(error: IntegrityError) -> bool:
+    return _is_active_lease_conflict(error) or _is_execution_binding_conflict(error)
 
 
 def _schedule_envelope(
