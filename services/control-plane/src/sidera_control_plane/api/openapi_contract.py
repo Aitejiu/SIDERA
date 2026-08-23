@@ -9,6 +9,7 @@ from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.schemas import (
     AnswerPlanningClarificationPayload,
     CancelPlanningRequestPayload,
+    ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ErrorBody,
     ErrorResponse,
@@ -18,6 +19,7 @@ from sidera_control_plane.api.schemas import (
     RejectPlanningProposalPayload,
     RequestProposalRevisionPayload,
     RetryBlockedPlanningRunPayload,
+    SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
 )
 from sidera_control_plane.config import Settings
@@ -34,6 +36,13 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("ConfirmPlanningProposal", ConfirmPlanningProposalPayload),
 )
 
+_RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("ConfigureWorkerRuntime", ConfigureWorkerRuntimePayload),
+    ("SetModuleLifecycle", SetModuleLifecyclePayload),
+)
+
+_COMMAND_PAYLOADS = _PLANNING_COMMAND_PAYLOADS + _RUNTIME_COMMAND_PAYLOADS
+
 
 def export_openapi(output: Path) -> dict[str, Any]:
     settings = Settings(
@@ -46,13 +55,13 @@ def export_openapi(output: Path) -> dict[str, Any]:
     _add_component_schema(schemas, ExecutionContextAddressPayload)
     _add_component_schema(schemas, ErrorBody)
     _add_component_schema(schemas, ErrorResponse)
-    for _command_name, model in _PLANNING_COMMAND_PAYLOADS:
+    for _command_name, model in _COMMAND_PAYLOADS:
         _add_component_schema(schemas, model)
     document["x-sidera-command-payloads"] = {
         command_name: {
             "$ref": f"#/components/schemas/{model.__name__}",
         }
-        for command_name, model in _PLANNING_COMMAND_PAYLOADS
+        for command_name, model in _COMMAND_PAYLOADS
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(

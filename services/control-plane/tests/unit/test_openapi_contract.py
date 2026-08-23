@@ -40,6 +40,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "RejectPlanningProposal": "RejectPlanningProposalPayload",
     "RetryBlockedPlanningRun": "RetryBlockedPlanningRunPayload",
     "ConfirmPlanningProposal": "ConfirmPlanningProposalPayload",
+    "ConfigureWorkerRuntime": "ConfigureWorkerRuntimePayload",
+    "SetModuleLifecycle": "SetModuleLifecyclePayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {

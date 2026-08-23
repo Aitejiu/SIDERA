@@ -55,6 +55,9 @@ AggregateType = Literal[
     "workspace",
     "planning_request",
     "planning_run",
+    "worker_runtime_configuration",
+    "module_definition",
+    "module_instance",
 ]
 
 
@@ -955,6 +958,21 @@ class HeartbeatWorkerPayload(BaseModel):
     healthy: bool
 
 
+class ConfigureWorkerRuntimePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    adapter_module_instance_id: UUID
+    adapter_module_config_version: int = Field(ge=1)
+    workspace_module_instance_id: UUID
+    workspace_module_config_version: int = Field(ge=1)
+
+
+class SetModuleLifecyclePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle: Literal["active", "draining", "disabled"]
+
+
 class CreateExecutionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1123,6 +1141,16 @@ class CommandRequest(BaseModel):
         elif self.command_type == "DrainWorker":
             self._require_mutation_target("worker")
             parsed = EmptyPayload.model_validate(self.payload)
+        elif self.command_type == "ConfigureWorkerRuntime":
+            self._require_runtime_configuration_target()
+            parsed = ConfigureWorkerRuntimePayload.model_validate(self.payload)
+        elif self.command_type == "SetModuleLifecycle":
+            if self.target_type not in {"module_definition", "module_instance"}:
+                raise ValueError(
+                    "SetModuleLifecycle target_type must be module_definition or module_instance"
+                )
+            self._require_mutation_target()
+            parsed = SetModuleLifecyclePayload.model_validate(self.payload)
         elif self.command_type == "CreateExecution":
             self._require_create("execution")
             parsed = CreateExecutionPayload.model_validate(self.payload)
@@ -1176,6 +1204,16 @@ class CommandRequest(BaseModel):
         if self.target_id is None or self.expected_version is None:
             raise ValueError("mutation commands require target_id and expected_version")
         if self.expected_version < 1:
+            raise ValueError("expected_version must be positive")
+
+    def _require_runtime_configuration_target(self) -> None:
+        if self.target_type != "worker_runtime_configuration":
+            raise ValueError(
+                "ConfigureWorkerRuntime requires target_type=worker_runtime_configuration"
+            )
+        if self.target_id is None:
+            raise ValueError("ConfigureWorkerRuntime requires target_id")
+        if self.expected_version is not None and self.expected_version < 1:
             raise ValueError("expected_version must be positive")
 
     def to_envelope(self) -> CommandEnvelope:

@@ -158,6 +158,22 @@ class WorkerRuntimeResolver:
             definitions={definition.id: definition for definition in definitions},
         )
 
+    def validate_configuration(
+        self,
+        worker: Worker,
+        configuration: WorkerRuntimeConfiguration,
+        instances: Mapping[UUID, ModuleInstance],
+        definitions: Mapping[UUID, ModuleDefinition],
+    ) -> ResolvedWorkerRuntime | RuntimeIssue:
+        """Validate a proposed runtime without requiring an Execution route."""
+        return _resolve(
+            worker=worker,
+            execution=None,
+            configuration=configuration,
+            instances=instances,
+            definitions=definitions,
+        )
+
 
 def _inspection_for(
     *,
@@ -182,18 +198,18 @@ def _inspection_for(
 def _resolve(
     *,
     worker: Worker,
-    execution: Execution,
+    execution: Execution | None,
     configuration: WorkerRuntimeConfiguration | None,
     instances: Mapping[UUID, ModuleInstance],
     definitions: Mapping[UUID, ModuleDefinition],
 ) -> ResolvedWorkerRuntime | RuntimeIssue:
-    if worker.workspace_id != execution.workspace_id:
+    if execution is not None and worker.workspace_id != execution.workspace_id:
         return _issue(
             SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
             worker,
             reason="worker_workspace_mismatch",
         )
-    if worker.adapter_type in execution.adapter_forbidden:
+    if execution is not None and worker.adapter_type in execution.adapter_forbidden:
         return _issue(
             SchedulingBlockReason.ADAPTER_POLICY_REJECTED,
             worker,

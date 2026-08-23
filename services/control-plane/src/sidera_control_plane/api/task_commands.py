@@ -37,5 +37,10 @@ def execute_command(
         "SubmitPlanningRequest",
         "ConfirmPlanningProposal",
     } and result.command_id == request.command_id
+    is_new_create = is_new_create or (
+        request.command_type == "ConfigureWorkerRuntime"
+        and request.expected_version is None
+        and result.command_id == request.command_id
+    )
     response.status_code = 201 if is_new_create else 200
     return CommandResponse.from_result(result)

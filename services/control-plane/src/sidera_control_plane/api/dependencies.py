@@ -19,6 +19,7 @@ from sidera_control_plane.application.planning_metrics import PlanningMetricsSer
 from sidera_control_plane.application.planning_queries import PlanningQueryService
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
+from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
 from sidera_control_plane.application.subtask_workspace_queries import (
     SubtaskWorkspaceQueryService,
 )
@@ -29,6 +30,7 @@ from sidera_control_plane.application.task_console_queries import (
 from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
+from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.worker_trace_queries import (
     WorkerTraceQueryService,
 )
@@ -88,6 +90,10 @@ def get_command_service(
             AcknowledgeAttentionItemHandler(lambda: datetime.now(UTC)),
             PublishPlanSnapshotHandler(),
             WorkerCommandHandler(lambda: datetime.now(UTC)),
+            RuntimeCommandHandler(
+                lambda: datetime.now(UTC),
+                resolver=WorkerRuntimeResolver(),
+            ),
             ExecutionCommandHandler(
                 lambda: datetime.now(UTC),
                 lease_ttl_seconds=settings.assignment_lease_seconds,
