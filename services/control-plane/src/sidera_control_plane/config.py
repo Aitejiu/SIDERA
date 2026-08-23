@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     reconciler_poll_interval_seconds: float = Field(default=2.0, gt=0)
     gateway_batch_size: int = Field(default=20, gt=0)
     gateway_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    planning_batch_size: int = Field(default=10, gt=0)
+    planning_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    planning_lease_ttl_seconds: int = Field(default=60, gt=0)
+    planning_lease_renew_interval_seconds: float = Field(default=10.0, gt=0)
+    planning_max_diagnostic_bytes: int = Field(default=4096, gt=0)
+    planning_temp_root: Path = Path(".sidera/planning")
     workspace_root: Path = Path(".sidera/workspaces")
     workspace_retention_seconds: int = Field(default=86_400, gt=0)
     git_executable: str = Field(default="git", min_length=1)
@@ -35,3 +41,14 @@ class Settings(BaseSettings):
     artifact_download_token_ttl_seconds: int = Field(default=300, gt=0)
     web_origin: str = "http://127.0.0.1:5173"
     api_bind_host: str = "127.0.0.1"
+
+    @model_validator(mode="after")
+    def validate_planning_lease_intervals(self) -> "Settings":
+        if self.planning_lease_renew_interval_seconds >= (
+            self.planning_lease_ttl_seconds / 2
+        ):
+            raise ValueError(
+                "planning_lease_renew_interval_seconds must be less than half "
+                "planning_lease_ttl_seconds"
+            )
+        return self

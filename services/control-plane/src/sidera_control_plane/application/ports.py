@@ -168,6 +168,9 @@ class PlanningRunRepositoryPort(Protocol):
     def claim_queued(self, *, now: datetime, limit: int) -> tuple[PlanningRun, ...]:
         raise NotImplementedError
 
+    def claim_failed(self, *, now: datetime, limit: int) -> tuple[PlanningRun, ...]:
+        raise NotImplementedError
+
 
 class PlanningLeaseRepositoryPort(Protocol):
     def add(self, lease: PlanningRunLease) -> None:

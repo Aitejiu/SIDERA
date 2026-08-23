@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.planning import (
+    PlanningRequest,
+    PlanningRequestStatus,
+    PlanningRun,
+    PlanningRunLease,
+    PlanningRunLeaseStatus,
+    PlanningRunStatus,
+)
+from sidera_control_plane.domain.planning_profiles import (
+    InvalidOutputPolicy,
+    UnknownOutcomePolicy,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningReconcileResult:
+    expired: int
+    retried: int
+    blocked: int
+    failed: int
+
+
+class PlanningReconciler:
+    def __init__(
+        self,
+        *,
+        uow_factory: Callable[[], ControlPlaneUnitOfWork],
+        owner_id: str,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if not owner_id.strip():
+            raise ValueError("owner_id is required")
+        self._uow_factory = uow_factory
+        self._owner_id = owner_id
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def run_once(self, limit: int = 50) -> PlanningReconcileResult:
+        if limit <= 0:
+            raise ValueError("planning reconciler limit must be positive")
+        now = self._clock()
+        expired = 0
+        retried = 0
+        blocked = 0
+        failed = 0
+        with self._uow_factory() as uow:
+            expired_leases = uow.planning_leases.claim_expired(
+                now=now, limit=limit
+            )
+            expired = len(expired_leases)
+            for lease in expired_leases:
+                outcome = self._reconcile_expired(uow, lease, now)
+                retried += outcome[0]
+                blocked += outcome[1]
+                failed += outcome[2]
+
+            for run in uow.planning_runs.claim_failed(now=now, limit=limit):
+                outcome = self._reconcile_failed(uow, run, now)
+                retried += outcome[0]
+                blocked += outcome[1]
+                failed += outcome[2]
+        return PlanningReconcileResult(
+            expired=expired,
+            retried=retried,
+            blocked=blocked,
+            failed=failed,
+        )
+
+    def _reconcile_expired(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        lease: PlanningRunLease,
+        now: datetime,
+    ) -> tuple[int, int, int]:
+        run = uow.planning_runs.get(
+            lease.planning_run_id, lease.workspace_id, for_update=True
+        )
+        if run is None:
+            self._expire_lease(uow, lease, now)
+            return (0, 0, 0)
+        request = uow.planning_requests.get(
+            run.planning_request_id, lease.workspace_id, for_update=True
+        )
+        self._expire_lease(uow, lease, now)
+        if request is None or run.status is not PlanningRunStatus.RUNNING:
+            return (0, 0, 0)
+        if request.status is not PlanningRequestStatus.PLANNING:
+            return (0, 0, 0)
+        run = request.run(run.id)
+        run.lease_id = lease.id
+        run.fencing_token = lease.fencing_token
+        previous_request_version = request.version
+        previous_run_version = run.version
+        request.fail_run(
+            run_id=run.id,
+            lease_id=lease.id,
+            fencing_token=lease.fencing_token,
+            error_code="lease_expired",
+            error_message="planning worker lease expired before a result was committed",
+            now=now,
+        )
+        uow.planning_runs.save(run, previous_run_version)
+        should_retry = self._should_retry(run, request, now)
+        new_run = None
+        if should_retry:
+            new_run = self._retry_request(uow, request, previous_request_version, now)
+        self._record_event(
+            uow,
+            request=request,
+            event_type="PlanningRunUpdated",
+            payload={
+                "planning_run_id": str(run.id),
+                "status": run.status.value,
+                "error_code": run.error_code,
+                "retry_queued": new_run is not None,
+                "next_run_id": str(new_run.id) if new_run is not None else None,
+            },
+        )
+        if new_run is not None:
+            return (1, 0, 0)
+        return (0, 0, 1)
+
+    def _reconcile_failed(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        run: PlanningRun,
+        now: datetime,
+    ) -> tuple[int, int, int]:
+        request = uow.planning_requests.get(
+            run.planning_request_id, run.workspace_id, for_update=True
+        )
+        if request is None or request.current_run_id != run.id:
+            return (0, 0, 0)
+        if request.status is not PlanningRequestStatus.FAILED:
+            return (0, 0, 0)
+        if (
+            uow.planning_leases.get_active_for_run(
+                run.id, run.workspace_id, for_update=True
+            )
+            is not None
+        ):
+            return (0, 0, 0)
+        if not self._should_retry(run, request, now):
+            return (0, 0, 1)
+        previous_request_version = request.version
+        new_run = self._retry_request(uow, request, previous_request_version, now)
+        self._record_event(
+            uow,
+            request=request,
+            event_type="PlanningBlockedRunRetried",
+            payload={
+                "failed_run_id": str(run.id),
+                "planning_run_id": str(new_run.id),
+                "attempt": new_run.attempt,
+                "reason": run.error_code,
+            },
+        )
+        return (1, 0, 0)
+
+    def _retry_request(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        previous_request_version: int,
+        now: datetime,
+    ) -> PlanningRun:
+        new_run_id = uuid4()
+        request.retry_failed(new_run_id=new_run_id, now=now)
+        new_run = request.runs[-1]
+        uow.planning_runs.add(new_run)
+        uow.planning_requests.save(request, previous_request_version)
+        return new_run
+
+    def _should_retry(
+        self, run: PlanningRun, request: PlanningRequest, now: datetime
+    ) -> bool:
+        policy = request.profile_snapshot.retry_policy
+        if run.attempt > policy.max_retries:
+            return False
+        if run.error_code != "lease_expired" and run.finished_at is not None:
+            backoff_index = min(run.attempt - 1, len(policy.backoff_seconds) - 1)
+            retry_at = run.finished_at + timedelta(
+                seconds=policy.backoff_seconds[backoff_index]
+            )
+            if now < retry_at:
+                return False
+        if run.error_code == "unknown_outcome":
+            return (
+                policy.unknown_outcome_policy is UnknownOutcomePolicy.RETRY
+                and run.capability_snapshot.idempotency.value == "operation-id"
+            )
+        if run.error_code in {"invalid_result", "proposal_schema_invalid"}:
+            return policy.invalid_output_policy is InvalidOutputPolicy.RETRY
+        return run.error_code in {
+            "timeout",
+            "rate_limited",
+            "lease_expired",
+            "planning_lease_unavailable",
+            "planner_exception",
+        }
+
+    def _expire_lease(
+        self, uow: ControlPlaneUnitOfWork, lease: PlanningRunLease, now: datetime
+    ) -> None:
+        previous_version = lease.version
+        lease.status = PlanningRunLeaseStatus.EXPIRED
+        lease.released_at = now
+        lease.version += 1
+        uow.planning_leases.save(lease, previous_version)
+
+    def _record_event(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        request: PlanningRequest,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> EventData:
+        envelope = CommandEnvelope(
+            id=uuid4(),
+            workspace_id=request.workspace_id,
+            command_type="PlanningReconcilerRun",
+            target_type="planning_request",
+            actor_type="system",
+            actor_id=self._owner_id,
+            target_id=request.id,
+            payload=payload,
+            expected_version=None,
+            idempotency_key=f"{event_type}:{request.id}:{request.version}:{uuid4()}",
+            correlation_id=request.correlation_id,
+        )
+        event = EventData(
+            id=uuid4(),
+            workspace_id=request.workspace_id,
+            aggregate_type="planning_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type=event_type,
+            payload=payload,
+            actor_type="system",
+            actor_id=self._owner_id,
+            causation_id=envelope.id,
+            correlation_id=request.correlation_id,
+        )
+        uow.events.append_with_outbox(event)
+        uow.commands.record_applied(
+            envelope,
+            hash_request(envelope),
+            CommandResult(
+                command_id=envelope.id,
+                aggregate_id=request.id,
+                aggregate_version=request.version,
+                event_ids=(event.id,),
+                data={"planning_run_id": payload.get("planning_run_id")},
+            ),
+        )
+        return event

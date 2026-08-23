@@ -304,6 +304,27 @@ class PlanningRunRepository:
         rows = self._session.execute(statement).all()
         return tuple(_to_run(row, snapshot) for row, snapshot in rows)
 
+    def claim_failed(self, *, now: datetime, limit: int) -> tuple[PlanningRun, ...]:
+        statement = (
+            select(PlanningRunModel, PlanningRequestModel.profile_snapshot)
+            .join(
+                PlanningRequestModel,
+                (PlanningRequestModel.id == PlanningRunModel.planning_request_id)
+                & (PlanningRequestModel.workspace_id == PlanningRunModel.workspace_id),
+            )
+            .where(
+                PlanningRunModel.status == PlanningRunStatus.FAILED.value,
+                PlanningRunModel.finished_at <= now,
+            )
+            .order_by(
+                PlanningRunModel.finished_at.asc(), PlanningRunModel.id.asc()
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        rows = self._session.execute(statement).all()
+        return tuple(_to_run(row, snapshot) for row, snapshot in rows)
+
     def _snapshot_for_request(
         self, request_id: UUID, workspace_id: UUID
     ) -> PlanningProfileSnapshot:

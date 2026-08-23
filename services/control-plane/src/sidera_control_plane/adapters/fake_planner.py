@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -89,7 +90,7 @@ class FakePlannerAdapter:
     def cancelled_operations(self) -> frozenset[UUID]:
         return frozenset(self._cancelled_operations)
 
-    def probe(self, config: dict[str, object]) -> PlannerAdapterCapabilityProfile:
+    def probe(self, config: Mapping[str, object]) -> PlannerAdapterCapabilityProfile:
         configured_scenario = config.get("scenario")
         if configured_scenario is not None and configured_scenario != self.config.scenario:
             raise ValueError("fake planner scenario must be explicitly configured")
