@@ -1,0 +1,130 @@
+import type {
+  MainAgentCapabilities,
+  MainAgentErrorEnvelope,
+  MainAgentHealth,
+  MainAgentThread,
+  MainAgentThreadList,
+  MainAgentTurn,
+} from "./types";
+
+const API_BASE = "/main-agent/v1";
+
+export class MainAgentApiProblem extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly retryable: boolean;
+
+  constructor(status: number, code: string, message: string, retryable: boolean) {
+    super(message);
+    this.name = "MainAgentApiProblem";
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...init?.headers,
+    },
+  });
+  if (!response.ok) {
+    throw await parseApiProblem(response);
+  }
+  return (await response.json()) as T;
+}
+
+async function parseApiProblem(response: Response): Promise<MainAgentApiProblem> {
+  let parsed: unknown;
+  try {
+    parsed = (await response.json()) as unknown;
+  } catch {
+    parsed = undefined;
+  }
+  const envelope = isErrorEnvelope(parsed) ? parsed.error : undefined;
+  return new MainAgentApiProblem(
+    response.status,
+    envelope?.code ?? `http_${response.status}`,
+    envelope?.message ?? `Gateway request failed (${response.status})`,
+    envelope?.retryable ?? response.status >= 500,
+  );
+}
+
+function isErrorEnvelope(value: unknown): value is MainAgentErrorEnvelope {
+  if (!isRecord(value) || !isRecord(value.error)) {
+    return false;
+  }
+  return (
+    typeof value.error.code === "string" &&
+    typeof value.error.message === "string" &&
+    typeof value.error.retryable === "boolean"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function getHealth(): Promise<MainAgentHealth> {
+  return requestJson<MainAgentHealth>("/health");
+}
+
+export function getCapabilities(): Promise<MainAgentCapabilities> {
+  return requestJson<MainAgentCapabilities>("/capabilities");
+}
+
+export function listThreads(
+  cursor?: string,
+  limit = 50,
+): Promise<MainAgentThreadList> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor !== undefined) {
+    query.set("cursor", cursor);
+  }
+  return requestJson<MainAgentThreadList>(`/threads?${query.toString()}`);
+}
+
+export function createThread(
+  payload: Pick<MainAgentThread, "contextRefs"> & { title?: string | null },
+): Promise<MainAgentThread> {
+  return requestJson<MainAgentThread>("/threads", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getThread(threadId: string): Promise<MainAgentThread> {
+  return requestJson<MainAgentThread>(
+    `/threads/${encodeURIComponent(threadId)}`,
+  );
+}
+
+export function startTurn(threadId: string, input: string): Promise<MainAgentTurn> {
+  return requestJson<MainAgentTurn>(
+    `/threads/${encodeURIComponent(threadId)}/turns`,
+    {
+      method: "POST",
+      body: JSON.stringify({ input }),
+    },
+  );
+}
+
+export function getTurn(threadId: string, turnId: string): Promise<MainAgentTurn> {
+  return requestJson<MainAgentTurn>(
+    `/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}`,
+  );
+}
+
+export function interruptTurn(
+  threadId: string,
+  turnId: string,
+): Promise<MainAgentTurn> {
+  return requestJson<MainAgentTurn>(
+    `/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}/interrupt`,
+    { method: "POST" },
+  );
+}

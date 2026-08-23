@@ -14,6 +14,7 @@ export default defineConfig({
     host: "127.0.0.1",
     proxy: {
       "/api": "http://127.0.0.1:8000",
+      "/main-agent": "http://127.0.0.1:8010",
     },
   },
   preview: {
