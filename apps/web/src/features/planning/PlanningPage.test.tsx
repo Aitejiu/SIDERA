@@ -290,6 +290,17 @@ describe("PlanningPage", () => {
     expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
   });
 
+  it("opens a Main Agent draft with the planning request reference", async () => {
+    installHandlers({ request: makeRequest("planning") });
+    renderPage();
+
+    const link = await screen.findByRole("link", { name: "与 Main Agent 讨论" });
+    expect(link).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/chat?context_ref=planning_request:${REQUEST_ID}`,
+    );
+  });
+
   it("shows real running metadata without inventing percentage progress", async () => {
     const request = makeRequest("planning", {
       active_run: makeRun({

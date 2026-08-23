@@ -1,6 +1,6 @@
 import { CircleAlert, CircleCheck, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -35,6 +35,7 @@ export function ChatPage() {
   const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
   const threadId = useParams<{ threadId?: string }>().threadId;
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const scope = threadId ?? NEW_THREAD_SCOPE;
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -42,7 +43,13 @@ export function ChatPage() {
   const [turnInputsByScope, setTurnInputsByScope] = useState<ScopedInputMap>({});
   const [pollingTurn, setPollingTurn] = useState<{ threadId: string; turnId: string } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const draft = drafts[scope] ?? "";
+  const [contextSendPending, setContextSendPending] = useState(false);
+  const rawContextRef = searchParams.get("context_ref");
+  const pendingContextRef = useMemo(() => {
+    if (rawContextRef === null) return null;
+    return collectContextReferences([rawContextRef], [], workspaceId)[0]?.key ?? null;
+  }, [rawContextRef, workspaceId]);
+  const draft = drafts[scope] ?? (scope === NEW_THREAD_SCOPE ? pendingContextRef ?? "" : "");
   const transientTurns = useMemo(
     () => transientByScope[scope] ?? {},
     [scope, transientByScope],
@@ -94,8 +101,12 @@ export function ChatPage() {
     [turns],
   );
   const contextReferences = useMemo(
-    () => collectContextReferences(selectedThread?.contextRefs ?? [], toolResourceRefs, workspaceId),
-    [selectedThread?.contextRefs, toolResourceRefs, workspaceId],
+    () => collectContextReferences(
+      selectedThread?.contextRefs ?? (pendingContextRef === null ? [] : [pendingContextRef]),
+      toolResourceRefs,
+      workspaceId,
+    ),
+    [pendingContextRef, selectedThread?.contextRefs, toolResourceRefs, workspaceId],
   );
 
   const applyTurn = useCallback((turn: MainAgentTurn) => {
@@ -193,13 +204,49 @@ export function ChatPage() {
   };
 
   const send = async (input: string) => {
-    if (threadId === undefined || activeTurn !== undefined || input.trim() === "") return;
+    const normalizedInput = input.trim();
+    if (activeTurn !== undefined || normalizedInput === "") return;
     setErrorMessage(null);
+
+    if (threadId === undefined) {
+      if (pendingContextRef === null || contextSendPending) return;
+      setContextSendPending(true);
+      try {
+        const created = await createThread({
+          contextRefs: [pendingContextRef],
+          title: "上下文讨论",
+        });
+        queryClient.setQueryData(mainAgentThreadQueryKey(workspaceId, created.id), created);
+        void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
+        setDrafts((current) => ({ ...current, [created.id]: normalizedInput }));
+        navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(created.id)}`);
+        try {
+          const turn = await startTurn(created.id, normalizedInput);
+          setTurnInputsByScope((current) => ({
+            ...current,
+            [created.id]: { ...current[created.id], [turn.id]: normalizedInput },
+          }));
+          applyTurn(turn);
+          setDrafts((current) => ({ ...current, [created.id]: "" }));
+          if (!turn.streamAvailable) {
+            setPollingTurn({ threadId: created.id, turnId: turn.id });
+          }
+        } catch {
+          setErrorMessage("消息未发送，输入内容已保留。请检查 Gateway 后重试。");
+        }
+      } catch {
+        setErrorMessage("无法创建带上下文的对话，输入内容已保留。请稍后重试。");
+      } finally {
+        setContextSendPending(false);
+      }
+      return;
+    }
+
     try {
-      const turn = await startTurn(threadId, input.trim());
+      const turn = await startTurn(threadId, normalizedInput);
       setTurnInputsByScope((current) => ({
         ...current,
-        [threadId]: { ...current[threadId], [turn.id]: input.trim() },
+        [threadId]: { ...current[threadId], [turn.id]: normalizedInput },
       }));
       applyTurn(turn);
       setDrafts((current) => ({ ...current, [scope]: "" }));
@@ -235,7 +282,7 @@ export function ChatPage() {
   };
 
   const unavailable = healthQuery.data?.provider === "unavailable";
-  const pageTitle = selectedThread?.title ?? "Main Agent";
+  const pageTitle = selectedThread?.title ?? (pendingContextRef === null ? "Main Agent" : "上下文讨论");
 
   return (
     <section className="chat-page" aria-labelledby="chat-page-title">
@@ -269,6 +316,26 @@ export function ChatPage() {
               <strong>Main Agent 暂不可用</strong>
               <span>任务控制面仍可继续查看。</span>
             </div>
+          ) : threadId === undefined && pendingContextRef !== null ? (
+            <div className="chat-main__draft">
+              <div className="chat-main__draft-card">
+                <span className="eyebrow">CONTEXT DRAFT</span>
+                <h2>围绕这个对象开始讨论</h2>
+                <code>{pendingContextRef}</code>
+              </div>
+              <ChatComposer
+                value={draft}
+                active={false}
+                disabled={contextSendPending}
+                errorMessage={errorMessage}
+                onChange={(value) => {
+                  setDrafts((current) => ({ ...current, [scope]: value }));
+                  setErrorMessage(null);
+                }}
+                onSend={() => void send(draft)}
+                onInterrupt={() => void interrupt()}
+              />
+            </div>
           ) : threadId === undefined ? (
             <div className="chat-main__empty">
               <span className="eyebrow">NO THREAD SELECTED</span>
@@ -296,7 +363,7 @@ export function ChatPage() {
               <ChatComposer
                 value={draft}
                 active={activeTurn !== undefined}
-                disabled={threadQuery.isError || createMutation.isPending}
+                disabled={threadQuery.isError || createMutation.isPending || contextSendPending}
                 errorMessage={errorMessage}
                 onChange={(value) => {
                   setDrafts((current) => ({ ...current, [scope]: value }));

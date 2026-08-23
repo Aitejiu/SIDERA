@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, MessageCircle, X } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -242,6 +242,12 @@ export function PlanningPage() {
         </div>
         <div className="planning-page__heading-state">
           <span className={`planning-status planning-status--${request.status}`}>{requestStatusLabel(request.status)}</span>
+          <Link
+            className="quiet-button"
+            to={`/workspaces/${workspaceId}/chat?context_ref=planning_request:${planningRequestId}`}
+          >
+            <MessageCircle size={14} aria-hidden="true" />与 Main Agent 讨论
+          </Link>
           <span className="mono-label">请求 {planningRequestId.slice(0, 8)} · V{request.version}</span>
         </div>
       </header>

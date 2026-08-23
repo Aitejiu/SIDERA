@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { Clock3, History } from "lucide-react";
+import { Clock3, History, MessageCircle } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -172,6 +172,12 @@ function TaskDeliveryContent({
             to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/plan/${graph.overview.generation}`}
           >
             <History size={14} aria-hidden="true" />计划历史
+          </Link>
+          <Link
+            className="quiet-button"
+            to={`/workspaces/${workspaceId}/chat?context_ref=task:${rootTaskId}`}
+          >
+            <MessageCircle size={14} aria-hidden="true" />与 Main Agent 讨论
           </Link>
           <span className="mono-label">CURSOR {graph.overview.last_change_cursor}</span>
         </div>

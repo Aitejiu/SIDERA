@@ -7040,6 +7040,42 @@ h1 {
   font-size: 18px;
 }
 
+.chat-main__draft {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.chat-main__draft-card {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  flex: 1 1 auto;
+  min-height: 300px;
+  gap: 10px;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.chat-main__draft-card h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+}
+
+.chat-main__draft-card code {
+  max-width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--structure);
+  color: var(--dispatch);
+  background: #f7f9fb;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
 .chat-main__offline {
   color: var(--attention);
 }

@@ -12,6 +12,8 @@ import { ChatPage } from "./ChatPage";
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const THREAD_ID = "thread-1";
 const TURN_ID = "turn-1";
+const PLANNING_REQUEST_ID = "40000000-0000-0000-0000-000000000001";
+const TASK_CONTEXT_ID = "30000000-0000-0000-0000-000000000001";
 
 class TestEventSource {
   static instances: TestEventSource[] = [];
@@ -160,6 +162,61 @@ describe("Main Agent chat workspace", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
     });
+  });
+
+  it("keeps a context draft request-free until the first send", async () => {
+    const user = userEvent.setup();
+    const contextRef = `planning_request:${PLANNING_REQUEST_ID}`;
+    useBaseHandlers();
+    let createCount = 0;
+    let startCount = 0;
+    server.use(
+      http.post("/main-agent/v1/threads", () => {
+        createCount += 1;
+        return HttpResponse.json(thread({ id: "thread-context", title: "规划讨论" }), { status: 201 });
+      }),
+      http.post("/main-agent/v1/threads/:threadId/turns", () => {
+        startCount += 1;
+        return HttpResponse.json(turn({ id: "turn-context" }), { status: 202 });
+      }),
+    );
+
+    const { router } = renderChat(`/workspaces/${WORKSPACE_ID}/chat?context_ref=${contextRef}`);
+
+    const composer = await screen.findByRole("textbox", { name: "给 Main Agent 的消息" });
+    expect(composer).toHaveValue(contextRef);
+    expect(screen.getAllByText(contextRef)).not.toHaveLength(0);
+    expect(createCount).toBe(0);
+    expect(startCount).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/workspaces/${WORKSPACE_ID}/chat/thread-context`));
+    expect(createCount).toBe(1);
+    expect(startCount).toBe(1);
+  });
+
+  it("keeps a context draft after thread creation when the first turn fails", async () => {
+    const user = userEvent.setup();
+    const contextRef = `task:${TASK_CONTEXT_ID}`;
+    useBaseHandlers();
+    let createCount = 0;
+    server.use(
+      http.post("/main-agent/v1/threads", () => {
+        createCount += 1;
+        return HttpResponse.json(thread({ id: "thread-created", title: "任务讨论" }), { status: 201 });
+      }),
+      http.post("/main-agent/v1/threads/:threadId/turns", () =>
+        HttpResponse.json({ error: { code: "provider_unavailable", message: "offline", retryable: true } }, { status: 503 }),
+      ),
+    );
+
+    const { router } = renderChat(`/workspaces/${WORKSPACE_ID}/chat?context_ref=${contextRef}`);
+    await user.click(await screen.findByRole("button", { name: "发送消息" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/workspaces/${WORKSPACE_ID}/chat/thread-created`));
+    expect(createCount).toBe(1);
+    expect(screen.getByRole("textbox", { name: "给 Main Agent 的消息" })).toHaveValue(contextRef);
   });
 
   it("restores server history, sends only on click, and exposes the active stop action", async () => {

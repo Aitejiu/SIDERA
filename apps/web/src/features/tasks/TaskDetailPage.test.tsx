@@ -210,6 +210,16 @@ describe("TaskDetailPage", () => {
     );
   });
 
+  it("offers a Main Agent draft scoped to the root task", async () => {
+    renderPage();
+
+    const link = await screen.findByRole("link", { name: "与 Main Agent 讨论" });
+    expect(link).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/chat?context_ref=task:${ROOT_TASK_ID}`,
+    );
+  });
+
   it("defaults to the Subtask board and keeps DAG optional", async () => {
     const user = userEvent.setup();
     renderPage();
