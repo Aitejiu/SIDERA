@@ -129,15 +129,14 @@ def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
 def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
     """Mirror the host installer, which gives plugin.py a package search root."""
 
+    from agent.plugins.importer import FreshPluginImporter
     from agent.plugins.registry import plugin_registry
 
     root = Path(__file__).parents[1]
     module_name = "task_bridge_installer_boundary_test"
-    spec = importlib.util.spec_from_file_location(
-        module_name,
-        root / "plugin.py",
-        submodule_search_locations=[str(root)],
-    )
+    importer = FreshPluginImporter()
+    importer.register(module_name, root)
+    spec = importer.root_spec(module_name, root / "plugin.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -154,7 +153,30 @@ def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
     try:
         spec.loader.exec_module(module)
         assert module.SideraTaskBridge.name == "sidera-task-bridge"
+        metadata = {
+            item.tool_name: item
+            for item in plugin_registry.get_handlers_by_module_path(module_name)
+            if item.kind.name == "TOOL"
+        }
+        submit_schema = metadata["sidera_submit_brief"].tool_schema
+        assert submit_schema is not None
+        assert all(
+            submit_schema["properties"][name]["type"] == "array"
+            for name in (
+                "constraints",
+                "acceptance_criteria",
+                "context_refs",
+                "requested_outputs",
+            )
+        )
+        clarification_schema = metadata["sidera_answer_clarifications"].tool_schema
+        assert clarification_schema is not None
+        assert clarification_schema["properties"]["answers"] == {
+            "type": "array",
+            "items": {"type": "object"},
+        }
     finally:
+        importer.unregister(module_name)
         plugin_registry.remove_module_tree(module_name)
         for imported_name in tuple(sys.modules):
             if imported_name == module_name or imported_name.startswith(f"{module_name}."):

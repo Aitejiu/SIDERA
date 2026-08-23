@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from agent.plugins import Plugin, tool
+from agent.plugins.registry import MetadataKind, plugin_registry
 
 if __package__:
     from .sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
@@ -226,6 +227,40 @@ class SideraTaskBridge(Plugin):
         """Read the bounded SIDERA Task First overview."""
 
         return await self._toolset().sidera_get_task_status(event, task_id)
+
+
+def _patch_host_collection_schemas() -> None:
+    """Restore collection schemas lost by Akashic's future-annotation loader."""
+
+    collection_items = {
+        "sidera_submit_brief": {
+            "constraints": {"type": "string"},
+            "acceptance_criteria": {"type": "string"},
+            "context_refs": {"type": "string"},
+            "requested_outputs": {"type": "string"},
+        },
+        "sidera_answer_clarifications": {
+            "answers": {"type": "object"},
+        },
+    }
+    for metadata in plugin_registry.get_handlers_by_module_path(__name__):
+        if metadata.kind is not MetadataKind.TOOL:
+            continue
+        fields = collection_items.get(metadata.tool_name or "")
+        schema = metadata.tool_schema
+        if fields is None or schema is None:
+            continue
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        for name, item_schema in fields.items():
+            property_schema = properties.get(name)
+            if isinstance(property_schema, dict):
+                property_schema["type"] = "array"
+                property_schema["items"] = item_schema
+
+
+_patch_host_collection_schemas()
 
 
 __all__ = ["SideraTaskBridge"]
