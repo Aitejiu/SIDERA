@@ -2,7 +2,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 from uuid import UUID
 
-from agent.plugins.decorators import tool
 from agent.tools.base import get_current_tool_context
 
 from .client import (
@@ -57,7 +56,6 @@ class SideraTaskTools:
         self._source_resolver = source_resolver
         self._session_metadata_provider = session_metadata_provider
 
-    @tool(name="sidera_submit_brief", risk="write", always_on=True)
     async def sidera_submit_brief(
         self,
         event: object,
@@ -154,7 +152,6 @@ class SideraTaskTools:
         except ControlPlaneRejected as exc:
             return _encode(_rejected_envelope(exc.code, "brief submission"))
 
-    @tool(name="sidera_get_planning_status", risk="read-only", always_on=True)
     async def sidera_get_planning_status(
         self, event: object, planning_request_id: str
     ) -> str:
@@ -227,11 +224,6 @@ class SideraTaskTools:
         except ControlPlaneRejected as exc:
             return _encode(_rejected_envelope(exc.code, "planning status"))
 
-    @tool(
-        name="sidera_answer_clarifications",
-        risk="write",
-        search_hint="SIDERA planning clarification answer question",
-    )
     async def sidera_answer_clarifications(
         self,
         event: object,
@@ -285,11 +277,6 @@ class SideraTaskTools:
                 )
             )
 
-    @tool(
-        name="sidera_request_proposal_revision",
-        risk="write",
-        search_hint="SIDERA planning proposal revise feedback",
-    )
     async def sidera_request_proposal_revision(
         self,
         event: object,
@@ -355,11 +342,6 @@ class SideraTaskTools:
                 )
             )
 
-    @tool(
-        name="sidera_confirm_proposal",
-        risk="write",
-        search_hint="SIDERA planning proposal confirm approve",
-    )
     async def sidera_confirm_proposal(
         self,
         event: object,
@@ -436,11 +418,6 @@ class SideraTaskTools:
                 )
             )
 
-    @tool(
-        name="sidera_reject_proposal",
-        risk="write",
-        search_hint="SIDERA planning proposal reject decline",
-    )
     async def sidera_reject_proposal(
         self,
         event: object,
@@ -535,11 +512,6 @@ class SideraTaskTools:
             }
         )
 
-    @tool(
-        name="sidera_get_task_status",
-        risk="read-only",
-        search_hint="SIDERA task progress status milestone worker next work item",
-    )
     async def sidera_get_task_status(self, event: object, task_id: str) -> str:
         """Read the bounded Task First overview for a materialized root task."""
 

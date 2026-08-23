@@ -143,9 +143,11 @@ def decode(value: str) -> dict[str, Any]:
 def test_submit_schema_exposes_only_business_fields() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 
+    import plugin
+
     metadata = [
         item
-        for item in plugin_registry.get_handlers_by_module_path("sidera_task_bridge.tools")
+        for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
     assert {item.tool_name for item in metadata} == {

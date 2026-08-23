@@ -1,0 +1,118 @@
+import asyncio
+from typing import Any, cast
+from uuid import UUID
+
+import plugin
+from sidera_task_bridge.config import TaskBridgeConfig
+
+WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
+PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
+
+
+class MemoryKV:
+    def __init__(self) -> None:
+        self.value: object = None
+        self.writes = 0
+
+    def get(self, key: str, default: object = None) -> object:
+        del key
+        return self.value if self.value is not None else default
+
+    def set(self, key: str, value: object) -> None:
+        del key
+        self.value = value
+        self.writes += 1
+
+
+class FakeContext:
+    def __init__(self) -> None:
+        self.config = TaskBridgeConfig.model_validate(
+            {
+                "workspace_id": WORKSPACE_ID,
+                "planning_profile_id": PROFILE_ID,
+                "planning_profile_version": 1,
+            }
+        )
+        self.kv_store = MemoryKV()
+        self.session_manager = None
+        self.tasks: list[asyncio.Task[object]] = []
+        self.task_names: list[str | None] = []
+
+    def create_task(self, coroutine: object, *, name: str | None = None) -> asyncio.Task[object]:
+        task = asyncio.create_task(coroutine)  # type: ignore[arg-type]
+        self.tasks.append(task)
+        self.task_names.append(name)
+        return task
+
+
+def test_plugin_declares_exact_seven_tools_and_risks() -> None:
+    from agent.plugins.registry import MetadataKind, plugin_registry
+
+    metadata = [
+        item
+        for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
+        if item.kind is MetadataKind.TOOL
+    ]
+    assert len(metadata) == 7
+    assert {item.tool_name for item in metadata} == {
+        "sidera_submit_brief",
+        "sidera_get_planning_status",
+        "sidera_answer_clarifications",
+        "sidera_request_proposal_revision",
+        "sidera_confirm_proposal",
+        "sidera_reject_proposal",
+        "sidera_get_task_status",
+    }
+    read_only = {"sidera_get_planning_status", "sidera_get_task_status"}
+    for item in metadata:
+        assert item.tool_risk == ("read-only" if item.tool_name in read_only else "write")
+        assert item.tool_schema is not None
+        assert "self" not in item.tool_schema["properties"]
+        assert "event" not in item.tool_schema["properties"]
+    always_on = {item.tool_name for item in metadata if item.tool_always_on}
+    assert always_on == {"sidera_submit_brief", "sidera_get_planning_status"}
+    hints = {
+        item.tool_name for item in metadata if item.tool_search_hint is not None
+    }
+    assert hints == {
+        "sidera_answer_clarifications",
+        "sidera_request_proposal_revision",
+        "sidera_confirm_proposal",
+        "sidera_reject_proposal",
+        "sidera_get_task_status",
+    }
+
+
+def test_prepare_constructs_bridge_without_starting_recovery_or_network() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+
+        await bridge.prepare()
+
+        assert bridge._client is not None
+        assert bridge._dispatcher is not None
+        assert bridge._tools is not None
+        assert context.tasks == []
+        assert context.kv_store.writes == 0
+        await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
+def test_activate_starts_one_named_recovery_task_and_retire_is_read_only() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+        await bridge.prepare()
+
+        bridge.activate()
+        assert context.task_names == ["sidera-task-bridge-command-recovery"]
+        await asyncio.gather(*context.tasks)
+        bridge.retire()
+        assert context.kv_store.writes == 0
+        await bridge.terminate()
+
+    asyncio.run(scenario())
