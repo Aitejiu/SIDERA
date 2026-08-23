@@ -18,6 +18,8 @@ import { ArtifactPage } from "@/features/trace/ArtifactPage";
 import { WorkerTracePage } from "@/features/trace/WorkerTracePage";
 import { ExecutionPage } from "@/features/trace/ExecutionPage";
 import { WorkerItemPage } from "@/features/worker-items/WorkerItemPage";
+import { WorkerNodePage } from "@/features/workers/WorkerNodePage";
+import { WorkerNodesPage } from "@/features/workers/WorkerNodesPage";
 import { CapabilitiesPage, ChatPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
 import { PlanningBriefForm } from "@/features/planning/PlanningBriefForm";
 import { PlanningPage } from "@/features/planning/PlanningPage";
@@ -55,6 +57,14 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/worker-items/:workerItemId",
         element: <WorkerItemPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/workers",
+        element: <WorkerNodesPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/workers/:workerId",
+        element: <WorkerNodePage />,
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/plan/:generation",

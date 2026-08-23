@@ -47,6 +47,7 @@ describe("app shell", () => {
     expect(screen.getByRole("link", { name: "聊天" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "历史" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "能力" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "执行节点" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "任务总览" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /任务 30000000/ })).toBeInTheDocument();
   });

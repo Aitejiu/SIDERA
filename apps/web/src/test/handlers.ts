@@ -26,3 +26,28 @@ export function commandHandler(
     HttpResponse.json(body, { status }),
   );
 }
+
+export function workersHandler(
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get("/api/v1/workers", () => HttpResponse.json(body));
+}
+
+export function workerHandler(
+  workerId: string,
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get(`/api/v1/workers/${workerId}`, () => HttpResponse.json(body));
+}
+
+export function modulesHandler(
+  moduleType: "worker_adapter" | "workspace_provider",
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get("/api/v1/modules", ({ request }) => {
+    if (new URL(request.url).searchParams.get("module_type") !== moduleType) {
+      return new HttpResponse(null, { status: 404 });
+    }
+    return HttpResponse.json(body);
+  });
+}

@@ -1,4 +1,4 @@
-import { Boxes, Clock3, ListTodo, Mail, MessageCircle, Settings2 } from "lucide-react";
+import { Boxes, Clock3, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
@@ -55,6 +55,7 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
             <NavItem to={`/workspaces/${workspaceId}/chat`} label="聊天" icon={<MessageCircle size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/history`} label="历史" icon={<Clock3 size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/capabilities`} label="能力" icon={<Boxes size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/workers`} label="执行节点" icon={<ServerCog size={17} />} />
           </nav>
           <div className="rail-footer">
             <NavItem to={`/workspaces/${workspaceId}/settings`} label="设置" icon={<Settings2 size={17} />} />
