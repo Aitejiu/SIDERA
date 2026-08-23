@@ -9,6 +9,7 @@ from sidera_control_plane.domain.worker import Worker
 @dataclass(frozen=True, slots=True)
 class WorkerCandidate:
     id: UUID
+    adapter_type: str
     capabilities: frozenset[str]
     capacity: int
     current_load: int
@@ -19,6 +20,7 @@ class WorkerCandidate:
     def from_worker(cls, worker: Worker) -> "WorkerCandidate":
         return cls(
             id=worker.id,
+            adapter_type=worker.adapter_type,
             capabilities=worker.capabilities,
             capacity=worker.capacity,
             current_load=worker.current_load,
@@ -50,17 +52,25 @@ class LowestCostWorkerPolicy:
             return None
         selected = min(candidates, key=lambda candidate: _score(execution, candidate))
         score = _score(execution, selected)
+        preference_rank = score[0]
+        preference_fallback = bool(execution.adapter_preferences) and (
+            preference_rank == len(execution.adapter_preferences)
+        )
         return AssignmentDecision(
             worker_id=selected.id,
             reason={
                 "policy": self.name,
                 "eligible_count": len(candidates),
                 "required_capabilities": sorted(execution.capability_requirements),
+                "selected_adapter_type": selected.adapter_type,
+                "adapter_preference_rank": preference_rank,
+                "adapter_preference_fallback": preference_fallback,
+                "pin_applied": execution.pinned_worker_id == selected.id,
                 "selected_score": {
-                    "extra_capabilities": score[0],
-                    "startup_latency_ms": score[1],
-                    "load_ppm": score[2],
-                    "cost_per_hour_microunits": score[3],
+                    "extra_capabilities": score[1],
+                    "startup_latency_ms": score[2],
+                    "load_ppm": score[3],
+                    "cost_per_hour_microunits": score[4],
                 },
             },
         )
@@ -68,10 +78,20 @@ class LowestCostWorkerPolicy:
 
 def _score(
     execution: Execution, candidate: WorkerCandidate
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
+    if execution.adapter_preferences:
+        try:
+            adapter_preference_rank = execution.adapter_preferences.index(
+                candidate.adapter_type
+            )
+        except ValueError:
+            adapter_preference_rank = len(execution.adapter_preferences)
+    else:
+        adapter_preference_rank = 0
     extra = len(candidate.capabilities - execution.capability_requirements)
     load_ppm = candidate.current_load * 1_000_000 // candidate.capacity
     return (
+        adapter_preference_rank,
         extra,
         candidate.startup_latency_ms,
         load_ppm,
