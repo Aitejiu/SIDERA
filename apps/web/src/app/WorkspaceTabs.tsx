@@ -176,9 +176,9 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
       })}
       <Link
         className="workspace-tab__new"
-        to={`/workspaces/${workspaceId}/tasks`}
-        aria-label="打开任务"
-        title="打开任务"
+        to={`/workspaces/${workspaceId}/planning/new`}
+        aria-label="新建任务"
+        title="新建任务"
       >
         <Plus size={15} aria-hidden="true" />
       </Link>
@@ -198,6 +198,31 @@ function semanticTabForLocation(
       title: "任务",
       href: `${location.pathname}${location.search}`,
       closeable: false,
+    };
+  }
+
+  const planningNewPath = `/workspaces/${workspaceId}/planning/new`;
+  if (location.pathname === planningNewPath) {
+    return {
+      id: "planning-new",
+      kind: "planning-new",
+      title: "新建任务",
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
+  const planningMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/planning/([^/]+)$`),
+  );
+  if (planningMatch?.[1] !== undefined) {
+    const planningRequestId = decodeURIComponent(planningMatch[1]);
+    return {
+      id: `planning:${planningRequestId}`,
+      kind: "planning",
+      title: `规划 ${planningRequestId.slice(0, 8)}`,
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
     };
   }
 
@@ -261,6 +286,10 @@ function tabDetail(tab: WorkspaceTab): string {
   switch (tab.kind) {
     case "task-index":
       return "总览";
+    case "planning-new":
+      return "规划入口";
+    case "planning":
+      return "规划请求";
     case "root-task":
       return "任务";
     case "subtask":

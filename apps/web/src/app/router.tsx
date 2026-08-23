@@ -19,6 +19,8 @@ import { WorkerTracePage } from "@/features/trace/WorkerTracePage";
 import { ExecutionPage } from "@/features/trace/ExecutionPage";
 import { WorkerItemPage } from "@/features/worker-items/WorkerItemPage";
 import { CapabilitiesPage, ChatPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
+import { PlanningBriefForm } from "@/features/planning/PlanningBriefForm";
+import { PlanningPage } from "@/features/planning/PlanningPage";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -33,6 +35,14 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/tasks",
         element: <TaskListPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/planning/new",
+        element: <PlanningBriefForm />,
+      },
+      {
+        path: "/workspaces/:workspaceId/planning/:planningRequestId",
+        element: <PlanningPage />,
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId",

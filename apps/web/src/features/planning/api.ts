@@ -1,0 +1,191 @@
+import { apiCommand, apiGetAt, createCommandIdentity } from "@/shared/api/client";
+import type { paths } from "@/shared/api/schema";
+
+import type {
+  PlanningBriefPage,
+  PlanningClarificationPage,
+  PlanningCommandRequest,
+  PlanningCommandResponse,
+  PlanningMaterialization,
+  PlanningProfilePage,
+  PlanningProposal,
+  PlanningRequest,
+  PlanningRunPage,
+  SubmitPlanningRequestPayload,
+} from "./types";
+
+const PLANNING_PROFILES_PATH = "/api/v1/workspaces/{workspace_id}/planning-profiles" as const;
+const PLANNING_REQUEST_PATH = "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}" as const;
+
+export function planningProfilesQueryKey(workspaceId: string) {
+  return ["planning-profiles", workspaceId] as const;
+}
+
+export function planningRequestQueryKey(workspaceId: string, requestId: string) {
+  return ["planning-request", workspaceId, requestId] as const;
+}
+
+export function planningBriefsQueryKey(workspaceId: string, requestId: string) {
+  return ["planning-briefs", workspaceId, requestId] as const;
+}
+
+export function planningRunsQueryKey(workspaceId: string, requestId: string) {
+  return ["planning-runs", workspaceId, requestId] as const;
+}
+
+export function planningClarificationsQueryKey(workspaceId: string, requestId: string) {
+  return ["planning-clarifications", workspaceId, requestId] as const;
+}
+
+export function planningProposalQueryKey(
+  workspaceId: string,
+  requestId: string,
+  revision: number,
+) {
+  return ["planning-proposal", workspaceId, requestId, revision] as const;
+}
+
+export function planningMaterializationQueryKey(workspaceId: string, requestId: string) {
+  return ["planning-materialization", workspaceId, requestId] as const;
+}
+
+export async function listPlanningProfiles(
+  workspaceId: string,
+  signal?: AbortSignal,
+): Promise<PlanningProfilePage> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-profiles`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(path, PLANNING_PROFILES_PATH as keyof paths, init);
+}
+
+export async function getPlanningRequest(
+  workspaceId: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PlanningRequest> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests/${encodeURIComponent(requestId)}`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(path, PLANNING_REQUEST_PATH as keyof paths, init);
+}
+
+export async function listPlanningBriefs(
+  workspaceId: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PlanningBriefPage> {
+  return getPlanningSubresource(
+    workspaceId,
+    requestId,
+    "briefs",
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/briefs" as keyof paths,
+    signal,
+  );
+}
+
+export async function listPlanningRuns(
+  workspaceId: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PlanningRunPage> {
+  return getPlanningSubresource(
+    workspaceId,
+    requestId,
+    "runs",
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/runs" as keyof paths,
+    signal,
+  );
+}
+
+export async function listPlanningClarifications(
+  workspaceId: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PlanningClarificationPage> {
+  return getPlanningSubresource(
+    workspaceId,
+    requestId,
+    "clarifications",
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/clarifications" as keyof paths,
+    signal,
+  );
+}
+
+export async function getPlanningProposal(
+  workspaceId: string,
+  requestId: string,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<PlanningProposal> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests/${encodeURIComponent(requestId)}/proposals/${revision}`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(
+    path,
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/proposals/{revision}" as keyof paths,
+    init,
+  );
+}
+
+export async function getPlanningMaterialization(
+  workspaceId: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PlanningMaterialization> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests/${encodeURIComponent(requestId)}/materialization`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(
+    path,
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/materialization" as keyof paths,
+    init,
+  );
+}
+
+export function buildSubmitPlanningRequestCommand({
+  workspaceId,
+  payload,
+  actorId = "aitejiu",
+  expectedVersion = null,
+}: {
+  workspaceId: string;
+  payload: SubmitPlanningRequestPayload;
+  actorId?: string;
+  expectedVersion?: number | null;
+}): PlanningCommandRequest {
+  const identity = createCommandIdentity();
+  return {
+    command_id: identity.commandId,
+    workspace_id: workspaceId,
+    command_type: "SubmitPlanningRequest",
+    target_type: "workspace",
+    actor: { type: "local", id: actorId },
+    target_id: null,
+    expected_version: expectedVersion,
+    idempotency_key: identity.idempotencyKey,
+    correlation_id: crypto.randomUUID(),
+    payload,
+  };
+}
+
+export async function submitPlanningRequest(
+  command: PlanningCommandRequest,
+): Promise<PlanningCommandResponse> {
+  return apiCommand<PlanningCommandResponse, "/api/v1/commands">(
+    "/api/v1/commands",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(command),
+    },
+  );
+}
+
+async function getPlanningSubresource<T>(
+  workspaceId: string,
+  requestId: string,
+  resource: string,
+  contractPath: keyof paths,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests/${encodeURIComponent(requestId)}/${resource}`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(path, contractPath, init) as Promise<T>;
+}

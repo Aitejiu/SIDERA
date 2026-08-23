@@ -50,6 +50,29 @@ function workerTab(workerItemId: string): WorkspaceTab {
   };
 }
 
+function planningNewTab(workspaceId = "ws-1"): WorkspaceTab {
+  return {
+    id: "planning-new",
+    kind: "planning-new",
+    title: "新建任务",
+    href: `/workspaces/${workspaceId}/planning/new`,
+    closeable: true,
+  };
+}
+
+function planningTab(
+  requestId: string,
+  href = `/workspaces/ws-1/planning/${requestId}`,
+): WorkspaceTab {
+  return {
+    id: `planning:${requestId}`,
+    kind: "planning",
+    title: "规划请求",
+    href,
+    closeable: true,
+  };
+}
+
 function stateWithTaskSubtaskAndWorker() {
   let state = taskIndex();
   state = reduceTabs(state, openTab(rootTaskTab("task-1")));
@@ -109,6 +132,47 @@ describe("workspace tabs", () => {
     expect(state.tabs.find((tab) => tab.id === "subtask:task-1:callback-idempotency")?.href).toContain("view=dag");
   });
 
+  it("keeps the new brief and different planning requests as separate semantic tabs", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(planningNewTab()));
+    state = reduceTabs(state, openTab(planningTab("request-1")));
+    state = reduceTabs(state, openTab(planningTab("request-2")));
+    state = reduceTabs(state, openTab(planningTab("request-1", "/workspaces/ws-1/planning/request-1?view=history")));
+
+    expect(state.tabs.map((tab) => tab.id)).toEqual([
+      "task-index",
+      "planning-new",
+      "planning:request-1",
+      "planning:request-2",
+    ]);
+    expect(state.activeTabId).toBe("planning:request-1");
+    expect(state.tabs.find((tab) => tab.id === "planning:request-1")?.href).toContain("view=history");
+  });
+
+  it("closes an active planning tab to its left neighbor without losing the audit tab", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(planningNewTab()));
+    state = reduceTabs(state, openTab(planningTab("request-1")));
+    state = reduceTabs(state, openTab(rootTaskTab("task-1")));
+    state = reduceTabs(state, closeTab("root-task:task-1"));
+
+    expect(state.activeTabId).toBe("planning:request-1");
+    expect(state.navigationHref).toBe("/workspaces/ws-1/planning/request-1");
+    expect(state.tabs.map((tab) => tab.id)).toContain("planning:request-1");
+  });
+
+  it("keeps planning audit tabs when a root task is opened", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(planningTab("request-1")));
+    state = reduceTabs(state, openTab(rootTaskTab("task-1")));
+
+    expect(state.tabs.map((tab) => tab.id)).toEqual([
+      "task-index",
+      "planning:request-1",
+      "root-task:task-1",
+    ]);
+  });
+
   it("does not navigate when closing an inactive tab", () => {
     const state = stateWithTaskSubtaskAndWorker();
     const next = reduceTabs(state, closeTab("root-task:task-1"));
@@ -136,9 +200,30 @@ describe("workspace tabs", () => {
     expect(state.tabs).toContainEqual(direct);
   });
 
+  it("rebuilds a direct planning request deep link", () => {
+    const direct = planningTab("request-1");
+    const state = reduceTabs(
+      initialTabs("ws-1"),
+      registerDirectRoute(direct),
+    );
+
+    expect(state.activeTabId).toBe("planning:request-1");
+    expect(state.tabs).toContainEqual(direct);
+  });
+
   it("discards damaged or cross-workspace session data", () => {
     const state = initialTabs("ws-1");
     expect(hydrateTabs("ws-1", "not-json")).toEqual(state);
+    expect(
+      hydrateTabs(
+        "ws-1",
+        JSON.stringify({
+          schemaVersion: 2,
+          tabs: state.tabs,
+          activeTabId: state.activeTabId,
+        }),
+      ),
+    ).toEqual(state);
     expect(
       hydrateTabs(
         "ws-1",

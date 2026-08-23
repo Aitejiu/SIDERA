@@ -1,7 +1,7 @@
-import { RefreshCw } from "lucide-react";
+import { Plus, RefreshCw } from "lucide-react";
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -39,15 +39,25 @@ export function TaskListPage() {
           <span className="eyebrow">TASK FIRST CONTROL ROOM</span>
           <h1 id="workspace-title">任务</h1>
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          onClick={() => void query.refetch()}
-          aria-label="刷新任务列表"
-          title="刷新任务列表"
-        >
-          <RefreshCw size={16} aria-hidden="true" />
-        </button>
+        <div className="page-heading__actions">
+          <Link
+            className="icon-button"
+            to={`/workspaces/${resolvedWorkspaceId}/planning/new`}
+            aria-label="新建任务"
+            title="新建任务"
+          >
+            <Plus size={16} aria-hidden="true" />
+          </Link>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => void query.refetch()}
+            aria-label="刷新任务列表"
+            title="刷新任务列表"
+          >
+            <RefreshCw size={16} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className="task-list-intro">

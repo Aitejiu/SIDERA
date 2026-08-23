@@ -1,7 +1,9 @@
-export const WORKSPACE_TABS_SCHEMA_VERSION = 2;
+export const WORKSPACE_TABS_SCHEMA_VERSION = 3;
 
 export type WorkspaceTabId =
   | "task-index"
+  | "planning-new"
+  | `planning:${string}`
   | `root-task:${string}`
   | `subtask:${string}:${string}`
   | `worker-item:${string}`;
@@ -13,6 +15,20 @@ export type WorkspaceTab =
       title: "任务";
       href: string;
       closeable: false;
+    }
+  | {
+      id: "planning-new";
+      kind: "planning-new";
+      title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `planning:${string}`;
+      kind: "planning";
+      title: string;
+      href: string;
+      closeable: true;
     }
   | {
       id: `root-task:${string}`;
@@ -148,7 +164,7 @@ export function reduceTabs(
 }
 
 export function storageKey(workspaceId: string): string {
-  return `sidera.workspace-tabs.v2:${workspaceId}`;
+  return `sidera.workspace-tabs.v3:${workspaceId}`;
 }
 
 export function serializeTabs(state: WorkspaceTabsState): string {
@@ -236,8 +252,15 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
       && value.closeable === false
       && value.href === `/workspaces/${workspaceId}/tasks`;
   }
+  if (value.id === "planning-new") {
+    return value.kind === "planning-new"
+      && value.title === "新建任务"
+      && value.closeable === true
+      && isWorkspaceHref(value.href, workspaceId);
+  }
   return value.closeable === true
-    && ((value.id.startsWith("root-task:") && value.kind === "root-task")
+    && ((value.id.startsWith("planning:") && value.kind === "planning")
+      || (value.id.startsWith("root-task:") && value.kind === "root-task")
       || (value.id.startsWith("subtask:") && value.kind === "subtask")
       || (value.id.startsWith("worker-item:") && value.kind === "worker-item"))
     && isWorkspaceHref(value.href, workspaceId);
@@ -257,7 +280,9 @@ function isWorkspaceHref(href: string, workspaceId: string): boolean {
 function isTabId(value: unknown): value is WorkspaceTabId {
   return value === "task-index"
     || (typeof value === "string" && (
-      value.startsWith("root-task:")
+      value === "planning-new"
+      || value.startsWith("planning:")
+      || value.startsWith("root-task:")
       || value.startsWith("subtask:")
       || value.startsWith("worker-item:")
     ));

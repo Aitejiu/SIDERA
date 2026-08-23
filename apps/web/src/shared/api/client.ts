@@ -80,12 +80,12 @@ export async function apiGetBlobAt<Path extends keyof paths>(
   return response.blob();
 }
 
-export async function apiCommand<Path extends keyof paths>(
+export async function apiCommand<Response = unknown, Path extends keyof paths = keyof paths>(
   path: Path,
   init: RequestInit,
-): Promise<unknown> {
+): Promise<Response> {
   const response = await fetch(path as string, init);
-  return parseResponse<unknown>(response);
+  return parseResponse<Response>(response);
 }
 
 export function createCommandIdentity() {
