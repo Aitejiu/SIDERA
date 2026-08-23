@@ -1,0 +1,32 @@
+[project]
+name = "sidera-akashic-task-bridge"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.10,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.403,<2",
+    "pytest>=9,<10",
+    "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sidera_task_bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.pyright]
+pythonVersion = "3.12"
+include = ["sidera_task_bridge", "tests"]
