@@ -300,4 +300,50 @@ describe("Main Agent chat workspace", () => {
       `/workspaces/${WORKSPACE_ID}/tasks`,
     );
   });
+
+  it("renders a tool result and resolves its task reference in the context rail", async () => {
+    const taskId = "30000000-0000-0000-0000-000000000099";
+    useBaseHandlers({
+      thread: thread({
+        turns: [turn({
+          items: [
+            { id: "tool-user", type: "userMessage", data: { content: "查任务" } },
+            {
+              id: "tool-result",
+              type: "toolCall",
+              data: {
+                name: "sidera_get_task_status",
+                resultPreview: JSON.stringify({
+                  outcome: "ok",
+                  summary: "Task progress loaded.",
+                  resource_ref: `task:${taskId}`,
+                  web_url: `/workspaces/${WORKSPACE_ID}/tasks/${taskId}`,
+                }),
+              },
+            },
+          ],
+        })],
+      }),
+    });
+    server.use(
+      http.get(`/api/v1/tasks/${taskId}/graph`, () =>
+        HttpResponse.json({
+          overview: {
+            title: "控制面任务",
+            completed_subtask_count: 2,
+            planned_subtask_count: 4,
+          },
+        }),
+      ),
+    );
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+
+    expect(await screen.findByText("Task progress loaded.")).toBeInTheDocument();
+    expect(await screen.findByText("控制面任务")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开任务" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/tasks/${taskId}`,
+    );
+  });
 });

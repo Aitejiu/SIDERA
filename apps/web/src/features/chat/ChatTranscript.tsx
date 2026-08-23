@@ -1,14 +1,17 @@
 import { AlertTriangle, Bot, RotateCcw, UserRound, Wrench } from "lucide-react";
 
 import type { JsonValue, MainAgentItem, MainAgentTurn } from "./types";
+import { ToolResultCard, parseToolResult } from "./ToolResultCard";
 
 const TERMINAL_STATUSES = new Set(["completed", "interrupted", "failed", "cancelled"]);
 
 export function ChatTranscript({
   turns,
+  workspaceId,
   onRetry,
 }: {
   turns: MainAgentTurn[];
+  workspaceId: string;
   onRetry: (turnId: string) => void;
 }) {
   if (turns.length === 0) {
@@ -34,7 +37,7 @@ export function ChatTranscript({
             </span>
           </div>
           <div className="chat-turn__items">
-            {turn.items.map((item) => <TranscriptItem item={item} key={item.id} />)}
+            {turn.items.map((item) => <TranscriptItem item={item} workspaceId={workspaceId} key={item.id} />)}
             {turn.items.length === 0 && turn.finalResponse ? (
               <p className="chat-message chat-message--assistant">{turn.finalResponse}</p>
             ) : null}
@@ -56,7 +59,7 @@ export function ChatTranscript({
   );
 }
 
-function TranscriptItem({ item }: { item: MainAgentItem }) {
+function TranscriptItem({ item, workspaceId }: { item: MainAgentItem; workspaceId: string }) {
   const text = itemText(item.data);
   if (item.type === "userMessage") {
     return <p className="chat-message chat-message--user">{text}</p>;
@@ -65,6 +68,10 @@ function TranscriptItem({ item }: { item: MainAgentItem }) {
     return <p className="chat-message chat-message--assistant">{text}</p>;
   }
   if (item.type === "toolCall") {
+    const result = parseToolResult(item);
+    if (result !== null) {
+      return <ToolResultCard result={result} workspaceId={workspaceId} />;
+    }
     return (
       <div className="chat-tool-event">
         <Wrench size={14} aria-hidden="true" />

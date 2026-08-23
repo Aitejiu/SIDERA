@@ -1,6 +1,6 @@
-import { CircleAlert, CircleCheck, Link2, RefreshCw } from "lucide-react";
+import { CircleAlert, CircleCheck, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -16,8 +16,10 @@ import {
   startTurn,
 } from "./api";
 import { ChatComposer } from "./ChatComposer";
+import { ChatContextPanel, collectContextReferences } from "./ChatContextPanel";
 import { ChatThreadList } from "./ChatThreadList";
 import { ChatTranscript, getTurnInput } from "./ChatTranscript";
+import { parseToolResult } from "./ToolResultCard";
 import { subscribeTurnEvents } from "./turnStream";
 import type { JsonValue, MainAgentItem, MainAgentTurn } from "./types";
 
@@ -85,6 +87,15 @@ export function ChatPage() {
   const activeTurn = useMemo(
     () => [...turns].reverse().find((turn) => ACTIVE_STATUSES.has(turn.status)),
     [turns],
+  );
+  const toolResourceRefs = useMemo(
+    () => turns.flatMap((turn) => turn.items
+      .map((item) => item.type === "toolCall" ? parseToolResult(item)?.resourceRef ?? null : null)),
+    [turns],
+  );
+  const contextReferences = useMemo(
+    () => collectContextReferences(selectedThread?.contextRefs ?? [], toolResourceRefs, workspaceId),
+    [selectedThread?.contextRefs, toolResourceRefs, workspaceId],
   );
 
   const applyTurn = useCallback((turn: MainAgentTurn) => {
@@ -277,7 +288,11 @@ export function ChatPage() {
             </div>
           ) : (
             <>
-              <ChatTranscript turns={turns} onRetry={(turnId) => void retry(turnId)} />
+              <ChatTranscript
+                turns={turns}
+                workspaceId={workspaceId}
+                onRetry={(turnId) => void retry(turnId)}
+              />
               <ChatComposer
                 value={draft}
                 active={activeTurn !== undefined}
@@ -294,41 +309,11 @@ export function ChatPage() {
           )}
         </main>
 
-        <aside className="chat-context-panel" aria-label="对话上下文">
-          <div className="chat-pane-heading">
-            <div>
-              <span className="eyebrow">CONTEXT</span>
-              <h2>关联对象</h2>
-            </div>
-          </div>
-          <div className="chat-context-panel__body">
-            {selectedThread === undefined ? (
-              <span className="chat-context-panel__muted">选择对话后显示上下文</span>
-            ) : (
-              <>
-                <div className="chat-context-fact">
-                  <span className="eyebrow">THREAD</span>
-                  <strong>{selectedThread.title}</strong>
-                  <span className="mono-label">{selectedThread.id}</span>
-                </div>
-                <div className="chat-context-fact">
-                  <span className="eyebrow">CONTEXT REFS</span>
-                  {selectedThread.contextRefs.length === 0 ? (
-                    <span className="chat-context-panel__muted">无显式关联</span>
-                  ) : (
-                    <div className="chat-context-refs">
-                      {selectedThread.contextRefs.map((ref) => <code key={ref}>{ref}</code>)}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-          <Link className="chat-context-panel__task-link" to={`/workspaces/${workspaceId}/tasks`}>
-            <Link2 size={14} aria-hidden="true" />
-            <span>{unavailable ? "返回任务" : "打开任务控制面"}</span>
-          </Link>
-        </aside>
+        <ChatContextPanel
+          workspaceId={workspaceId}
+          references={contextReferences}
+          taskLinkLabel={unavailable ? "返回任务" : "打开任务控制面"}
+        />
       </div>
     </section>
   );
