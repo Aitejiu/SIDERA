@@ -264,16 +264,17 @@ def _patch_host_tool_schemas() -> None:
             continue
         fields = collection_items.get(metadata.tool_name or "")
         schema = metadata.tool_schema
-        if fields is None or schema is None:
+        scalar_fields = scalar_types.get(metadata.tool_name or "")
+        if schema is None:
             continue
         properties = schema.get("properties")
         if not isinstance(properties, dict):
             continue
-        for name, json_type in scalar_types.get(metadata.tool_name or "", {}).items():
+        for name, json_type in (scalar_fields or {}).items():
             property_schema = properties.get(name)
             if isinstance(property_schema, dict):
                 property_schema["type"] = json_type
-        for name, item_schema in fields.items():
+        for name, item_schema in (fields or {}).items():
             property_schema = properties.get(name)
             if isinstance(property_schema, dict):
                 property_schema["type"] = "array"

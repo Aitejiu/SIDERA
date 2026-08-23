@@ -199,6 +199,18 @@ def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
             "type": "array",
             "items": {"type": "object"},
         }
+        revision_schema = metadata["sidera_request_proposal_revision"].tool_schema
+        assert revision_schema is not None
+        assert revision_schema["properties"]["request_version"]["type"] == "number"
+        assert revision_schema["properties"]["proposal_revision"]["type"] == "number"
+        confirmation_schema = metadata["sidera_confirm_proposal"].tool_schema
+        assert confirmation_schema is not None
+        assert confirmation_schema["properties"]["request_version"]["type"] == "number"
+        assert confirmation_schema["properties"]["proposal_revision"]["type"] == "number"
+        assert (
+            confirmation_schema["properties"]["explicit_user_confirmation"]["type"]
+            == "boolean"
+        )
     finally:
         importer.unregister(module_name)
         plugin_registry.remove_module_tree(module_name)
