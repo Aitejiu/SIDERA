@@ -147,6 +147,10 @@ def test_active_block_surfaces_safe_subtask_action_and_block_attention(
             "resource_version": 1,
             "correlation_id": str(BLOCK_ID),
             "occurred_at": NOW.isoformat().replace("+00:00", "Z"),
+            "waiting_reason": "runtime_configuration_missing",
+            "waiting_details_summary": "2 个候选执行节点未配置运行环境",
+            "requires_operator": True,
+            "blocked_since": NOW.isoformat().replace("+00:00", "Z"),
         }
     ]
     assert str(CONSOLE_WAITING_EXECUTION_ID) not in callback["current_action"]

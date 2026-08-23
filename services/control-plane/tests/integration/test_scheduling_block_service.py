@@ -274,7 +274,9 @@ def test_resolve_closes_active_episode_and_is_noop_without_one(
         )
 
     with database.session() as session:
-        event_types = session.scalars(select(EventModel.event_type)).all()
+        event_types = session.scalars(
+            select(EventModel.event_type).order_by(EventModel.created_at, EventModel.id)
+        ).all()
     assert event_types == [
         "ExecutionSchedulingBlocked",
         "ExecutionSchedulingUnblocked",

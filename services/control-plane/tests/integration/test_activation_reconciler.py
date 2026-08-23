@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,7 +24,7 @@ from sidera_control_plane.persistence.models import (
 
 pytestmark = pytest.mark.integration
 
-NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC) + timedelta(minutes=5)
 
 
 @pytest.fixture

@@ -208,6 +208,58 @@ added, stop new submissions by removing the profile from the upstream selector,
 stop the planning worker, and register a replacement profile when changing
 configuration. Existing PlanningRequest snapshots remain immutable.
 
+## R5.1.1 Runtime Binding And Deployment
+
+R5.1.1 is implemented in the PostgreSQL control-plane profile. `Worker` stores
+health, capacity, heartbeat, and workload capabilities; the independent
+`WorkerRuntimeConfiguration` stores the exact Adapter and Workspace Provider
+ModuleInstance IDs plus their config versions. A missing or invalid runtime
+configuration is visible to operators and keeps new executions queued.
+
+The Scheduler resolves and locks that configuration in the same transaction as
+the Lease, Worker reservation, Execution assignment, immutable
+`ExecutionBinding`, SchedulingBlock episode, Event, and Outbox record. The
+Gateway then loads only those exact module IDs and versions. Reconfiguring a
+Worker affects future Bindings; existing leased/running executions remain on
+their immutable Binding.
+
+Runtime inspection endpoints are:
+
+- `GET /api/v1/workers?workspace_id=<uuid>` and
+  `GET /api/v1/workers/<worker-id>?workspace_id=<uuid>`;
+- `GET /api/v1/modules?workspace_id=<uuid>&module_type=worker_adapter` or
+  `workspace_provider`;
+- `GET /api/v1/workspaces/<workspace-id>/runtime-metrics`.
+
+### Deployment Order
+
+Use this order for an existing workspace. Do not infer or backfill a runtime
+from an adapter type, instance name, or latest active module:
+
+1. Pause the Scheduler assignment writer; leave valid existing Gateway sessions
+   running.
+2. Back up PostgreSQL and run the additive Alembic migration to head.
+3. Deploy the new API and Web.
+4. Explicitly configure every existing Worker that should receive new work
+   with `ConfigureWorkerRuntime`; inspect the returned version and do not place
+   config bodies or secrets in Events or logs.
+5. Run the readiness audit:
+
+   ```bash
+   uv run --project services/control-plane python \
+     -m sidera_control_plane.runtime_readiness \
+     --workspace-id <workspace-uuid> --json
+   ```
+
+   Continue only when the report has no missing/invalid runtime, active
+   leased/running Execution without Binding, or module mismatch.
+6. Start the Scheduler and observe `SchedulingBlock` changes, runtime metrics,
+   and structured assignment/binding logs.
+
+Queued executions can be pinned, changed, or returned to automatic selection.
+Leased/running executions cannot be hot-switched in this release; use the
+future R5.1.2 reassignment flow so the old trace and Binding remain auditable.
+
 ## R4.1 WorkerItem Migration Runbook
 
 Use this order when upgrading an existing PostgreSQL workspace to the R4.1
@@ -403,10 +455,11 @@ uv run --project services/control-plane pytest -m integration \
   services/control-plane/tests/integration/test_r5_1_real_planning_loop.py -q -s
 ```
 
-The gate intentionally keeps Scheduler-to-Gateway module binding explicit in
-its fixture because the production binding resolver is a later modular-worker
-extension. It still exercises the real Gateway, workspace, ACP process,
-Session, Artifact and Evidence path after the binding is installed.
+The gate explicitly configures the Worker runtime and lets the production
+Scheduler create the `ExecutionBinding`. It does not insert a Binding in the
+planning fixture. The only direct Binding fixtures left are lower-level Gateway
+repository/boundary tests; the real planning path still exercises the Gateway,
+workspace, ACP process, Session, Artifact, and Evidence path.
 
 ## Verification
 

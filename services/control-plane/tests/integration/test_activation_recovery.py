@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -27,7 +27,7 @@ from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.integration
 
-NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC) + timedelta(minutes=5)
 
 
 @pytest.fixture

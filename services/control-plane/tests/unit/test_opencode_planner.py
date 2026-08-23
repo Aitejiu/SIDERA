@@ -33,7 +33,7 @@ from sidera_control_plane.domain.modules import (
 from sidera_control_plane.domain.planning import PlanningBriefRevision
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
 
-NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC)
 
 
 def _fake_opencode(tmp_path: Path, *, hang_prompt: bool = False) -> Path:

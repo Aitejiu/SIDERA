@@ -451,6 +451,20 @@ def _seed_task_first(session, workspace_id: UUID) -> None:
         ]
     )
     session.flush()
+    session.add(
+        WorkerRuntimeConfigurationModel(
+            worker_id=WORKER_ID,
+            workspace_id=workspace_id,
+            adapter_module_instance_id=adapter_instance_id,
+            adapter_module_config_version=1,
+            workspace_module_instance_id=workspace_instance_id,
+            workspace_module_config_version=1,
+            version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    session.flush()
     session.add_all(
         [
             _plan_model(first),
