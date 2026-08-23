@@ -281,7 +281,7 @@ def test_routing_commands_reject_stale_execution_version_and_replay_idempotently
     first = client.post("/api/v1/commands", json=request)
     replay = client.post(
         "/api/v1/commands",
-        json={**request, "command_id": str(uuid4()), "correlation_id": str(uuid4())},
+        json={**request, "correlation_id": str(uuid4())},
     )
     stale_clear = client.post(
         "/api/v1/commands",

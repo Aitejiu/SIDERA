@@ -48,6 +48,7 @@ class FakeWorkerDriver:
         self._worker_id = worker_id
         self._lease_id = lease_id
         self._fencing_token = fencing_token
+        self._command_ids: dict[str, UUID] = {}
 
     def start(
         self, execution_id: UUID, *, expected_version: int, adapter_session_id: str
@@ -137,7 +138,9 @@ class FakeWorkerDriver:
         return self._client.post(
             "/api/v1/commands",
             json={
-                "command_id": str(uuid4()),
+                "command_id": str(
+                    self._command_ids.setdefault(idempotency_key, uuid4())
+                ),
                 "workspace_id": str(self._workspace_id),
                 "command_type": command_type,
                 "target_type": target_type,

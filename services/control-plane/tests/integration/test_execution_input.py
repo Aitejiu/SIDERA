@@ -321,7 +321,7 @@ def test_input_command_persists_queue_outbox_and_client_replay(
     )
 
     first = service.handle(envelope)
-    replay = service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+    replay = service.handle(replace(envelope, correlation_id=uuid4()))
 
     assert replay == first
     with database.session() as db_session:

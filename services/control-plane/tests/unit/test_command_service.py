@@ -351,7 +351,7 @@ class _Diagnostic:
     constraint_name = "uq_event_aggregate_version"
 
 
-class _IntegrityFailure:
+class _IntegrityFailure(Exception):
     diag = _Diagnostic()
 
 
@@ -360,7 +360,7 @@ class _FailingSession:
         return None
 
     def flush(self) -> None:
-        raise IntegrityError("insert", {}, _IntegrityFailure())
+        raise IntegrityError("insert", {}, _IntegrityFailure("duplicate event"))
 
 
 def test_non_command_integrity_error_is_not_converted_to_concurrent_commit() -> None:

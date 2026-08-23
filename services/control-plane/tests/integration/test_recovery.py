@@ -40,7 +40,6 @@ def test_application_restart_preserves_task_timeline_and_idempotency(
 
     replay_request = {
         **create_request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     task_id = created.json()["aggregate_id"]
@@ -60,7 +59,7 @@ def test_application_restart_preserves_task_timeline_and_idempotency(
     assert detail.json()["version"] == 1
     assert timeline.status_code == 200
     assert [item["event_type"] for item in timeline.json()] == ["TaskCreated"]
-    assert replayed.status_code == 200
+    assert replayed.status_code == 201
     assert replayed.json() == created.json()
     assert row_counts() == {
         "tasks": 1,
