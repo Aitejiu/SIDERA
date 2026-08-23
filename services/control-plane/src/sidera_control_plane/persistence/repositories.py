@@ -222,6 +222,7 @@ class EventRepository:
                     "aggregate_version": event.aggregate_version,
                     "event_type": event.event_type,
                     "data": event.payload,
+                    "causation_id": str(event.causation_id),
                     "correlation_id": str(event.correlation_id),
                 },
             )

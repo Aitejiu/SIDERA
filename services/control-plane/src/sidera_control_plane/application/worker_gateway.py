@@ -37,7 +37,9 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperation,
     GatewayOperationStatus,
     GatewayOperationType,
+    RuntimeModuleOperation,
     gateway_operation_id,
+    runtime_module_operation_allowed,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
 from sidera_control_plane.domain.lease import AssignmentLease
@@ -46,9 +48,9 @@ from sidera_control_plane.domain.modules import (
     ExecutionBinding,
     ModuleDefinition,
     ModuleInstance,
-    ModuleLifecycle,
 )
 from sidera_control_plane.domain.task import Task
+from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
     CheckoutMode,
@@ -60,6 +62,16 @@ from sidera_control_plane.domain.workspace import (
 
 ASSIGNMENT_TOPIC = "execution.ExecutionLeased"
 STOP_TOPIC = "execution.ExecutionStopRequested"
+_START_BLOCK_FAILURE_CODES = frozenset(
+    {
+        "runtime_binding_missing",
+        "runtime_binding_version_mismatch",
+        "runtime_module_disabled",
+        "runtime_module_type_mismatch",
+        "runtime_adapter_provider_mismatch",
+        "runtime_capability_mismatch",
+    }
+)
 
 
 class GatewayError(RuntimeError):
@@ -68,6 +80,10 @@ class GatewayError(RuntimeError):
 
 class GatewayMessageError(GatewayError):
     """The assignment message is malformed or targets an unavailable resource."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class GatewayRecoveryRequired(GatewayError):
@@ -118,12 +134,14 @@ class GatewayStopResult:
 class _AssignmentContext:
     execution: Execution
     task: Task
+    worker: Worker
     lease: AssignmentLease
     binding: ExecutionBinding
     adapter_definition: ModuleDefinition
     adapter_instance: ModuleInstance
     workspace_definition: ModuleDefinition
     workspace_instance: ModuleInstance
+    causation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +150,7 @@ class _OperationState:
     completed: bool
     recovery_required: bool = False
     result_ref: str | None = None
+    blocked_failure_code: str | None = None
 
 
 class ConfiguredExecutionSpecFactory:
@@ -265,7 +284,12 @@ class WorkerGateway:
     ) -> GatewayExecutionResult | GatewayStopResult:
         if message.topic == STOP_TOPIC:
             return self.handle_stop(message)
-        context = self._load_context(message)
+        try:
+            context = self._load_context(message)
+        except GatewayMessageError as exc:
+            if exc.code in _START_BLOCK_FAILURE_CODES:
+                self._audit_start_block_from_message(message, exc.code)
+            raise
         spec = self._spec_factory.create(
             context.execution,
             context.task,
@@ -319,10 +343,15 @@ class WorkerGateway:
             execution_id=execution_id,
             lease_id=lease_id,
             fencing_token=fencing_token,
+            operation=RuntimeModuleOperation.STOP,
         )
         if not context.execution.stop_requested:
             raise GatewayMessageError("stop request is no longer active")
-        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
+        adapter = self._adapter(
+            context.adapter_definition,
+            context.adapter_instance,
+            operation=RuntimeModuleOperation.STOP,
+        )
         recovery_code: str | None = None
         handle: AdapterSessionHandle | None = None
         completed_delivery: DeliveryResult | None = None
@@ -542,13 +571,98 @@ class WorkerGateway:
     def _load_context(self, message: OutboxMessage) -> _AssignmentContext:
         if message.topic != ASSIGNMENT_TOPIC:
             raise GatewayMessageError(f"unsupported Gateway topic: {message.topic}")
-        workspace_id, execution_id, lease_id, fencing_token = _assignment_ids(message)
+        (
+            workspace_id,
+            execution_id,
+            lease_id,
+            fencing_token,
+            causation_id,
+        ) = _assignment_ids(message)
         return self._load_context_by_ids(
             workspace_id=workspace_id,
             execution_id=execution_id,
             lease_id=lease_id,
             fencing_token=fencing_token,
+            operation=RuntimeModuleOperation.START,
+            causation_id=causation_id,
         )
+
+    def _audit_start_block_from_message(
+        self, message: OutboxMessage, failure_code: str
+    ) -> None:
+        try:
+            (
+                workspace_id,
+                execution_id,
+                lease_id,
+                fencing_token,
+                causation_id,
+            ) = _assignment_ids(message)
+            with self._uow_factory() as uow:
+                execution = uow.executions.get(
+                    execution_id, workspace_id, for_update=True
+                )
+                lease = uow.leases.get(lease_id, workspace_id, for_update=True)
+                if execution is None or lease is None:
+                    return
+                task = uow.tasks.get(execution.task_id, workspace_id)
+                if task is None:
+                    return
+                binding = uow.bindings.get_for_execution(
+                    execution_id, workspace_id, for_update=True
+                )
+                operation_id = _operation_id(
+                    execution_id, GatewayOperationType.PREPARE_WORKSPACE
+                )
+                existing = uow.gateway_operations.get_by_operation_id(
+                    operation_id, workspace_id, for_update=True
+                )
+                if existing is not None:
+                    return
+                operation = GatewayOperation.create(
+                    id=uuid5(NAMESPACE_URL, f"sidera.gateway.row:{operation_id}"),
+                    operation_id=operation_id,
+                    workspace_id=workspace_id,
+                    task_id=task.id,
+                    execution_id=execution.id,
+                    session_id=None,
+                    operation_type=GatewayOperationType.PREPARE_WORKSPACE,
+                    module_instance_id=(
+                        binding.workspace_module_id if binding is not None else None
+                    ),
+                    config_version=(
+                        binding.workspace_config_version
+                        if binding is not None
+                        else None
+                    ),
+                    lease_id=lease.id,
+                    fencing_token=fencing_token,
+                    now=self._clock(),
+                )
+                operation.start(now=self._clock())
+                operation.fail(failure_code=failure_code, now=self._clock())
+                uow.gateway_operations.add(operation)
+                if causation_id is None:
+                    return
+                uow.events.append_with_outbox(
+                    _gateway_event(
+                        causation_id,
+                        workspace_id=workspace_id,
+                        aggregate_type="gateway_operation",
+                        aggregate_id=operation.operation_id,
+                        aggregate_version=operation.version,
+                        event_type="ExecutionRuntimeStartBlocked",
+                        payload={
+                            "execution_id": str(execution.id),
+                            "binding_id": (
+                                str(binding.id) if binding is not None else None
+                            ),
+                            "error_code": failure_code,
+                        },
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            return
 
     def _load_context_by_ids(
         self,
@@ -557,6 +671,8 @@ class WorkerGateway:
         execution_id: UUID,
         lease_id: UUID,
         fencing_token: int,
+        operation: RuntimeModuleOperation,
+        causation_id: UUID | None = None,
     ) -> _AssignmentContext:
         with self._uow_factory() as uow:
             execution = uow.executions.get(execution_id, workspace_id, for_update=True)
@@ -566,7 +682,9 @@ class WorkerGateway:
                 execution_id, workspace_id, for_update=True
             )
             if binding is None:
-                raise GatewayMessageError("execution binding was not found")
+                raise GatewayMessageError(
+                    "execution binding was not found", code="runtime_binding_missing"
+                )
             lease = uow.leases.get(lease_id, workspace_id, for_update=True)
             if lease is None:
                 raise GatewayMessageError("assignment lease was not found")
@@ -574,11 +692,25 @@ class WorkerGateway:
             if task is None:
                 raise GatewayMessageError("assigned task was not found")
             if binding.lease_id != lease_id or binding.fencing_token != fencing_token:
-                raise GatewayMessageError("assignment binding fence does not match event")
+                raise GatewayMessageError(
+                    "assignment binding fence does not match event",
+                    code="runtime_binding_missing",
+                )
             if binding.execution_id != execution_id:
-                raise GatewayMessageError("assignment binding targets another execution")
+                raise GatewayMessageError(
+                    "assignment binding targets another execution",
+                    code="runtime_binding_missing",
+                )
             if execution.assigned_worker_id != binding.worker_id:
-                raise GatewayMessageError("execution worker does not match binding")
+                raise GatewayMessageError(
+                    "execution worker does not match binding",
+                    code="runtime_binding_missing",
+                )
+            worker = uow.workers.get(binding.worker_id, workspace_id, for_update=True)
+            if worker is None:
+                raise GatewayMessageError(
+                    "bound worker was not found", code="runtime_binding_missing"
+                )
             if execution.active_lease_id != lease_id:
                 raise GatewayMessageError("execution lease does not match event")
             execution.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
@@ -595,17 +727,44 @@ class WorkerGateway:
                 workspace_id,
                 expected_type="workspace_provider",
             )
+            if adapter_instance.config_version != binding.adapter_config_version:
+                raise GatewayMessageError(
+                    "bound adapter config version does not match",
+                    code="runtime_binding_version_mismatch",
+                )
+            if workspace_instance.config_version != binding.workspace_config_version:
+                raise GatewayMessageError(
+                    "bound workspace config version does not match",
+                    code="runtime_binding_version_mismatch",
+                )
             if binding.capability_snapshot != adapter_definition.capabilities:
-                raise GatewayMessageError("binding capability snapshot is stale")
+                raise GatewayMessageError(
+                    "binding capability snapshot is stale",
+                    code="runtime_capability_mismatch",
+                )
+            if adapter_definition.provider != worker.adapter_type:
+                raise GatewayMessageError(
+                    "bound adapter provider does not match worker adapter type",
+                    code="runtime_adapter_provider_mismatch",
+                )
+            if operation is not RuntimeModuleOperation.START:
+                _validate_module_operation(
+                    adapter_definition, adapter_instance, operation
+                )
+                _validate_module_operation(
+                    workspace_definition, workspace_instance, operation
+                )
             return _AssignmentContext(
                 execution=execution,
                 task=task,
+                worker=worker,
                 lease=lease,
                 binding=binding,
                 adapter_definition=adapter_definition,
                 adapter_instance=adapter_instance,
                 workspace_definition=workspace_definition,
                 workspace_instance=workspace_instance,
+                causation_id=causation_id,
             )
 
     def sync_session(
@@ -622,6 +781,7 @@ class WorkerGateway:
             execution_id=execution_id,
             lease_id=lease_id,
             fencing_token=fencing_token,
+            operation=RuntimeModuleOperation.OBSERVE,
         )
         with self._uow_factory() as uow:
             session = uow.sessions.get_active_for_execution(
@@ -630,7 +790,11 @@ class WorkerGateway:
             if session is None or session.id != session_id:
                 raise GatewayMessageError("active session does not match sync request")
             handle = _session_handle(session)
-        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
+        adapter = self._adapter(
+            context.adapter_definition,
+            context.adapter_instance,
+            operation=RuntimeModuleOperation.OBSERVE,
+        )
         adapter_events = tuple(adapter.read_events(handle))
         event_report = self._event_ingestor.ingest(
             workspace_id=workspace_id,
@@ -775,7 +939,11 @@ class WorkerGateway:
                 failure_code="session_handle_unavailable",
             )
 
-        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
+        adapter = self._adapter(
+            context.adapter_definition,
+            context.adapter_instance,
+            operation=RuntimeModuleOperation.INPUT,
+        )
         try:
             delivery = adapter.send_input(
                 handle,
@@ -839,6 +1007,7 @@ class WorkerGateway:
             execution_id=item.execution_id,
             lease_id=lease_id,
             fencing_token=fencing_token,
+            operation=RuntimeModuleOperation.INPUT,
         )
 
     def _ensure_workspace(
@@ -846,12 +1015,11 @@ class WorkerGateway:
         context: _AssignmentContext,
         spec: ExecutionSpec,
     ) -> ExecutionWorkspaceManifest:
-        provider = self._workspace_provider(
-            context.workspace_definition, context.workspace_instance
-        )
         operation_id = _operation_id(
             context.execution.id, GatewayOperationType.PREPARE_WORKSPACE
         )
+        provider: WorkspaceProvider | None = None
+        blocked_error: GatewayMessageError | None = None
         with self._uow_factory() as uow:
             manifest = uow.workspaces.get_for_execution(
                 context.execution.id, context.execution.workspace_id, for_update=True
@@ -869,19 +1037,47 @@ class WorkerGateway:
                         "workspace operation succeeded without a persisted manifest"
                     )
                 return manifest
-            if manifest is not None and manifest.lifecycle not in {
-                WorkspaceLifecycle.REQUESTED,
-                WorkspaceLifecycle.PREPARING,
-            }:
-                self._succeed_operation(
-                    uow, operation_id, context, manifest.location_ref
+            if operation_state.blocked_failure_code is not None:
+                blocked_error = GatewayMessageError(
+                    "workspace start is blocked by the exact runtime binding",
+                    code=operation_state.blocked_failure_code,
                 )
-                return manifest
+            else:
+                try:
+                    provider = self._workspace_provider(
+                        context.workspace_definition,
+                        context.workspace_instance,
+                        operation=RuntimeModuleOperation.START,
+                    )
+                except GatewayMessageError as exc:
+                    if exc.code not in _START_BLOCK_FAILURE_CODES:
+                        raise
+                    self._fail_operation_in_uow(
+                        uow,
+                        operation_id,
+                        context,
+                        exc.code or _failure_code(exc),
+                        audit_start_block=True,
+                    )
+                    blocked_error = exc
+                if manifest is not None and manifest.lifecycle not in {
+                    WorkspaceLifecycle.REQUESTED,
+                    WorkspaceLifecycle.PREPARING,
+                }:
+                    self._succeed_operation(
+                        uow, operation_id, context, manifest.location_ref
+                    )
+                    return manifest
+
+        if blocked_error is not None:
+            raise blocked_error
 
         if operation_state.recovery_required:
             raise GatewayRecoveryRequired(
                 f"Gateway operation {operation_id} requires reconciliation"
             )
+        if provider is None:
+            raise GatewayRecoveryRequired("workspace provider is unavailable")
         try:
             manifest = provider.prepare(spec, operation_id=operation_id)
             _validate_manifest(context, manifest)
@@ -901,10 +1097,11 @@ class WorkerGateway:
         spec: ExecutionSpec,
         workspace: ExecutionWorkspaceManifest,
     ) -> GatewayExecutionResult:
-        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
         operation_id = _operation_id(
             context.execution.id, GatewayOperationType.START_SESSION
         )
+        adapter: WorkerAdapter | None = None
+        blocked_error: GatewayMessageError | None = None
         with self._uow_factory() as uow:
             existing_session = uow.sessions.get_active_for_execution(
                 context.execution.id, for_update=True
@@ -927,21 +1124,46 @@ class WorkerGateway:
                     session_id=existing_session.id,
                     adapter_session_id=existing_session.adapter_session_id,
                 )
-            if existing_session is not None:
-                self._succeed_operation(
-                    uow,
-                    operation_id,
-                    context,
-                    existing_session.adapter_session_id,
-                    session_id=existing_session.id,
+            if operation_state.blocked_failure_code is not None:
+                blocked_error = GatewayMessageError(
+                    "session start is blocked by the exact runtime binding",
+                    code=operation_state.blocked_failure_code,
                 )
-                return GatewayExecutionResult(
-                    execution_id=context.execution.id,
-                    workspace_id=context.execution.workspace_id,
-                    session_id=existing_session.id,
-                    adapter_session_id=existing_session.adapter_session_id,
-                )
+            else:
+                try:
+                    adapter = self._adapter(
+                        context.adapter_definition,
+                        context.adapter_instance,
+                        operation=RuntimeModuleOperation.START,
+                    )
+                except GatewayMessageError as exc:
+                    if exc.code not in _START_BLOCK_FAILURE_CODES:
+                        raise
+                    self._fail_operation_in_uow(
+                        uow,
+                        operation_id,
+                        context,
+                        exc.code or _failure_code(exc),
+                        audit_start_block=True,
+                    )
+                    blocked_error = exc
+                if existing_session is not None:
+                    self._succeed_operation(
+                        uow,
+                        operation_id,
+                        context,
+                        existing_session.adapter_session_id,
+                        session_id=existing_session.id,
+                    )
+                    return GatewayExecutionResult(
+                        execution_id=context.execution.id,
+                        workspace_id=context.execution.workspace_id,
+                        session_id=existing_session.id,
+                        adapter_session_id=existing_session.adapter_session_id,
+                    )
 
+        if blocked_error is not None:
+            raise blocked_error
         if operation_state.recovery_required:
             self._mark_operation_unknown(
                 operation_id,
@@ -951,6 +1173,8 @@ class WorkerGateway:
             raise GatewayRecoveryRequired(
                 f"Gateway operation {operation_id} requires reconciliation"
             )
+        if adapter is None:
+            raise GatewayRecoveryRequired("worker adapter is unavailable")
 
         try:
             handle = adapter.start_session(spec, workspace, operation_id=operation_id)
@@ -966,10 +1190,11 @@ class WorkerGateway:
         spec: ExecutionSpec,
         session_result: GatewayExecutionResult,
     ) -> None:
-        adapter = self._adapter(context.adapter_definition, context.adapter_instance)
         operation_id = _operation_id(
             context.execution.id, GatewayOperationType.SEND_INPUT
         )
+        adapter: WorkerAdapter | None = None
+        blocked_error: GatewayMessageError | None = None
         with self._uow_factory() as uow:
             session = uow.sessions.get_active_for_execution(
                 context.execution.id, for_update=True
@@ -991,7 +1216,23 @@ class WorkerGateway:
                 handle = None
             else:
                 handle = _session_handle(session)
+                try:
+                    adapter = self._adapter(
+                        context.adapter_definition,
+                        context.adapter_instance,
+                        operation=RuntimeModuleOperation.INPUT,
+                    )
+                except GatewayMessageError as exc:
+                    self._fail_operation_in_uow(
+                        uow,
+                        operation_id,
+                        context,
+                        exc.code or _failure_code(exc),
+                    )
+                    blocked_error = exc
 
+        if blocked_error is not None:
+            raise blocked_error
         if operation_state.recovery_required:
             self._mark_operation_unknown(
                 operation_id,
@@ -1003,6 +1244,8 @@ class WorkerGateway:
             )
         if handle is None:
             raise GatewayRecoveryRequired("active session handle is unavailable")
+        if adapter is None:
+            raise GatewayRecoveryRequired("worker adapter is unavailable")
         try:
             delivery = adapter.send_input(
                 handle,
@@ -1085,6 +1328,20 @@ class WorkerGateway:
             return _OperationState(operation_id=operation_id, completed=False, recovery_required=True)
         if operation.status is GatewayOperationStatus.UNKNOWN:
             return _OperationState(operation_id=operation_id, completed=False, recovery_required=True)
+        if (
+            operation.status is GatewayOperationStatus.FAILED
+            and operation.operation_type
+            in {
+                GatewayOperationType.PREPARE_WORKSPACE,
+                GatewayOperationType.START_SESSION,
+            }
+            and operation.failure_code in _START_BLOCK_FAILURE_CODES
+        ):
+            return _OperationState(
+                operation_id=operation_id,
+                completed=False,
+                blocked_failure_code=operation.failure_code,
+            )
         previous_version = operation.version
         if operation.status is GatewayOperationStatus.FAILED:
             operation.retry(now=now)
@@ -1208,11 +1465,49 @@ class WorkerGateway:
                 )
                 if operation is None or operation.status is not GatewayOperationStatus.RUNNING:
                     return
-                previous_version = operation.version
-                operation.fail(failure_code=failure_code, now=self._clock())
-                uow.gateway_operations.save(operation, previous_version)
+                self._fail_operation_in_uow(
+                    uow,
+                    operation_id,
+                    context,
+                    failure_code,
+                )
         except Exception:  # noqa: BLE001
             return
+
+    def _fail_operation_in_uow(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        operation_id: UUID,
+        context: _AssignmentContext,
+        failure_code: str,
+        *,
+        audit_start_block: bool = False,
+    ) -> None:
+        operation = uow.gateway_operations.get_by_operation_id(
+            operation_id, context.execution.workspace_id, for_update=True
+        )
+        if operation is None or operation.status is not GatewayOperationStatus.RUNNING:
+            return
+        previous_version = operation.version
+        operation.fail(failure_code=failure_code, now=self._clock())
+        uow.gateway_operations.save(operation, previous_version)
+        if not audit_start_block or context.causation_id is None:
+            return
+        uow.events.append_with_outbox(
+            _gateway_event(
+                context.causation_id,
+                workspace_id=context.execution.workspace_id,
+                aggregate_type="gateway_operation",
+                aggregate_id=operation.operation_id,
+                aggregate_version=operation.version,
+                event_type="ExecutionRuntimeStartBlocked",
+                payload={
+                    "execution_id": str(context.execution.id),
+                    "binding_id": str(context.binding.id),
+                    "error_code": failure_code,
+                },
+            )
+        )
 
     def _mark_operation_unknown(
         self,
@@ -1234,15 +1529,18 @@ class WorkerGateway:
             return
 
     def _adapter(
-        self, definition: ModuleDefinition, instance: ModuleInstance
+        self,
+        definition: ModuleDefinition,
+        instance: ModuleInstance,
+        *,
+        operation: RuntimeModuleOperation,
     ) -> WorkerAdapter:
+        _validate_module_operation(definition, instance, operation)
         factory = self._adapter_factories.get(definition.provider)
         if factory is None:
             raise GatewayMessageError(
                 f"no WorkerAdapter registered for provider {definition.provider}"
             )
-        if definition.lifecycle is not ModuleLifecycle.ACTIVE:
-            raise GatewayMessageError("adapter module is not active")
         adapter = self._adapter_instances.get(instance.id)
         if adapter is None:
             adapter = factory(instance)
@@ -1250,15 +1548,18 @@ class WorkerGateway:
         return adapter
 
     def _workspace_provider(
-        self, definition: ModuleDefinition, instance: ModuleInstance
+        self,
+        definition: ModuleDefinition,
+        instance: ModuleInstance,
+        *,
+        operation: RuntimeModuleOperation,
     ) -> WorkspaceProvider:
+        _validate_module_operation(definition, instance, operation)
         factory = self._workspace_factories.get(definition.provider)
         if factory is None:
             raise GatewayMessageError(
                 f"no WorkspaceProvider registered for provider {definition.provider}"
             )
-        if definition.lifecycle is not ModuleLifecycle.ACTIVE:
-            raise GatewayMessageError("workspace module is not active")
         return factory(instance)
 
 
@@ -1313,17 +1614,42 @@ def _load_module(
 ) -> tuple[ModuleInstance, ModuleDefinition]:
     instance = uow.modules.get_instance(module_id, workspace_id)
     if instance is None:
-        raise GatewayMessageError(f"{expected_type} module is unavailable")
+        raise GatewayMessageError(
+            f"{expected_type} module is unavailable", code="runtime_binding_missing"
+        )
     definition = uow.modules.get_definition(instance.definition_id, workspace_id)
     if definition is None:
-        raise GatewayMessageError(f"{expected_type} module definition is unavailable")
+        raise GatewayMessageError(
+            f"{expected_type} module definition is unavailable",
+            code="runtime_binding_missing",
+        )
     if definition.module_type != expected_type:
-        raise GatewayMessageError(f"module is not a {expected_type}")
+        raise GatewayMessageError(
+            f"module is not a {expected_type}", code="runtime_module_type_mismatch"
+        )
     if instance.definition_id != definition.id:
-        raise GatewayMessageError("module instance definition does not match")
-    if instance.lifecycle is not ModuleLifecycle.ACTIVE:
-        raise GatewayMessageError("module instance is not active")
+        raise GatewayMessageError(
+            "module instance definition does not match",
+            code="runtime_binding_missing",
+        )
     return instance, definition
+
+
+def _validate_module_operation(
+    definition: ModuleDefinition,
+    instance: ModuleInstance,
+    operation: RuntimeModuleOperation,
+) -> None:
+    if not runtime_module_operation_allowed(definition.lifecycle, operation):
+        raise GatewayMessageError(
+            "module lifecycle does not allow this operation",
+            code="runtime_module_disabled",
+        )
+    if not runtime_module_operation_allowed(instance.lifecycle, operation):
+        raise GatewayMessageError(
+            "module lifecycle does not allow this operation",
+            code="runtime_module_disabled",
+        )
 
 
 def _validate_manifest(
@@ -1376,7 +1702,9 @@ def _initial_prompt(spec: ExecutionSpec) -> str:
     return f"{spec.goal}\n\nAcceptance criteria:\n{criteria}"
 
 
-def _assignment_ids(message: OutboxMessage) -> tuple[UUID, UUID, UUID, int]:
+def _assignment_ids(
+    message: OutboxMessage,
+) -> tuple[UUID, UUID, UUID, int, UUID | None]:
     payload = message.payload
     data = payload.get("data")
     data_mapping: Mapping[str, object] = data if isinstance(data, Mapping) else payload
@@ -1390,9 +1718,10 @@ def _assignment_ids(message: OutboxMessage) -> tuple[UUID, UUID, UUID, int]:
         ):
             raise TypeError("fencing_token must be an integer")
         fencing_token = int(raw_fencing_token)
+        causation_id = _optional_payload_uuid(payload, data_mapping, "causation_id")
     except (KeyError, TypeError, ValueError) as exc:
         raise GatewayMessageError("ExecutionLeased payload is malformed") from exc
-    return workspace_id, execution_id, lease_id, fencing_token
+    return workspace_id, execution_id, lease_id, fencing_token, causation_id
 
 
 def _stop_ids(
@@ -1459,6 +1788,15 @@ def _required_payload(payload: Mapping[str, object], name: str) -> object:
     return payload[name]
 
 
+def _optional_payload_uuid(
+    payload: Mapping[str, object], data: Mapping[str, object], name: str
+) -> UUID | None:
+    value = payload.get(name, data.get(name))
+    if value is None:
+        return None
+    return UUID(str(value))
+
+
 def _operation_id(execution_id: UUID, operation_type: GatewayOperationType) -> UUID:
     return gateway_operation_id(execution_id, operation_type)
 
@@ -1518,6 +1856,8 @@ def _config_value(config: Mapping[str, object], namespace: str, name: str) -> ob
 
 
 def _failure_code(exc: Exception) -> str:
+    if isinstance(exc, GatewayMessageError) and exc.code:
+        return exc.code
     value = str(exc).lower().replace(" ", "_")
     clean = "".join(char if char.isalnum() or char == "_" else "_" for char in value)
     return clean.strip("_")[:100] or type(exc).__name__.lower()

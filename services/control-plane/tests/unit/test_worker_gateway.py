@@ -2,6 +2,8 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
 
+import pytest
+
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.ports import ArtifactContentWriter
 from sidera_control_plane.application.worker_gateway import (
@@ -10,8 +12,14 @@ from sidera_control_plane.application.worker_gateway import (
     GatewayAssignmentRunner,
     GatewayMessageError,
     WorkerGateway,
+    _load_module,
 )
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
+from sidera_control_plane.domain.gateway import (
+    RuntimeModuleOperation,
+    runtime_module_operation_allowed,
+)
+from sidera_control_plane.domain.modules import ModuleLifecycle
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
@@ -163,3 +171,46 @@ def test_worker_gateway_rejects_content_metadata_mismatch() -> None:
         assert "size" in str(exc)
     else:
         raise AssertionError("expected GatewayMessageError")
+
+
+def test_runtime_module_lifecycle_matrix() -> None:
+    for lifecycle in (ModuleLifecycle.ACTIVE, ModuleLifecycle.DRAINING):
+        for operation in RuntimeModuleOperation:
+            assert runtime_module_operation_allowed(lifecycle, operation)
+
+    allowed_when_disabled = {
+        RuntimeModuleOperation.OBSERVE,
+        RuntimeModuleOperation.STOP,
+        RuntimeModuleOperation.CLEANUP,
+    }
+    for operation in RuntimeModuleOperation:
+        assert runtime_module_operation_allowed(
+            ModuleLifecycle.DISABLED, operation
+        ) is (operation in allowed_when_disabled)
+
+
+def test_gateway_message_error_preserves_stable_code() -> None:
+    error = GatewayMessageError(
+        "the runtime binding is missing", code="runtime_binding_missing"
+    )
+
+    assert error.code == "runtime_binding_missing"
+
+
+def test_gateway_rejects_a_binding_to_a_missing_module_instance() -> None:
+    class EmptyModules:
+        def get_instance(self, module_id, workspace_id):
+            del module_id, workspace_id
+
+    class FakeUnitOfWork:
+        modules = EmptyModules()
+
+    with pytest.raises(GatewayMessageError) as caught:
+        _load_module(
+            FakeUnitOfWork(),  # type: ignore[arg-type]
+            uuid4(),
+            uuid4(),
+            expected_type="worker_adapter",
+        )
+
+    assert caught.value.code == "runtime_binding_missing"

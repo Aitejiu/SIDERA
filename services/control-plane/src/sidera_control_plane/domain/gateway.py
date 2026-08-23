@@ -7,7 +7,10 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
-from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
+from sidera_control_plane.domain.modules import (
+    ModuleLifecycle,
+    WorkerAdapterCapabilityProfile,
+)
 
 
 class GatewayOperationType(StrEnum):
@@ -32,6 +35,38 @@ class DeliveryOutcome(StrEnum):
     BLOCKED = "blocked"
     FAILED = "failed"
     UNKNOWN = "unknown"
+
+
+class RuntimeModuleOperation(StrEnum):
+    START = "start"
+    RESUME = "resume"
+    INPUT = "input"
+    OBSERVE = "observe"
+    STOP = "stop"
+    CLEANUP = "cleanup"
+
+
+def runtime_module_operation_allowed(
+    lifecycle: ModuleLifecycle | str,
+    operation: RuntimeModuleOperation | str,
+) -> bool:
+    current = (
+        lifecycle
+        if isinstance(lifecycle, ModuleLifecycle)
+        else ModuleLifecycle(lifecycle)
+    )
+    requested = (
+        operation
+        if isinstance(operation, RuntimeModuleOperation)
+        else RuntimeModuleOperation(operation)
+    )
+    if current is not ModuleLifecycle.DISABLED:
+        return True
+    return requested in {
+        RuntimeModuleOperation.OBSERVE,
+        RuntimeModuleOperation.STOP,
+        RuntimeModuleOperation.CLEANUP,
+    }
 
 
 @dataclass(slots=True)

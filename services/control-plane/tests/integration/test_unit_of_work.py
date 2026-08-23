@@ -141,6 +141,7 @@ def test_unit_of_work_commits_task_command_event_and_outbox_atomically(
         "aggregate_version": 1,
         "event_type": "TaskCreated",
         "data": event.payload,
+        "causation_id": str(command.id),
         "correlation_id": str(command.correlation_id),
     }
 
