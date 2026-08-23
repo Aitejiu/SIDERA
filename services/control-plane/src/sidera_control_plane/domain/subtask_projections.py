@@ -52,6 +52,12 @@ class SubtaskExecutionFact:
     session_id: UUID | None = None
     assigned_worker_id: UUID | None = None
     version: int = 1
+    active_block_id: UUID | None = None
+    active_block_version: int | None = None
+    active_block_reason: str | None = None
+    active_block_requires_operator: bool = False
+    active_block_first_seen_at: datetime | None = None
+    active_block_summary: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +203,10 @@ class SubtaskAttentionProjection:
     worker_item_title: str | None
     reason: str
     occurred_at: datetime
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,21 +377,53 @@ class SubtaskWorkspaceProjectionService:
                 )
             )
             if _is_attention_state(state):
+                active_block = _active_scheduling_block(execution)
                 attention.append(
                     SubtaskAttentionProjection(
-                        key=f"worker-item:{item.id}:{state}",
+                        key=(
+                            f"scheduling_block:{plan.root_task_id}:{subtask.key}:"
+                            f"{active_block.active_block_id}"
+                            if active_block is not None
+                            else f"worker-item:{item.id}:{state}"
+                        ),
                         kind=state,
                         worker_item_id=item.id,
                         worker_item_title=item.title,
                         reason=(
-                            latest_activity.summary
+                            active_block.active_block_summary
+                            if active_block is not None
+                            and active_block.active_block_summary is not None
+                            else latest_activity.summary
                             if latest_activity
                             else _default_attention_reason(state)
                         ),
                         occurred_at=(
-                            latest_activity.occurred_at
+                            active_block.active_block_first_seen_at
+                            if active_block is not None
+                            and active_block.active_block_first_seen_at is not None
+                            else latest_activity.occurred_at
                             if latest_activity
                             else item.updated_at
+                        ),
+                        waiting_reason=(
+                            active_block.active_block_reason
+                            if active_block is not None
+                            else None
+                        ),
+                        waiting_details_summary=(
+                            active_block.active_block_summary
+                            if active_block is not None
+                            else None
+                        ),
+                        requires_operator=(
+                            active_block.active_block_requires_operator
+                            if active_block is not None
+                            else False
+                        ),
+                        blocked_since=(
+                            active_block.active_block_first_seen_at
+                            if active_block is not None
+                            else None
                         ),
                     )
                 )
@@ -639,6 +681,8 @@ def _worker_item_state(
         if worker_item.status == "paused":
             return "paused"
     if execution is not None:
+        if execution.status == "queued" and execution.active_block_id is not None:
+            return "blocked"
         return {
             "queued": "queued",
             "leased": "assigned",
@@ -723,6 +767,14 @@ def _is_running_state(state: str) -> bool:
 
 def _is_attention_state(state: str) -> bool:
     return state in {"waiting_user", "blocked", "failed"}
+
+
+def _active_scheduling_block(
+    execution: SubtaskExecutionFact | None,
+) -> SubtaskExecutionFact | None:
+    if execution is not None and execution.status == "queued" and execution.active_block_id is not None:
+        return execution
+    return None
 
 
 def _default_attention_reason(state: str) -> str:

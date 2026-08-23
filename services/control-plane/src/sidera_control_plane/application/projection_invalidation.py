@@ -9,6 +9,9 @@ from sidera_control_plane.domain.events import EventData
 
 PROJECTION_TYPES = frozenset(
     {
+        "workers",
+        "worker_runtime",
+        "executions",
         "task_overview",
         "task_graph",
         "subtask_workspace",
@@ -110,6 +113,81 @@ def projection_targets_for_event(
     context = payload.get("execution_context")
     if isinstance(context, Mapping):
         worker_item_id = worker_item_id or _mapping_uuid(context, "worker_item_id")
+    execution_id = _payload_uuid(payload, "execution_id")
+    if execution_id is None and event.aggregate_type == "execution":
+        execution_id = event.aggregate_id
+    worker_id = _payload_uuid(payload, "worker_id")
+
+    if event.event_type == "WorkerRuntimeConfigured":
+        return _targets(
+            (
+                "workers",
+                "worker_runtime",
+                "executions",
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+            ),
+            worker_item_id,
+            root_task_id,
+            execution_id=None,
+            worker_id=(
+                event.aggregate_id
+                if event.aggregate_type == "worker_runtime_configuration"
+                else worker_id
+            ),
+        )
+    if event.event_type == "ModuleLifecycleChanged":
+        return _targets(
+            (
+                "workers",
+                "worker_runtime",
+                "executions",
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+            ),
+            worker_item_id,
+            root_task_id,
+            execution_id=None,
+            worker_id=None,
+        )
+    if event.event_type in {"ExecutionWorkerPinned", "ExecutionWorkerPinCleared"}:
+        return _targets(
+            ("executions", "worker_item_workspace", "subtask_workspace", "task_graph"),
+            worker_item_id,
+            root_task_id,
+            execution_id=execution_id,
+        )
+    if event.event_type in {"ExecutionSchedulingBlocked", "ExecutionSchedulingUnblocked"}:
+        return _targets(
+            (
+                "executions",
+                "worker_item_workspace",
+                "subtask_workspace",
+                "task_overview",
+                "task_graph",
+            ),
+            worker_item_id,
+            root_task_id,
+            execution_id=execution_id,
+        )
+    if event.event_type in {"ExecutionRuntimeBound", "ExecutionRuntimeStartBlocked"}:
+        return _targets(
+            (
+                "executions",
+                "worker_item_workspace",
+                "worker_trace",
+                "subtask_workspace",
+                "task_overview",
+                "task_graph",
+            ),
+            worker_item_id,
+            root_task_id,
+            execution_id=execution_id,
+        )
 
     if event.event_type == "worker_item.created":
         worker_item_id = worker_item_id or _aggregate_worker_item_id(event)
@@ -186,7 +264,19 @@ def projection_targets_for_evidence(
 
 
 def projection_targets_for_module() -> tuple[ProjectionInvalidationTarget, ...]:
-    return (ProjectionInvalidationTarget("worker_item_workspace", None),)
+    return _targets(
+        (
+            "workers",
+            "worker_runtime",
+            "executions",
+            "task_overview",
+            "task_graph",
+            "subtask_workspace",
+            "worker_item_workspace",
+        ),
+        None,
+        None,
+    )
 
 
 def projection_targets_for_worker_item_change(
@@ -208,12 +298,18 @@ def _targets(
     root_task_id: UUID | None,
     *,
     trace_resource_id: UUID | None = None,
+    execution_id: UUID | None = None,
+    worker_id: UUID | None = None,
 ) -> tuple[ProjectionInvalidationTarget, ...]:
     result: list[ProjectionInvalidationTarget] = []
     for projection_type in projection_types:
         if projection_type not in PROJECTION_TYPES:
             raise ValueError(f"unsupported projection type: {projection_type}")
-        if projection_type in {"worker_item_workspace", "worker_item_activity"}:
+        if projection_type in {"workers", "worker_runtime"}:
+            resource_id = worker_id
+        elif projection_type == "executions":
+            resource_id = execution_id
+        elif projection_type in {"worker_item_workspace", "worker_item_activity"}:
             resource_id = worker_item_id
         elif projection_type == "worker_trace":
             resource_id = trace_resource_id

@@ -143,6 +143,17 @@ export function matchesProjectionQuery(
     change.resource_id === null || queryKey[resourceQueryIndex] === change.resource_id;
 
   switch (change.projection_type) {
+    case "workers":
+      return queryType === "workers"
+        || (queryType === "worker" && matchesResource())
+        || (queryType === "worker-runtime" && matchesResource());
+    case "worker_runtime":
+      return queryType === "workers"
+        || (queryType === "worker" && matchesResource())
+        || (queryType === "worker-runtime" && matchesResource());
+    case "executions":
+      return queryType === "executions"
+        || (queryType === "execution" && matchesResource());
     case "task_overview":
       return queryType === "task-overviews" ||
         (queryType === "task-overview" && matchesResource());

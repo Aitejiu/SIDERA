@@ -160,7 +160,7 @@ describe("WorkerRuntimeDialog", () => {
     if (!commandRequest) throw new Error("configuration command was not sent");
     expect(commandRequest.expected_version).toBeNull();
     expect(commandRequest.target_id).toBe(WORKER_ID);
-    expect(commandRequest.target_type).toBe("worker");
+    expect(commandRequest.target_type).toBe("worker_runtime_configuration");
     expect(commandRequest.command_type).toBe("ConfigureWorkerRuntime");
     expect(commandRequest.payload).toEqual({
       adapter_module_instance_id: activeAdapter.id,

@@ -14,7 +14,7 @@ const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 const DESIGN_TASK_ID = "30000000-0000-0000-0000-000000000002";
 
 const attentionItem = {
-  key: "attention:subtask:callback-idempotency",
+  key: "scheduling_block:30000000-0000-0000-0000-000000000001:callback-idempotency:80000000-0000-0000-0000-000000000001",
   kind: "waiting_user",
   occurred_at: "2026-08-22T08:00:00Z",
   reason: "需要确认重试规则",
@@ -24,6 +24,10 @@ const attentionItem = {
   subtask_key: "callback-idempotency",
   subtask_title: "回调幂等",
   task_title: "支付重构",
+  waiting_reason: "no_eligible_worker",
+  waiting_details_summary: "2 个候选执行节点暂不可用",
+  requires_operator: true,
+  blocked_since: "2026-08-22T07:55:00Z",
 };
 
 const graph = {
@@ -189,10 +193,14 @@ describe("TaskDetailPage", () => {
 
     expect(await screen.findByRole("heading", { name: "支付重构" })).toBeVisible();
     expect(screen.getByText("把支付回调改造成可恢复、可观测的执行流程。")).toBeVisible();
-    expect(screen.getByText("回调幂等")).toBeVisible();
+    expect(screen.getAllByText("回调幂等").length).toBeGreaterThan(0);
     expect(screen.getByText("等待确认重试规则")).toBeVisible();
     expect(screen.getByText(/支付重构 \/ 回调幂等/)).toBeVisible();
     expect(screen.getByText("需要确认重试规则")).toBeVisible();
+    expect(screen.getByText("2 个候选执行节点暂不可用")).toBeVisible();
+    expect(screen.getAllByText("调度等待").length).toBeGreaterThan(0);
+    expect(screen.getByText(/阻塞于/)).toBeVisible();
+    expect(screen.getByText("需要我处理")).toBeVisible();
     expect(screen.queryByText(/OpenCode Worker A/)).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /介入/ })).not.toBeInTheDocument();
 

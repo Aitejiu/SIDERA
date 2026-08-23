@@ -83,7 +83,7 @@ export function buildConfigureWorkerRuntimeCommand({
     command_id: identity.commandId,
     workspace_id: workspaceId,
     command_type: "ConfigureWorkerRuntime",
-    target_type: "worker",
+    target_type: "worker_runtime_configuration",
     actor: { type: "local", id: actorId },
     target_id: workerId,
     expected_version: expectedVersion,

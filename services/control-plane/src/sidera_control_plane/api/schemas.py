@@ -359,6 +359,10 @@ class TaskConsoleAttentionProjectionResponse(BaseModel):
     resource_version: int
     correlation_id: UUID
     occurred_at: datetime
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 class TaskConsoleOverviewProjectionResponse(BaseModel):
@@ -400,6 +404,10 @@ class SubtaskNodeProjectionResponse(BaseModel):
     evidence_required: int
     evidence_satisfied: int
     current_action: str | None
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 class SubtaskEdgeProjectionResponse(BaseModel):
@@ -525,6 +533,10 @@ class SubtaskAttentionProjectionResponse(BaseModel):
     worker_item_title: str | None
     reason: str
     occurred_at: datetime
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 class SubtaskActivityProjectionResponse(BaseModel):

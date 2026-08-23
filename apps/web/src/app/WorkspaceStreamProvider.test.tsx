@@ -6,6 +6,8 @@ import type { ProjectionChange } from "@/shared/api/projectionStream";
 const WORKSPACE_ID = "workspace-1";
 const ROOT_TASK_ID = "root-task-1";
 const WORKER_ITEM_ID = "worker-item-1";
+const WORKER_ID = "worker-1";
+const EXECUTION_ID = "execution-1";
 const PLANNING_REQUEST_ID = "planning-request-1";
 
 function change(
@@ -108,5 +110,64 @@ describe("WorkspaceStreamProvider projection matching", () => {
         change("planning_request", null),
       ),
     ).toBe(true);
+  });
+
+  it("matches runtime, worker, and execution projection resources without broadening other workspaces", () => {
+    expect(
+      matchesProjectionQuery(
+        ["workers", WORKSPACE_ID],
+        WORKSPACE_ID,
+        change("workers", WORKER_ID),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["worker", WORKSPACE_ID, WORKER_ID],
+        WORKSPACE_ID,
+        change("worker_runtime", WORKER_ID),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["worker-runtime", WORKSPACE_ID, WORKER_ID],
+        WORKSPACE_ID,
+        change("worker_runtime", WORKER_ID),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["worker", WORKSPACE_ID, "other-worker"],
+        WORKSPACE_ID,
+        change("worker_runtime", WORKER_ID),
+      ),
+    ).toBe(false);
+    expect(
+      matchesProjectionQuery(
+        ["execution", WORKSPACE_ID, EXECUTION_ID],
+        WORKSPACE_ID,
+        change("executions", EXECUTION_ID),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["execution", WORKSPACE_ID, "other-execution"],
+        WORKSPACE_ID,
+        change("executions", EXECUTION_ID),
+      ),
+    ).toBe(false);
+    expect(
+      matchesProjectionQuery(
+        ["executions", WORKSPACE_ID],
+        WORKSPACE_ID,
+        change("executions", null),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["workers", "other-workspace"],
+        WORKSPACE_ID,
+        change("workers", WORKER_ID),
+      ),
+    ).toBe(false);
   });
 });

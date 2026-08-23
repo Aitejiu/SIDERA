@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, GitBranch, List, MessageSquareText } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock3, GitBranch, List, MessageSquareText } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -146,8 +146,20 @@ function SubtaskContent({
           <div className="subtask-attention__list">
             {workspace.attention_items.map((item) => (
               <article className="subtask-attention__item" key={item.key}>
-                <strong>{item.worker_item_title ?? workspace.subtask.title}</strong>
-                <span>{item.reason}</span>
+                <div className="subtask-attention__heading">
+                  <strong>{isSchedulingWait(item) ? "调度等待" : item.worker_item_title ?? workspace.subtask.title}</strong>
+                  {isSchedulingWait(item) ? <span className="subtask-attention__tag">需要处理</span> : null}
+                </div>
+                <span>{item.waiting_details_summary || item.reason}</span>
+                {isSchedulingWait(item) ? (
+                  <div className="subtask-attention__meta">
+                    <span>
+                      <Clock3 size={13} aria-hidden="true" />
+                      阻塞于 {formatBlockedSince(item.blocked_since)}
+                    </span>
+                    {item.requires_operator ? <strong>需要我处理</strong> : <span>等待执行节点恢复</span>}
+                  </div>
+                ) : null}
               </article>
             ))}
           </div>
@@ -187,6 +199,28 @@ function SubtaskContent({
       </div>
     </>
   );
+}
+
+function isSchedulingWait(
+  item: SubtaskWorkspace["attention_items"][number],
+): boolean {
+  return Boolean(item.waiting_details_summary) || item.key.startsWith("scheduling_block:");
+}
+
+function formatBlockedSince(value: string | null | undefined): string {
+  if (!value) {
+    return "时间未知";
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return "时间未知";
+  }
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function SubtaskRelations({

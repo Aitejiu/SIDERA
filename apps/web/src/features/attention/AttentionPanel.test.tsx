@@ -20,6 +20,7 @@ const ITEM = {
   resource_version: 3,
   correlation_id: "00000000-0000-0000-0000-000000000000",
   occurred_at: "2026-08-21T08:00:00Z",
+  requires_operator: false,
 };
 
 describe("AttentionPanel", () => {

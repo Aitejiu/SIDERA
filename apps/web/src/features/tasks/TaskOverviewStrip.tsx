@@ -47,7 +47,13 @@ export function TaskOverviewStrip({
         {overview.attention_items[0] ? (
           <>
             <strong className="attention-value"><AlertTriangle size={14} aria-hidden="true" />{overview.title} / {overview.attention_items[0].subtask_title}</strong>
-            <span>{overview.attention_items[0].reason}</span>
+            <span className="task-row__attention-label">
+              {isSchedulingWait(overview.attention_items[0]) ? "调度等待" : "需要处理"}
+            </span>
+            <span>
+              {overview.attention_items[0].waiting_details_summary
+                || overview.attention_items[0].reason}
+            </span>
             {overview.attention_items.length > 1 ? <span>另有 {overview.attention_items.length - 1} 项待处理</span> : null}
           </>
         ) : <strong className="metric-muted"><Check size={14} aria-hidden="true" />当前没有卡点</strong>}
@@ -55,6 +61,10 @@ export function TaskOverviewStrip({
       </div>
     </Link>
   );
+}
+
+function isSchedulingWait(item: TaskOverview["attention_items"][number]): boolean {
+  return Boolean(item.waiting_details_summary) || item.key.startsWith("scheduling_block:");
 }
 
 

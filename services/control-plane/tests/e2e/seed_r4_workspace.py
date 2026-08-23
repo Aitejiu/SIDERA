@@ -54,10 +54,12 @@ from sidera_control_plane.persistence.models import (
     ProcessDescriptorModel,
     ProjectionChangeModel,
     ProposalMaterializationModel,
+    SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
+    WorkerRuntimeConfigurationModel,
     WorkspaceModel,
     WorkspaceProjectionCursorModel,
 )
@@ -75,6 +77,7 @@ ATTENTION_EXECUTION_ID = UUID("60000000-0000-0000-0000-000000000004")
 BACKEND_EXECUTION_ID = UUID("60000000-0000-0000-0000-000000000001")
 SCALE_EXECUTION_ID = UUID("60000000-0000-0000-0000-000000000002")
 SCALE_WORKER_EXECUTION_ID = UUID("60000000-0000-0000-0000-000000000005")
+RUNTIME_EXECUTION_ID = UUID("60000000-0000-0000-0000-000000000006")
 PREVIOUS_SESSION_ID = UUID("70000000-0000-0000-0000-000000000003")
 ATTENTION_SESSION_ID = UUID("70000000-0000-0000-0000-000000000004")
 SESSION_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -82,6 +85,7 @@ SCALE_SESSION_ID = UUID("70000000-0000-0000-0000-000000000002")
 SCALE_WORKER_SESSION_ID = UUID("70000000-0000-0000-0000-000000000005")
 WORKER_ID = UUID("80000000-0000-0000-0000-000000000001")
 SCALE_WORKER_ID = UUID("80000000-0000-0000-0000-000000000002")
+RUNTIME_WORKER_ID = UUID("80000000-0000-0000-0000-000000000003")
 LEASE_ID = UUID("90000000-0000-0000-0000-000000000001")
 ARTIFACT_ID = UUID("a0000000-0000-0000-0000-000000000001")
 GENERATION_ONE_ID = UUID("50000000-0000-0000-0000-000000000001")
@@ -101,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenario",
-        choices=("task-first", "scale"),
+        choices=("task-first", "scale", "runtime-routing"),
         default="task-first",
     )
     parser.add_argument("--workspace-id", default=str(DEFAULT_WORKSPACE_ID))
@@ -123,6 +127,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _clean_workspace(session, workspace_id)
             if args.scenario == "scale":
                 _seed_scale(session, workspace_id)
+            elif args.scenario == "runtime-routing":
+                _seed_runtime_routing(session, workspace_id)
             else:
                 _seed_task_first(session, workspace_id)
             session.commit()
@@ -130,9 +136,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         database.dispose()
 
     execution_id = (
-        SCALE_EXECUTION_ID if args.scenario == "scale" else BACKEND_EXECUTION_ID
+        SCALE_EXECUTION_ID
+        if args.scenario == "scale"
+        else RUNTIME_EXECUTION_ID
+        if args.scenario == "runtime-routing"
+        else BACKEND_EXECUTION_ID
     )
-    session_id = SCALE_SESSION_ID if args.scenario == "scale" else SESSION_ID
+    session_id = (
+        SCALE_SESSION_ID
+        if args.scenario == "scale"
+        else None
+        if args.scenario == "runtime-routing"
+        else SESSION_ID
+    )
     print(
         json.dumps(
             {
@@ -150,7 +166,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     str(SCALE_WORKER_ITEM_ID) if args.scenario == "scale" else None
                 ),
                 "execution_id": str(execution_id),
-                "session_id": str(session_id),
+                "session_id": str(session_id) if session_id is not None else None,
+                "runtime_worker_id": (
+                    str(RUNTIME_WORKER_ID)
+                    if args.scenario == "runtime-routing"
+                    else None
+                ),
                 "scenario": args.scenario,
             },
             sort_keys=True,
@@ -182,6 +203,7 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
     )
     models = (
         AttentionAcknowledgementModel,
+        SchedulingBlockModel,
         ProjectionChangeModel,
         WorkspaceProjectionCursorModel,
         ExecutionRequestDependencyModel,
@@ -207,6 +229,7 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         ExecutionSessionModel,
         AssignmentLeaseModel,
         ExecutionModel,
+        WorkerRuntimeConfigurationModel,
         ModuleInstanceModel,
         ModuleDefinitionModel,
         WorkerItemModel,
@@ -997,6 +1020,62 @@ def _seed_task_first(session, workspace_id: UUID) -> None:
         )
         .values(active_lease_id=LEASE_ID)
     )
+
+
+def _seed_runtime_routing(session, workspace_id: UUID) -> None:
+    _seed_task_first(session, workspace_id)
+    runtime_now = datetime.now(UTC)
+    session.add(
+        WorkerModel(
+            id=RUNTIME_WORKER_ID,
+            workspace_id=workspace_id,
+            adapter_type="opencode",
+            display_name="Runtime Routing Worker",
+            status="idle",
+            desired_state="active",
+            capabilities=["python", "typescript"],
+            capacity=1,
+            current_load=0,
+            cost_per_hour_microunits=1,
+            startup_latency_ms=10,
+            last_heartbeat_at=runtime_now,
+            version=1,
+            created_at=runtime_now,
+            updated_at=runtime_now,
+        )
+    )
+    session.flush()
+    session.add(
+        ExecutionModel(
+            id=RUNTIME_EXECUTION_ID,
+            workspace_id=workspace_id,
+            task_id=BACKEND_TASK_ID,
+            lineage_id=RUNTIME_EXECUTION_ID,
+            attempt=1,
+            max_attempts=3,
+            purpose="runtime routing e2e",
+            status="queued",
+            capability_requirements=["python"],
+            adapter_preferences=[],
+            adapter_forbidden=[],
+            pinned_worker_id=None,
+            assigned_worker_id=None,
+            worker_item_id=IMPLEMENTER_WORKER_ITEM_ID,
+            active_lease_id=None,
+            last_fencing_token=0,
+            not_before=runtime_now - timedelta(seconds=1),
+            failure_code=None,
+            started_at=None,
+            finished_at=None,
+            version=1,
+            stop_requested=False,
+            source_execution_id=None,
+            source_session_id=None,
+            created_at=runtime_now,
+            updated_at=runtime_now,
+        )
+    )
+    session.flush()
 
 
 def _seed_scale(session, workspace_id: UUID) -> None:

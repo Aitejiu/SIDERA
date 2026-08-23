@@ -265,7 +265,7 @@ def test_task_graph_projects_one_node_per_subtask() -> None:
     assert graph.nodes[1].state == "waiting_dependency"
 
 
-def test_task_attention_names_task_subtask_and_reason() -> None:
+def test_task_attention_projects_scheduling_wait_facts() -> None:
     graph = TaskConsoleProjectionService().compose(
         _plan(),
         tasks=_tasks(),
@@ -276,8 +276,14 @@ def test_task_attention_names_task_subtask_and_reason() -> None:
                 id=WAITING_EXECUTION_ID,
                 task_id=CALLBACK_TASK_ID,
                 worker_item_id=REVIEWER_ID,
-                status="waiting_user",
+                status="queued",
                 updated_at=NOW,
+                active_block_id=UUID("90000000-0000-0000-0000-000000000001"),
+                active_block_version=2,
+                active_block_reason="runtime_configuration_missing",
+                active_block_requires_operator=True,
+                active_block_first_seen_at=datetime(2026, 8, 22, 11, 55, tzinfo=UTC),
+                active_block_summary="2 个候选执行节点未配置运行环境",
             ),
         ),
         evidence=(),
@@ -300,7 +306,11 @@ def test_task_attention_names_task_subtask_and_reason() -> None:
     assert item.task_title == "支付重构"
     assert item.subtask_key == "callback-idempotency"
     assert item.subtask_title == "回调幂等"
-    assert item.reason == "等待确认重试规则"
+    assert item.reason == "2 个候选执行节点未配置运行环境"
+    assert item.waiting_reason == "runtime_configuration_missing"
+    assert item.waiting_details_summary == "2 个候选执行节点未配置运行环境"
+    assert item.requires_operator is True
+    assert item.blocked_since == datetime(2026, 8, 22, 11, 55, tzinfo=UTC)
 
 
 def test_succeeded_requires_subtask_evidence() -> None:

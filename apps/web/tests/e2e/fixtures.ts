@@ -12,11 +12,13 @@ export const TESTER_WORKER_ITEM_ID = "a1000000-0000-0000-0000-000000000002";
 export const REVIEWER_WORKER_ITEM_ID = "a1000000-0000-0000-0000-000000000003";
 export const EXECUTION_ID = "60000000-0000-0000-0000-000000000001";
 export const SCALE_EXECUTION_ID = "60000000-0000-0000-0000-000000000002";
+export const RUNTIME_EXECUTION_ID = "60000000-0000-0000-0000-000000000006";
 export const SCALE_WORKER_ITEM_ID = "a1000000-0000-0000-0000-000000000101";
+export const RUNTIME_WORKER_ID = "80000000-0000-0000-0000-000000000003";
 export const SESSION_ID = "70000000-0000-0000-0000-000000000001";
 export const SCALE_SESSION_ID = "70000000-0000-0000-0000-000000000002";
 
-export type SeedScenario = "task-first" | "scale";
+export type SeedScenario = "task-first" | "scale" | "runtime-routing";
 export type PlanningSeedScenario = "proposal" | "clarification" | "scale" | "real";
 
 const webRoot = resolve(import.meta.dirname, "../..");

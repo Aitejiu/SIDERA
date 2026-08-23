@@ -11,17 +11,27 @@ from sidera_control_plane.domain.events import EventData
 WORKSPACE_ID = UUID("21000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("31000000-0000-0000-0000-000000000001")
 WORKER_ITEM_ID = UUID("41000000-0000-0000-0000-000000000001")
+WORKER_ID = UUID("42000000-0000-0000-0000-000000000001")
+EXECUTION_ID = UUID("61000000-0000-0000-0000-000000000001")
 
 
-def _event(event_type: str) -> EventData:
+def _event(
+    event_type: str,
+    *,
+    aggregate_type: str = "execution",
+    aggregate_id: UUID = EXECUTION_ID,
+    payload: dict[str, object] | None = None,
+) -> EventData:
     return EventData(
         id=UUID("51000000-0000-0000-0000-000000000001"),
         workspace_id=WORKSPACE_ID,
-        aggregate_type="execution",
-        aggregate_id=UUID("61000000-0000-0000-0000-000000000001"),
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
         aggregate_version=4,
         event_type=event_type,
-        payload={
+        payload=payload
+        if payload is not None
+        else {
             "root_task_id": str(ROOT_TASK_ID),
             "worker_item_id": str(WORKER_ITEM_ID),
         },
@@ -121,3 +131,161 @@ def test_projection_targets_use_workspace_scope_when_identity_is_unavailable() -
 
     assert targets
     assert all(target.resource_id is None for target in targets)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "aggregate_type", "aggregate_id", "payload", "expected"),
+    [
+        (
+            "WorkerRuntimeConfigured",
+            "worker_runtime_configuration",
+            WORKER_ID,
+            {},
+            {
+                "workers",
+                "worker_runtime",
+                "executions",
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+            },
+        ),
+        (
+            "ModuleLifecycleChanged",
+            "module_instance",
+            UUID("43000000-0000-0000-0000-000000000001"),
+            {},
+            {
+                "workers",
+                "worker_runtime",
+                "executions",
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+            },
+        ),
+        (
+            "ExecutionWorkerPinned",
+            "execution",
+            EXECUTION_ID,
+            {"worker_id": str(WORKER_ID)},
+            {"executions", "worker_item_workspace", "subtask_workspace", "task_graph"},
+        ),
+        (
+            "ExecutionWorkerPinCleared",
+            "execution",
+            EXECUTION_ID,
+            {},
+            {"executions", "worker_item_workspace", "subtask_workspace", "task_graph"},
+        ),
+        (
+            "ExecutionSchedulingBlocked",
+            "scheduling_block",
+            UUID("44000000-0000-0000-0000-000000000001"),
+            {"execution_id": str(EXECUTION_ID)},
+            {
+                "executions",
+                "worker_item_workspace",
+                "subtask_workspace",
+                "task_overview",
+                "task_graph",
+            },
+        ),
+        (
+            "ExecutionSchedulingUnblocked",
+            "scheduling_block",
+            UUID("44000000-0000-0000-0000-000000000001"),
+            {"execution_id": str(EXECUTION_ID)},
+            {
+                "executions",
+                "worker_item_workspace",
+                "subtask_workspace",
+                "task_overview",
+                "task_graph",
+            },
+        ),
+        (
+            "ExecutionRuntimeBound",
+            "execution_binding",
+            UUID("45000000-0000-0000-0000-000000000001"),
+            {"execution_id": str(EXECUTION_ID)},
+            {
+                "executions",
+                "worker_item_workspace",
+                "worker_trace",
+                "subtask_workspace",
+                "task_overview",
+                "task_graph",
+            },
+        ),
+        (
+            "ExecutionRuntimeStartBlocked",
+            "gateway_operation",
+            UUID("46000000-0000-0000-0000-000000000001"),
+            {"execution_id": str(EXECUTION_ID)},
+            {
+                "executions",
+                "worker_item_workspace",
+                "worker_trace",
+                "subtask_workspace",
+                "task_overview",
+                "task_graph",
+            },
+        ),
+    ],
+)
+def test_runtime_events_invalidate_only_the_public_facts_they_can_change(
+    event_type: str,
+    aggregate_type: str,
+    aggregate_id: UUID,
+    payload: dict[str, object],
+    expected: set[str],
+) -> None:
+    event = _event(
+        event_type,
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
+        payload={
+            "root_task_id": str(ROOT_TASK_ID),
+            "worker_item_id": str(WORKER_ITEM_ID),
+            **payload,
+        },
+    )
+
+    targets = projection_targets_for_event(event)
+
+    assert {target.projection_type for target in targets} == expected
+    assert all(target.projection_type in PROJECTION_TYPES for target in targets)
+    execution_target = next(
+        target for target in targets if target.projection_type == "executions"
+    )
+    assert execution_target.resource_id == (
+        EXECUTION_ID
+        if "execution_id" in payload or aggregate_type == "execution"
+        else None
+    )
+
+
+def test_worker_runtime_changes_keep_worker_identity_but_scope_derived_facts_to_workspace() -> None:
+    targets = projection_targets_for_event(
+        _event(
+            "WorkerRuntimeConfigured",
+            aggregate_type="worker_runtime_configuration",
+            aggregate_id=WORKER_ID,
+            payload={},
+        )
+    )
+
+    assert {
+        target.resource_id
+        for target in targets
+        if target.projection_type in {"workers", "worker_runtime"}
+    } == {WORKER_ID}
+    assert all(
+        target.resource_id is None
+        for target in targets
+        if target.projection_type
+        not in {"workers", "worker_runtime"}
+    )

@@ -104,7 +104,20 @@ const workspace = {
       occurred_at: "2026-08-23T08:00:00Z",
     },
   ],
-  attention_items: [],
+  attention_items: [
+    {
+      key: "scheduling_block:30000000-0000-0000-0000-000000000001:callback-idempotency:80000000-0000-0000-0000-000000000001",
+      kind: "blocked",
+      worker_item_id: IMPLEMENTER_ID,
+      worker_item_title: "实现者",
+      reason: "2 个候选执行节点暂不可用",
+      occurred_at: "2026-08-23T07:55:00Z",
+      waiting_reason: "no_eligible_worker",
+      waiting_details_summary: "2 个候选执行节点暂不可用",
+      requires_operator: true,
+      blocked_since: "2026-08-23T07:55:00Z",
+    },
+  ],
   recent_activity: [
     {
       source_type: "worker_item",
@@ -157,9 +170,13 @@ describe("SubtaskPage", () => {
     renderPage();
 
     expect(await screen.findByRole("heading", { name: "回调幂等" })).toBeVisible();
-    expect(screen.getByText("实现者")).toBeVisible();
+    expect(screen.getAllByText("实现者").length).toBeGreaterThan(0);
     expect(screen.getByText("审查者")).toBeVisible();
     expect(screen.getByText("等待确认重试规则")).toBeVisible();
+    expect(screen.getByText("调度等待")).toBeVisible();
+    expect(screen.getByText("2 个候选执行节点暂不可用")).toBeVisible();
+    expect(screen.getByText("需要我处理")).toBeVisible();
+    expect(screen.getByText(/阻塞于/)).toBeVisible();
     expect(screen.getByText("实现幂等写入和重试策略")).toBeVisible();
     expect(screen.queryByTestId("worker-graph-canvas")).not.toBeInTheDocument();
 

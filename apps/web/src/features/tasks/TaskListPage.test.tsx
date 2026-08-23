@@ -29,7 +29,7 @@ const overviews = [
     next_subtask_keys: ["trace-viewer"],
     attention_items: [
       {
-        key: "trace-viewer:blocked",
+        key: "scheduling_block:30000000-0000-0000-0000-000000000001:trace-viewer:80000000-0000-0000-0000-000000000001",
         kind: "blocked",
         task_title: "Ship control room",
         subtask_key: "trace-viewer",
@@ -39,6 +39,10 @@ const overviews = [
         resource_version: 4,
         correlation_id: "50000000-0000-0000-0000-000000000001",
         occurred_at: "2026-08-21T08:00:00Z",
+        waiting_reason: "runtime_configuration_missing",
+        waiting_details_summary: "1 个候选执行节点未配置运行环境",
+        requires_operator: false,
+        blocked_since: "2026-08-21T07:55:00Z",
       },
     ],
     last_change_cursor: 42,
@@ -103,6 +107,8 @@ describe("TaskListPage", () => {
     expect(screen.getByText("失败 1")).toBeVisible();
     expect(screen.getByText("下一个 trace-viewer")).toBeVisible();
     expect(screen.getByText("Ship control room / Trace viewer needs input")).toBeVisible();
+    expect(screen.getByText("调度等待")).toBeVisible();
+    expect(screen.getByText("1 个候选执行节点未配置运行环境")).toBeVisible();
     expect(screen.getAllByText("需要我").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/刚刚更新|分钟前更新|更新于/).length).toBeGreaterThan(0);
   });

@@ -113,6 +113,17 @@ test.describe("accessible R4 routes", () => {
   });
 });
 
+test.describe("accessible runtime routing", () => {
+  test("keeps the queued execution node chooser accessible", async ({ page, seedR4 }) => {
+    seedR4("runtime-routing");
+    await page.goto(`/workspaces/${WORKSPACE_ID}/worker-items/${IMPLEMENTER_WORKER_ITEM_ID}`);
+    await expect(page.locator("#worker-item-title")).toHaveText("实现者");
+    await page.locator(".worker-item-routing").getByRole("button", { name: "调整执行节点" }).click();
+    await expect(page.getByRole("region", { name: "执行节点选择器" })).toBeVisible();
+    await audit(page, "runtime routing chooser");
+  });
+});
+
 async function audit(page: Page, surface: string): Promise<void> {
   const result = await new AxeBuilder({ page }).analyze();
   expect(result.violations, `${surface} has accessibility violations`).toEqual([]);

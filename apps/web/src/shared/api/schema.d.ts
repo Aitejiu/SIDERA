@@ -2415,6 +2415,8 @@ export interface components {
         };
         /** SubtaskAttentionProjectionResponse */
         SubtaskAttentionProjectionResponse: {
+            /** Blocked Since */
+            blocked_since?: string | null;
             /** Key */
             key: string;
             /** Kind */
@@ -2426,6 +2428,15 @@ export interface components {
             occurred_at: string;
             /** Reason */
             reason: string;
+            /**
+             * Requires Operator
+             * @default false
+             */
+            requires_operator: boolean;
+            /** Waiting Details Summary */
+            waiting_details_summary?: string | null;
+            /** Waiting Reason */
+            waiting_reason?: string | null;
             /** Worker Item Id */
             worker_item_id: string | null;
             /** Worker Item Title */
@@ -2494,6 +2505,8 @@ export interface components {
         SubtaskNodeProjectionResponse: {
             /** Attention Worker Item Count */
             attention_worker_item_count: number;
+            /** Blocked Since */
+            blocked_since?: string | null;
             /** Current Action */
             current_action: string | null;
             /** Evidence Required */
@@ -2506,6 +2519,11 @@ export interface components {
             kind: string;
             /** Milestone Key */
             milestone_key: string | null;
+            /**
+             * Requires Operator
+             * @default false
+             */
+            requires_operator: boolean;
             /** Running Worker Item Count */
             running_worker_item_count: number;
             /** State */
@@ -2516,6 +2534,10 @@ export interface components {
             task_id: string | null;
             /** Title */
             title: string;
+            /** Waiting Details Summary */
+            waiting_details_summary?: string | null;
+            /** Waiting Reason */
+            waiting_reason?: string | null;
             /** Worker Item Count */
             worker_item_count: number;
         };
@@ -2634,6 +2656,8 @@ export interface components {
         };
         /** TaskConsoleAttentionProjectionResponse */
         TaskConsoleAttentionProjectionResponse: {
+            /** Blocked Since */
+            blocked_since?: string | null;
             /**
              * Correlation Id
              * Format: uuid
@@ -2651,6 +2675,11 @@ export interface components {
             /** Reason */
             reason: string;
             /**
+             * Requires Operator
+             * @default false
+             */
+            requires_operator: boolean;
+            /**
              * Resource Id
              * Format: uuid
              */
@@ -2663,6 +2692,10 @@ export interface components {
             subtask_title: string;
             /** Task Title */
             task_title: string;
+            /** Waiting Details Summary */
+            waiting_details_summary?: string | null;
+            /** Waiting Reason */
+            waiting_reason?: string | null;
         };
         /** TaskConsoleGraphProjectionResponse */
         TaskConsoleGraphProjectionResponse: {

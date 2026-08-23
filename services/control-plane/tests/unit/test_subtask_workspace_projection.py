@@ -241,10 +241,16 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
                 id=EXECUTION_ID,
                 task_id=CALLBACK_TASK_ID,
                 worker_item_id=IMPLEMENTER_ID,
-                status="running",
+                status="queued",
                 updated_at=NOW,
                 session_id=SESSION_ID,
                 assigned_worker_id=WORKER_ID,
+                active_block_id=UUID("91000000-0000-0000-0000-000000000001"),
+                active_block_version=1,
+                active_block_reason="no_eligible_worker",
+                active_block_requires_operator=True,
+                active_block_first_seen_at=datetime(2026, 8, 22, 11, 50, tzinfo=UTC),
+                active_block_summary="2 个候选执行节点暂不可用",
             ),
         ),
         sessions=(
@@ -327,7 +333,14 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
     assert workspace.artifacts[0].artifact_id == ARTIFACT_ID
     assert workspace.evidence[0].acceptance_ref == "acceptance:callback"
     assert workspace.checkpoints[0].sequence == 3
-    assert workspace.attention_items == ()
+    assert workspace.attention_items[0].key.startswith("scheduling_block:")
+    assert workspace.attention_items[0].reason == "2 个候选执行节点暂不可用"
+    assert workspace.attention_items[0].waiting_reason == "no_eligible_worker"
+    assert workspace.attention_items[0].waiting_details_summary == "2 个候选执行节点暂不可用"
+    assert workspace.attention_items[0].requires_operator is True
+    assert workspace.attention_items[0].blocked_since == datetime(
+        2026, 8, 22, 11, 50, tzinfo=UTC
+    )
     assert workspace.recent_activity[0].summary == "运行回调测试"
     assert not hasattr(workspace, "trace_events")
     assert not hasattr(workspace, "intervention_composer_uri")

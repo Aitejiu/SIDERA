@@ -410,6 +410,14 @@ h1 {
   white-space: normal;
 }
 
+.task-row__attention-label {
+  color: var(--attention) !important;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px !important;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
 .task-row__identity .mono-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -438,6 +446,74 @@ h1 {
 
 .task-row__arrow {
   color: var(--dispatch);
+}
+
+.scheduling-wait-panel {
+  border-top: 3px solid var(--attention);
+  padding-top: 15px;
+}
+
+.scheduling-wait-list {
+  display: grid;
+  gap: 8px;
+}
+
+.scheduling-wait-item {
+  display: grid;
+  gap: 7px;
+  padding: 12px 14px;
+  border: 1px solid #dfc39d;
+  background: #fffaf2;
+}
+
+.scheduling-wait-item__heading,
+.scheduling-wait-item__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.scheduling-wait-item__heading strong {
+  overflow-wrap: anywhere;
+}
+
+.scheduling-wait-item__tag,
+.subtask-attention__tag {
+  flex: 0 0 auto;
+  color: var(--attention);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.scheduling-wait-item p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.scheduling-wait-item__meta,
+.subtask-attention__meta {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scheduling-wait-item__meta span,
+.subtask-attention__meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.scheduling-wait-item__meta strong,
+.subtask-attention__meta strong {
+  color: var(--attention);
+  font-size: 11px;
 }
 
 .attention-value,
@@ -3952,6 +4028,19 @@ h1 {
 .subtask-attention__item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.subtask-attention__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.subtask-attention__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .subtask-page__layout {

@@ -14,6 +14,7 @@ from sidera_control_plane.application.subtask_workspace_queries import (
 )
 from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.scheduling import scheduling_block_summary
 from sidera_control_plane.domain.subtask_projections import (
     SubtaskActivityFact,
     SubtaskArtifactFact,
@@ -35,6 +36,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
+    SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
@@ -126,6 +128,17 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
             ).all()
             execution_ids = {row.id for row in execution_rows}
 
+            block_rows = session.scalars(
+                select(SchedulingBlockModel).where(
+                    SchedulingBlockModel.workspace_id == workspace_id,
+                    SchedulingBlockModel.execution_id.in_(
+                        execution_ids or {UUID(int=0)}
+                    ),
+                    SchedulingBlockModel.status == "active",
+                )
+            ).all()
+            active_blocks = {row.execution_id: row for row in block_rows}
+
             session_rows = session.scalars(
                 select(ExecutionSessionModel)
                 .where(
@@ -142,7 +155,11 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
             session_facts = tuple(_session(row) for row in session_rows)
             session_by_execution = _latest_session_ids(session_facts)
             executions = tuple(
-                _execution(row, session_by_execution.get(row.id))
+                _execution(
+                    row,
+                    session_by_execution.get(row.id),
+                    active_blocks.get(row.id),
+                )
                 for row in execution_rows
             )
 
@@ -307,7 +324,9 @@ def _placement(row: WorkerItemPlacementModel) -> SubtaskPlacementFact:
 
 
 def _execution(
-    row: ExecutionModel, session_id: UUID | None
+    row: ExecutionModel,
+    session_id: UUID | None,
+    block: SchedulingBlockModel | None,
 ) -> SubtaskExecutionFact:
     return SubtaskExecutionFact(
         id=row.id,
@@ -318,6 +337,20 @@ def _execution(
         session_id=session_id,
         assigned_worker_id=row.assigned_worker_id,
         version=row.version,
+        active_block_id=block.id if block is not None else None,
+        active_block_version=block.version if block is not None else None,
+        active_block_reason=block.reason_code if block is not None else None,
+        active_block_requires_operator=(
+            block.requires_operator if block is not None else False
+        ),
+        active_block_first_seen_at=(
+            _as_utc(block.first_seen_at) if block is not None else None
+        ),
+        active_block_summary=(
+            scheduling_block_summary(block.reason_code, block.reason_details)
+            if block is not None
+            else None
+        ),
     )
 
 

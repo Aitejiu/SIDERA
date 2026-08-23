@@ -98,6 +98,10 @@ class SubtaskNodeProjection:
     evidence_required: int
     evidence_satisfied: int
     current_action: str | None
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +123,10 @@ class TaskConsoleAttentionProjection:
     resource_version: int
     correlation_id: UUID
     occurred_at: datetime
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +285,26 @@ class TaskConsoleProjectionService:
                         and latest_block.active_block_summary is not None
                         else latest_activity.summary
                         if latest_activity
+                        else None
+                    ),
+                    waiting_reason=(
+                        latest_block.active_block_reason
+                        if latest_block is not None
+                        else None
+                    ),
+                    waiting_details_summary=(
+                        latest_block.active_block_summary
+                        if latest_block is not None
+                        else None
+                    ),
+                    requires_operator=(
+                        latest_block.active_block_requires_operator
+                        if latest_block is not None
+                        else False
+                    ),
+                    blocked_since=(
+                        latest_block.active_block_first_seen_at
+                        if latest_block is not None
                         else None
                     ),
                 )
@@ -494,6 +522,26 @@ class TaskConsoleProjectionService:
                 resource_version=resource_version,
                 correlation_id=correlation_id,
                 occurred_at=occurred_at,
+                waiting_reason=(
+                    latest_block.active_block_reason
+                    if latest_block is not None
+                    else None
+                ),
+                waiting_details_summary=(
+                    latest_block.active_block_summary
+                    if latest_block is not None
+                    else None
+                ),
+                requires_operator=(
+                    latest_block.active_block_requires_operator
+                    if latest_block is not None
+                    else False
+                ),
+                blocked_since=(
+                    latest_block.active_block_first_seen_at
+                    if latest_block is not None
+                    else None
+                ),
             )
             source = AttentionSource(
                 attention_key=item.key,

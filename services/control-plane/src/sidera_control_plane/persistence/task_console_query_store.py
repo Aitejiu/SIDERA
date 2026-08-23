@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from sidera_control_plane.application.task_console_queries import (
 from sidera_control_plane.domain.attention import AttentionAcknowledgement
 from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.scheduling import scheduling_block_summary
 from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleActivityFact,
     TaskConsoleEvidenceFact,
@@ -384,52 +385,8 @@ def _activity(
     )
 
 
-_SCHEDULING_REASON_LABELS = {
-    "no_eligible_worker": "暂无可用执行节点",
-    "pinned_worker_unavailable": "固定执行节点不可用",
-    "runtime_configuration_missing": "运行环境未配置",
-    "runtime_configuration_invalid": "运行环境配置无效",
-    "adapter_module_unavailable": "适配器不可用",
-    "workspace_module_unavailable": "工作区提供器不可用",
-    "runtime_capability_mismatch": "运行能力不匹配",
-    "adapter_policy_rejected": "适配器策略已过滤",
-}
-
-
 def _scheduling_block_summary(block: SchedulingBlockModel) -> str:
-    details: Mapping[str, object] = block.reason_details
-    candidate_count = details.get("candidate_count")
-    if not isinstance(candidate_count, int) or isinstance(candidate_count, bool):
-        candidate_count = None
-
-    raw_counts = details.get("candidate_issue_counts")
-    counts: Mapping[str, object]
-    if isinstance(raw_counts, Mapping):
-        counts = raw_counts
-    else:
-        counts = {
-            key: details[key]
-            for key in _SCHEDULING_REASON_LABELS
-            if key in details
-        }
-    parts = [
-        f"{_SCHEDULING_REASON_LABELS[key]} {value} 个"
-        for key, value in sorted(counts.items())
-        if key in _SCHEDULING_REASON_LABELS
-        and isinstance(value, int)
-        and not isinstance(value, bool)
-        and value > 0
-    ]
-    if candidate_count is not None and parts:
-        return f"{candidate_count} 个候选执行节点暂不可用：" + "，".join(parts)
-    if (
-        candidate_count is not None
-        and block.reason_code == "runtime_configuration_missing"
-    ):
-        return f"{candidate_count} 个候选执行节点未配置运行环境"
-    if candidate_count is not None:
-        return f"{candidate_count} 个候选执行节点暂不可用"
-    return _SCHEDULING_REASON_LABELS.get(block.reason_code, "执行暂时无法分配")
+    return scheduling_block_summary(block.reason_code, block.reason_details)
 
 
 def _latest_session_ids(

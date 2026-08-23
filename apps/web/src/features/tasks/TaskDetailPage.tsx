@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { History } from "lucide-react";
+import { Clock3, History } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -155,6 +155,7 @@ function TaskDeliveryContent({
   onAcknowledged: () => void;
 }) {
   const status = taskStatus(graph);
+  const schedulingWaits = graph.overview.attention_items.filter(isSchedulingWait);
 
   return (
     <>
@@ -185,6 +186,7 @@ function TaskDeliveryContent({
           items={graph.overview.attention_items}
           onAcknowledged={onAcknowledged}
         />
+        <SchedulingWaitSummary items={schedulingWaits} />
         <MilestoneTrack milestones={graph.milestones} />
         <ExecutionHorizon graph={graph} />
         <div className="task-view-switch" role="tablist" aria-label="子任务状态视图">
@@ -222,6 +224,63 @@ function TaskDeliveryContent({
       </div>
     </>
   );
+}
+
+type TaskAttentionItem = TaskGraphProjection["overview"]["attention_items"][number];
+
+function SchedulingWaitSummary({ items }: { items: readonly TaskAttentionItem[] }) {
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <section className="scheduling-wait-panel" aria-labelledby="scheduling-wait-title">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">SCHEDULER</span>
+          <h2 id="scheduling-wait-title">调度等待</h2>
+        </div>
+        <span className="mono-label">{items.length} 个子任务</span>
+      </div>
+      <div className="scheduling-wait-list">
+        {items.map((item) => (
+          <article className="scheduling-wait-item" key={item.key}>
+            <div className="scheduling-wait-item__heading">
+              <strong>{item.subtask_title}</strong>
+              <span className="scheduling-wait-item__tag">调度等待</span>
+            </div>
+            <p>{item.waiting_details_summary || item.reason}</p>
+            <div className="scheduling-wait-item__meta">
+              <span>
+                <Clock3 size={13} aria-hidden="true" />
+                阻塞于 {formatBlockedSince(item.blocked_since)}
+              </span>
+              {item.requires_operator ? <strong>需要我处理</strong> : <span>等待执行节点恢复</span>}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function isSchedulingWait(item: TaskAttentionItem): boolean {
+  return Boolean(item.waiting_details_summary) || item.key.startsWith("scheduling_block:");
+}
+
+function formatBlockedSince(value: string | null | undefined): string {
+  if (!value) {
+    return "时间未知";
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return "时间未知";
+  }
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function taskStatus(graph: TaskGraphProjection): { kind: StatusMarkKind; label: string } {

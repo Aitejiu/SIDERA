@@ -30,6 +30,56 @@ class SchedulingBlockReason(StrEnum):
     ADAPTER_POLICY_REJECTED = "adapter_policy_rejected"
 
 
+_SCHEDULING_REASON_LABELS = {
+    "no_eligible_worker": "暂无可用执行节点",
+    "pinned_worker_unavailable": "固定执行节点不可用",
+    "runtime_configuration_missing": "运行环境未配置",
+    "runtime_configuration_invalid": "运行环境配置无效",
+    "adapter_module_unavailable": "适配器不可用",
+    "workspace_module_unavailable": "工作区提供器不可用",
+    "runtime_capability_mismatch": "运行能力不匹配",
+    "adapter_policy_rejected": "适配器策略已过滤",
+}
+
+
+def scheduling_block_summary(
+    reason_code: str | SchedulingBlockReason,
+    reason_details: Mapping[str, object],
+) -> str:
+    """Create a safe, user-facing summary without exposing runtime configuration."""
+
+    code = reason_code.value if isinstance(reason_code, SchedulingBlockReason) else str(reason_code)
+    candidate_count = reason_details.get("candidate_count")
+    if not isinstance(candidate_count, int) or isinstance(candidate_count, bool):
+        candidate_count = None
+
+    raw_counts = reason_details.get("candidate_issue_counts")
+    counts: Mapping[object, object]
+    if isinstance(raw_counts, Mapping):
+        counts = raw_counts
+    else:
+        counts = {
+            key: reason_details[key]
+            for key in _SCHEDULING_REASON_LABELS
+            if key in reason_details
+        }
+    parts = [
+        f"{_SCHEDULING_REASON_LABELS[key]} {value} 个"
+        for key, value in sorted(counts.items(), key=lambda item: str(item[0]))
+        if key in _SCHEDULING_REASON_LABELS
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    ]
+    if candidate_count is not None and parts:
+        return f"{candidate_count} 个候选执行节点暂不可用：" + "，".join(parts)
+    if candidate_count is not None and code == "runtime_configuration_missing":
+        return f"{candidate_count} 个候选执行节点未配置运行环境"
+    if candidate_count is not None:
+        return f"{candidate_count} 个候选执行节点暂不可用"
+    return _SCHEDULING_REASON_LABELS.get(code, "执行暂时无法分配")
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulingIssue:
     reason_code: SchedulingBlockReason
