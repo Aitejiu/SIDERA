@@ -132,7 +132,9 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
       return;
     }
     const title = graph?.overview.title;
-    const route = currentRoute.kind === "task-index" || title === undefined
+    const route = currentRoute.kind === "task-index"
+      || currentRoute.kind === "chat"
+      || title === undefined
       ? currentRoute
       : { ...currentRoute, title };
     registerDirectRoute(route);
@@ -207,6 +209,20 @@ function semanticTabForLocation(
       id: "planning-new",
       kind: "planning-new",
       title: "新建任务",
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
+  const chatMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/chat/([^/]+)$`),
+  );
+  if (chatMatch?.[1] !== undefined) {
+    const threadId = decodeURIComponent(chatMatch[1]);
+    return {
+      id: `chat:${threadId}`,
+      kind: "chat",
+      title: "Main Agent" as const,
       href: `${location.pathname}${location.search}`,
       closeable: true,
     };
@@ -296,6 +312,8 @@ function tabDetail(tab: WorkspaceTab): string {
       return "子任务";
     case "worker-item":
       return "WorkerItem";
+    case "chat":
+      return "对话";
   }
 }
 

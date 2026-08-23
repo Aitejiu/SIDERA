@@ -20,7 +20,8 @@ import { ExecutionPage } from "@/features/trace/ExecutionPage";
 import { WorkerItemPage } from "@/features/worker-items/WorkerItemPage";
 import { WorkerNodePage } from "@/features/workers/WorkerNodePage";
 import { WorkerNodesPage } from "@/features/workers/WorkerNodesPage";
-import { CapabilitiesPage, ChatPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
+import { ChatPage } from "@/features/chat/ChatPage";
+import { CapabilitiesPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
 import { PlanningBriefForm } from "@/features/planning/PlanningBriefForm";
 import { PlanningPage } from "@/features/planning/PlanningPage";
 
@@ -92,6 +93,10 @@ export const routes: RouteObject[] = [
       },
       {
         path: "/workspaces/:workspaceId/chat",
+        element: <ChatPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/chat/:threadId",
         element: <ChatPage />,
       },
       {

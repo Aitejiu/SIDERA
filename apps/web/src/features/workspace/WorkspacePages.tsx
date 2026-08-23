@@ -136,25 +136,6 @@ export function InboxPage() {
   );
 }
 
-export function ChatPage() {
-  return (
-    <WorkspacePageShell
-      eyebrow="MAIN AGENT / CHAT"
-      title="聊天"
-      icon={<MessageCircle size={18} aria-hidden="true" />}
-    >
-      <div className="workspace-empty workspace-empty--chat">
-        <div className="workspace-empty__glyph">
-          <MessageCircle size={20} aria-hidden="true" />
-        </div>
-        <strong>Main Agent 对话入口</strong>
-        <span>聊天通道将在主 agent 接入后启用。</span>
-        <span className="mono-label">R5 · MAIN AGENT GATEWAY</span>
-      </div>
-    </WorkspacePageShell>
-  );
-}
-
 export function HistoryPage() {
   const workspaceId =
     useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;

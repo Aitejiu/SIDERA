@@ -73,6 +73,16 @@ function planningTab(
   };
 }
 
+function chatTab(threadId: string, workspaceId = "ws-1"): WorkspaceTab {
+  return {
+    id: `chat:${threadId}`,
+    kind: "chat",
+    title: "Main Agent",
+    href: `/workspaces/${workspaceId}/chat/${threadId}`,
+    closeable: true,
+  };
+}
+
 function stateWithTaskSubtaskAndWorker() {
   let state = taskIndex();
   state = reduceTabs(state, openTab(rootTaskTab("task-1")));
@@ -173,6 +183,29 @@ describe("workspace tabs", () => {
     ]);
   });
 
+  it("keeps multiple chat threads as separate semantic tabs", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(chatTab("thread-1")));
+    state = reduceTabs(state, openTab(chatTab("thread-2")));
+    state = reduceTabs(state, openTab(chatTab("thread-1", "ws-1")));
+
+    expect(state.tabs.map((tab) => tab.id)).toContain("chat:thread-1");
+    expect(state.tabs.map((tab) => tab.id)).toContain("chat:thread-2");
+    expect(state.tabs.filter((tab) => tab.id === "chat:thread-1")).toHaveLength(1);
+    expect(state.activeTabId).toBe("chat:thread-1");
+  });
+
+  it("closes an active chat tab to its left neighbor", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(chatTab("thread-1")));
+    state = reduceTabs(state, openTab(chatTab("thread-2")));
+
+    const next = reduceTabs(state, closeTab("chat:thread-2"));
+
+    expect(next.activeTabId).toBe("chat:thread-1");
+    expect(next.navigationHref).toBe("/workspaces/ws-1/chat/thread-1");
+  });
+
   it("does not navigate when closing an inactive tab", () => {
     const state = stateWithTaskSubtaskAndWorker();
     const next = reduceTabs(state, closeTab("root-task:task-1"));
@@ -222,6 +255,17 @@ describe("workspace tabs", () => {
           tabs: state.tabs,
           activeTabId: state.activeTabId,
         }),
+      ),
+    ).toEqual(state);
+    expect(
+      hydrateTabs(
+        "ws-1",
+        serializeTabs(
+          reduceTabs(
+            state,
+            openTab(chatTab("thread-1", "ws-2")),
+          ),
+        ),
       ),
     ).toEqual(state);
     expect(

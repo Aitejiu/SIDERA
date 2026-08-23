@@ -1,4 +1,4 @@
-export const WORKSPACE_TABS_SCHEMA_VERSION = 3;
+export const WORKSPACE_TABS_SCHEMA_VERSION = 4;
 
 export type WorkspaceTabId =
   | "task-index"
@@ -6,7 +6,8 @@ export type WorkspaceTabId =
   | `planning:${string}`
   | `root-task:${string}`
   | `subtask:${string}:${string}`
-  | `worker-item:${string}`;
+  | `worker-item:${string}`
+  | `chat:${string}`;
 
 export type WorkspaceTab =
   | {
@@ -48,6 +49,13 @@ export type WorkspaceTab =
       id: `worker-item:${string}`;
       kind: "worker-item";
       title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `chat:${string}`;
+      kind: "chat";
+      title: "Main Agent";
       href: string;
       closeable: true;
     };
@@ -164,7 +172,7 @@ export function reduceTabs(
 }
 
 export function storageKey(workspaceId: string): string {
-  return `sidera.workspace-tabs.v3:${workspaceId}`;
+  return `sidera.workspace-tabs.v4:${workspaceId}`;
 }
 
 export function serializeTabs(state: WorkspaceTabsState): string {
@@ -258,6 +266,12 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
       && value.closeable === true
       && isWorkspaceHref(value.href, workspaceId);
   }
+  if (value.id.startsWith("chat:")) {
+    return value.kind === "chat"
+      && value.title === "Main Agent"
+      && value.closeable === true
+      && isWorkspaceHref(value.href, workspaceId);
+  }
   return value.closeable === true
     && ((value.id.startsWith("planning:") && value.kind === "planning")
       || (value.id.startsWith("root-task:") && value.kind === "root-task")
@@ -285,6 +299,7 @@ function isTabId(value: unknown): value is WorkspaceTabId {
       || value.startsWith("root-task:")
       || value.startsWith("subtask:")
       || value.startsWith("worker-item:")
+      || value.startsWith("chat:")
     ));
 }
 

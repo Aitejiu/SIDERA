@@ -93,4 +93,22 @@ describe("app shell", () => {
       expect(router.state.location.search).toBe("");
     });
   });
+
+  it("registers a deep-linked main agent chat as a closeable tab", async () => {
+    const workspaceId = "20000000-0000-0000-0000-000000000001";
+    const router = createTestRouter([
+      `/workspaces/${workspaceId}/chat/thread-1`,
+    ]);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("button", { name: "关闭Main Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Main Agent" })).toBeInTheDocument();
+  });
 });
