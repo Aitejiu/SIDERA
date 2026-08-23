@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import json
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, NoReturn, Protocol, cast
@@ -10,7 +11,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import TaskBridgeConfig
-from .contracts import JsonValue
+from .contracts import JsonValue, ProjectionChange
 from .state import (
     BridgeStateStore,
     OutboundCommand,
@@ -105,6 +106,23 @@ class CommandClient(Protocol):
 
 class TransportUnavailable(RuntimeError):
     """The control plane could not be read or reached."""
+
+
+class ProjectionResyncRequired(RuntimeError):
+    """The stream cannot safely continue from its current cursor."""
+
+    def __init__(self, reason: str, last_confirmed_cursor: int) -> None:
+        self.reason = reason
+        self.last_confirmed_cursor = last_confirmed_cursor
+        super().__init__(f"projection stream requires resync: {reason}")
+
+
+class ProjectionStreamDisconnected(RuntimeError):
+    """The stream ended or lost transport before a safe terminal event."""
+
+    def __init__(self, last_confirmed_cursor: int) -> None:
+        self.last_confirmed_cursor = last_confirmed_cursor
+        super().__init__("projection stream disconnected")
 
 
 class CommandResultUnknown(RuntimeError):
@@ -251,6 +269,58 @@ class ControlPlaneClient:
             params={"workspace_id": str(self._config.workspace_id)},
         )
         return self._parse_json_object(response)
+
+    async def iter_projection_changes(
+        self, *, after: int
+    ) -> AsyncIterator[ProjectionChange]:
+        """Consume bounded Projection SSE invalidations without provider imports."""
+
+        if after < 0:
+            raise ValueError("after must be non-negative")
+        current = after
+        parser = _ProjectionSSEParser(
+            max_event_bytes=int(
+                getattr(self._config, "notification_event_limit_bytes", 262_144)
+            )
+        )
+        path = (
+            f"/api/v1/workspaces/{self._config.workspace_id}/projection-changes"
+        )
+        try:
+            async with self._client.stream(
+                "GET",
+                path,
+                params={"after": str(after), "schema_version": "1"},
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                if response.status_code >= 400:
+                    raise ProjectionResyncRequired("http_status", current)
+                async for chunk in response.aiter_bytes():
+                    try:
+                        events = parser.feed(chunk)
+                    except _ProjectionSSEParseError as exc:
+                        raise ProjectionResyncRequired(exc.reason, current) from None
+                    for event in events:
+                        change = _parse_projection_event(
+                            event,
+                            workspace_id=self._config.workspace_id,
+                            current_cursor=current,
+                        )
+                        if change is None:
+                            continue
+                        if change.cursor <= current:
+                            continue
+                        if change.cursor != current + 1:
+                            raise ProjectionResyncRequired("cursor_gap", current)
+                        current = change.cursor
+                        yield change
+                if parser.has_partial_event:
+                    raise ProjectionStreamDisconnected(current)
+                raise ProjectionStreamDisconnected(current)
+        except (ProjectionResyncRequired, ProjectionStreamDisconnected):
+            raise
+        except (httpx.TimeoutException, httpx.TransportError):
+            raise ProjectionStreamDisconnected(current) from None
 
     async def close(self) -> None:
         """Release the HTTP transport owned by this client."""
@@ -600,3 +670,150 @@ def _submitted_brief_binding(
     except ValueError:
         return None
     return request_id, source_type, source_ref
+
+
+@dataclass(frozen=True, slots=True)
+class _SSEEvent:
+    event: str
+    event_id: str | None
+    data: str
+
+
+class _ProjectionSSEParseError(ValueError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _ProjectionSSEParser:
+    def __init__(self, *, max_event_bytes: int) -> None:
+        self._max_event_bytes = max_event_bytes
+        self._buffer = bytearray()
+        self._skip_lf = False
+        self._event_id: str | None = None
+        self._event_name: str | None = None
+        self._data_lines: list[str] = []
+        self._event_bytes = 0
+
+    @property
+    def has_partial_event(self) -> bool:
+        return bool(
+            self._buffer
+            or self._event_id is not None
+            or self._event_name is not None
+            or self._data_lines
+        )
+
+    def feed(self, chunk: bytes) -> tuple[_SSEEvent, ...]:
+        self._buffer.extend(chunk)
+        events: list[_SSEEvent] = []
+        while True:
+            if self._skip_lf:
+                if not self._buffer:
+                    self._check_size()
+                    break
+                if self._buffer and self._buffer[0] == 0x0A:
+                    del self._buffer[0]
+                self._skip_lf = False
+            newline_index = _find_line_ending(self._buffer)
+            if newline_index is None:
+                self._check_size()
+                break
+            ending = self._buffer[newline_index]
+            raw_line = bytes(self._buffer[:newline_index])
+            del self._buffer[: newline_index + 1]
+            if ending == 0x0D:
+                self._skip_lf = True
+            self._event_bytes += len(raw_line) + 1
+            self._check_size()
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError:
+                raise _ProjectionSSEParseError("invalid_utf8") from None
+            if not line:
+                event = self._finish_event()
+                if event is not None:
+                    events.append(event)
+                continue
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if separator and value.startswith(" "):
+                value = value[1:]
+            if field == "id":
+                self._event_id = value
+            elif field == "event":
+                self._event_name = value
+            elif field == "data":
+                self._data_lines.append(value)
+        return tuple(events)
+
+    def _finish_event(self) -> _SSEEvent | None:
+        if self._event_id is None and self._event_name is None and not self._data_lines:
+            self._event_bytes = 0
+            return None
+        event = _SSEEvent(
+            event=self._event_name or "message",
+            event_id=self._event_id,
+            data="\n".join(self._data_lines),
+        )
+        self._event_id = None
+        self._event_name = None
+        self._data_lines = []
+        self._event_bytes = 0
+        return event
+
+    def _check_size(self) -> None:
+        if self._event_bytes + len(self._buffer) > self._max_event_bytes:
+            raise _ProjectionSSEParseError("event_too_large")
+
+
+def _find_line_ending(buffer: bytearray) -> int | None:
+    positions = [position for position in (buffer.find(b"\n"), buffer.find(b"\r")) if position >= 0]
+    return min(positions) if positions else None
+
+
+def _parse_projection_event(
+    event: _SSEEvent,
+    *,
+    workspace_id: UUID,
+    current_cursor: int,
+) -> ProjectionChange | None:
+    if event.event == "resync_required":
+        reason = _resync_reason(event.data)
+        raise ProjectionResyncRequired(reason, current_cursor)
+    if event.event != "projection.changed":
+        raise ProjectionResyncRequired("invalid_event", current_cursor)
+    if not event.data:
+        raise ProjectionResyncRequired("invalid_payload", current_cursor)
+    try:
+        raw = json.loads(event.data)
+    except (TypeError, ValueError):
+        raise ProjectionResyncRequired("invalid_payload", current_cursor) from None
+    if not isinstance(raw, dict):
+        raise ProjectionResyncRequired("invalid_payload", current_cursor)
+    if raw.get("schema_version") != 1:
+        raise ProjectionResyncRequired("unsupported_schema", current_cursor)
+    if raw.get("workspace_id") != str(workspace_id):
+        raise ProjectionResyncRequired("workspace_mismatch", current_cursor)
+    try:
+        change = ProjectionChange.model_validate(raw)
+    except ValidationError:
+        raise ProjectionResyncRequired("invalid_payload", current_cursor) from None
+    if event.event_id is not None:
+        try:
+            event_cursor = int(event.event_id)
+        except ValueError:
+            raise ProjectionResyncRequired("invalid_cursor", current_cursor) from None
+        if event_cursor < 0 or event_cursor != change.cursor:
+            raise ProjectionResyncRequired("invalid_cursor", current_cursor)
+    return change
+
+
+def _resync_reason(data: str) -> str:
+    try:
+        raw = json.loads(data)
+    except (TypeError, ValueError):
+        return "invalid_payload"
+    reason = raw.get("reason") if isinstance(raw, dict) else None
+    return reason if isinstance(reason, str) and reason else "invalid_payload"

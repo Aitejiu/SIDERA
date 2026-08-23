@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,6 +15,22 @@ ToolOutcome = Literal[
     "result_unknown",
     "failed",
 ]
+
+
+class ProjectionChange(BaseModel):
+    """Provider-neutral invalidation metadata from the Control Plane."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    cursor: int = Field(ge=1)
+    schema_version: Literal[1]
+    projection_type: str = Field(min_length=1)
+    resource_id: UUID | None = None
+    change_type: str = Field(min_length=1)
+    resource_version: int | None = Field(default=None, ge=0)
+    occurred_at: datetime
+    correlation_id: UUID
 
 
 class ToolEnvelope(BaseModel):
