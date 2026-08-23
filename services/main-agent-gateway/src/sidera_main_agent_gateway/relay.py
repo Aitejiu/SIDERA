@@ -12,11 +12,12 @@ from sidera_main_agent_gateway.contracts import (
     MainAgentTurnHandle,
     TurnStatus,
 )
+from sidera_main_agent_gateway.errors import GatewayError
 
 _TERMINAL_EVENTS = frozenset({"completed", "failed", "interrupted", "cancelled"})
 
 
-class RelayError(RuntimeError):
+class RelayError(GatewayError):
     """Base class for relay lifecycle and cursor errors."""
 
 

@@ -17,6 +17,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "httpx>=0.28,<1",
+    "genai-prices==0.0.71",
     "pyright>=1.1.403,<2",
     "pytest>=9,<10",
     "pytest-asyncio>=1.2,<2",
@@ -40,3 +41,4 @@ target-version = "py312"
 [tool.pyright]
 pythonVersion = "3.12"
 include = ["src", "tests"]
+extraPaths = ["akashic-agent", "akashic-agent/sdk/python/src"]

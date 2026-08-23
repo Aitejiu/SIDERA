@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+# The integration boundary imports the separately-owned Akashic host source.
+# Runtime resolution is installed by tests/conftest.py.
+# pyright: reportMissingImports=false
 import asyncio
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from agent.control.models import TurnRequest
@@ -26,7 +29,7 @@ async def test_adapter_runs_against_real_akashic_socket(tmp_path: Path) -> None:
 
     runtime = ConversationRuntime(sessions.control_store, execute)
     server = SocketAppServer(
-        tmp_path / "control.sock",
+        Path("/tmp") / f"sga-{uuid4().hex}.sock",
         ControlService(runtime, sessions, tmp_path),
     )
     await server.start()
@@ -74,7 +77,7 @@ async def test_adapter_interrupts_active_real_turn(tmp_path: Path) -> None:
 
     runtime = ConversationRuntime(sessions.control_store, execute)
     server = SocketAppServer(
-        tmp_path / "control.sock",
+        Path("/tmp") / f"sga-{uuid4().hex}.sock",
         ControlService(runtime, sessions, tmp_path),
     )
     await server.start()

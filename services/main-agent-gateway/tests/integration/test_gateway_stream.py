@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 
@@ -16,7 +17,7 @@ class QueueHandle:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[MainAgentEvent | None] = asyncio.Queue()
 
-    async def events(self) -> Any:
+    async def events(self) -> AsyncIterator[MainAgentEvent]:
         while True:
             event = await self.queue.get()
             if event is None:
@@ -39,7 +40,7 @@ async def test_gateway_relay_keeps_provider_stream_alive_after_browser_disconnec
 
     await provider.queue.put(MainAgentEvent(1, "started", {"phase": "work"}))
     first = await anext(subscriber)
-    await subscriber.aclose()
+    await cast(Any, subscriber).aclose()
 
     await provider.queue.put(MainAgentEvent(2, "completed", {"phase": "done"}))
     await provider.queue.put(None)
