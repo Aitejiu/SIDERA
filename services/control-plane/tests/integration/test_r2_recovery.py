@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.reconciler import Reconciler
@@ -72,6 +73,7 @@ def seed_running_execution(
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.tasks.add(task)
         uow.workers.add(worker)
+        register_runtime_modules_and_configure_worker(uow, worker)
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.executions.add(execution)
 

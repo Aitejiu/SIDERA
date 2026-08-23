@@ -17,7 +17,6 @@ from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.worker_gateway import WorkerGateway
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.modules import (
-    ExecutionBinding,
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
@@ -27,6 +26,7 @@ from sidera_control_plane.domain.modules import (
     WorkspaceProviderCapabilityProfile,
 )
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
 from sidera_control_plane.opencode_preflight import run_preflight
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
@@ -181,7 +181,7 @@ def test_real_opencode_planning_to_gateway_vertical_path(
         assert scheduler_summary.assigned >= 1, scheduler_summary
 
         execution_id = _execution_for_root(database, workspace_id, root_task_id)
-        lease_id, fencing_token = _bind_real_gateway_modules(
+        lease_id, fencing_token = _read_scheduler_binding(
             database,
             workspace_id,
             execution_id,
@@ -483,17 +483,27 @@ def _seed_real_worker_facts(
                 lifecycle=ModuleLifecycle.ACTIVE,
             )
         )
-        uow.workers.add(
-            Worker.register(
-                worker_id=worker_id,
+        worker = Worker.register(
+            worker_id=worker_id,
+            workspace_id=workspace_id,
+            adapter_type="opencode",
+            display_name="R5.1 Real OpenCode Worker",
+            capabilities=frozenset({"code", "python"}),
+            capacity=1,
+            cost_per_hour_microunits=1,
+            startup_latency_ms=1,
+            now=now,
+        )
+        uow.workers.add(worker)
+        uow.flush()
+        uow.worker_runtime_configurations.add(
+            WorkerRuntimeConfiguration.create(
+                worker_id=worker.id,
                 workspace_id=workspace_id,
-                adapter_type="opencode",
-                display_name="R5.1 Real OpenCode Worker",
-                capabilities=frozenset({"code", "python"}),
-                capacity=1,
-                cost_per_hour_microunits=1,
-                startup_latency_ms=1,
-                now=now,
+                adapter_module_instance_id=adapter_instance_id,
+                adapter_module_config_version=1,
+                workspace_module_instance_id=workspace_instance_id,
+                workspace_module_config_version=1,
             )
         )
     return {
@@ -516,7 +526,7 @@ def _execution_for_root(database: Database, workspace_id: UUID, root_task_id: UU
         return execution.id
 
 
-def _bind_real_gateway_modules(
+def _read_scheduler_binding(
     database: Database,
     workspace_id: UUID,
     execution_id: UUID,
@@ -528,24 +538,27 @@ def _bind_real_gateway_modules(
         assert execution.active_lease_id is not None
         lease = uow.leases.get(execution.active_lease_id, workspace_id)
         assert lease is not None
-        worker_profile = facts["worker_profile"]
-        assert isinstance(worker_profile, WorkerAdapterCapabilityProfile)
-        uow.bindings.add(
-            ExecutionBinding(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                execution_id=execution_id,
-                worker_id=facts["worker_id"],  # type: ignore[arg-type]
-                adapter_module_id=facts["adapter_instance_id"],  # type: ignore[arg-type]
-                workspace_module_id=facts["workspace_instance_id"],  # type: ignore[arg-type]
-                adapter_config_version=1,
-                workspace_config_version=1,
-                capability_snapshot=worker_profile,
-                lease_id=lease.id,
-                fencing_token=lease.fencing_token,
-                version=1,
-            )
+        worker_id = facts["worker_id"]
+        adapter_instance_id = facts["adapter_instance_id"]
+        workspace_instance_id = facts["workspace_instance_id"]
+        assert isinstance(worker_id, UUID)
+        assert isinstance(adapter_instance_id, UUID)
+        assert isinstance(workspace_instance_id, UUID)
+        configuration = uow.worker_runtime_configurations.get_for_worker(
+            worker_id, workspace_id
         )
+        assert configuration is not None
+        assert configuration.adapter_module_instance_id == adapter_instance_id
+        assert configuration.workspace_module_instance_id == workspace_instance_id
+        binding = uow.bindings.get_for_execution(execution_id, workspace_id)
+        assert binding is not None
+        assert binding.worker_id == worker_id
+        assert binding.adapter_module_id == configuration.adapter_module_instance_id
+        assert binding.workspace_module_id == configuration.workspace_module_instance_id
+        assert binding.adapter_config_version == configuration.adapter_module_config_version
+        assert binding.workspace_config_version == configuration.workspace_module_config_version
+        assert binding.lease_id == lease.id
+        assert binding.fencing_token == lease.fencing_token
         return lease.id, lease.fencing_token
 
 

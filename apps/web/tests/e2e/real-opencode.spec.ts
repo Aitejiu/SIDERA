@@ -47,11 +47,26 @@ test("shows a real OpenCode execution in the browser control room", async ({ pag
     await expect(page.getByRole("link", { name: "打开任务 OpenCode R3 E2E" })).toBeVisible();
     await page.getByRole("link", { name: "打开任务 OpenCode R3 E2E" }).click();
     await expect(page.locator("#task-detail-title")).toHaveText("OpenCode R3 E2E");
-    await expect(page.locator(".inspector-evidence strong", { hasText: "the execution produces a Git diff" })).toBeVisible();
-    await expect(
-      page.locator(`a[href*="/executions/${ids.execution_id}/sessions/${ids.session_id}"]`),
-    ).toBeVisible();
-    const artifactLink = page.getByRole("link", { name: "diff · text/x-diff" });
+    await page.getByRole("button", { name: "打开子任务：OpenCode R3 E2E" }).click();
+    await expect(page.locator("#subtask-title")).toHaveText("OpenCode R3 E2E");
+    await expect(page.locator(".subtask-summary__evidence strong", { hasText: "the execution produces a Git diff" })).toBeVisible();
+    const workerButton = page.getByRole("button", { name: "打开 Worker：OpenCode E2E WorkerItem" }).first();
+    await expect(workerButton).toBeVisible();
+    await workerButton.click();
+    await expect(page.locator("#worker-item-title")).toHaveText("OpenCode E2E WorkerItem");
+    await expect(page.locator(".worker-item-sidebar")).toContainText("opencode");
+    const traceButton = page.getByRole("button", { name: "查看 Agent Trace" }).first();
+    await expect(traceButton).toBeVisible();
+    await traceButton.click();
+    const traceDialog = page.getByRole("dialog", { name: "Agent Trace" });
+    await expect(traceDialog).toBeVisible();
+    await expect(traceDialog).toContainText(ids.execution_id);
+    await expect(traceDialog).toContainText(ids.session_id);
+    await expect(traceDialog.locator(".trace-row")).not.toHaveCount(0);
+    await traceDialog.getByRole("button", { name: "关闭 Agent Trace" }).click();
+    await expect(traceDialog).not.toBeVisible();
+
+    const artifactLink = page.locator(".worker-item-sidebar__link").filter({ hasText: "diff" });
     await expect(artifactLink).toBeVisible();
 
     const traceResponse = await request.get(

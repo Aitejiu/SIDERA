@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
+from test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.scheduler import Scheduler
@@ -191,6 +192,7 @@ def seed_scheduled_execution(
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.tasks.add(task)
         uow.workers.add(worker)
+        register_runtime_modules_and_configure_worker(uow, worker)
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.executions.add(execution)
 
@@ -369,7 +371,12 @@ def test_fenced_report_rejects_wrong_worker_or_token_without_mutation(
     assert command.status == "rejected"
     assert command.rejection_reason == "stale_fencing_token"
     assert active_session is None
-    assert len(events) == 3
+    assert {event.event_type for event in events} == {
+        "ExecutionRuntimeBound",
+        "ExecutionLeased",
+        "LeaseGranted",
+        "WorkerCapacityReserved",
+    }
 
 
 def test_expired_lease_rejects_worker_report(

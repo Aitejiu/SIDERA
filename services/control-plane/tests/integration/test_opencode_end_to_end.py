@@ -50,6 +50,8 @@ from sidera_control_plane.persistence.models import (
     OutboxMessageModel,
     PlanSnapshotModel,
     TaskModel,
+    WorkerItemModel,
+    WorkerItemPlacementModel,
     WorkerModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -151,6 +153,7 @@ def _seed_execution(
     workspace_definition_id = uuid4()
     adapter_instance_id = uuid4()
     workspace_instance_id = uuid4()
+    worker_item_id = uuid4()
     capabilities = _capability_payload(profile)
     plan_snapshot_id = uuid4()
     with database.session() as session:
@@ -245,6 +248,37 @@ def _seed_execution(
                 raise AssertionError("OpenCode E2E task is missing its plan snapshot")
             plan_snapshot_id = existing_snapshot_id
         session.add(
+            WorkerItemModel(
+                id=worker_item_id,
+                workspace_id=workspace_id,
+                root_task_id=task_id,
+                stable_key=f"opencode-e2e{name_suffix}",
+                title="OpenCode E2E WorkerItem",
+                responsibility="Run the OpenCode Gateway boundary test.",
+                status="active",
+                context_version=1,
+                acknowledged_context_version=1,
+                derived_from_worker_item_ids=[],
+                version=1,
+            )
+        )
+        session.add(
+            WorkerItemPlacementModel(
+                plan_snapshot_id=plan_snapshot_id,
+                plan_generation=1,
+                workspace_id=workspace_id,
+                root_task_id=task_id,
+                worker_item_id=worker_item_id,
+                worker_item_key=f"opencode-e2e{name_suffix}",
+                subtask_key="opencode-e2e",
+                subtask_task_id=task_id,
+                role="implementation",
+                capability_requirements=["python"],
+                worker_policy_ref=None,
+                configuration_ref=None,
+            )
+        )
+        session.add(
             WorkerModel(
                 id=worker_id,
                 workspace_id=workspace_id,
@@ -322,6 +356,7 @@ def _seed_execution(
                 id=execution_id,
                 workspace_id=workspace_id,
                 task_id=task_id,
+                worker_item_id=worker_item_id,
                 lineage_id=execution_id,
                 attempt=1,
                 max_attempts=2,
@@ -386,6 +421,7 @@ def _seed_execution(
         session.commit()
     return {
         "task_id": task_id,
+        "worker_item_id": worker_item_id,
         "plan_snapshot_id": plan_snapshot_id,
         "worker_id": worker_id,
         "execution_id": execution_id,
@@ -561,9 +597,13 @@ def test_real_opencode_gateway_task_flow(
                         "root_task_id": str(ids["task_id"]),
                         "work_item_key": "opencode-e2e",
                         "worker_slot_key": "opencode-e2e",
+                        "worker_item_id": str(ids["worker_item_id"]),
+                        "plan_generation": 1,
+                        "context_version": 1,
                         "worker_id": str(ids["worker_id"]),
                         "execution_id": str(ids["execution_id"]),
                         "session_id": str(first_result.session_id),
+                        "session_version": input_version,
                     },
                     "execution_id": str(ids["execution_id"]),
                     "client_idempotency_key": "opencode-e2e-input-1",

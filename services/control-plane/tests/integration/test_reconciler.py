@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
+from test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.application.reconciler import Reconciler
 from sidera_control_plane.application.scheduler import Scheduler
@@ -89,6 +90,7 @@ def seed_running_execution(
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.tasks.add(task)
         uow.workers.add(worker)
+        register_runtime_modules_and_configure_worker(uow, worker)
         if worker_item is not None:
             uow.worker_items.add(worker_item)
     with SqlAlchemyUnitOfWork(database) as uow:
