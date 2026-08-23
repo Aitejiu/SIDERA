@@ -25,6 +25,12 @@ class AttentionAcknowledgement:
     acknowledged_at: datetime
 
     def applies_to(self, source: AttentionSource) -> bool:
+        if self.attention_key.startswith("scheduling_block:"):
+            return (
+                self.attention_key == source.attention_key
+                and self.root_task_id == source.root_task_id
+                and self.source_correlation_id == source.correlation_id
+            )
         return (
             self.attention_key == source.attention_key
             and self.root_task_id == source.root_task_id

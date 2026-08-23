@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -30,6 +30,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
+    SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
@@ -118,6 +119,17 @@ class SqlAlchemyTaskConsoleQueryStore:
             ).all()
             execution_ids = {row.id for row in execution_rows}
 
+            block_rows = session.scalars(
+                select(SchedulingBlockModel).where(
+                    SchedulingBlockModel.workspace_id == workspace_id,
+                    SchedulingBlockModel.execution_id.in_(
+                        execution_ids or {UUID(int=0)}
+                    ),
+                    SchedulingBlockModel.status == "active",
+                )
+            ).all()
+            active_blocks = {row.execution_id: row for row in block_rows}
+
             session_rows = session.scalars(
                 select(ExecutionSessionModel)
                 .where(
@@ -133,7 +145,11 @@ class SqlAlchemyTaskConsoleQueryStore:
             ).all()
             session_by_execution = _latest_session_ids(session_rows)
             executions = tuple(
-                _execution(row, session_by_execution.get(row.id))
+                _execution(
+                    row,
+                    session_by_execution.get(row.id),
+                    active_blocks.get(row.id),
+                )
                 for row in execution_rows
             )
 
@@ -315,7 +331,9 @@ def _placement(row: WorkerItemPlacementModel) -> TaskConsolePlacementFact:
 
 
 def _execution(
-    row: ExecutionModel, session_id: UUID | None
+    row: ExecutionModel,
+    session_id: UUID | None,
+    block: SchedulingBlockModel | None,
 ) -> TaskConsoleExecutionFact:
     return TaskConsoleExecutionFact(
         id=row.id,
@@ -326,6 +344,18 @@ def _execution(
         session_id=session_id,
         assigned_worker_id=row.assigned_worker_id,
         version=row.version,
+        active_block_id=block.id if block is not None else None,
+        active_block_version=block.version if block is not None else None,
+        active_block_reason=block.reason_code if block is not None else None,
+        active_block_requires_operator=(
+            block.requires_operator if block is not None else False
+        ),
+        active_block_first_seen_at=(
+            _as_utc(block.first_seen_at) if block is not None else None
+        ),
+        active_block_summary=(
+            _scheduling_block_summary(block) if block is not None else None
+        ),
     )
 
 
@@ -354,6 +384,54 @@ def _activity(
     )
 
 
+_SCHEDULING_REASON_LABELS = {
+    "no_eligible_worker": "暂无可用执行节点",
+    "pinned_worker_unavailable": "固定执行节点不可用",
+    "runtime_configuration_missing": "运行环境未配置",
+    "runtime_configuration_invalid": "运行环境配置无效",
+    "adapter_module_unavailable": "适配器不可用",
+    "workspace_module_unavailable": "工作区提供器不可用",
+    "runtime_capability_mismatch": "运行能力不匹配",
+    "adapter_policy_rejected": "适配器策略已过滤",
+}
+
+
+def _scheduling_block_summary(block: SchedulingBlockModel) -> str:
+    details: Mapping[str, object] = block.reason_details
+    candidate_count = details.get("candidate_count")
+    if not isinstance(candidate_count, int) or isinstance(candidate_count, bool):
+        candidate_count = None
+
+    raw_counts = details.get("candidate_issue_counts")
+    counts: Mapping[str, object]
+    if isinstance(raw_counts, Mapping):
+        counts = raw_counts
+    else:
+        counts = {
+            key: details[key]
+            for key in _SCHEDULING_REASON_LABELS
+            if key in details
+        }
+    parts = [
+        f"{_SCHEDULING_REASON_LABELS[key]} {value} 个"
+        for key, value in sorted(counts.items())
+        if key in _SCHEDULING_REASON_LABELS
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    ]
+    if candidate_count is not None and parts:
+        return f"{candidate_count} 个候选执行节点暂不可用：" + "，".join(parts)
+    if (
+        candidate_count is not None
+        and block.reason_code == "runtime_configuration_missing"
+    ):
+        return f"{candidate_count} 个候选执行节点未配置运行环境"
+    if candidate_count is not None:
+        return f"{candidate_count} 个候选执行节点暂不可用"
+    return _SCHEDULING_REASON_LABELS.get(block.reason_code, "执行暂时无法分配")
+
+
 def _latest_session_ids(
     rows: Sequence[ExecutionSessionModel],
 ) -> dict[UUID, UUID]:
@@ -364,4 +442,8 @@ def _latest_session_ids(
 
 
 def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return (
+        value.astimezone(UTC)
+        if value.tzinfo is not None
+        else value.replace(tzinfo=UTC)
+    )

@@ -16,6 +16,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionEventModel,
     ExecutionModel,
     PlanSnapshotModel,
+    SchedulingBlockModel,
     TaskModel,
 )
 
@@ -40,6 +41,16 @@ class AttentionAcknowledgementRepository:
         if snapshot_row is None:
             return None
         snapshot = _plan(snapshot_row)
+        scheduling_block_parts = _scheduling_block_attention_key_parts(
+            attention_key, root_task_id
+        )
+        if scheduling_block_parts is not None:
+            return self._get_current_scheduling_block_source(
+                snapshot,
+                workspace_id,
+                attention_key,
+                *scheduling_block_parts,
+            )
         subtask_parts = _subtask_attention_key_parts(attention_key, root_task_id)
         if subtask_parts is not None:
             return self._get_current_subtask_source(
@@ -113,6 +124,52 @@ class AttentionAcknowledgementRepository:
             resource_id=task.id,
             resource_version=task.version,
             correlation_id=correlation_id,
+        )
+
+    def _get_current_scheduling_block_source(
+        self,
+        snapshot: TaskPlanSnapshot,
+        workspace_id: UUID,
+        attention_key: str,
+        subtask_key: str,
+        raw_block_id: str,
+    ) -> AttentionSource | None:
+        subtask = next(
+            (
+                item
+                for item in self._normalizer.normalize(snapshot).subtasks
+                if item.key == subtask_key
+            ),
+            None,
+        )
+        if subtask is None or subtask.task_id is None:
+            return None
+        try:
+            block_id = UUID(raw_block_id)
+        except ValueError:
+            return None
+        block = self._session.scalar(
+            select(SchedulingBlockModel)
+            .join(
+                ExecutionModel,
+                ExecutionModel.id == SchedulingBlockModel.execution_id,
+            )
+            .where(
+                SchedulingBlockModel.id == block_id,
+                SchedulingBlockModel.workspace_id == workspace_id,
+                SchedulingBlockModel.status == "active",
+                ExecutionModel.workspace_id == workspace_id,
+                ExecutionModel.task_id == subtask.task_id,
+            )
+        )
+        if block is None:
+            return None
+        return AttentionSource(
+            attention_key=attention_key,
+            root_task_id=snapshot.root_task_id,
+            resource_id=block.id,
+            resource_version=block.version,
+            correlation_id=block.id,
         )
 
     def _get_current_subtask_source(
@@ -300,6 +357,19 @@ def _subtask_attention_key_parts(
 ) -> tuple[str, str] | None:
     parts = key.split(":")
     if len(parts) < 4 or parts[0] != "subtask" or parts[1] != str(root_task_id):
+        return None
+    return ":".join(parts[2:-1]), parts[-1]
+
+
+def _scheduling_block_attention_key_parts(
+    key: str, root_task_id: UUID
+) -> tuple[str, str] | None:
+    parts = key.split(":")
+    if (
+        len(parts) < 4
+        or parts[0] != "scheduling_block"
+        or parts[1] != str(root_task_id)
+    ):
         return None
     return ":".join(parts[2:-1]), parts[-1]
 

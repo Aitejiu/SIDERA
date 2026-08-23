@@ -54,7 +54,10 @@ class AcknowledgeAttentionItemHandler:
             )
         if (
             source.correlation_id != source_correlation_id
-            or source.resource_version != source_resource_version
+            or (
+                source.resource_version != source_resource_version
+                and not attention_key.startswith("scheduling_block:")
+            )
         ):
             raise ValidationError(
                 "attention item source is stale",
@@ -86,7 +89,7 @@ class AcknowledgeAttentionItemHandler:
             attention_key=attention_key,
             root_task_id=root_task.id,
             source_correlation_id=source_correlation_id,
-            source_resource_version=source_resource_version,
+            source_resource_version=source.resource_version,
             acknowledged_command_id=envelope.id,
             acknowledged_at=self._clock(),
         )
@@ -107,7 +110,7 @@ class AcknowledgeAttentionItemHandler:
                 "attention_key": attention_key,
                 "root_task_id": str(root_task.id),
                 "source_correlation_id": str(source_correlation_id),
-                "source_resource_version": source_resource_version,
+                "source_resource_version": source.resource_version,
             },
             actor_type=envelope.actor_type,
             actor_id=envelope.actor_id,

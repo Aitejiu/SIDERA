@@ -55,6 +55,12 @@ class TaskConsoleExecutionFact:
     session_id: UUID | None = None
     assigned_worker_id: UUID | None = None
     version: int = 1
+    active_block_id: UUID | None = None
+    active_block_version: int | None = None
+    active_block_reason: str | None = None
+    active_block_requires_operator: bool = False
+    active_block_first_seen_at: datetime | None = None
+    active_block_summary: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +245,14 @@ class TaskConsoleProjectionService:
             latest_activity = _latest(
                 activity_by_task.get(task_id, ()) if task_id else ()
             )
+            task_executions = (
+                executions_by_task.get(task_id, ()) if task_id else ()
+            )
+            latest_block = _latest(
+                execution
+                for execution in task_executions
+                if execution.status == "queued" and execution.active_block_id is not None
+            )
             nodes.append(
                 SubtaskNodeProjection(
                     subtask_key=subtask.key,
@@ -257,7 +271,14 @@ class TaskConsoleProjectionService:
                     ),
                     evidence_required=len(subtask.acceptance_refs),
                     evidence_satisfied=evidence_satisfied,
-                    current_action=latest_activity.summary if latest_activity else None,
+                    current_action=(
+                        latest_block.active_block_summary
+                        if latest_block is not None
+                        and latest_block.active_block_summary is not None
+                        else latest_activity.summary
+                        if latest_activity
+                        else None
+                    ),
                 )
             )
 
@@ -278,6 +299,7 @@ class TaskConsoleProjectionService:
             milestones,
             tasks=tasks,
             activity=activity_values,
+            executions=execution_values,
             last_change_cursor=last_change_cursor,
             as_of=as_of,
             acknowledgements=tuple(acknowledgements),
@@ -407,6 +429,7 @@ class TaskConsoleProjectionService:
         *,
         tasks: Mapping[UUID, TaskConsoleTaskFact],
         activity: tuple[TaskConsoleActivityFact, ...],
+        executions: tuple[TaskConsoleExecutionFact, ...],
         last_change_cursor: int,
         as_of: datetime,
         acknowledgements: tuple[AttentionAcknowledgement, ...],
@@ -416,6 +439,7 @@ class TaskConsoleProjectionService:
             None,
         )
         activity_by_task = _group_activity_by_task(activity)
+        executions_by_task = _group_executions_by_task(executions)
         attention: list[TaskConsoleAttentionProjection] = []
         for node in nodes:
             if node.state not in {"waiting_user", "blocked", "failed"}:
@@ -425,24 +449,51 @@ class TaskConsoleProjectionService:
                 activity_by_task.get(task_id, ()) if task_id else ()
             )
             task = tasks.get(task_id) if task_id else None
-            resource_id = node.task_id or plan.root_task_id
-            resource_version = task.version if task else 1
-            correlation_id = (
-                latest_activity.correlation_id
-                if latest_activity
-                else UUID(int=0)
+            task_executions = (
+                executions_by_task.get(task_id, ()) if task_id is not None else ()
             )
+            latest_block = _latest(
+                execution
+                for execution in task_executions
+                if execution.status == "queued" and execution.active_block_id is not None
+            )
+            if latest_block is not None and latest_block.active_block_id is not None:
+                attention_key = (
+                    f"scheduling_block:{plan.root_task_id}:"
+                    f"{node.subtask_key}:{latest_block.active_block_id}"
+                )
+                resource_id = latest_block.active_block_id
+                resource_version = latest_block.active_block_version or 1
+                correlation_id = latest_block.active_block_id
+                reason = (
+                    latest_block.active_block_summary
+                    or _default_attention_reason(node.state)
+                )
+                occurred_at = latest_block.active_block_first_seen_at or as_of
+            else:
+                attention_key = (
+                    f"subtask:{plan.root_task_id}:{node.subtask_key}:{node.state}"
+                )
+                resource_id = node.task_id or plan.root_task_id
+                resource_version = task.version if task else 1
+                correlation_id = (
+                    latest_activity.correlation_id
+                    if latest_activity
+                    else UUID(int=0)
+                )
+                reason = node.current_action or _default_attention_reason(node.state)
+                occurred_at = latest_activity.occurred_at if latest_activity else as_of
             item = TaskConsoleAttentionProjection(
-                key=f"subtask:{plan.root_task_id}:{node.subtask_key}:{node.state}",
+                key=attention_key,
                 kind=node.state,
                 task_title=plan.title,
                 subtask_key=node.subtask_key,
                 subtask_title=node.title,
-                reason=node.current_action or _default_attention_reason(node.state),
+                reason=reason,
                 resource_id=resource_id,
                 resource_version=resource_version,
                 correlation_id=correlation_id,
-                occurred_at=latest_activity.occurred_at if latest_activity else as_of,
+                occurred_at=occurred_at,
             )
             source = AttentionSource(
                 attention_key=item.key,
@@ -545,6 +596,8 @@ def _worker_item_state(
         if worker_item.status == "paused":
             return "paused"
     if execution is not None:
+        if execution.active_block_id is not None and execution.status == "queued":
+            return "blocked"
         return {
             "queued": "queued",
             "leased": "assigned",
