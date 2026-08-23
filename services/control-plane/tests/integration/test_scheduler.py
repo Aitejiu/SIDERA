@@ -11,14 +11,30 @@ from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
 from sidera_control_plane.domain.execution import Execution, ExecutionStatus
 from sidera_control_plane.domain.lease import LeaseStatus
+from sidera_control_plane.domain.modules import (
+    CapabilityInput,
+    IdempotencyCapability,
+    ModuleDefinition,
+    ModuleInstance,
+    ModuleLifecycle,
+    ResumeCapability,
+    SandboxCapability,
+    StabilityLevel,
+    StopCapability,
+    WorkerAdapterCapabilityProfile,
+    WorkspaceProviderCapabilityProfile,
+)
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     CommandModel,
     EventModel,
+    ExecutionBindingModel,
     ExecutionModel,
+    SchedulingBlockModel,
     WorkspaceModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -93,9 +109,85 @@ def seed_scheduler_case(
         uow.tasks.add(task)
         for worker in workers:
             uow.workers.add(worker)
+        for worker in workers:
+            register_runtime_modules_and_configure_worker(uow, worker)
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.executions.add(execution)
     return task, workers, execution
+
+
+def register_runtime_modules_and_configure_worker(
+    uow: SqlAlchemyUnitOfWork, worker: Worker
+) -> None:
+    adapter_definition = ModuleDefinition(
+        id=uuid4(),
+        workspace_id=worker.workspace_id,
+        module_type="worker_adapter",
+        provider=worker.adapter_type,
+        interface_version="sidera.worker-adapter.v1",
+        config_schema_version=1,
+        capabilities=WorkerAdapterCapabilityProfile(
+            input=CapabilityInput.QUEUED,
+            idempotency=IdempotencyCapability.OPERATION_ID,
+            resume=ResumeCapability.DURABLE,
+            stop=StopCapability.EXACT_EXECUTION,
+            sandbox=SandboxCapability.FILESYSTEM,
+            stability=StabilityLevel.STABLE,
+        ),
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+    workspace_definition = ModuleDefinition(
+        id=uuid4(),
+        workspace_id=worker.workspace_id,
+        module_type="workspace_provider",
+        provider="fake-workspace",
+        interface_version="sidera.workspace-provider.v1",
+        config_schema_version=1,
+        capabilities=WorkspaceProviderCapabilityProfile(
+            isolation=SandboxCapability.ISOLATED_RUNTIME,
+            writable=True,
+            git_worktree=True,
+            stability=StabilityLevel.STABLE,
+        ),
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+    adapter_instance = ModuleInstance(
+        id=uuid4(),
+        workspace_id=worker.workspace_id,
+        definition_id=adapter_definition.id,
+        instance_name=f"adapter-{worker.id}",
+        config_version=1,
+        config_namespace="adapter",
+        config={"adapter.command": worker.adapter_type},
+        secret_refs=(),
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+    workspace_instance = ModuleInstance(
+        id=uuid4(),
+        workspace_id=worker.workspace_id,
+        definition_id=workspace_definition.id,
+        instance_name=f"workspace-{worker.id}",
+        config_version=1,
+        config_namespace="workspace",
+        config={"workspace.root": f"/tmp/sidera/{worker.id}"},
+        secret_refs=(),
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+    uow.modules.add_definition(adapter_definition)
+    uow.modules.add_definition(workspace_definition)
+    uow.modules.add_instance(adapter_instance)
+    uow.modules.add_instance(workspace_instance)
+    uow.flush()
+    uow.worker_runtime_configurations.add(
+        WorkerRuntimeConfiguration.create(
+            worker_id=worker.id,
+            workspace_id=worker.workspace_id,
+            adapter_module_instance_id=adapter_instance.id,
+            adapter_module_config_version=adapter_instance.config_version,
+            workspace_module_instance_id=workspace_instance.id,
+            workspace_module_config_version=workspace_instance.config_version,
+        )
+    )
 
 
 def _make_worker(workspace_id: UUID, spec: WorkerSpec) -> Worker:
@@ -187,8 +279,20 @@ def test_scheduler_assigns_atomically_and_records_auditable_facts(
                 AssignmentLeaseModel.execution_id == execution.id
             )
         )
+        binding = session.scalar(
+            select(ExecutionBindingModel).where(
+                ExecutionBindingModel.execution_id == execution.id
+            )
+        )
+        active_block = session.scalar(
+            select(SchedulingBlockModel).where(
+                SchedulingBlockModel.execution_id == execution.id,
+                SchedulingBlockModel.status == "active",
+            )
+        )
     events_by_id = {event.id: event for event in events}
     assert [events_by_id[event_id].event_type for event_id in event_ids] == [
+        "ExecutionRuntimeBound",
         "ExecutionLeased",
         "LeaseGranted",
         "WorkerCapacityReserved",
@@ -200,11 +304,19 @@ def test_scheduler_assigns_atomically_and_records_auditable_facts(
     assert lease.status == LeaseStatus.ACTIVE.value
     assert lease.fencing_token == 1
     assert lease.assignment_reason["policy"] == "lowest-cost-v1"
+    assert binding is not None
+    assert binding.worker_id == workers[1].id
+    assert binding.adapter_config_version == 1
+    assert binding.workspace_config_version == 1
+    assert binding.adapter_module_id is not None
+    assert binding.workspace_module_id is not None
+    assert binding.fencing_token == lease.fencing_token
+    assert active_block is None
     assert row_counts() == {
         "tasks": 1,
         "commands": 1,
-        "events": 3,
-        "outbox_messages": 3,
+        "events": 4,
+        "outbox_messages": 4,
     }
 
 
@@ -248,9 +360,9 @@ def test_scheduler_defers_without_hard_eligible_worker(
     assert stored.status is ExecutionStatus.QUEUED
     assert row_counts() == {
         "tasks": 1,
-        "commands": 0,
-        "events": 0,
-        "outbox_messages": 0,
+        "commands": 1,
+        "events": 1,
+        "outbox_messages": 1,
     }
 
 
@@ -335,7 +447,7 @@ def test_scheduler_respects_workspace_and_unavailable_pin(
     assert result.deferred == 1
     assert pinned_result.assigned == 0
     assert pinned_result.deferred == 1
-    assert row_counts()["events"] == 0
+    assert row_counts()["events"] == 1
 
 
 def test_two_schedulers_reserve_one_execution_once(
