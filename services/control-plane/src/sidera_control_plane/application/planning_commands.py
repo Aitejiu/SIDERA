@@ -6,6 +6,9 @@ from uuid import UUID, uuid4
 
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.proposal_materializer import (
+    ProposalMaterializer,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     OperatorRequired,
@@ -49,6 +52,7 @@ class PlanningCommandHandler:
             "AnswerPlanningClarification",
             "RequestProposalRevision",
             "RejectPlanningProposal",
+            "ConfirmPlanningProposal",
             "RetryBlockedPlanningRun",
         }
     )
@@ -59,10 +63,12 @@ class PlanningCommandHandler:
         local_actor_type: str,
         local_actor_id: str,
         clock: Callable[[], datetime] | None = None,
+        materializer: ProposalMaterializer | None = None,
     ) -> None:
         self._local_actor_type = local_actor_type
         self._local_actor_id = local_actor_id
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._materializer = materializer or ProposalMaterializer()
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -81,6 +87,8 @@ class PlanningCommandHandler:
             return self._request_proposal_revision(uow, envelope)
         if envelope.command_type == "RejectPlanningProposal":
             return self._reject_proposal(uow, envelope)
+        if envelope.command_type == "ConfirmPlanningProposal":
+            return self._confirm_proposal(uow, envelope)
         if envelope.command_type == "RetryBlockedPlanningRun":
             return self._retry_blocked_run(uow, envelope)
         raise ValidationError(f"unsupported planning command: {envelope.command_type}")
@@ -581,6 +589,61 @@ class PlanningCommandHandler:
             data={
                 "planning_request_id": str(request.id),
                 "status": request.status.value,
+            },
+        )
+
+    def _confirm_proposal(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        request = self._request_for_mutation(uow, envelope)
+        proposal = uow.planning_records.get_current_proposal(
+            request.id, request.workspace_id
+        )
+        if proposal is None:
+            raise NotFound("current planning proposal not found")
+        profile_id = _uuid(envelope.payload, "profile_id")
+        profile_version = _positive_int(envelope.payload, "profile_version")
+        profile = uow.planning_profiles.get(
+            profile_id, envelope.workspace_id, version=profile_version
+        )
+        if profile is None:
+            raise NotFound("planning profile not found")
+        result = self._materializer.materialize(
+            uow,
+            request=request,
+            proposal=proposal,
+            profile=profile,
+            envelope=envelope,
+            now=self._clock(),
+        )
+        materialization = result.materialization
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=result.event_ids,
+            data={
+                "planning_request_id": str(request.id),
+                "proposal_revision": proposal.revision,
+                "proposal_content_hash": proposal.content_hash,
+                "profile_id": str(profile.id),
+                "profile_version": profile.version,
+                "root_task_id": str(materialization.root_task_id),
+                "plan_snapshot_id": str(materialization.plan_snapshot_id),
+                "plan_generation": materialization.plan_generation,
+                "subtask_task_mapping": {
+                    key: str(value)
+                    for key, value in materialization.subtask_task_mapping.items()
+                },
+                "worker_item_mapping": {
+                    key: str(value)
+                    for key, value in materialization.worker_item_mapping.items()
+                },
+                "execution_request_mapping": {
+                    key: str(value)
+                    for key, value in materialization.execution_request_mapping.items()
+                },
+                "deep_link": materialization.deep_link,
             },
         )
 

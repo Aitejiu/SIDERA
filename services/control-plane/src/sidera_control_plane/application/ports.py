@@ -783,6 +783,9 @@ class ControlPlaneUnitOfWork(Protocol):
     commands: CommandRepositoryPort
     events: EventStorePort
 
+    def flush(self) -> None:
+        raise NotImplementedError
+
     def savepoint(self) -> AbstractContextManager[None]:
         raise NotImplementedError
 

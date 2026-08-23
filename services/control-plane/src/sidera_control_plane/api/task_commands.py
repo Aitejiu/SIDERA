@@ -35,6 +35,7 @@ def execute_command(
         "RegisterPlannerModule",
         "RegisterPlanningProfile",
         "SubmitPlanningRequest",
+        "ConfirmPlanningProposal",
     } and result.command_id == request.command_id
     response.status_code = 201 if is_new_create else 200
     return CommandResponse.from_result(result)

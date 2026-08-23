@@ -172,6 +172,9 @@ class SqlAlchemyUnitOfWork:
         finally:
             self.session.close()
 
+    def flush(self) -> None:
+        self.session.flush()
+
     @contextmanager
     def savepoint(self) -> Iterator[None]:
         with self.session.begin_nested():

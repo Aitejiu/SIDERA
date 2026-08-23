@@ -489,6 +489,17 @@ def test_answer_planning_clarification_persists_new_brief_and_queued_run(
                 "current_proposal_content_hash": "a" * 64,
             },
         ),
+        (
+            "ConfirmPlanningProposal",
+            "planning_request",
+            {
+                "proposal_revision": 1,
+                "proposal_content_hash": "a" * 64,
+                "profile_id": str(uuid4()),
+                "profile_version": 1,
+                "unexpected": True,
+            },
+        ),
         ("RetryBlockedPlanningRun", "planning_run", {}),
     ],
 )

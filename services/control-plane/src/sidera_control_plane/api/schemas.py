@@ -203,6 +203,15 @@ class RejectPlanningProposalPayload(BaseModel):
     reason: NonEmptyString
 
 
+class ConfirmPlanningProposalPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_revision: int = Field(ge=1)
+    proposal_content_hash: NonEmptyString
+    profile_id: UUID
+    profile_version: int = Field(ge=1)
+
+
 class RetryBlockedPlanningRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1078,12 +1087,14 @@ class CommandRequest(BaseModel):
             "AnswerPlanningClarification",
             "RequestProposalRevision",
             "RejectPlanningProposal",
+            "ConfirmPlanningProposal",
         }:
             self._require_mutation_target("planning_request")
             payload_types = {
                 "AnswerPlanningClarification": AnswerPlanningClarificationPayload,
                 "RequestProposalRevision": RequestProposalRevisionPayload,
                 "RejectPlanningProposal": RejectPlanningProposalPayload,
+                "ConfirmPlanningProposal": ConfirmPlanningProposalPayload,
             }
             parsed = payload_types[self.command_type].model_validate(self.payload)
         elif self.command_type == "RetryBlockedPlanningRun":

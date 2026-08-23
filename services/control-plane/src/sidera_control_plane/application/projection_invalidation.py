@@ -51,6 +51,7 @@ _EXECUTION_LIFECYCLE_TYPES = {
     "ExecutionSessionStarted",
     "ExecutionSessionClosed",
     "ExecutionSessionLost",
+    "ExecutionRequestCreated",
     "TaskWaitingForDecision",
 }
 
@@ -80,6 +81,16 @@ def projection_targets_for_event(
                 planning_change_type or "planning_request_updated",
             ),
         )
+    if event.aggregate_type == "planning_proposal":
+        request_id = _payload_uuid(payload, "planning_request_id")
+        if request_id is not None:
+            return (
+                ProjectionInvalidationTarget(
+                    "planning_request",
+                    request_id,
+                    planning_change_type or "planning_request_updated",
+                ),
+            )
     if event.aggregate_type == "planning_run":
         request_id = _payload_uuid(payload, "planning_request_id")
         if request_id is not None:
@@ -224,6 +235,7 @@ def _planning_change_type(event_type: str) -> str | None:
         "PlanningProposalReady": "planning_proposal_ready",
         "PlanningProposalConflicted": "planning_proposal_conflicted",
         "PlanningMaterialized": "planning_materialized",
+        "PlanningProposalConfirmed": "planning_materialized",
     }.get(event_type)
 
 

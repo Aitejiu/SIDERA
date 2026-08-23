@@ -286,6 +286,9 @@ class FakeUnitOfWork:
     ) -> None:
         del exc_type, exc_value, traceback
 
+    def flush(self) -> None:
+        return None
+
     @contextmanager
     def savepoint(self) -> Iterator[None]:
         plans = dict(self.plans.snapshots)
