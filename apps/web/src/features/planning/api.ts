@@ -3,6 +3,8 @@ import type { paths } from "@/shared/api/schema";
 
 import type {
   PlanningBriefPage,
+  AnswerPlanningClarificationPayload,
+  CancelPlanningRequestPayload,
   PlanningClarificationPage,
   PlanningCommandRequest,
   PlanningCommandResponse,
@@ -11,6 +13,9 @@ import type {
   PlanningProposal,
   PlanningRequest,
   PlanningRunPage,
+  PlanningClarificationAnswer,
+  RejectPlanningProposalPayload,
+  RequestProposalRevisionPayload,
   SubmitPlanningRequestPayload,
 } from "./types";
 
@@ -150,14 +155,144 @@ export function buildSubmitPlanningRequestCommand({
   actorId?: string;
   expectedVersion?: number | null;
 }): PlanningCommandRequest {
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "SubmitPlanningRequest",
+    targetType: "workspace",
+    targetId: null,
+    expectedVersion,
+    payload,
+  });
+}
+
+export async function submitPlanningRequest(
+  command: PlanningCommandRequest,
+): Promise<PlanningCommandResponse> {
+  return executePlanningCommand(command);
+}
+
+export function buildCancelPlanningRequestCommand({
+  workspaceId,
+  requestId,
+  expectedVersion,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  requestId: string;
+  expectedVersion: number;
+  actorId?: string;
+}): PlanningCommandRequest {
+  const payload: CancelPlanningRequestPayload = {};
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "CancelPlanningRequest",
+    targetType: "planning_request",
+    targetId: requestId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildAnswerPlanningClarificationCommand({
+  workspaceId,
+  requestId,
+  expectedVersion,
+  answers,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  requestId: string;
+  expectedVersion: number;
+  answers: PlanningClarificationAnswer[];
+  actorId?: string;
+}): PlanningCommandRequest {
+  const payload: AnswerPlanningClarificationPayload = { answers };
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "AnswerPlanningClarification",
+    targetType: "planning_request",
+    targetId: requestId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildRequestProposalRevisionCommand({
+  workspaceId,
+  requestId,
+  expectedVersion,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  requestId: string;
+  expectedVersion: number;
+  payload: RequestProposalRevisionPayload;
+  actorId?: string;
+}): PlanningCommandRequest {
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "RequestProposalRevision",
+    targetType: "planning_request",
+    targetId: requestId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildRejectPlanningProposalCommand({
+  workspaceId,
+  requestId,
+  expectedVersion,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  requestId: string;
+  expectedVersion: number;
+  payload: RejectPlanningProposalPayload;
+  actorId?: string;
+}): PlanningCommandRequest {
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "RejectPlanningProposal",
+    targetType: "planning_request",
+    targetId: requestId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildPlanningCommand({
+  workspaceId,
+  commandType,
+  targetType,
+  targetId,
+  payload,
+  expectedVersion = null,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  commandType: string;
+  targetType: PlanningCommandRequest["target_type"];
+  targetId: string | null;
+  payload: PlanningCommandRequest["payload"];
+  expectedVersion?: number | null;
+  actorId?: string;
+}): PlanningCommandRequest {
   const identity = createCommandIdentity();
   return {
     command_id: identity.commandId,
     workspace_id: workspaceId,
-    command_type: "SubmitPlanningRequest",
-    target_type: "workspace",
+    command_type: commandType,
+    target_type: targetType,
     actor: { type: "local", id: actorId },
-    target_id: null,
+    target_id: targetId,
     expected_version: expectedVersion,
     idempotency_key: identity.idempotencyKey,
     correlation_id: crypto.randomUUID(),
@@ -165,7 +300,7 @@ export function buildSubmitPlanningRequestCommand({
   };
 }
 
-export async function submitPlanningRequest(
+export async function executePlanningCommand(
   command: PlanningCommandRequest,
 ): Promise<PlanningCommandResponse> {
   return apiCommand<PlanningCommandResponse, "/api/v1/commands">(
