@@ -92,7 +92,7 @@ def profile(workspace_id: UUID, instance_id: UUID) -> PlanningProfile:
         proposal_schema_version=2,
         allowed_capabilities=("code",),
         adapter_preferences=("fake",),
-        adapter_forbidden=(),
+        adapter_forbidden=("unsafe",),
         budget=PlanningBudgetPolicy(
             max_context_bytes=64_000,
             max_tokens=10_000,

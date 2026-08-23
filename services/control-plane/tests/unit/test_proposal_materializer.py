@@ -201,7 +201,7 @@ def profile() -> PlanningProfile:
         proposal_schema_version=2,
         allowed_capabilities=("code", "docs", "test"),
         adapter_preferences=("fake",),
-        adapter_forbidden=(),
+        adapter_forbidden=("unsafe",),
         budget=PlanningBudgetPolicy(
             max_context_bytes=64_000,
             max_tokens=10_000,
@@ -506,6 +506,11 @@ def test_materializes_tasks_plan_worker_items_requests_and_mapping() -> None:
     assert len(uow.worker_items.items) == 4
     assert len(uow.worker_items.placements) == 4
     assert len(uow.execution_requests.added) == 4
+    assert all(
+        item.adapter_preferences == ("fake",)
+        and item.adapter_forbidden == frozenset({"unsafe"})
+        for item in uow.execution_requests.added
+    )
     assert len(uow.proposal_materializations.added) == 1
     assert result.materialization.root_task_id == uow.tasks.added[0].id
     assert set(result.materialization.subtask_task_mapping) == {

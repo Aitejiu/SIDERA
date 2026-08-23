@@ -962,6 +962,8 @@ class CreateExecutionPayload(BaseModel):
     worker_item_id: UUID | None = None
     purpose: NonEmptyString
     capability_requirements: tuple[NonEmptyString, ...] = Field(min_length=1)
+    adapter_preferences: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    adapter_forbidden: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
     pinned_worker_id: UUID | None = None
     max_attempts: int = Field(ge=1, le=10)
     not_before: datetime

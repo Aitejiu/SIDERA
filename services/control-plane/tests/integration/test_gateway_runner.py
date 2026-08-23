@@ -299,6 +299,8 @@ def _seed_assignment(
             purpose="Start Gateway",
             status="leased",
             capability_requirements=["python"],
+            adapter_preferences=["opencode", "codex"],
+            adapter_forbidden=["unsafe"],
             pinned_worker_id=None,
             assigned_worker_id=worker_id,
             active_lease_id=None,
@@ -750,6 +752,8 @@ def test_gateway_stops_exact_execution_and_continues_without_touching_sibling(
         assert continuation.source_session_id == first_session.session_id
         assert continuation.task_id == ids["task_id"]
         assert continuation.active_lease_id is None
+        assert continuation.adapter_preferences == ["opencode", "codex"]
+        assert continuation.adapter_forbidden == ["unsafe"]
         assert session.query(ExecutionModel).count() == 3
         task = session.get(TaskModel, ids["task_id"])
         assert task is not None

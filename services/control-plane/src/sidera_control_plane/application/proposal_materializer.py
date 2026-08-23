@@ -378,6 +378,7 @@ class ProposalMaterializer:
                 purpose=intent.purpose,
                 capability_requirements=frozenset(intent.capability_requirements),
                 adapter_preferences=intent.adapter_preferences,
+                adapter_forbidden=request.profile_snapshot.adapter_forbidden,
                 budget_class=intent.budget_class,
                 not_before=now + timedelta(seconds=intent.not_before_seconds or 0),
                 max_attempts=intent.max_attempts,

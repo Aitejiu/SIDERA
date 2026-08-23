@@ -127,6 +127,12 @@ class ExecutionCommandHandler:
             ),
             pinned_worker_id=pinned_worker_id,
             not_before=_required_datetime(envelope.payload, "not_before"),
+            adapter_preferences=_required_string_tuple(
+                envelope.payload, "adapter_preferences", allow_empty=True
+            ),
+            adapter_forbidden=_required_string_tuple(
+                envelope.payload, "adapter_forbidden", allow_empty=True
+            ),
         )
         events: list[EventData] = []
         if task.status in {TaskStatus.PENDING, TaskStatus.WAITING}:
@@ -260,6 +266,8 @@ class ExecutionCommandHandler:
             not_before=_required_datetime(envelope.payload, "not_before"),
             source_execution_id=execution.id,
             source_session_id=session.id,
+            adapter_preferences=execution.adapter_preferences,
+            adapter_forbidden=execution.adapter_forbidden,
         )
         events: list[EventData] = []
         if task.status in {TaskStatus.PENDING, TaskStatus.WAITING}:
@@ -328,6 +336,8 @@ class ExecutionCommandHandler:
             capability_requirements=source.capability_requirements,
             pinned_worker_id=source.pinned_worker_id,
             not_before=_required_datetime(envelope.payload, "not_before"),
+            adapter_preferences=source.adapter_preferences,
+            adapter_forbidden=source.adapter_forbidden,
         )
         events: list[EventData] = []
         if task.status is TaskStatus.WAITING:

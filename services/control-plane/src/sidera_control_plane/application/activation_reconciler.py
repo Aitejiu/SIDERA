@@ -215,6 +215,8 @@ class ActivationReconciler:
             capability_requirements=request.capability_requirements,
             pinned_worker_id=None,
             not_before=request.not_before,
+            adapter_preferences=request.adapter_preferences,
+            adapter_forbidden=request.adapter_forbidden,
         )
         task_event: EventData | None = None
         previous_request_version = request.version

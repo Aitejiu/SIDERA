@@ -114,6 +114,8 @@ def create_execution_request(
     pinned_worker_id: UUID | None = None,
     worker_item_id: UUID | None = None,
     max_attempts: int = 3,
+    adapter_preferences: tuple[str, ...] = (),
+    adapter_forbidden: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "command_id": str(uuid4()),
@@ -137,6 +139,8 @@ def create_execution_request(
             else None,
             "max_attempts": max_attempts,
             "not_before": NOW.isoformat(),
+            "adapter_preferences": list(adapter_preferences),
+            "adapter_forbidden": list(adapter_forbidden),
         },
     }
 
@@ -278,6 +282,8 @@ def seed_active_execution(
     *,
     max_attempts: int = 3,
     worker_item_id: UUID | None = None,
+    adapter_preferences: tuple[str, ...] = (),
+    adapter_forbidden: tuple[str, ...] = (),
 ) -> tuple[Task, Worker, Execution, AssignmentLease, ExecutionSession]:
     task = Task.create(
         task_id=uuid4(),
@@ -325,6 +331,8 @@ def seed_active_execution(
         capability_requirements=frozenset({"code", "python"}),
         pinned_worker_id=worker.id,
         not_before=NOW,
+        adapter_preferences=adapter_preferences,
+        adapter_forbidden=adapter_forbidden,
     )
     lease = AssignmentLease.issue(
         lease_id=uuid4(),
@@ -386,12 +394,16 @@ def seed_terminal_execution(
     status: str,
     max_attempts: int,
     worker_item_id: UUID | None = None,
+    adapter_preferences: tuple[str, ...] = (),
+    adapter_forbidden: tuple[str, ...] = (),
 ) -> tuple[Task, Execution]:
     task, worker, execution, lease, _ = seed_active_execution(
         database,
         workspace_id,
         max_attempts=max_attempts,
         worker_item_id=worker_item_id,
+        adapter_preferences=adapter_preferences,
+        adapter_forbidden=adapter_forbidden,
     )
     execution.start(
         lease_id=lease.id,
@@ -424,6 +436,7 @@ def seed_terminal_execution(
 
 def test_create_execution_readiness_parallel_lineages_and_replay(
     client: TestClient,
+    database: Database,
     workspace_id: UUID,
     row_counts: Callable[[], dict[str, int]],
 ) -> None:
@@ -432,6 +445,8 @@ def test_create_execution_readiness_parallel_lineages_and_replay(
         workspace_id,
         task_id,
         idempotency_key="create-execution-001",
+        adapter_preferences=("opencode", "codex"),
+        adapter_forbidden=("unsafe",),
     )
     first = client.post("/api/v1/commands", json=first_request)
 
@@ -446,6 +461,11 @@ def test_create_execution_readiness_parallel_lineages_and_replay(
     assert first_detail.json()["attempt"] == 1
     assert first_detail.json()["lineage_id"] == str(first_id)
     assert first_detail.json()["capability_requirements"] == ["code", "python"]
+    with SqlAlchemyUnitOfWork(database) as uow:
+        stored_first = uow.executions.get(first_id, workspace_id)
+        assert stored_first is not None
+        assert stored_first.adapter_preferences == ("opencode", "codex")
+        assert stored_first.adapter_forbidden == frozenset({"unsafe"})
 
     task_detail = client.get(
         f"/api/v1/tasks/{task_id}",
@@ -696,6 +716,8 @@ def test_retry_is_append_only_and_bounded(
         workspace_id,
         status=terminal_status,
         max_attempts=2,
+        adapter_preferences=("opencode", "codex"),
+        adapter_forbidden=("unsafe",),
     )
     retry_request = execution_mutation_request(
         workspace_id,
@@ -726,6 +748,11 @@ def test_retry_is_append_only_and_bounded(
     assert datetime.fromisoformat(
         retry_detail.json()["not_before"]
     ) == NOW + timedelta(minutes=1)
+    with SqlAlchemyUnitOfWork(database) as uow:
+        stored_retry = uow.executions.get(retry_id, workspace_id)
+        assert stored_retry is not None
+        assert stored_retry.adapter_preferences == ("opencode", "codex")
+        assert stored_retry.adapter_forbidden == frozenset({"unsafe"})
 
     replay = client.post(
         "/api/v1/commands",

@@ -197,6 +197,8 @@ class Reconciler:
                     capability_requirements=execution.capability_requirements,
                     pinned_worker_id=execution.pinned_worker_id,
                     not_before=now + timedelta(seconds=retry_delay_seconds),
+                    adapter_preferences=execution.adapter_preferences,
+                    adapter_forbidden=execution.adapter_forbidden,
                 )
                 uow.executions.add(retry)
 

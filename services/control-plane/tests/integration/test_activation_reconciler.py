@@ -76,6 +76,8 @@ def test_root_ready_request_creates_execution_and_marks_subtask_ready(
         assert execution.task_id is not None
         assert execution.worker_item_id is not None
         assert execution.status == "queued"
+        assert execution.adapter_preferences == ["fake"]
+        assert execution.adapter_forbidden == ["unsafe"]
         assert session.scalar(select(func.count()).select_from(GatewayOperationModel)) == 0
         request = session.scalar(select(ExecutionRequestModel))
         assert request is not None

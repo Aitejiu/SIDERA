@@ -34,6 +34,8 @@ def seed_running_execution(
     *,
     max_attempts: int,
     worker_item_id: UUID | None = None,
+    adapter_preferences: tuple[str, ...] = (),
+    adapter_forbidden: tuple[str, ...] = (),
 ) -> tuple[Execution, Worker, UUID]:
     task = Task.create(
         task_id=uuid4(),
@@ -81,6 +83,8 @@ def seed_running_execution(
         capability_requirements=frozenset({"code", "python"}),
         pinned_worker_id=worker.id,
         not_before=NOW,
+        adapter_preferences=adapter_preferences,
+        adapter_forbidden=adapter_forbidden,
     )
     with SqlAlchemyUnitOfWork(database) as uow:
         uow.tasks.add(task)
@@ -143,6 +147,8 @@ def test_reconciler_expires_lease_and_queues_bounded_retry(
         workspace_id,
         max_attempts=3,
         worker_item_id=uuid4(),
+        adapter_preferences=("opencode", "codex"),
+        adapter_forbidden=("unsafe",),
     )
     reconcile_now = NOW + timedelta(seconds=31)
     reconciler = Reconciler(
@@ -177,6 +183,8 @@ def test_reconciler_expires_lease_and_queues_bounded_retry(
     assert executions[1].status == "queued"
     assert executions[1].attempt == 2
     assert executions[1].worker_item_id == executions[0].worker_item_id
+    assert executions[1].adapter_preferences == ["opencode", "codex"]
+    assert executions[1].adapter_forbidden == ["unsafe"]
     assert executions[1].not_before == reconcile_now + timedelta(seconds=2)
     assert lease is not None
     assert lease.status == "expired"
