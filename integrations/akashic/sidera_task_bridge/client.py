@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Literal, NoReturn, cast
-from uuid import UUID
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Literal, NoReturn, Protocol, cast
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import TaskBridgeConfig
 from .contracts import JsonValue
+from .state import (
+    BridgeStateStore,
+    OutboundCommand,
+    StateConflict,
+    same_logical_request,
+)
 
 
 class CommandEnvelope(BaseModel):
@@ -23,6 +31,18 @@ class CommandEnvelope(BaseModel):
     expected_version: int | None
     idempotency_key: str
     correlation_id: UUID
+    payload: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class CommandIntent(BaseModel):
+    """Business fields used to create a new command envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_type: str
+    target_type: str
+    target_id: UUID | None
+    expected_version: int | None
     payload: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -58,6 +78,28 @@ class CommandStatus(BaseModel):
     status: Literal["pending", "applied", "rejected"]
     result: CommandResponse | None = None
     error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchResult:
+    """Safe local result of a persisted command dispatch."""
+
+    status: Literal["applied", "rejected", "result_unknown", "unavailable"]
+    command_id: UUID
+    error_code: str | None = None
+    execution: CommandExecution | CommandStatus | None = None
+
+
+class CommandClient(Protocol):
+    def build_request_json(self, envelope: CommandEnvelope) -> dict[str, JsonValue]: ...
+
+    def build_intent_request_json(self, intent: CommandIntent) -> dict[str, JsonValue]: ...
+
+    async def execute_command_json(
+        self, request_json: dict[str, JsonValue], command_id: UUID
+    ) -> CommandExecution: ...
+
+    async def get_command_status(self, command_id: UUID) -> CommandStatus: ...
 
 
 class TransportUnavailable(RuntimeError):
@@ -106,23 +148,44 @@ class ControlPlaneClient:
     async def execute_command(self, envelope: CommandEnvelope) -> CommandExecution:
         """Submit one exact command envelope without retrying it."""
 
-        body = envelope.model_dump(mode="json")
+        return await self.execute_command_json(
+            self.build_request_json(envelope), envelope.command_id
+        )
+
+    def build_request_json(self, envelope: CommandEnvelope) -> dict[str, JsonValue]:
+        body = cast(dict[str, JsonValue], envelope.model_dump(mode="json"))
         body["workspace_id"] = str(self._config.workspace_id)
         body["actor"] = {
             "type": self._config.actor_type,
             "id": self._config.actor_id,
         }
+        return body
+
+    def build_intent_request_json(
+        self, intent: CommandIntent
+    ) -> dict[str, JsonValue]:
+        body = cast(dict[str, JsonValue], intent.model_dump(mode="json"))
+        body["workspace_id"] = str(self._config.workspace_id)
+        body["actor"] = {
+            "type": self._config.actor_type,
+            "id": self._config.actor_id,
+        }
+        return body
+
+    async def execute_command_json(
+        self, request_json: dict[str, JsonValue], command_id: UUID
+    ) -> CommandExecution:
         response = await self._request(
             "POST",
             "/api/v1/commands",
-            json=body,
-            command_id=envelope.command_id,
+            json=request_json,
+            command_id=command_id,
         )
         if response.status_code in {200, 201}:
             result = self._parse_model(response, CommandResponse)
             return CommandExecution(
                 status="applied",
-                command_id=envelope.command_id,
+                command_id=command_id,
                 result=result,
             )
         self._raise_rejected(response)
@@ -255,4 +318,243 @@ class ControlPlaneClient:
         raise ControlPlaneRejected(
             error["code"],
             cast(Mapping[str, JsonValue], details),
+        )
+
+
+class CommandDispatcher:
+    """Persist, dispatch, and recover one control-plane command at a time."""
+
+    def __init__(
+        self,
+        client: CommandClient,
+        state: BridgeStateStore,
+        *,
+        uuid_factory: Callable[[], UUID] = uuid4,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._client = client
+        self._state = state
+        self._uuid_factory = uuid_factory
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def new_envelope(self, intent: CommandIntent) -> CommandEnvelope:
+        command_id = self._uuid_factory()
+        return CommandEnvelope(
+            command_id=command_id,
+            command_type=intent.command_type,
+            target_type=intent.target_type,
+            target_id=intent.target_id,
+            expected_version=intent.expected_version,
+            idempotency_key=f"sidera:{intent.command_type}:{command_id}",
+            correlation_id=command_id,
+            payload=intent.payload.copy(),
+        )
+
+    async def execute(
+        self,
+        resource_lock_key: str,
+        command: CommandEnvelope | CommandIntent,
+    ) -> DispatchResult:
+        if isinstance(command, CommandIntent):
+            existing, matches = await self._find_intent(resource_lock_key, command)
+            if existing is not None:
+                if matches:
+                    return await self._recover_existing(existing)
+                return self._busy(existing)
+            command = self.new_envelope(command)
+
+        outbound = self._to_outbound(resource_lock_key, command)
+        try:
+            existing, disposition = await self._state.reserve_or_recover(outbound)
+        except StateConflict:
+            return DispatchResult(
+                status="rejected",
+                command_id=command.command_id,
+                error_code="command_identity_conflict",
+            )
+        if disposition == "busy":
+            return self._busy(existing)
+        if disposition == "recovered":
+            return await self._recover_existing(existing)
+        return await self._send(existing)
+
+    async def recover_all(self) -> tuple[DispatchResult, ...]:
+        """Recover oldest unresolved commands until the dependency is unavailable."""
+
+        results: list[DispatchResult] = []
+        for command in await self._state.list_unresolved():
+            try:
+                status = await self._client.get_command_status(command.command_id)
+            except TransportUnavailable:
+                results.append(self._unavailable(command.command_id))
+                break
+            except ControlPlaneRejected as exc:
+                results.append(
+                    DispatchResult(
+                        status="result_unknown",
+                        command_id=command.command_id,
+                        error_code=exc.code,
+                    )
+                )
+                continue
+            if status.status == "pending":
+                results.append(await self._send(command))
+            else:
+                results.append(await self._settle_status(status))
+        return tuple(results)
+
+    async def _find_intent(
+        self, resource_lock_key: str, intent: CommandIntent
+    ) -> tuple[OutboundCommand | None, bool]:
+        request_json = self._client.build_intent_request_json(intent)
+        for existing in await self._state.list_resource(resource_lock_key):
+            if same_logical_request(existing.request_json, request_json):
+                return existing, True
+            return existing, False
+        return None, False
+
+    def _to_outbound(
+        self, resource_lock_key: str, command: CommandEnvelope
+    ) -> OutboundCommand:
+        now = self._clock()
+        return OutboundCommand(
+            command_id=command.command_id,
+            resource_lock_key=resource_lock_key,
+            request_json=self._client.build_request_json(command),
+            created_at=now,
+            last_attempted_at=now,
+            attempt_count=0,
+        )
+
+    async def _recover_existing(self, command: OutboundCommand) -> DispatchResult:
+        try:
+            status = await self._client.get_command_status(command.command_id)
+        except TransportUnavailable:
+            return self._unavailable(command.command_id)
+        except ControlPlaneRejected as exc:
+            return DispatchResult(
+                status="result_unknown",
+                command_id=command.command_id,
+                error_code=exc.code,
+            )
+        if status.status == "pending":
+            return await self._send(command)
+        return await self._settle_status(status)
+
+    async def _send(self, command: OutboundCommand) -> DispatchResult:
+        await self._state.record_attempt(command.command_id, at=self._clock())
+        stored = await self._state.get_unresolved(command.command_id)
+        if stored is None:
+            return DispatchResult(
+                status="result_unknown",
+                command_id=command.command_id,
+                error_code="command_state_missing",
+            )
+        try:
+            execution = await self._client.execute_command_json(
+                stored.request_json, stored.command_id
+            )
+        except CommandResultUnknown:
+            return await self._resolve_unknown(stored.command_id)
+        except TransportUnavailable:
+            return self._unavailable(stored.command_id)
+        except ControlPlaneRejected as exc:
+            await self._state.settle(
+                stored.command_id,
+                outcome="rejected",
+                error_code=exc.code,
+            )
+            return DispatchResult(
+                status="rejected",
+                command_id=stored.command_id,
+                error_code=exc.code,
+            )
+
+        if execution.status == "applied":
+            await self._state.settle(
+                stored.command_id,
+                outcome="applied",
+                error_code=None,
+            )
+            return DispatchResult(
+                status="applied",
+                command_id=stored.command_id,
+                execution=execution,
+            )
+        error_code = execution.error_code or "command_rejected"
+        await self._state.settle(
+            stored.command_id,
+            outcome="rejected",
+            error_code=error_code,
+        )
+        return DispatchResult(
+            status="rejected",
+            command_id=stored.command_id,
+            error_code=error_code,
+            execution=execution,
+        )
+
+    async def _resolve_unknown(self, command_id: UUID) -> DispatchResult:
+        try:
+            status = await self._client.get_command_status(command_id)
+        except TransportUnavailable:
+            return DispatchResult(
+                status="result_unknown",
+                command_id=command_id,
+                error_code="command_status_unavailable",
+            )
+        except ControlPlaneRejected as exc:
+            return DispatchResult(
+                status="result_unknown",
+                command_id=command_id,
+                error_code=exc.code,
+            )
+        if status.status == "pending":
+            return DispatchResult(
+                status="result_unknown",
+                command_id=command_id,
+                error_code="command_pending",
+                execution=status,
+            )
+        return await self._settle_status(status)
+
+    async def _settle_status(self, status: CommandStatus) -> DispatchResult:
+        if status.status == "applied":
+            await self._state.settle(
+                status.command_id,
+                outcome="applied",
+                error_code=None,
+            )
+            return DispatchResult(
+                status="applied",
+                command_id=status.command_id,
+                execution=status,
+            )
+        error_code = status.error_code or "command_rejected"
+        await self._state.settle(
+            status.command_id,
+            outcome="rejected",
+            error_code=error_code,
+        )
+        return DispatchResult(
+            status="rejected",
+            command_id=status.command_id,
+            error_code=error_code,
+            execution=status,
+        )
+
+    @staticmethod
+    def _busy(command: OutboundCommand) -> DispatchResult:
+        return DispatchResult(
+            status="result_unknown",
+            command_id=command.command_id,
+            error_code="resource_busy",
+        )
+
+    @staticmethod
+    def _unavailable(command_id: UUID) -> DispatchResult:
+        return DispatchResult(
+            status="unavailable",
+            command_id=command_id,
+            error_code="service_unavailable",
         )

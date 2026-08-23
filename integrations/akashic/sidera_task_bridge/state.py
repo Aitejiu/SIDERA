@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .contracts import JsonValue
 
 STATE_KEY = "sidera_task_bridge_state_v1"
+IDENTITY_FIELDS = frozenset({"command_id", "correlation_id", "idempotency_key"})
+type ReserveDisposition = Literal["new", "recovered", "busy"]
 
 
 class KeyValueStore(Protocol):
@@ -88,6 +90,20 @@ class BridgeStateStore:
                 )
             )
 
+    async def list_resource(self, resource_lock_key: str) -> tuple[OutboundCommand, ...]:
+        async with self._lock:
+            state = self._load()
+            return tuple(
+                sorted(
+                    (
+                        item
+                        for item in state.unresolved_commands.values()
+                        if item.resource_lock_key == resource_lock_key
+                    ),
+                    key=lambda item: (item.created_at, str(item.command_id)),
+                )
+            )
+
     async def reserve(self, command: OutboundCommand) -> OutboundCommand:
         """Persist an exact command before the caller sends it externally."""
 
@@ -102,6 +118,34 @@ class BridgeStateStore:
             state.unresolved_commands[key] = command
             self._save(state)
             return command
+
+    async def reserve_or_recover(
+        self, command: OutboundCommand
+    ) -> tuple[OutboundCommand, ReserveDisposition]:
+        """Atomically reserve a command or identify an existing resource lock."""
+
+        async with self._lock:
+            state = self._load()
+            key = str(command.command_id)
+            existing = state.unresolved_commands.get(key)
+            if existing is not None:
+                if (
+                    existing.resource_lock_key != command.resource_lock_key
+                    or existing.request_json != command.request_json
+                ):
+                    raise StateConflict("command identity already has different state")
+                return existing, "recovered"
+
+            for existing in state.unresolved_commands.values():
+                if existing.resource_lock_key != command.resource_lock_key:
+                    continue
+                if same_logical_request(existing.request_json, command.request_json):
+                    return existing, "recovered"
+                return existing, "busy"
+
+            state.unresolved_commands[key] = command
+            self._save(state)
+            return command, "new"
 
     async def record_attempt(self, command_id: UUID, *, at: datetime) -> None:
         async with self._lock:
@@ -163,3 +207,15 @@ class BridgeStateStore:
 
     def _save(self, state: BridgeState) -> None:
         self._kv_store.set(STATE_KEY, state.model_dump(mode="json"))
+
+
+def same_logical_request(
+    left: dict[str, JsonValue], right: dict[str, JsonValue]
+) -> bool:
+    """Compare command intent while ignoring generated transport identities."""
+
+    return {
+        key: value for key, value in left.items() if key not in IDENTITY_FIELDS
+    } == {
+        key: value for key, value in right.items() if key not in IDENTITY_FIELDS
+    }
