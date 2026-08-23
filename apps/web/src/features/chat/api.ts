@@ -23,6 +23,18 @@ export class MainAgentApiProblem extends Error {
   }
 }
 
+export function mainAgentHealthQueryKey(workspaceId: string) {
+  return ["main-agent", workspaceId, "health"] as const;
+}
+
+export function mainAgentThreadsQueryKey(workspaceId: string) {
+  return ["main-agent", workspaceId, "threads"] as const;
+}
+
+export function mainAgentThreadQueryKey(workspaceId: string, threadId: string) {
+  return ["main-agent", workspaceId, "thread", threadId] as const;
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -69,8 +81,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export function getHealth(): Promise<MainAgentHealth> {
-  return requestJson<MainAgentHealth>("/health");
+export function getHealth(signal?: AbortSignal): Promise<MainAgentHealth> {
+  return requestJson<MainAgentHealth>("/health", requestOptions(signal));
 }
 
 export function getCapabilities(): Promise<MainAgentCapabilities> {
@@ -80,12 +92,13 @@ export function getCapabilities(): Promise<MainAgentCapabilities> {
 export function listThreads(
   cursor?: string,
   limit = 50,
+  signal?: AbortSignal,
 ): Promise<MainAgentThreadList> {
   const query = new URLSearchParams({ limit: String(limit) });
   if (cursor !== undefined) {
     query.set("cursor", cursor);
   }
-  return requestJson<MainAgentThreadList>(`/threads?${query.toString()}`);
+  return requestJson<MainAgentThreadList>(`/threads?${query.toString()}`, requestOptions(signal));
 }
 
 export function createThread(
@@ -97,9 +110,10 @@ export function createThread(
   });
 }
 
-export function getThread(threadId: string): Promise<MainAgentThread> {
+export function getThread(threadId: string, signal?: AbortSignal): Promise<MainAgentThread> {
   return requestJson<MainAgentThread>(
     `/threads/${encodeURIComponent(threadId)}`,
+    requestOptions(signal),
   );
 }
 
@@ -113,10 +127,19 @@ export function startTurn(threadId: string, input: string): Promise<MainAgentTur
   );
 }
 
-export function getTurn(threadId: string, turnId: string): Promise<MainAgentTurn> {
+export function getTurn(
+  threadId: string,
+  turnId: string,
+  signal?: AbortSignal,
+): Promise<MainAgentTurn> {
   return requestJson<MainAgentTurn>(
     `/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}`,
+    requestOptions(signal),
   );
+}
+
+function requestOptions(signal: AbortSignal | undefined): RequestInit {
+  return signal === undefined ? {} : { signal };
 }
 
 export function interruptTurn(

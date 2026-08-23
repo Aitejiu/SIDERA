@@ -30,19 +30,6 @@ class StartTurnRequest(ApiModel):
     input: str = Field(min_length=1, max_length=100_000)
 
 
-class ThreadResponse(ApiModel):
-    id: str
-    title: str
-    created_at: datetime = Field(alias="createdAt")
-    updated_at: datetime = Field(alias="updatedAt")
-    context_refs: tuple[str, ...] = Field(alias="contextRefs")
-
-
-class ThreadListResponse(ApiModel):
-    data: tuple[ThreadResponse, ...]
-    next_cursor: str | None = Field(alias="nextCursor")
-
-
 class TurnItemResponse(ApiModel):
     id: str
     type: Literal["userMessage", "assistantMessage", "toolCall", "error"]
@@ -69,6 +56,20 @@ class TurnResponse(ApiModel):
     error: dict[str, Any] | None
     stream_available: bool = Field(alias="streamAvailable")
     recovery_mode: Literal["poll"] | None = Field(alias="recoveryMode")
+
+
+class ThreadResponse(ApiModel):
+    id: str
+    title: str
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+    context_refs: tuple[str, ...] = Field(alias="contextRefs")
+    turns: tuple[TurnResponse, ...] = ()
+
+
+class ThreadListResponse(ApiModel):
+    data: tuple[ThreadResponse, ...]
+    next_cursor: str | None = Field(alias="nextCursor")
 
 
 class CapabilitiesResponse(ApiModel):

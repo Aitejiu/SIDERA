@@ -97,6 +97,7 @@ class MainAgentThread:
     created_at: datetime
     updated_at: datetime
     context_refs: tuple[str, ...]
+    turns: tuple[MainAgentTurn, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_id(self.id, "thread id")
@@ -108,6 +109,10 @@ class MainAgentThread:
             raise TypeError("thread context_refs must be a tuple")
         for context_ref in self.context_refs:
             _validate_id(context_ref, "thread context ref")
+        if not isinstance(self.turns, tuple) or not all(
+            isinstance(turn, MainAgentTurn) for turn in self.turns
+        ):
+            raise ValueError("thread turns must be a tuple of MainAgentTurn")
 
 
 @dataclass(frozen=True, slots=True)

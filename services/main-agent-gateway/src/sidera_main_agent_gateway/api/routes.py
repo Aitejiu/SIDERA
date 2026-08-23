@@ -44,13 +44,17 @@ def get_relays(request: Request) -> TurnRelayRegistry:
     return cast(TurnRelayRegistry, request.app.state.turn_relays)
 
 
-def _thread_response(thread: MainAgentThread) -> ThreadResponse:
+def _thread_response(
+    thread: MainAgentThread,
+    relays: TurnRelayRegistry,
+) -> ThreadResponse:
     return ThreadResponse(
         id=thread.id,
         title=thread.title,
         createdAt=thread.created_at,
         updatedAt=thread.updated_at,
         contextRefs=thread.context_refs,
+        turns=tuple(_turn_response(turn, relays) for turn in thread.turns),
     )
 
 
@@ -98,12 +102,13 @@ async def capabilities() -> CapabilitiesResponse:
 @router.get("/threads", response_model=ThreadListResponse)
 async def list_threads(
     adapter: Annotated[MainAgentAdapter, Depends(get_adapter)],
+    relays: Annotated[TurnRelayRegistry, Depends(get_relays)],
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> ThreadListResponse:
     page: MainAgentThreadPage = await adapter.list_threads(cursor=cursor, limit=limit)
     return ThreadListResponse(
-        data=tuple(_thread_response(thread) for thread in page.threads),
+        data=tuple(_thread_response(thread, relays) for thread in page.threads),
         nextCursor=page.next_cursor,
     )
 
@@ -112,20 +117,22 @@ async def list_threads(
 async def create_thread(
     payload: CreateThreadRequest,
     adapter: Annotated[MainAgentAdapter, Depends(get_adapter)],
+    relays: Annotated[TurnRelayRegistry, Depends(get_relays)],
 ) -> ThreadResponse:
     thread = await adapter.create_thread(
         title=payload.title or "",
         context_refs=payload.context_refs,
     )
-    return _thread_response(thread)
+    return _thread_response(thread, relays)
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadResponse)
 async def read_thread(
     thread_id: str,
     adapter: Annotated[MainAgentAdapter, Depends(get_adapter)],
+    relays: Annotated[TurnRelayRegistry, Depends(get_relays)],
 ) -> ThreadResponse:
-    return _thread_response(await adapter.read_thread(thread_id))
+    return _thread_response(await adapter.read_thread(thread_id), relays)
 
 
 @router.post("/threads/{thread_id}/turns", response_model=TurnResponse, status_code=202)

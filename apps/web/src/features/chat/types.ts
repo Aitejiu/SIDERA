@@ -20,6 +20,7 @@ export interface MainAgentThread {
   createdAt: string;
   updatedAt: string;
   contextRefs: string[];
+  turns: MainAgentTurn[];
 }
 
 export interface MainAgentThreadList {

@@ -212,12 +212,17 @@ class AkashicAdapter(MainAgentAdapter):
             context_refs = _normalize_context_refs(raw_refs)
         except (TypeError, ValueError) as exc:
             raise ProviderProtocolError(str(exc)) from exc
+        raw_turns = record.get("turns", [])
+        if not isinstance(raw_turns, list):
+            raise ProviderProtocolError("thread turns must be an array")
+        turns = tuple([await self._map_turn(raw_turn) for raw_turn in raw_turns])
         return MainAgentThread(
             id=thread_id,
             title=title,
             created_at=created_at,
             updated_at=updated_at,
             context_refs=context_refs,
+            turns=turns,
         )
 
     async def health(self) -> Mapping[str, JsonValue]:
@@ -283,7 +288,7 @@ class AkashicAdapter(MainAgentAdapter):
 
     async def read_thread(self, thread_id: str) -> MainAgentThread:
         raw_thread = await self._read_with_reconnect(
-            lambda client: client.thread_read(thread_id, include_turns=False)
+            lambda client: client.thread_read(thread_id, include_turns=True)
         )
         return await self._map_thread(raw_thread)
 

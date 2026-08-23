@@ -1,13 +1,373 @@
+import { CircleAlert, CircleCheck, Link2, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+import {
+  createThread,
+  getHealth,
+  getThread,
+  getTurn,
+  interruptTurn,
+  listThreads,
+  mainAgentHealthQueryKey,
+  mainAgentThreadQueryKey,
+  mainAgentThreadsQueryKey,
+  startTurn,
+} from "./api";
+import { ChatComposer } from "./ChatComposer";
+import { ChatThreadList } from "./ChatThreadList";
+import { ChatTranscript, getTurnInput } from "./ChatTranscript";
+import { subscribeTurnEvents } from "./turnStream";
+import type { JsonValue, MainAgentItem, MainAgentTurn } from "./types";
+
+const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
+const NEW_THREAD_SCOPE = "__new__";
+const ACTIVE_STATUSES = new Set<MainAgentTurn["status"]>(["queued", "in_progress"]);
+const TERMINAL_EVENT_NAMES = new Set(["completed", "failed", "interrupted", "cancelled"]);
+
+type ScopedTurnMap = Record<string, Record<string, MainAgentTurn>>;
+type ScopedInputMap = Record<string, Record<string, string>>;
+
 export function ChatPage() {
+  const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
+  const threadId = useParams<{ threadId?: string }>().threadId;
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const scope = threadId ?? NEW_THREAD_SCOPE;
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [transientByScope, setTransientByScope] = useState<ScopedTurnMap>({});
+  const [turnInputsByScope, setTurnInputsByScope] = useState<ScopedInputMap>({});
+  const [pollingTurn, setPollingTurn] = useState<{ threadId: string; turnId: string } | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const draft = drafts[scope] ?? "";
+  const transientTurns = useMemo(
+    () => transientByScope[scope] ?? {},
+    [scope, transientByScope],
+  );
+  const turnInputs = useMemo(
+    () => turnInputsByScope[scope] ?? {},
+    [scope, turnInputsByScope],
+  );
+
+  const healthQuery = useQuery({
+    queryKey: mainAgentHealthQueryKey(workspaceId),
+    queryFn: ({ signal }) => getHealth(signal),
+    enabled: workspaceId.length > 0,
+    retry: false,
+  });
+  const threadsQuery = useQuery({
+    queryKey: mainAgentThreadsQueryKey(workspaceId),
+    queryFn: ({ signal }) => listThreads(undefined, 50, signal),
+    enabled: workspaceId.length > 0,
+  });
+  const threadQuery = useQuery({
+    queryKey: mainAgentThreadQueryKey(workspaceId, threadId ?? ""),
+    queryFn: ({ signal }) => getThread(threadId ?? "", signal),
+    enabled: threadId !== undefined,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: () => createThread({ contextRefs: [], title: "新对话" }),
+    onSuccess: (thread) => {
+      queryClient.setQueryData(mainAgentThreadQueryKey(workspaceId, thread.id), thread);
+      void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
+      navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(thread.id)}`);
+    },
+    onError: () => setErrorMessage("无法创建对话，请稍后重试。"),
+  });
+
+  const selectedThread = threadQuery.data;
+  const turns = useMemo(
+    () => mergeTurns(selectedThread?.turns ?? [], transientTurns),
+    [selectedThread?.turns, transientTurns],
+  );
+  const activeTurn = useMemo(
+    () => [...turns].reverse().find((turn) => ACTIVE_STATUSES.has(turn.status)),
+    [turns],
+  );
+
+  const applyTurn = useCallback((turn: MainAgentTurn) => {
+    setTransientByScope((current) => ({
+      ...current,
+      [turn.threadId]: { ...current[turn.threadId], [turn.id]: turn },
+    }));
+    if (!ACTIVE_STATUSES.has(turn.status)) {
+      void queryClient.invalidateQueries({
+        queryKey: mainAgentThreadQueryKey(workspaceId, turn.threadId),
+      });
+    }
+  }, [queryClient, workspaceId]);
+
+  useEffect(() => {
+    if (threadId === undefined || activeTurn === undefined) {
+      return;
+    }
+    if (!activeTurn.streamAvailable) {
+      return;
+    }
+    if (typeof globalThis.EventSource !== "function") {
+      return;
+    }
+    const subscription = subscribeTurnEvents(threadId, activeTurn.id, {
+      onEvent: (event) => {
+        if (event.event === "item") {
+          const item = readItem(event.data.item);
+          if (item !== null) {
+            setTransientByScope((current) => {
+              const previous = current[threadId]?.[activeTurn.id] ?? activeTurn;
+              const items = previous.items.some((candidate) => candidate.id === item.id)
+                ? previous.items.map((candidate) => candidate.id === item.id ? item : candidate)
+                : [...previous.items, item];
+              return {
+                ...current,
+                [threadId]: { ...current[threadId], [activeTurn.id]: { ...previous, items } },
+              };
+            });
+          }
+        }
+        if (TERMINAL_EVENT_NAMES.has(event.event)) {
+          void refreshTurn(threadId, activeTurn.id, applyTurn);
+        }
+      },
+      onResync: () => setPollingTurn({ threadId, turnId: activeTurn.id }),
+      onPollingRequired: () => setPollingTurn({ threadId, turnId: activeTurn.id }),
+    });
+    return () => subscription.close();
+  }, [activeTurn, applyTurn, threadId]);
+
+  const pollingTarget = useMemo(() => {
+    if (threadId === undefined) return null;
+    if (pollingTurn?.threadId === threadId) return pollingTurn;
+    if (activeTurn !== undefined && !activeTurn.streamAvailable) {
+      return { threadId, turnId: activeTurn.id };
+    }
+    return null;
+  }, [activeTurn, pollingTurn, threadId]);
+
+  useEffect(() => {
+    if (pollingTarget === null) {
+      return;
+    }
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const turn = await getTurn(pollingTarget.threadId, pollingTarget.turnId);
+        if (cancelled) return;
+        applyTurn(turn);
+        if (ACTIVE_STATUSES.has(turn.status)) {
+          timer = window.setTimeout(() => void poll(), 1000);
+        } else {
+          if (pollingTurn?.threadId === pollingTarget.threadId
+            && pollingTurn.turnId === pollingTarget.turnId) {
+            setPollingTurn(null);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          timer = window.setTimeout(() => void poll(), 1500);
+        }
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [applyTurn, pollingTarget, pollingTurn]);
+
+  const selectThread = (nextThreadId: string) => {
+    navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(nextThreadId)}`);
+  };
+
+  const send = async (input: string) => {
+    if (threadId === undefined || activeTurn !== undefined || input.trim() === "") return;
+    setErrorMessage(null);
+    try {
+      const turn = await startTurn(threadId, input.trim());
+      setTurnInputsByScope((current) => ({
+        ...current,
+        [threadId]: { ...current[threadId], [turn.id]: input.trim() },
+      }));
+      applyTurn(turn);
+      setDrafts((current) => ({ ...current, [scope]: "" }));
+      if (!turn.streamAvailable) {
+        setPollingTurn({ threadId, turnId: turn.id });
+      }
+    } catch {
+      setErrorMessage("消息未发送，输入内容已保留。请检查 Gateway 后重试。");
+    }
+  };
+
+  const retry = async (turnId: string) => {
+    if (threadId === undefined || activeTurn !== undefined) return;
+    const sourceTurn = turns.find((turn) => turn.id === turnId);
+    const input = turnInputs[turnId] ?? (sourceTurn === undefined ? null : getTurnInput(sourceTurn));
+    if (input === null || input === undefined) {
+      setErrorMessage("这轮对话没有可重试的原始输入。");
+      return;
+    }
+    await send(input);
+  };
+
+  const interrupt = async () => {
+    if (threadId === undefined || activeTurn === undefined) return;
+    setErrorMessage(null);
+    try {
+      const turn = await interruptTurn(threadId, activeTurn.id);
+      applyTurn(turn);
+      setPollingTurn(null);
+    } catch {
+      setErrorMessage("停止请求未完成，请刷新当前对话确认状态。");
+    }
+  };
+
+  const unavailable = healthQuery.data?.provider === "unavailable";
+  const pageTitle = selectedThread?.title ?? "Main Agent";
+
   return (
-    <section className="workspace-page" aria-labelledby="chat-page-title">
+    <section className="chat-page" aria-labelledby="chat-page-title">
       <div className="breadcrumb">工作区 / 聊天</div>
-      <div className="workspace-page__heading">
+      <div className="chat-page__heading">
         <div>
           <span className="eyebrow">MAIN AGENT / CHAT</span>
-          <h1 id="chat-page-title">Main Agent</h1>
+          <h1 id="chat-page-title">{pageTitle}</h1>
         </div>
+        <div className="chat-page__status">
+          {unavailable ? <CircleAlert size={15} aria-hidden="true" /> : <CircleCheck size={15} aria-hidden="true" />}
+          <span>{unavailable ? "Gateway offline" : "Gateway ready"}</span>
+        </div>
+      </div>
+
+      <div className="chat-workspace">
+        <ChatThreadList
+          threads={threadsQuery.data?.data ?? []}
+          activeThreadId={threadId}
+          isLoading={threadsQuery.isPending}
+          isError={threadsQuery.isError}
+          onSelect={selectThread}
+          onCreate={() => createMutation.mutate()}
+          onRetry={() => void threadsQuery.refetch()}
+        />
+
+        <main className="chat-main" aria-label="Main Agent 对话工作面">
+          {unavailable ? (
+            <div className="chat-main__offline" role="alert">
+              <CircleAlert size={19} aria-hidden="true" />
+              <strong>Main Agent 暂不可用</strong>
+              <span>任务控制面仍可继续查看。</span>
+            </div>
+          ) : threadId === undefined ? (
+            <div className="chat-main__empty">
+              <span className="eyebrow">NO THREAD SELECTED</span>
+              <h2>选择一个对话</h2>
+              <button className="quiet-button" type="button" onClick={() => createMutation.mutate()}>
+                新建对话
+              </button>
+            </div>
+          ) : threadQuery.isPending ? (
+            <div className="chat-main__state">正在读取对话内容</div>
+          ) : threadQuery.isError ? (
+            <div className="chat-main__state chat-main__state--error" role="alert">
+              <strong>无法读取这段对话</strong>
+              <button className="quiet-button" type="button" onClick={() => void threadQuery.refetch()}>
+                <RefreshCw size={14} aria-hidden="true" />重试读取
+              </button>
+            </div>
+          ) : (
+            <>
+              <ChatTranscript turns={turns} onRetry={(turnId) => void retry(turnId)} />
+              <ChatComposer
+                value={draft}
+                active={activeTurn !== undefined}
+                disabled={threadQuery.isError || createMutation.isPending}
+                errorMessage={errorMessage}
+                onChange={(value) => {
+                  setDrafts((current) => ({ ...current, [scope]: value }));
+                  setErrorMessage(null);
+                }}
+                onSend={() => void send(draft)}
+                onInterrupt={() => void interrupt()}
+              />
+            </>
+          )}
+        </main>
+
+        <aside className="chat-context-panel" aria-label="对话上下文">
+          <div className="chat-pane-heading">
+            <div>
+              <span className="eyebrow">CONTEXT</span>
+              <h2>关联对象</h2>
+            </div>
+          </div>
+          <div className="chat-context-panel__body">
+            {selectedThread === undefined ? (
+              <span className="chat-context-panel__muted">选择对话后显示上下文</span>
+            ) : (
+              <>
+                <div className="chat-context-fact">
+                  <span className="eyebrow">THREAD</span>
+                  <strong>{selectedThread.title}</strong>
+                  <span className="mono-label">{selectedThread.id}</span>
+                </div>
+                <div className="chat-context-fact">
+                  <span className="eyebrow">CONTEXT REFS</span>
+                  {selectedThread.contextRefs.length === 0 ? (
+                    <span className="chat-context-panel__muted">无显式关联</span>
+                  ) : (
+                    <div className="chat-context-refs">
+                      {selectedThread.contextRefs.map((ref) => <code key={ref}>{ref}</code>)}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <Link className="chat-context-panel__task-link" to={`/workspaces/${workspaceId}/tasks`}>
+            <Link2 size={14} aria-hidden="true" />
+            <span>{unavailable ? "返回任务" : "打开任务控制面"}</span>
+          </Link>
+        </aside>
       </div>
     </section>
   );
+}
+
+async function refreshTurn(
+  threadId: string,
+  turnId: string,
+  applyTurn: (turn: MainAgentTurn) => void,
+): Promise<void> {
+  try {
+    applyTurn(await getTurn(threadId, turnId));
+  } catch {
+    // The next query refresh or the user retry owns recovery after a terminal stream error.
+  }
+}
+
+function mergeTurns(
+  persisted: MainAgentTurn[],
+  transient: Record<string, MainAgentTurn>,
+): MainAgentTurn[] {
+  const merged = new Map(persisted.map((turn) => [turn.id, turn]));
+  for (const turn of Object.values(transient)) {
+    merged.set(turn.id, turn);
+  }
+  return [...merged.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+function readItem(value: JsonValue | undefined): MainAgentItem | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.id !== "string" || typeof value.type !== "string" || !isRecord(value.data)) return null;
+  if (!isItemType(value.type)) return null;
+  return { id: value.id, type: value.type, data: value.data as Record<string, JsonValue> };
+}
+
+function isItemType(value: string): value is MainAgentItem["type"] {
+  return value === "userMessage" || value === "assistantMessage" || value === "toolCall" || value === "error";
+}
+
+function isRecord(value: JsonValue | undefined): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

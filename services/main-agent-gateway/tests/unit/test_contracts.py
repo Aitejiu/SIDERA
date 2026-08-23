@@ -54,9 +54,18 @@ def test_thread_and_turn_models_are_immutable_and_provider_neutral() -> None:
         usage={"inputTokens": 3},
         error=None,
     )
+    detailed_thread = MainAgentThread(
+        id=thread.id,
+        title=thread.title,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+        context_refs=thread.context_refs,
+        turns=(turn,),
+    )
 
     assert thread.context_refs == ("task:123",)
     assert turn.items == (item,)
+    assert detailed_thread.turns == (turn,)
     with pytest.raises(AttributeError):
         thread.title = "changed"  # type: ignore[misc]
 

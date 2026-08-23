@@ -38,6 +38,18 @@ def thread() -> MainAgentThread:
     )
 
 
+def detailed_thread() -> MainAgentThread:
+    base = thread()
+    return MainAgentThread(
+        id=base.id,
+        title=base.title,
+        created_at=base.created_at,
+        updated_at=base.updated_at,
+        context_refs=base.context_refs,
+        turns=(turn(),),
+    )
+
+
 def turn(status: str = "completed") -> MainAgentTurn:
     return MainAgentTurn(
         id="turn-1",
@@ -84,6 +96,7 @@ class FakeAdapter:
         self.health_error: BaseException | None = None
         self.closed = False
         self.created: list[tuple[str, tuple[str, ...]]] = []
+        self.thread_detail = thread()
 
     async def health(self) -> Mapping[str, JsonValue]:
         if self.health_error is not None:
@@ -113,7 +126,7 @@ class FakeAdapter:
     async def read_thread(self, thread_id: str) -> MainAgentThread:
         if self.read_error is not None:
             raise self.read_error
-        return thread()
+        return self.thread_detail
 
     async def start_turn(
         self,
@@ -237,6 +250,19 @@ def test_thread_create_and_turn_start_use_expected_status_codes(
     assert started.status_code == 202
     assert adapter.created == [("Web chat", ("task:1",))]
     assert started.json()["id"] == "turn-1"
+
+
+def test_thread_read_returns_persisted_turns(
+    client: tuple[TestClient, FakeAdapter],
+) -> None:
+    test_client, adapter = client
+    adapter.thread_detail = detailed_thread()
+
+    response = test_client.get("/main-agent/v1/threads/thread-1")
+
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["id"] == "turn-1"
+    assert response.json()["turns"][0]["streamAvailable"] is False
 
 
 @pytest.mark.parametrize(

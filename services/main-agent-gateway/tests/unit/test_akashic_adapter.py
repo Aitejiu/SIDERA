@@ -125,6 +125,7 @@ class FakeClient:
         self.handles: list[FakeTurnHandle] = []
         self.turn_error: BaseException | None = None
         self.list_error: BaseException | None = None
+        self.thread_read_include_turns: list[bool] = []
         self.closed = False
 
     async def thread_list(self, *, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
@@ -144,6 +145,7 @@ class FakeClient:
         return FakeThread(self, record)
 
     async def thread_read(self, thread_id: str, *, include_turns: bool = True) -> dict[str, Any]:
+        self.thread_read_include_turns.append(include_turns)
         return self.records[thread_id]
 
     async def thread_resume(self, thread_id: str) -> FakeThread:
@@ -235,6 +237,19 @@ async def test_title_falls_back_to_local_created_date() -> None:
     thread = await adapter.read_thread("date-title")
 
     assert thread.title == "对话 2026-08-24"
+
+
+@pytest.mark.asyncio
+async def test_read_maps_persisted_turns_and_requests_thread_details() -> None:
+    record = thread_record("with-turns")
+    record["turns"] = [turn_record("with-turns")]
+    client = FakeClient([record])
+    adapter = AkashicAdapter(settings(), client_factory=factory_for(client))
+
+    thread = await adapter.read_thread("with-turns")
+
+    assert client.thread_read_include_turns == [True]
+    assert [turn.id for turn in thread.turns] == ["turn-1"]
 
 
 @pytest.mark.asyncio
