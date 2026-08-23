@@ -490,11 +490,10 @@ def test_create_execution_readiness_parallel_lineages_and_replay(
         "/api/v1/commands",
         json={
             **first_request,
-            "command_id": str(uuid4()),
             "correlation_id": str(uuid4()),
         },
     )
-    assert replay.status_code == 200
+    assert replay.status_code == 201
     assert replay.json() == first.json()
 
     listed = client.get(
@@ -758,11 +757,10 @@ def test_retry_is_append_only_and_bounded(
         "/api/v1/commands",
         json={
             **retry_request,
-            "command_id": str(uuid4()),
             "correlation_id": str(uuid4()),
         },
     )
-    assert replay.status_code == 200
+    assert replay.status_code == 201
     assert replay.json() == retried.json()
 
     duplicate_attempt = client.post(

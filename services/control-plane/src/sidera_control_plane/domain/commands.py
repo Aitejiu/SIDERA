@@ -30,6 +30,10 @@ class CommandResult:
 @dataclass(frozen=True, slots=True)
 class StoredCommand:
     id: UUID
+    workspace_id: UUID
+    actor_type: str
+    actor_id: str
+    idempotency_key: str
     target_type: str
     request_hash: str
     status: str

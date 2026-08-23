@@ -86,12 +86,26 @@ class FakeCommandRepository:
     def __init__(self) -> None:
         self.records: dict[tuple[str, str], StoredCommand] = {}
 
+    def find_by_id(self, workspace_id, command_id):
+        return next(
+            (
+                stored
+                for stored in self.records.values()
+                if stored.workspace_id == workspace_id and stored.id == command_id
+            ),
+            None,
+        )
+
     def find_duplicate(self, workspace_id, actor_type, actor_id, idempotency_key):
         return self.records.get((actor_id, idempotency_key))
 
     def record_applied(self, envelope, request_hash, result):
         self.records[(envelope.actor_id, envelope.idempotency_key)] = StoredCommand(
             id=envelope.id,
+            workspace_id=envelope.workspace_id,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            idempotency_key=envelope.idempotency_key,
             target_type=envelope.target_type,
             request_hash=request_hash,
             status="applied",
@@ -108,6 +122,10 @@ class FakeCommandRepository:
     def record_rejected(self, envelope, request_hash, error_code, error_result):
         self.records[(envelope.actor_id, envelope.idempotency_key)] = StoredCommand(
             id=envelope.id,
+            workspace_id=envelope.workspace_id,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            idempotency_key=envelope.idempotency_key,
             target_type=envelope.target_type,
             request_hash=request_hash,
             status="rejected",
@@ -240,7 +258,7 @@ def test_acknowledgement_replay_returns_same_result_without_duplicate_event() ->
     envelope = make_envelope()
 
     first = service.handle(envelope)
-    replay = service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+    replay = service.handle(replace(envelope, correlation_id=uuid4()))
 
     assert replay == first
     assert len(uow.events.events) == 1

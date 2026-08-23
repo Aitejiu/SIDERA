@@ -196,7 +196,6 @@ def test_worker_registration_heartbeat_drain_and_version_replay(
 
     replay = {
         **stale_request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     replayed = client.post("/api/v1/commands", json=replay)
@@ -248,12 +247,11 @@ def test_duplicate_worker_registration_replays_without_new_event(
 
     replay = {
         **request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     second = client.post("/api/v1/commands", json=replay)
 
-    assert second.status_code == 200, second.text
+    assert second.status_code == 201, second.text
     assert second.json() == first.json()
     assert row_counts() == {
         "tasks": 0,

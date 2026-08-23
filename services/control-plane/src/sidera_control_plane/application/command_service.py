@@ -15,6 +15,7 @@ from sidera_control_plane.domain.commands import (
     StoredCommand,
 )
 from sidera_control_plane.domain.errors import DomainError, ReplayedDomainError
+from sidera_control_plane.persistence.repositories import ConcurrentCommandCommit
 
 
 class CommandHandler(Protocol):
@@ -46,20 +47,22 @@ class CommandService:
             raise UnsupportedCommand(f"unsupported command: {envelope.command_type}")
 
         request_hash = hash_request(envelope)
+        try:
+            return self._handle_once(envelope, request_hash, handler)
+        except ConcurrentCommandCommit:
+            return self._recover_concurrent(envelope, request_hash)
+
+    def _handle_once(
+        self,
+        envelope: CommandEnvelope,
+        request_hash: str,
+        handler: CommandHandler,
+    ) -> CommandResult:
         rejection: DomainError | None = None
         result: CommandResult | None = None
         with self._uow_factory() as uow:
-            stored = uow.commands.find_duplicate(
-                envelope.workspace_id,
-                envelope.actor_type,
-                envelope.actor_id,
-                envelope.idempotency_key,
-            )
+            stored = _find_existing_command(uow, envelope, request_hash)
             if stored is not None:
-                if not _request_hash_matches(stored, envelope, request_hash):
-                    raise IdempotencyConflict(
-                        "idempotency key was already used for a different request"
-                    )
                 return replay_command(stored)
 
             try:
@@ -87,6 +90,15 @@ class CommandService:
         if result is None:
             raise RuntimeError("command completed without a result")
         return result
+
+    def _recover_concurrent(
+        self, envelope: CommandEnvelope, request_hash: str
+    ) -> CommandResult:
+        with self._uow_factory() as uow:
+            stored = _find_existing_command(uow, envelope, request_hash)
+        if stored is None:
+            raise RuntimeError("concurrent command commit winner was not found")
+        return replay_command(stored)
 
 
 def hash_request(envelope: CommandEnvelope) -> str:
@@ -123,6 +135,51 @@ def _request_hash_matches(
         stored.target_type == envelope.target_type
         and stored.request_hash == _legacy_hash_request(envelope)
     )
+
+
+def _find_existing_command(
+    uow: ControlPlaneUnitOfWork,
+    envelope: CommandEnvelope,
+    request_hash: str,
+) -> StoredCommand | None:
+    by_id = uow.commands.find_by_id(envelope.workspace_id, envelope.id)
+    by_key = uow.commands.find_duplicate(
+        envelope.workspace_id,
+        envelope.actor_type,
+        envelope.actor_id,
+        envelope.idempotency_key,
+    )
+    selected: StoredCommand | None = None
+    for stored in (by_id, by_key):
+        if stored is None:
+            continue
+        _assert_replay_matches(stored, envelope, request_hash)
+        if selected is None:
+            selected = stored
+        elif selected.id != stored.id:
+            raise IdempotencyConflict(
+                "command identity or idempotency key was already used for a different request"
+            )
+    return selected
+
+
+def _assert_replay_matches(
+    stored: StoredCommand,
+    envelope: CommandEnvelope,
+    request_hash: str,
+) -> None:
+    identity_matches = (
+        stored.id == envelope.id
+        and stored.workspace_id == envelope.workspace_id
+        and stored.actor_type == envelope.actor_type
+        and stored.actor_id == envelope.actor_id
+        and stored.idempotency_key == envelope.idempotency_key
+        and stored.target_type == envelope.target_type
+    )
+    if not identity_matches or not _request_hash_matches(stored, envelope, request_hash):
+        raise IdempotencyConflict(
+            "command identity or idempotency key was already used for a different request"
+        )
 
 
 def _result_from_document(document: dict[str, Any]) -> CommandResult:

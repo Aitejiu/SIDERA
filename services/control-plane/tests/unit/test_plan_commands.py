@@ -110,6 +110,16 @@ class FakeCommandRepository:
     def __init__(self) -> None:
         self.records: dict[tuple[UUID, str, str, str], StoredCommand] = {}
 
+    def find_by_id(self, workspace_id, command_id):
+        return next(
+            (
+                stored
+                for stored in self.records.values()
+                if stored.workspace_id == workspace_id and stored.id == command_id
+            ),
+            None,
+        )
+
     def find_duplicate(
         self,
         workspace_id: UUID,
@@ -127,6 +137,10 @@ class FakeCommandRepository:
     ) -> None:
         self.records[(envelope.workspace_id, envelope.actor_type, envelope.actor_id, envelope.idempotency_key)] = StoredCommand(
             id=envelope.id,
+            workspace_id=envelope.workspace_id,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            idempotency_key=envelope.idempotency_key,
             target_type=envelope.target_type,
             request_hash=request_hash,
             status="applied",
@@ -149,6 +163,10 @@ class FakeCommandRepository:
     ) -> None:
         self.records[(envelope.workspace_id, envelope.actor_type, envelope.actor_id, envelope.idempotency_key)] = StoredCommand(
             id=envelope.id,
+            workspace_id=envelope.workspace_id,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            idempotency_key=envelope.idempotency_key,
             target_type=envelope.target_type,
             request_hash=request_hash,
             status="rejected",
@@ -457,7 +475,7 @@ def test_publish_is_idempotent_through_generic_command_service() -> None:
     envelope = make_envelope(snapshot, expected_generation=0)
 
     first = service.handle(envelope)
-    replay = service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+    replay = service.handle(replace(envelope, correlation_id=uuid4()))
 
     assert replay == first
     assert len(shared.plans.snapshots) == 1

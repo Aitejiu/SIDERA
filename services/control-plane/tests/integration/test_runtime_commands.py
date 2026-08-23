@@ -304,11 +304,11 @@ def test_configure_worker_runtime_is_idempotent_and_does_not_duplicate_event(
     first = client.post("/api/v1/commands", json=request)
     replay = client.post(
         "/api/v1/commands",
-        json={**request, "command_id": str(uuid4()), "correlation_id": str(uuid4())},
+        json={**request, "correlation_id": str(uuid4())},
     )
 
     assert first.status_code == 201, first.text
-    assert replay.status_code == 200, replay.text
+    assert replay.status_code == 201, replay.text
     assert replay.json() == first.json()
     assert row_counts()["commands"] == 1
     assert row_counts()["events"] == 1

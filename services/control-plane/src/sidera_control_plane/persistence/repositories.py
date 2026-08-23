@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import ProjectionChangePublisherPort
@@ -114,9 +115,26 @@ class TaskRepository:
         return version if version is not None else 0
 
 
+class ConcurrentCommandCommit(RuntimeError):
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__(constraint_name)
+        self.constraint_name = constraint_name
+
+
 class CommandRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def find_by_id(
+        self, workspace_id: UUID, command_id: UUID
+    ) -> StoredCommand | None:
+        row = self._session.scalar(
+            select(CommandModel).where(
+                CommandModel.workspace_id == workspace_id,
+                CommandModel.id == command_id,
+            )
+        )
+        return _stored_command(row) if row is not None else None
 
     def find_duplicate(
         self,
@@ -133,16 +151,7 @@ class CommandRepository:
                 CommandModel.idempotency_key == idempotency_key,
             )
         )
-        if row is None:
-            return None
-        return StoredCommand(
-            id=row.id,
-            target_type=row.target_type,
-            request_hash=row.request_hash,
-            status=row.status,
-            result=dict(row.result or {}),
-            rejection_reason=row.rejection_reason,
-        )
+        return _stored_command(row) if row is not None else None
 
     def record_applied(
         self,
@@ -165,6 +174,7 @@ class CommandRepository:
                 rejection_reason=None,
             )
         )
+        _flush_command(self._session)
 
     def record_rejected(
         self,
@@ -182,6 +192,7 @@ class CommandRepository:
                 rejection_reason=error_code[:100],
             )
         )
+        _flush_command(self._session)
 
 
 class EventRepository:
@@ -300,6 +311,31 @@ def _to_domain_task(row: TaskModel) -> Task:
         requested_by=row.requested_by,
         version=row.version,
     )
+
+
+def _stored_command(row: CommandModel) -> StoredCommand:
+    return StoredCommand(
+        id=row.id,
+        workspace_id=row.workspace_id,
+        actor_type=row.actor_type,
+        actor_id=row.actor_id,
+        idempotency_key=row.idempotency_key,
+        target_type=row.target_type,
+        request_hash=row.request_hash,
+        status=row.status,
+        result=dict(row.result or {}),
+        rejection_reason=row.rejection_reason,
+    )
+
+
+def _flush_command(session: Session) -> None:
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        constraint_name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        if constraint_name in {"commands_pkey", "uq_command_idempotency"}:
+            raise ConcurrentCommandCommit(constraint_name) from exc
+        raise
 
 
 def _command_model(

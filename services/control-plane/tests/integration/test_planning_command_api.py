@@ -322,9 +322,9 @@ def test_planning_commands_persist_one_request_lifecycle_without_task_materializ
 
     module_replay = client.post(
         "/api/v1/commands",
-        json={**module_request, "command_id": str(uuid4()), "correlation_id": str(uuid4())},
+        json={**module_request, "correlation_id": str(uuid4())},
     )
-    assert module_replay.status_code == 200, module_replay.text
+    assert module_replay.status_code == 201, module_replay.text
     assert module_replay.json() == module_created.json()
 
     profile_request = _command(

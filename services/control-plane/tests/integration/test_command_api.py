@@ -135,12 +135,11 @@ def test_create_task_is_idempotent(
 
     replay = {
         **request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     second = client.post("/api/v1/commands", json=replay)
 
-    assert second.status_code == 200
+    assert second.status_code == 201
     assert second.json() == first.json()
     assert row_counts() == {
         "tasks": 1,
@@ -184,12 +183,11 @@ def test_legacy_request_hash_replays_after_target_versioning(
 
     replay = {
         **request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     second = client.post("/api/v1/commands", json=replay)
 
-    assert second.status_code == 200, second.text
+    assert second.status_code == 201, second.text
     assert second.json() == first.json()
     assert row_counts() == {
         "tasks": 1,
@@ -289,7 +287,6 @@ def test_versioned_task_mutations_and_successful_replay(
 
     replay = {
         **priority_request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     replayed = client.post("/api/v1/commands", json=replay)
@@ -371,7 +368,6 @@ def test_stale_version_records_one_rejection_and_replays_it(
 
     replay = {
         **stale_request,
-        "command_id": str(uuid4()),
         "correlation_id": str(uuid4()),
     }
     replayed = client.post("/api/v1/commands", json=replay)

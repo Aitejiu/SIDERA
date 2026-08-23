@@ -5,12 +5,14 @@ from typing import Any, Self, cast
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from sidera_control_plane.application.command_service import (
     CommandService,
     hash_request,
     replay_command,
 )
+from sidera_control_plane.application.errors import IdempotencyConflict
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
@@ -18,11 +20,15 @@ from sidera_control_plane.domain.commands import (
     StoredCommand,
 )
 from sidera_control_plane.domain.errors import InvalidTransition, ReplayedDomainError
+from sidera_control_plane.persistence.repositories import (
+    CommandRepository,
+    ConcurrentCommandCommit,
+)
 
 
 class FakeCommandRepository:
     def __init__(self) -> None:
-        self.records: dict[tuple[str, str, str], StoredCommand] = {}
+        self.records: dict[tuple[str, str, str, str], StoredCommand] = {}
 
     def find_duplicate(
         self,
@@ -31,7 +37,19 @@ class FakeCommandRepository:
         actor_id: str,
         idempotency_key: str,
     ) -> StoredCommand | None:
-        return self.records.get((str(workspace_id), actor_type, idempotency_key))
+        return self.records.get(
+            (str(workspace_id), actor_type, actor_id, idempotency_key)
+        )
+
+    def find_by_id(self, workspace_id, command_id) -> StoredCommand | None:
+        return next(
+            (
+                stored
+                for stored in self.records.values()
+                if stored.workspace_id == workspace_id and stored.id == command_id
+            ),
+            None,
+        )
 
     def record_applied(
         self,
@@ -40,9 +58,18 @@ class FakeCommandRepository:
         result: CommandResult,
     ) -> None:
         self.records[
-            (str(envelope.workspace_id), envelope.actor_type, envelope.idempotency_key)
+            (
+                str(envelope.workspace_id),
+                envelope.actor_type,
+                envelope.actor_id,
+                envelope.idempotency_key,
+            )
         ] = StoredCommand(
             id=envelope.id,
+            workspace_id=envelope.workspace_id,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            idempotency_key=envelope.idempotency_key,
             target_type=envelope.target_type,
             request_hash=request_hash,
             status="applied",
@@ -64,9 +91,18 @@ class FakeCommandRepository:
         error_result: dict[str, object],
     ) -> None:
         self.records[
-            (str(envelope.workspace_id), envelope.actor_type, envelope.idempotency_key)
+            (
+                str(envelope.workspace_id),
+                envelope.actor_type,
+                envelope.actor_id,
+                envelope.idempotency_key,
+            )
         ] = StoredCommand(
             id=envelope.id,
+            workspace_id=envelope.workspace_id,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            idempotency_key=envelope.idempotency_key,
             target_type=envelope.target_type,
             request_hash=request_hash,
             status="rejected",
@@ -185,7 +221,7 @@ def test_dispatcher_routes_and_replays_without_reinvoking_handler() -> None:
     envelope = make_envelope("RecordThing")
 
     first = service.handle(envelope)
-    replay = service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+    replay = service.handle(replace(envelope, correlation_id=uuid4()))
 
     assert replay == first
     assert handler.calls == 1
@@ -197,7 +233,7 @@ def test_dispatcher_replays_command_result_data_without_reinvoking_handler() -> 
     envelope = make_envelope("RecordData")
 
     first = service.handle(envelope)
-    replay = service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+    replay = service.handle(replace(envelope, correlation_id=uuid4()))
 
     assert replay == first
     assert replay.data["brief_revision"] == 1
@@ -206,6 +242,10 @@ def test_dispatcher_replays_command_result_data_without_reinvoking_handler() -> 
 def test_legacy_applied_command_without_data_replays_empty_data() -> None:
     stored = StoredCommand(
         id=uuid4(),
+        workspace_id=uuid4(),
+        actor_type="test",
+        actor_id="actor:test",
+        idempotency_key="legacy-001",
         target_type="task",
         request_hash="hash",
         status="applied",
@@ -236,7 +276,7 @@ def test_dispatcher_replays_domain_rejection_with_stable_details() -> None:
     with pytest.raises(InvalidTransition) as first_error:
         service.handle(envelope)
     with pytest.raises(ReplayedDomainError) as replay_error:
-        service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+        service.handle(replace(envelope, correlation_id=uuid4()))
 
     assert replay_error.value.code == first_error.value.code
     assert str(replay_error.value) == str(first_error.value)
@@ -258,7 +298,29 @@ def test_rejected_handler_rolls_back_mutations_inside_savepoint() -> None:
     assert unit.savepoint_calls == 1
     assert unit.mutations == 0
     with pytest.raises(ReplayedDomainError, match="mutation rejected"):
+        service.handle(replace(envelope, correlation_id=uuid4()))
+
+
+def test_replay_with_different_command_id_is_an_idempotency_conflict() -> None:
+    commands = FakeCommandRepository()
+    service = make_service(commands, (RecordingHandler(),))
+    envelope = make_envelope("RecordThing")
+
+    service.handle(envelope)
+
+    with pytest.raises(IdempotencyConflict):
         service.handle(replace(envelope, id=uuid4(), correlation_id=uuid4()))
+
+
+def test_replay_with_different_actor_for_same_command_id_is_a_conflict() -> None:
+    commands = FakeCommandRepository()
+    service = make_service(commands, (RecordingHandler(),))
+    envelope = make_envelope("RecordThing")
+
+    service.handle(envelope)
+
+    with pytest.raises(IdempotencyConflict):
+        service.handle(replace(envelope, actor_id="actor:other"))
 
 
 def test_request_hash_uses_semantics_not_transport_ids() -> None:
@@ -283,3 +345,35 @@ def test_request_hash_uses_semantics_not_transport_ids() -> None:
     assert hash_request(replay) == hash_request(envelope)
     assert hash_request(changed) != hash_request(envelope)
     assert hash_request(changed_target) != hash_request(envelope)
+
+
+class _Diagnostic:
+    constraint_name = "uq_event_aggregate_version"
+
+
+class _IntegrityFailure:
+    diag = _Diagnostic()
+
+
+class _FailingSession:
+    def add(self, _model: object) -> None:
+        return None
+
+    def flush(self) -> None:
+        raise IntegrityError("insert", {}, _IntegrityFailure())
+
+
+def test_non_command_integrity_error_is_not_converted_to_concurrent_commit() -> None:
+    repository = CommandRepository(_FailingSession())  # type: ignore[arg-type]
+    envelope = make_envelope("RecordThing")
+    result = CommandResult(
+        command_id=envelope.id,
+        aggregate_id=uuid4(),
+        aggregate_version=1,
+        event_ids=(),
+    )
+
+    with pytest.raises(IntegrityError) as error:
+        repository.record_applied(envelope, "request-hash", result)
+
+    assert not isinstance(error.value, ConcurrentCommandCommit)

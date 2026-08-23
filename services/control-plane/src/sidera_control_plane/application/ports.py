@@ -818,6 +818,11 @@ class WorkspaceProvider(Protocol):
 
 
 class CommandRepositoryPort(Protocol):
+    def find_by_id(
+        self, workspace_id: UUID, command_id: UUID
+    ) -> StoredCommand | None:
+        raise NotImplementedError
+
     def find_duplicate(
         self,
         workspace_id: UUID,
