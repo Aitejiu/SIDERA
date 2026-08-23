@@ -111,7 +111,13 @@ def _planner_profile(workspace_id: UUID, instance_id: UUID) -> PlanningProfile:
     )
 
 
-def _seed_waiting_request(database: Database, workspace_id: UUID) -> tuple[UUID, UUID, int]:
+def _seed_waiting_request(
+    database: Database,
+    workspace_id: UUID,
+    *,
+    source_type: str = "web",
+    source_ref: str | None = None,
+) -> tuple[UUID, UUID, int]:
     definition_id = uuid4()
     instance_id = uuid4()
     profile = _planner_profile(workspace_id, instance_id)
@@ -153,8 +159,8 @@ def _seed_waiting_request(database: Database, workspace_id: UUID) -> tuple[UUID,
             acceptance_criteria=("The clarification is persisted",),
             context_refs=("context:test",),
             requested_outputs=("proposal",),
-            source_type="web",
-            source_ref="conversation:test",
+            source_type=source_type,
+            source_ref=source_ref,
             actor="operator",
             correlation_id=uuid4(),
             run_id=run_id,

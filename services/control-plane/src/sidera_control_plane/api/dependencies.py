@@ -8,6 +8,7 @@ from sidera_control_plane.application.artifact_content import ArtifactContentSer
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
 )
+from sidera_control_plane.application.command_queries import CommandQueryService
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -42,6 +43,9 @@ from sidera_control_plane.application.worker_workspace_queries import (
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
+)
+from sidera_control_plane.persistence.command_query_store import (
+    SqlAlchemyCommandQueryStore,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.planning_query_store import (
@@ -112,6 +116,12 @@ def get_command_service(
             ),
         ),
     )
+
+
+def get_command_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> CommandQueryService:
+    return CommandQueryService(SqlAlchemyCommandQueryStore(database))
 
 
 def get_task_query_service(

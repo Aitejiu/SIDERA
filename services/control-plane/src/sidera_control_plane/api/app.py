@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sidera_control_plane.api.artifact_content import (
     router as artifact_content_router,
 )
+from sidera_control_plane.api.command_queries import router as command_queries_router
 from sidera_control_plane.api.errors import install_error_handlers
 from sidera_control_plane.api.execution_queries import (
     router as execution_queries_router,
@@ -67,6 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     install_error_handlers(app)
     app.include_router(task_commands_router)
+    app.include_router(command_queries_router)
     app.include_router(task_first_queries_router)
     app.include_router(subtask_queries_router)
     app.include_router(task_queries_router)

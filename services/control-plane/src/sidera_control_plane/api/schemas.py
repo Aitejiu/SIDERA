@@ -11,6 +11,7 @@ from pydantic import (
     model_validator,
 )
 
+from sidera_control_plane.application.command_queries import CommandStatusView
 from sidera_control_plane.application.module_queries import ModuleSummaryView
 from sidera_control_plane.application.planning_metrics import PlanningMetricsView
 from sidera_control_plane.application.planning_queries import (
@@ -1295,6 +1296,28 @@ class CommandResponse(BaseModel):
             aggregate_version=result.aggregate_version,
             event_ids=result.event_ids,
             data=result.data,
+        )
+
+
+class CommandStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    status: Literal["pending", "applied", "rejected"]
+    result: CommandResponse | None = None
+    error_code: str | None = None
+
+    @classmethod
+    def from_view(cls, view: CommandStatusView) -> "CommandStatusResponse":
+        return cls(
+            command_id=view.command_id,
+            status=view.status,
+            result=(
+                CommandResponse.model_validate(view.result)
+                if view.result is not None
+                else None
+            ),
+            error_code=view.error_code,
         )
 
 
