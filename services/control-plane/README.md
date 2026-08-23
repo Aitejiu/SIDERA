@@ -23,7 +23,7 @@ uv sync --project services/control-plane --all-groups --frozen
 
 ## macOS Local Profile
 
-The verified local profile on 2026-08-20 uses OpenCode `1.18.19` from the
+The verified local profile on 2026-08-23 uses OpenCode `1.18.19` from the
 `anomalyco/tap` Homebrew tap. Keep the expected version in the environment so
 an upgrade cannot silently change the Adapter contract:
 
@@ -35,6 +35,7 @@ opencode --version
 
 export SIDERA_OPENCODE_EXECUTABLE="$(command -v opencode)"
 export SIDERA_OPENCODE_EXPECTED_VERSION="1.18.19"
+export SIDERA_OPENCODE_MODEL="deepseek/deepseek-v4-flash"
 export SIDERA_WORKSPACE_ROOT="$PWD/.sidera/workspaces"
 mkdir -p "$SIDERA_WORKSPACE_ROOT"
 ```
@@ -54,6 +55,17 @@ uv run --project services/control-plane python \
 The command prints a compact JSON capability report and returns non-zero when
 the configured executable, version, Git worktree, ACP `initialize`, or ACP
 `session/new` check fails. There is no automatic fake-worker fallback.
+
+Run the Planner-specific preflight before enabling a PlanningProfile:
+
+```bash
+uv run --project services/control-plane python \
+  -m sidera_control_plane.planner_preflight
+```
+
+This additionally validates the Planner ACP contract and Proposal schema
+round-trip. Planner and Worker preflight are independent; a passing Worker
+probe does not make a Planner profile available.
 
 ## Native PostgreSQL
 
@@ -121,6 +133,81 @@ uv run --project services/control-plane python \
 `StdoutEventSink` is a development diagnostic, not a production transport or a
 delivery contract. External delivery is at least once.
 
+## R5.1 Planning Control Loop
+
+The Planning control loop is a separate control-plane path. A restricted local
+operator registers a Planner ModuleInstance and a versioned PlanningProfile;
+the Web or a future Main Agent submits a Brief through the Public API. The
+Planner only returns a candidate Proposal. It cannot create a Task or start an
+Execution directly.
+
+The registration commands are not user-form commands and must remain behind the
+local operator identity. The payloads below are the important provider-specific
+parts of the standard `POST /api/v1/commands` envelope; use fresh command,
+correlation, and idempotency UUIDs for each request:
+
+```json
+{
+  "command_type": "RegisterPlannerModule",
+  "target_type": "workspace",
+  "payload": {
+    "provider": "opencode-acp-planner",
+    "interface_version": "sidera.planner.v1",
+    "config_schema_version": 1,
+    "capabilities": {
+      "structured_output": "json",
+      "clarification": true,
+      "idempotency": "none",
+      "cancellation": "process",
+      "usage_reporting": "tokens",
+      "max_context_bytes": 128000,
+      "stability": "experimental",
+      "interface_version": "sidera.planner.v1",
+      "proposal_schema_versions": [2]
+    },
+    "instance_name": "opencode-r5-planner",
+    "config_namespace": "planning",
+    "config": {
+      "planning.executable": "opencode",
+      "planning.model": "deepseek/deepseek-v4-flash"
+    },
+    "secret_refs": []
+  }
+}
+```
+
+Use the returned `module_instance_id` in a second restricted
+`RegisterPlanningProfile` command. The profile must pin
+`planner_module_config_version`, `planner_interface_version`, Proposal schema
+`2`, budget, retry policy, and `user_selectable`. Submit a task only after the
+profile query returns the expected active version.
+
+For a real local gate, use a model and timeout that are explicit and independent
+for Planner and Worker:
+
+```bash
+export SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=90
+export SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS=90
+export SIDERA_OPENCODE_STOP_GRACE_SECONDS=5
+uv run --project services/control-plane python \
+  -m sidera_control_plane.opencode_preflight
+```
+
+`opencode_preflight` is the Worker preflight command. It checks the executable,
+pinned version, Git worktree support, ACP `initialize`, and `session/new`; it
+does not run a user task. Planner runs use an isolated
+`.sidera/planning/run-*` directory and remove it in `finally`. If a process is
+interrupted, stop the worker first and remove only confirmed stale `run-*`
+directories under the configured planning temp root. Never print resolved secret
+values or put them in Module config; use opaque `env:NAME` references only.
+
+The current R5.1 public command set has no generic profile-lifecycle mutation
+endpoint. A disabled profile is rejected by the domain state machine, but an
+operator must not edit PostgreSQL directly. Until an admin lifecycle command is
+added, stop new submissions by removing the profile from the upstream selector,
+stop the planning worker, and register a replacement profile when changing
+configuration. Existing PlanningRequest snapshots remain immutable.
+
 ## R4.1 WorkerItem Migration Runbook
 
 Use this order when upgrading an existing PostgreSQL workspace to the R4.1
@@ -169,9 +256,14 @@ must be treated as a separate migration exercise because the downgrade drops
 the new tables and column. Never use recursive deletion commands against the
 repository, PostgreSQL data directory, or database.
 
-Run the Scheduler, Reconciler, and R3 Gateway as independent native processes:
+Run the Planning Worker, Activation Worker, Scheduler, Reconciler, and R3
+Gateway as independent native processes:
 
 ```bash
+uv run --project services/control-plane python \
+  -m sidera_control_plane.planning_worker --once
+uv run --project services/control-plane python \
+  -m sidera_control_plane.activation_worker --once
 uv run --project services/control-plane python \
   -m sidera_control_plane.scheduler_worker --once
 uv run --project services/control-plane python \
@@ -180,9 +272,11 @@ uv run --project services/control-plane python \
   -m sidera_control_plane.gateway_worker --once
 ```
 
-Omit `--once` for continuous PostgreSQL polling. The five processes are
+Omit `--once` for continuous PostgreSQL polling. The seven processes are
 independent and can be stopped or restarted separately: API, Outbox worker,
-Scheduler, Reconciler, and Gateway. `Ctrl-C` exits cleanly; all durable
+Planning Worker, Activation Worker, Scheduler, Reconciler, and Gateway.
+Start the API and migration first, then Outbox/Planning/Activation/Scheduler,
+and keep Reconciler and Gateway running for recovery and execution. `Ctrl-C` exits cleanly; all durable
 ownership, attempt, retry, Session, input, Artifact, and audit facts remain in
 PostgreSQL and are reloaded after a restart. Each batch writes one compact JSON
 summary to stdout; failures return non-zero and do not report a successful
@@ -200,6 +294,9 @@ Configure these settings with the `SIDERA_` environment prefix:
 | `SIDERA_SCHEDULER_POLL_INTERVAL_SECONDS` | `1.0` | Continuous Scheduler delay |
 | `SIDERA_RECONCILER_BATCH_SIZE` | `50` | Workers/Leases examined per Reconciler batch |
 | `SIDERA_RECONCILER_POLL_INTERVAL_SECONDS` | `2.0` | Continuous Reconciler delay |
+| `SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS` | `60.0` | Planner ACP request timeout |
+| `SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS` | `60.0` | Worker ACP request timeout |
+| `SIDERA_OPENCODE_STOP_GRACE_SECONDS` | `5.0` | Worker process stop grace period |
 
 Keep these timing relationships explicit when deploying:
 
@@ -284,6 +381,32 @@ npm --prefix ../../apps/web run test:e2e -- \
 `SIDERA_PROJECTION_CHANGE_RETENTION_SECONDS` controls replay retention. Keep
 `SIDERA_WEB_ORIGIN` exact and loopback-only for the Local Identity Profile.
 The API does not fall back to a fake Worker when OpenCode preflight fails.
+
+## R5.1 Fake And Real Gates
+
+Fake Planner scenarios are deterministic fixtures for UI and control-plane
+state-machine tests. They do not prove model output, ACP process handling, or
+real Worker artifacts. The opt-in real gate uses PostgreSQL, the registered
+OpenCode Planner, the actual planning/activation/scheduler code, a Git worktree,
+the actual OpenCode Worker ACP session, and persisted Artifact/Evidence
+candidate facts. It must be run explicitly:
+
+```bash
+SIDERA_RUN_REAL_OPENCODE=1 \
+SIDERA_DATABASE_URL="$SIDERA_DATABASE_URL" \
+SIDERA_OPENCODE_EXECUTABLE="$SIDERA_OPENCODE_EXECUTABLE" \
+SIDERA_OPENCODE_EXPECTED_VERSION="$SIDERA_OPENCODE_EXPECTED_VERSION" \
+SIDERA_OPENCODE_MODEL="deepseek/deepseek-v4-flash" \
+SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=90 \
+SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS=90 \
+uv run --project services/control-plane pytest -m integration \
+  services/control-plane/tests/integration/test_r5_1_real_planning_loop.py -q -s
+```
+
+The gate intentionally keeps Scheduler-to-Gateway module binding explicit in
+its fixture because the production binding resolver is a later modular-worker
+extension. It still exercises the real Gateway, workspace, ACP process,
+Session, Artifact and Evidence path after the binding is installed.
 
 ## Verification
 

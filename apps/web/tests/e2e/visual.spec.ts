@@ -47,7 +47,12 @@ test.describe("responsive control room visuals", () => {
     await expect(page).toHaveScreenshot("planning-proposal.png", {
       fullPage: true,
       animations: "disabled",
-      mask: [page.locator(".mono-label"), page.locator(".planning-run-status__facts")],
+      mask: [
+        page.locator(".mono-label"),
+        page.locator(".planning-run-status__facts"),
+        page.locator(".workspace-tab__label").filter({ hasText: "规划" }),
+        page.locator(".planning-inspector__section").nth(1).locator("dd").nth(2),
+      ],
     });
   });
 });

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     planning_max_diagnostic_bytes: int = Field(default=4096, gt=0)
     planning_temp_root: Path = Path(".sidera/planning")
     planning_opencode_executable: str = Field(default="opencode", min_length=1)
+    planning_opencode_model: str | None = None
     planning_opencode_expected_version: str | None = None
     planning_opencode_request_timeout_seconds: float = Field(default=60.0, gt=0)
     planning_opencode_stop_grace_seconds: float = Field(default=5.0, gt=0)
@@ -36,6 +37,8 @@ class Settings(BaseSettings):
     opencode_executable: str = Field(default="opencode", min_length=1)
     opencode_expected_version: str | None = None
     opencode_probe_timeout_seconds: float = Field(default=30.0, gt=0)
+    opencode_request_timeout_seconds: float = Field(default=60.0, gt=0)
+    opencode_stop_grace_seconds: float = Field(default=5.0, gt=0)
     local_actor_type: str = Field(default="local", min_length=1)
     local_actor_id: str = Field(default="aitejiu", min_length=1)
     projection_stream_poll_interval_seconds: float = Field(default=0.5, gt=0)

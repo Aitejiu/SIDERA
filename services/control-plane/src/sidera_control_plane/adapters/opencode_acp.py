@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import re
 import signal
@@ -68,6 +69,7 @@ class OpenCodeACPAdapter:
         self,
         *,
         executable: str = "opencode",
+        model: str | None = None,
         workspace_root: Path | None = None,
         request_timeout_seconds: float = 30.0,
         stop_grace_seconds: float = 5.0,
@@ -86,6 +88,7 @@ class OpenCodeACPAdapter:
         if not git_executable.strip():
             raise ValueError("Git executable is required")
         self._executable = executable
+        self._model = model.strip() if model is not None and model.strip() else None
         self._workspace_root = (
             workspace_root.expanduser().resolve() if workspace_root is not None else None
         )
@@ -381,10 +384,20 @@ class OpenCodeACPAdapter:
 
     def _spawn(self, executable: str, cwd: Path, *, probe: bool) -> ACPProcessTransport:
         try:
+            env = (
+                {
+                    "OPENCODE_CONFIG_CONTENT": json.dumps(
+                        {"model": self._model}, separators=(",", ":")
+                    )
+                }
+                if self._model is not None
+                else None
+            )
             return ACPProcessTransport.spawn(
                 executable,
                 cwd=cwd,
                 stderr_limit_bytes=self._stderr_limit_bytes,
+                env=env,
             )
         except OpenCodeAdapterError as exc:
             if probe:

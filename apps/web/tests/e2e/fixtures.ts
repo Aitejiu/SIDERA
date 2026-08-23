@@ -17,7 +17,7 @@ export const SESSION_ID = "70000000-0000-0000-0000-000000000001";
 export const SCALE_SESSION_ID = "70000000-0000-0000-0000-000000000002";
 
 export type SeedScenario = "task-first" | "scale";
-export type PlanningSeedScenario = "proposal" | "clarification" | "scale";
+export type PlanningSeedScenario = "proposal" | "clarification" | "scale" | "real";
 
 const webRoot = resolve(import.meta.dirname, "../..");
 const repositoryRoot = resolve(webRoot, "../..");

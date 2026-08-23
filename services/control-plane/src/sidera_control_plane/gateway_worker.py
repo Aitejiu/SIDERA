@@ -62,7 +62,18 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
                 executable=_module_config_text(
                     instance, "executable", settings.opencode_executable
                 ),
+                model=_module_config_optional_text(instance, "model"),
                 workspace_root=settings.workspace_root,
+                request_timeout_seconds=_module_config_float(
+                    instance,
+                    "request_timeout_seconds",
+                    settings.opencode_request_timeout_seconds,
+                ),
+                stop_grace_seconds=_module_config_float(
+                    instance,
+                    "stop_grace_seconds",
+                    settings.opencode_stop_grace_seconds,
+                ),
                 git_executable=settings.git_executable,
             )
 
@@ -147,6 +158,30 @@ def _module_config_text(
         value = instance.config.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return default
+
+
+def _module_config_optional_text(
+    instance: ModuleInstance, name: str
+) -> str | None:
+    for key in (f"{instance.config_namespace}.{name}", name):
+        value = instance.config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _module_config_float(
+    instance: ModuleInstance, name: str, default: float
+) -> float:
+    for key in (f"{instance.config_namespace}.{name}", name):
+        value = instance.config.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > 0
+        ):
+            return float(value)
     return default
 
 

@@ -70,6 +70,7 @@ class OpenCodePlannerAdapter:
         self,
         *,
         executable: str = "opencode",
+        model: str | None = None,
         temp_root: Path = Path(".sidera/planning"),
         request_timeout_seconds: float = 60.0,
         stop_grace_seconds: float = 5.0,
@@ -86,6 +87,7 @@ class OpenCodePlannerAdapter:
         if stderr_limit_bytes <= 0:
             raise ValueError("OpenCode planner stderr limit must be positive")
         self._executable = executable
+        self._model = model.strip() if model is not None and model.strip() else None
         self._temp_root = temp_root.expanduser()
         self._request_timeout_seconds = request_timeout_seconds
         self._stop_grace_seconds = stop_grace_seconds
@@ -246,8 +248,20 @@ class OpenCodePlannerAdapter:
                 cwd=cwd,
                 stderr_limit_bytes=self._stderr_limit_bytes,
                 env={
-                    f"SIDERA_PLANNER_SECRET_{index}": secret.get_secret_value()
-                    for index, secret in enumerate(self._secret_values)
+                    **{
+                        f"SIDERA_PLANNER_SECRET_{index}": secret.get_secret_value()
+                        for index, secret in enumerate(self._secret_values)
+                    },
+                    **(
+                        {
+                            "OPENCODE_CONFIG_CONTENT": json.dumps(
+                                {"model": self._model},
+                                separators=(",", ":"),
+                            )
+                        }
+                        if self._model is not None
+                        else {}
+                    ),
                 },
             )
         except ACPProcessError as exc:
@@ -348,9 +362,102 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         "PlanningProposalPayload schema version requested by policy; a clarification "
         "uses question, rationale, answer_type, options, and blocking fields. "
         "Always include usage with integer input_tokens, output_tokens, "
-        "cost_microunits, runtime_seconds, and context_bytes.\n"
+        "cost_microunits, runtime_seconds, and context_bytes. For a proposal, copy "
+        "the exact field names from this minimal valid shape, replace the example "
+        "values, and omit no required field. Empty dependency and milestone arrays "
+        "are valid. Do not add fields.\n"
+        + json.dumps(_proposal_shape_hint(), sort_keys=True, separators=(",", ":"))
+        + "\n"
         + json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
+
+
+def _proposal_shape_hint() -> dict[str, object]:
+    return {
+        "result_type": "proposal",
+        "proposal": {
+            "schema_version": 2,
+            "kind": "create",
+            "root_task": {
+                "title": "one root task",
+                "goal_summary": "the requested outcome",
+                "acceptance_refs": ["acceptance:one"],
+            },
+            "subtasks": [
+                {
+                    "key": "subtask-one",
+                    "kind": "child",
+                    "title": "one subtask",
+                    "goal_summary": "a concrete implementation step",
+                    "acceptance_refs": ["acceptance:one"],
+                    "expected_outputs": ["diff"],
+                    "milestone_key": None,
+                    "source_refs": [],
+                }
+            ],
+            "worker_items": [
+                {
+                    "key": "worker-one",
+                    "subtask_key": "subtask-one",
+                    "title": "one WorkerItem",
+                    "role": "implementation",
+                    "responsibility": "perform the implementation step",
+                    "capability_requirements": ["code"],
+                    "worker_policy_ref": None,
+                    "configuration_ref": None,
+                    "concurrency_limit": 1,
+                    "source_refs": [],
+                    "pinned_worker_id": None,
+                }
+            ],
+            "milestones": [],
+            "subtask_dependencies": [],
+            "worker_item_dependencies": [],
+            "execution_intents": [
+                {
+                    "worker_item_key": "worker-one",
+                    "purpose": "perform the implementation step",
+                    "context_refs": [],
+                    "expected_artifact_refs": ["artifact_type:diff"],
+                    "required_evidence_refs": ["acceptance:one"],
+                    "capability_requirements": ["code"],
+                    "adapter_preferences": ["opencode"],
+                    "budget_class": "standard",
+                    "deadline_seconds": None,
+                    "not_before_seconds": None,
+                    "max_attempts": 1,
+                    "activation_dependencies": [],
+                }
+            ],
+            "decision_summary": {
+                "understanding": "the requested outcome",
+                "assumptions": [],
+                "risks": [],
+                "estimated_cost_microunits": 0,
+                "estimated_tokens": 0,
+                "estimated_runtime_seconds": 60,
+                "estimated_concurrency": 1,
+                "scope_includes": ["the requested outcome"],
+                "scope_excludes": [],
+                "metadata": {},
+            },
+            "impact_policy": {
+                "activate_immediately": True,
+                "budget_level": "standard",
+                "failure_policy": "retry_then_block",
+                "manual_gate": False,
+                "revision_operation": None,
+            },
+            "base_descriptor": None,
+        },
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_microunits": 0,
+            "runtime_seconds": 0,
+            "context_bytes": 0,
+        },
+    }
 
 
 def _parse_result(

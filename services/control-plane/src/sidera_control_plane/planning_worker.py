@@ -104,8 +104,14 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         )
         if not isinstance(configured_executable, str) or not configured_executable.strip():
             raise TypeError("OpenCode planner executable is invalid")
+        configured_model = config.get(
+            "planning.model", settings.planning_opencode_model
+        )
+        if configured_model is not None and not isinstance(configured_model, str):
+            raise TypeError("OpenCode planner model is invalid")
         return OpenCodePlannerAdapter(
             executable=configured_executable,
+            model=configured_model,
             temp_root=settings.planning_temp_root,
             request_timeout_seconds=settings.planning_opencode_request_timeout_seconds,
             stop_grace_seconds=settings.planning_opencode_stop_grace_seconds,

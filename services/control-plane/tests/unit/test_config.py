@@ -53,6 +53,8 @@ def test_scheduler_settings_are_positive():
     assert settings.gateway_batch_size == 15
     assert settings.gateway_poll_interval_seconds == 1.5
     assert settings.opencode_executable == "opencode"
+    assert settings.opencode_request_timeout_seconds == 60.0
+    assert settings.opencode_stop_grace_seconds == 5.0
 
     with pytest.raises(ValueError):
         Settings(database_url="postgresql+psycopg://test", scheduler_batch_size=0)

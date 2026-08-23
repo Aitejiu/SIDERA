@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
-from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
 
 
@@ -122,16 +121,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Validate the configured OpenCode executable and ACP contract"
     )
     parser.parse_args(argv)
+    configured = os.environ.get("SIDERA_OPENCODE_EXECUTABLE", "opencode")
+    git_executable = os.environ.get("SIDERA_GIT_EXECUTABLE", "git")
+    expected = os.environ.get("SIDERA_OPENCODE_EXPECTED_VERSION")
     try:
-        settings = Settings()  # pyright: ignore[reportCallIssue]
+        timeout = float(
+            os.environ.get("SIDERA_OPENCODE_PROBE_TIMEOUT_SECONDS", "30")
+        )
         report = run_preflight(
-            executable=settings.opencode_executable,
-            git_executable=settings.git_executable,
-            expected_version=settings.opencode_expected_version,
-            timeout_seconds=settings.opencode_probe_timeout_seconds,
+            executable=configured,
+            git_executable=git_executable,
+            expected_version=expected,
+            timeout_seconds=timeout,
         )
     except Exception as exc:  # noqa: BLE001
-        configured = os.environ.get("SIDERA_OPENCODE_EXECUTABLE", "opencode")
         report = OpenCodePreflightReport(
             status="failed",
             configured_executable=configured,

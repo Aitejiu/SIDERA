@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
     FakePlannerConfig,
+    FakeScenario,
 )
 from sidera_control_plane.application.planning_runner import (
     PlanningRunner,
@@ -129,7 +131,9 @@ def test_real_planning_runner_persists_the_bounded_scale_proposal(
     factory = RegistryPlannerAdapterFactory(
         {
             "fake": lambda config, _secrets: FakePlannerAdapter(
-                FakePlannerConfig(scenario=config["planning.scenario"])
+                FakePlannerConfig(
+                    scenario=cast(FakeScenario, config["planning.scenario"])
+                )
             )
         }
     )

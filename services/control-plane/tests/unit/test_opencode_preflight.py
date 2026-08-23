@@ -2,7 +2,9 @@ import stat
 import textwrap
 from pathlib import Path
 
-from sidera_control_plane.opencode_preflight import run_preflight
+import pytest
+
+from sidera_control_plane.opencode_preflight import main, run_preflight
 
 
 def _fake_opencode(tmp_path: Path) -> Path:
@@ -78,3 +80,14 @@ def test_preflight_does_not_fallback_when_executable_is_missing() -> None:
         "status": "unavailable",
         "reason": "OpenCode executable was not found: /missing/opencode",
     }
+
+
+def test_preflight_command_does_not_require_database_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SIDERA_DATABASE_URL", raising=False)
+    monkeypatch.setenv("SIDERA_OPENCODE_EXECUTABLE", str(_fake_opencode(tmp_path)))
+    monkeypatch.setenv("SIDERA_OPENCODE_EXPECTED_VERSION", "0.0.0-preflight")
+    monkeypatch.setenv("SIDERA_OPENCODE_PROBE_TIMEOUT_SECONDS", "2")
+
+    assert main([]) == 0

@@ -77,7 +77,7 @@ MODULE_DEFINITION_ID = UUID("b2000000-0000-0000-0000-000000000001")
 MODULE_INSTANCE_ID = UUID("b3000000-0000-0000-0000-000000000001")
 PROFILE_ID = UUID("b4000000-0000-0000-0000-000000000001")
 WORKSPACE_NAME = "SIDERA R5.1 Planning E2E Workspace"
-SCENARIOS = ("proposal", "clarification", "scale")
+SCENARIOS = ("proposal", "clarification", "scale", "real")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -88,6 +88,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if os.environ.get("SIDERA_ALLOW_E2E_SEED") != "1":
         raise SystemExit("SIDERA_ALLOW_E2E_SEED=1 is required for the E2E seed")
+    if args.scenario == "real" and os.environ.get("SIDERA_RUN_REAL_OPENCODE") != "1":
+        raise SystemExit(
+            "SIDERA_RUN_REAL_OPENCODE=1 is required for the real planning seed"
+        )
     database_url = os.environ.get("SIDERA_DATABASE_URL")
     if not database_url:
         raise SystemExit("SIDERA_DATABASE_URL is required for the E2E seed")
@@ -220,22 +224,37 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
 def _planning_facts(
     workspace_id: UUID, scenario: str
 ) -> tuple[ModuleDefinition, ModuleInstance, PlanningProfile]:
+    is_real = scenario == "real"
     capabilities = PlannerAdapterCapabilityProfile(
-        structured_output=StructuredOutputCapability.JSON_SCHEMA,
+        structured_output=(
+            StructuredOutputCapability.JSON
+            if is_real
+            else StructuredOutputCapability.JSON_SCHEMA
+        ),
         clarification=True,
-        idempotency=IdempotencyCapability.OPERATION_ID,
-        cancellation=CancellationCapability.RUN,
+        idempotency=(
+            IdempotencyCapability.NONE
+            if is_real
+            else IdempotencyCapability.OPERATION_ID
+        ),
+        cancellation=(
+            CancellationCapability.PROCESS
+            if is_real
+            else CancellationCapability.RUN
+        ),
         usage_reporting=UsageReportingCapability.TOKENS,
         max_context_bytes=128_000,
-        stability=StabilityLevel.STABLE,
+        stability=StabilityLevel.EXPERIMENTAL if is_real else StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
         proposal_schema_versions=(2,),
     )
+    executable = os.environ.get("SIDERA_OPENCODE_EXECUTABLE", "opencode")
+    model = os.environ.get("SIDERA_OPENCODE_MODEL", "deepseek/deepseek-chat")
     definition = ModuleDefinition(
         id=MODULE_DEFINITION_ID,
         workspace_id=workspace_id,
         module_type="planner_adapter",
-        provider="fake",
+        provider="opencode-acp-planner" if is_real else "fake",
         interface_version="sidera.planner.v1",
         config_schema_version=1,
         capabilities=capabilities,
@@ -245,10 +264,14 @@ def _planning_facts(
         id=MODULE_INSTANCE_ID,
         workspace_id=workspace_id,
         definition_id=definition.id,
-        instance_name="fake-r5-planner",
+        instance_name="opencode-r5-planner" if is_real else "fake-r5-planner",
         config_version=1,
         config_namespace="planning",
-        config={"planning.scenario": scenario},
+        config=(
+            {"planning.executable": executable, "planning.model": model}
+            if is_real
+            else {"planning.scenario": scenario}
+        ),
         secret_refs=(),
         lifecycle=ModuleLifecycle.ACTIVE,
     )
@@ -257,7 +280,7 @@ def _planning_facts(
         workspace_id=workspace_id,
         profile_key="r5-e2e",
         version=1,
-        display_name="R5.1 Fake Planner",
+        display_name="R5.1 OpenCode Planner" if is_real else "R5.1 Fake Planner",
         planner_module_instance_id=instance.id,
         planner_module_config_version=1,
         planner_interface_version="sidera.planner.v1",
@@ -265,7 +288,7 @@ def _planning_facts(
         system_policy={},
         proposal_schema_version=2,
         allowed_capabilities=("code",),
-        adapter_preferences=("fake",),
+        adapter_preferences=("opencode",) if is_real else ("fake",),
         adapter_forbidden=(),
         budget=PlanningBudgetPolicy(
             max_context_bytes=64_000,

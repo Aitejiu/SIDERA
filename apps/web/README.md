@@ -45,7 +45,9 @@ Start the Web dev server on port `4174`:
 npm --prefix apps/web run dev -- --port 4174
 ```
 
-Open <http://127.0.0.1:4174/>. The Vite proxy forwards `/api` to the API.
+Open <http://127.0.0.1:4174/>. The Vite proxy forwards `/api` to the API. The
+Task First entry is `/workspaces/<workspace-uuid>/tasks`; use `新建任务` there
+to submit a Planning Brief.
 Playwright starts an isolated Vite server on `4173` and an API process when
 the ports are free, so the E2E command does not require the interactive Web
 server to be running.
@@ -77,28 +79,45 @@ The scale fixture contains 200 WorkItems, 400 informational edges and 50,000
 trace events. Playwright checks the HTTP page size, reverse pagination and a
 virtualized trace DOM bounded to 120 rows.
 
-## Real OpenCode Gate
+## R5.1 Real OpenCode Planning Gate
 
 Run the real provider only after the pinned executable passes preflight:
 
 ```bash
 export SIDERA_OPENCODE_EXECUTABLE="$(command -v opencode)"
 export SIDERA_OPENCODE_EXPECTED_VERSION="1.18.19"
+export SIDERA_OPENCODE_MODEL="deepseek/deepseek-v4-flash"
 uv run --project services/control-plane python \
   -m sidera_control_plane.opencode_preflight
 
+SIDERA_RUN_REAL_OPENCODE=1 \
+SIDERA_ALLOW_E2E_SEED=1 \
+SIDERA_DATABASE_URL="$SIDERA_DATABASE_URL" \
+SIDERA_OPENCODE_EXECUTABLE="$SIDERA_OPENCODE_EXECUTABLE" \
+SIDERA_OPENCODE_EXPECTED_VERSION="$SIDERA_OPENCODE_EXPECTED_VERSION" \
+SIDERA_OPENCODE_MODEL="$SIDERA_OPENCODE_MODEL" \
+SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=90 \
+SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS=90 \
+npm --prefix apps/web run test:e2e -- \
+  --project=desktop-chromium tests/e2e/real-planning.spec.ts
+```
+
+The browser case submits a real Brief, runs the real Planner worker, renders the
+Proposal architecture, confirms the exact revision through the UI, and opens
+the generated Root Task. The backend command in the control-plane runbook goes
+further through Activation, Scheduler, Worker Gateway, Session, Artifact and
+Evidence. The real gate never enables a fake Provider fallback.
+
+The older R3 Worker-only integration remains available separately:
+
+```bash
 SIDERA_RUN_OPENCODE_E2E=1 \
 SIDERA_DATABASE_URL="$SIDERA_DATABASE_URL" \
 SIDERA_OPENCODE_EXECUTABLE="$SIDERA_OPENCODE_EXECUTABLE" \
 SIDERA_OPENCODE_EXPECTED_VERSION="$SIDERA_OPENCODE_EXPECTED_VERSION" \
-npm --prefix apps/web run test:e2e -- \
-  --project=real-opencode tests/e2e/real-opencode.spec.ts
+uv run --project services/control-plane pytest \
+  services/control-plane/tests/integration/test_opencode_end_to_end.py -q
 ```
-
-The real browser case runs the R3 integration test, opens the generated Task,
-follows the real Execution/Session trace, reads the hash-addressed Artifact
-descriptor and cleans the dedicated `Integration Test Workspace` afterwards.
-It does not enable a fake Worker fallback.
 
 ## Configuration And Troubleshooting
 
@@ -113,8 +132,9 @@ It does not enable a fake Worker fallback.
   canonical Task snapshot is the recovery path; writes stay disabled until the
   stream is live again.
 - If the real gate is skipped, check `SIDERA_RUN_OPENCODE_E2E=1`, the OpenCode
-  executable path/version and the PostgreSQL DSN. A skipped provider test is
-  not R4 real-operation evidence.
+  or `SIDERA_RUN_REAL_OPENCODE=1` switch, the OpenCode executable/model/version,
+  the timeout settings and the PostgreSQL DSN. A skipped provider test is not
+  real-operation evidence.
 
 R4 delivers the standalone complete mode. A future DSH Plugin may embed the
 same Public API projections and deep links, but it must not access this

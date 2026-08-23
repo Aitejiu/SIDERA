@@ -30,6 +30,8 @@ def fake_settings() -> Any:
         workspace_retention_seconds=86_400,
         git_executable="git",
         opencode_executable="opencode",
+        opencode_request_timeout_seconds=60.0,
+        opencode_stop_grace_seconds=5.0,
     )
 
 
