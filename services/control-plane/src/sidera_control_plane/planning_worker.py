@@ -16,6 +16,7 @@ from sidera_control_plane.adapters.fake_planner import (
     FakePlannerConfig,
     FakeScenario,
 )
+from sidera_control_plane.adapters.opencode_planner import OpenCodePlannerAdapter
 from sidera_control_plane.application.planning_reconciler import (
     PlanningReconciler,
     PlanningReconcileResult,
@@ -94,8 +95,28 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             FakePlannerConfig(scenario=cast(FakeScenario, scenario))
         )
 
+    def opencode_builder(
+        config: Mapping[str, object], secrets: tuple[SecretStr, ...]
+    ) -> OpenCodePlannerAdapter:
+        configured_executable = config.get(
+            "planning.executable", settings.planning_opencode_executable
+        )
+        if not isinstance(configured_executable, str) or not configured_executable.strip():
+            raise TypeError("OpenCode planner executable is invalid")
+        return OpenCodePlannerAdapter(
+            executable=configured_executable,
+            temp_root=settings.planning_temp_root,
+            request_timeout_seconds=settings.planning_opencode_request_timeout_seconds,
+            stop_grace_seconds=settings.planning_opencode_stop_grace_seconds,
+            stderr_limit_bytes=settings.planning_acp_stderr_limit_bytes,
+            secret_values=secrets,
+        )
+
     factory = RegistryPlannerAdapterFactory(
-        {"fake": fake_builder},
+        {
+            "fake": fake_builder,
+            "opencode-acp-planner": opencode_builder,
+        },
         temp_root=settings.planning_temp_root,
     )
     try:

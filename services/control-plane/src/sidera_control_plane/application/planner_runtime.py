@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
     PlanningClarification,
+    PlanningUsage,
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
 from sidera_control_plane.domain.planning_proposals import ProposalRevision
@@ -196,11 +197,13 @@ class PlannerInputAssembler:
 @dataclass(frozen=True, slots=True)
 class PlannerProposalResult:
     proposal: ProposalRevision
+    usage: PlanningUsage = field(default_factory=PlanningUsage.zero)
 
 
 @dataclass(frozen=True, slots=True)
 class PlannerClarificationResult:
     clarifications: tuple[PlanningClarification, ...]
+    usage: PlanningUsage = field(default_factory=PlanningUsage.zero)
 
     def __post_init__(self) -> None:
         if not self.clarifications:
@@ -215,10 +218,13 @@ class PlannerFailure:
     retryable: bool
     unknown_outcome: bool
     provider_ref: str | None = None
+    usage: PlanningUsage = field(default_factory=PlanningUsage.zero)
 
     def __post_init__(self) -> None:
         if not self.code.strip() or not self.safe_message.strip():
             raise ValueError("planner failure code and safe_message are required")
+        if not isinstance(self.usage, PlanningUsage):
+            raise TypeError("planner failure usage must be PlanningUsage")
         lowered = self.safe_message.lower()
         if any(marker in lowered for marker in ("password", "api_key", "secret_value")):
             raise ValueError("planner failure safe_message contains a secret marker")

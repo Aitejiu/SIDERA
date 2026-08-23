@@ -1,8 +1,6 @@
 import hashlib
-import json
 import os
 import re
-import select
 import signal
 import subprocess
 import threading
@@ -15,6 +13,18 @@ from subprocess import Popen
 from typing import Any
 from uuid import UUID, uuid4
 
+from sidera_control_plane.adapters.acp_process import (
+    ACPProcessError as OpenCodeAdapterError,
+)
+from sidera_control_plane.adapters.acp_process import (
+    ACPProcessProtocolError as ACPProtocolError,
+)
+from sidera_control_plane.adapters.acp_process import (
+    ACPProcessTimeoutError as ACPTimeoutError,
+)
+from sidera_control_plane.adapters.acp_process import (
+    ACPProcessTransport,
+)
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
@@ -38,20 +48,8 @@ from sidera_control_plane.domain.workspace import (
 )
 
 
-class OpenCodeAdapterError(RuntimeError):
-    """The OpenCode adapter could not complete a safe operation."""
-
-
 class AdapterProbeError(OpenCodeAdapterError):
     """The configured OpenCode process is unavailable or incompatible."""
-
-
-class ACPTimeoutError(OpenCodeAdapterError):
-    """An ACP response did not arrive before the configured deadline."""
-
-
-class ACPProtocolError(OpenCodeAdapterError):
-    """The OpenCode process returned malformed or unsupported ACP data."""
 
 
 class OpenCodeACPAdapter:
@@ -123,7 +121,7 @@ class OpenCodeACPAdapter:
         except (ACPProtocolError, OpenCodeAdapterError) as exc:
             raise AdapterProbeError(f"OpenCode ACP handshake failed: {exc}") from exc
         finally:
-            _terminate_owned_process(transport.process)
+            transport.terminate(grace_seconds=self._stop_grace_seconds)
             transport.close()
 
     def start_session(
@@ -168,7 +166,7 @@ class OpenCodeACPAdapter:
                 )
             return handle
         except Exception:
-            _terminate_owned_process(transport.process)
+            transport.terminate(grace_seconds=self._stop_grace_seconds)
             transport.close()
             raise
 
@@ -381,28 +379,17 @@ class OpenCodeACPAdapter:
                 if session.transport.process.poll() is None
             )
 
-    def _spawn(self, executable: str, cwd: Path, *, probe: bool) -> "_JsonRpcTransport":
-        if not cwd.is_dir():
-            raise OpenCodeAdapterError(f"OpenCode working directory is unavailable: {cwd}")
+    def _spawn(self, executable: str, cwd: Path, *, probe: bool) -> ACPProcessTransport:
         try:
-            process = subprocess.Popen(
-                [executable, "acp"],
+            return ACPProcessTransport.spawn(
+                executable,
                 cwd=cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-                start_new_session=True,
+                stderr_limit_bytes=self._stderr_limit_bytes,
             )
-        except FileNotFoundError as exc:
-            message = f"OpenCode executable is unavailable: {executable}"
+        except OpenCodeAdapterError as exc:
             if probe:
-                raise AdapterProbeError(message) from exc
-            raise OpenCodeAdapterError(message) from exc
-        except OSError as exc:
-            raise OpenCodeAdapterError(f"OpenCode process could not start: {exc}") from exc
-        stderr = _BoundedStderr(process.stderr, self._stderr_limit_bytes)
-        return _JsonRpcTransport(process, stderr)
+                raise AdapterProbeError(str(exc)) from exc
+            raise
 
     def _workspace_path(self, manifest: ExecutionWorkspaceManifest) -> Path:
         if self._workspace_root is not None:
@@ -488,7 +475,7 @@ class _OpenCodeSession:
         self,
         *,
         handle: AdapterSessionHandle,
-        transport: "_JsonRpcTransport",
+        transport: ACPProcessTransport,
         identity: ProcessDescriptor,
         cwd: Path,
         acceptance_criteria: tuple[str, ...],
@@ -503,142 +490,6 @@ class _OpenCodeSession:
         self.prompt_busy = False
         self.stopped = False
         self.lock = threading.RLock()
-
-
-class _JsonRpcTransport:
-    def __init__(self, process: Popen[bytes], stderr: "_BoundedStderr") -> None:
-        if process.stdin is None or process.stdout is None:
-            raise OpenCodeAdapterError("OpenCode ACP pipes are unavailable")
-        self.process = process
-        self._stdin = process.stdin
-        self._stdout = process.stdout
-        self._stderr = stderr
-        self._next_id = 1
-        self._notifications: deque[Mapping[str, Any]] = deque()
-        self._read_buffer = bytearray()
-        self._lock = threading.RLock()
-
-    def request(
-        self,
-        method: str,
-        params: Mapping[str, object],
-        *,
-        timeout: float,
-    ) -> Mapping[str, Any]:
-        with self._lock:
-            request_id = self._next_id
-            self._next_id += 1
-            self._write(
-                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-            )
-            deadline = time.monotonic() + timeout
-            while True:
-                message = self._read_message(max(0.0, deadline - time.monotonic()))
-                if message.get("id") != request_id:
-                    self._notifications.append(message)
-                    continue
-                if "error" in message:
-                    raise ACPProtocolError(_rpc_error(message["error"]))
-                result = message.get("result")
-                if not isinstance(result, Mapping):
-                    raise ACPProtocolError(f"ACP {method} response has no result object")
-                return result
-
-    def notify(self, method: str, params: Mapping[str, object]) -> None:
-        with self._lock:
-            self._write({"jsonrpc": "2.0", "method": method, "params": params})
-
-    def read_available(self, *, timeout: float) -> None:
-        with self._lock:
-            while True:
-                if b"\n" not in self._read_buffer:
-                    ready, _, _ = select.select([self._stdout], [], [], timeout)
-                    timeout = 0
-                    if not ready:
-                        return
-                try:
-                    self._notifications.append(self._read_message(0))
-                except ACPTimeoutError:
-                    return
-
-    def drain_notifications(self) -> tuple[Mapping[str, Any], ...]:
-        with self._lock:
-            messages = tuple(self._notifications)
-            self._notifications.clear()
-            return messages
-
-    def close(self) -> None:
-        self._stderr.close()
-        try:
-            self._stdin.close()
-        except OSError:
-            pass
-        try:
-            self._stdout.close()
-        except OSError:
-            pass
-
-    def _write(self, message: Mapping[str, object]) -> None:
-        try:
-            self._stdin.write(
-                (json.dumps(message, separators=(",", ":")) + "\n").encode()
-            )
-            self._stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise OpenCodeAdapterError("OpenCode ACP stdin is closed") from exc
-
-    def _read_message(self, timeout: float) -> Mapping[str, Any]:
-        deadline = time.monotonic() + timeout
-        while b"\n" not in self._read_buffer:
-            remaining = max(0.0, deadline - time.monotonic())
-            ready, _, _ = select.select([self._stdout], [], [], remaining)
-            if not ready:
-                raise ACPTimeoutError("OpenCode ACP response timed out")
-            chunk = os.read(self._stdout.fileno(), 4096)
-            if not chunk:
-                raise OpenCodeAdapterError("OpenCode ACP stdout closed")
-            self._read_buffer.extend(chunk)
-        line, _, remainder = self._read_buffer.partition(b"\n")
-        self._read_buffer = bytearray(remainder)
-        try:
-            message = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ACPProtocolError("OpenCode ACP emitted invalid JSON") from exc
-        if not isinstance(message, Mapping):
-            raise ACPProtocolError("OpenCode ACP message must be an object")
-        return message
-
-
-class _BoundedStderr:
-    def __init__(self, stream: Any, limit_bytes: int) -> None:
-        self._stream = stream
-        self._limit_bytes = limit_bytes
-        self._buffer = bytearray()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._read, daemon=True)
-        self._thread.start()
-
-    def close(self) -> None:
-        self._stop.set()
-        try:
-            self._stream.close()
-        except OSError:
-            pass
-
-    def _read(self) -> None:
-        while not self._stop.is_set():
-            try:
-                chunk = self._stream.read(4096)
-            except (OSError, ValueError):
-                return
-            if not chunk:
-                return
-            if isinstance(chunk, bytes):
-                chunk = chunk.decode("utf-8", errors="replace")
-            encoded = _redact_stderr(chunk).encode("utf-8", errors="replace")
-            remaining = self._limit_bytes - len(self._buffer)
-            if remaining > 0:
-                self._buffer.extend(encoded[:remaining])
 
 
 def _config_text(config: Mapping[str, object], key: str, default: str) -> str:

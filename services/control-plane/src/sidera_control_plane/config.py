@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     planning_lease_renew_interval_seconds: float = Field(default=10.0, gt=0)
     planning_max_diagnostic_bytes: int = Field(default=4096, gt=0)
     planning_temp_root: Path = Path(".sidera/planning")
+    planning_opencode_executable: str = Field(default="opencode", min_length=1)
+    planning_opencode_expected_version: str | None = None
+    planning_opencode_request_timeout_seconds: float = Field(default=60.0, gt=0)
+    planning_opencode_stop_grace_seconds: float = Field(default=5.0, gt=0)
+    planning_acp_stderr_limit_bytes: int = Field(default=65_536, gt=0)
     workspace_root: Path = Path(".sidera/workspaces")
     workspace_retention_seconds: int = Field(default=86_400, gt=0)
     git_executable: str = Field(default="git", min_length=1)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -173,6 +173,7 @@ class PlanningRunOutcome:
     attempt: int
     code: str | None = None
     proposal_revision: int | None = None
+    usage: PlanningUsage = field(default_factory=PlanningUsage.zero)
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,7 +561,7 @@ class PlanningRunner:
     ) -> PlanningRunOutcome:
         if isinstance(result, PlannerProposalResult):
             try:
-                return self._persist_proposal(item, result.proposal)
+                return self._persist_proposal(item, result.proposal, result.usage)
             except (DomainError, ValueError, TypeError):
                 return self._persist_failure(
                     item,
@@ -591,7 +592,9 @@ class PlanningRunner:
                 or item.profile_snapshot.retry_policy.unknown_outcome_policy
                 is UnknownOutcomePolicy.BLOCK
             )
-            return self._persist_failure(item, result, blocked=blocked)
+            return self._persist_failure(
+                item, result, blocked=blocked, usage=result.usage
+            )
         return self._persist_failure(
             item,
             PlannerInvalidResult(
@@ -603,7 +606,10 @@ class PlanningRunner:
         )
 
     def _persist_proposal(
-        self, item: _ClaimedRun, adapter_proposal: ProposalRevision
+        self,
+        item: _ClaimedRun,
+        adapter_proposal: ProposalRevision,
+        usage: PlanningUsage,
     ) -> PlanningRunOutcome:
         now = self._clock()
         with self._uow_factory() as uow:
@@ -636,7 +642,7 @@ class PlanningRunner:
                 fencing_token=lease.fencing_token,
                 provider_ref=_provider_ref(item),
                 structured_result_type="proposal",
-                usage=PlanningUsage.zero(),
+                usage=usage,
                 now=now,
             )
             uow.planning_runs.save(run, previous_run_version)
@@ -674,6 +680,7 @@ class PlanningRunner:
             status=PlanningRunStatus.SUCCEEDED,
             attempt=item.attempt,
             proposal_revision=proposal.revision,
+            usage=usage,
         )
 
     def _persist_clarification(
@@ -685,6 +692,7 @@ class PlanningRunner:
             if locked is None:
                 return self._stale_outcome(item)
             request, run, lease = locked
+            run.usage = result.usage
             previous_request_version = request.version
             previous_run_version = run.version
             for clarification in result.clarifications:
@@ -712,6 +720,7 @@ class PlanningRunner:
             run_id=item.run_id,
             status=PlanningRunStatus.NEEDS_CLARIFICATION,
             attempt=item.attempt,
+            usage=result.usage,
         )
 
     def _persist_failure(
@@ -720,6 +729,7 @@ class PlanningRunner:
         failure: PlannerFailure,
         *,
         blocked: bool = False,
+        usage: PlanningUsage | None = None,
     ) -> PlanningRunOutcome:
         now = self._clock()
         with self._uow_factory() as uow:
@@ -731,6 +741,7 @@ class PlanningRunner:
             previous_run_version = run.version
             run.provider_ref = failure.provider_ref
             run.structured_result_type = "failure"
+            run.usage = usage or failure.usage
             if blocked:
                 request.block_run_unknown(
                     run_id=run.id,
@@ -767,6 +778,7 @@ class PlanningRunner:
             status=run.status,
             attempt=item.attempt,
             code=failure.code,
+            usage=usage or failure.usage,
         )
 
     def _lock_owned_run(
@@ -883,11 +895,11 @@ class PlanningRunner:
                 "proposal_revision": outcome.proposal_revision,
                 "elapsed_seconds": elapsed,
                 "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cost_microunits": 0,
-                    "runtime_seconds": 0,
-                    "context_bytes": 0,
+                    "input_tokens": outcome.usage.input_tokens,
+                    "output_tokens": outcome.usage.output_tokens,
+                    "cost_microunits": outcome.usage.cost_microunits,
+                    "runtime_seconds": outcome.usage.runtime_seconds,
+                    "context_bytes": outcome.usage.context_bytes,
                 },
                 "result_code": outcome.code,
                 "result_status": str(outcome.status),
