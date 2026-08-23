@@ -3319,6 +3319,8 @@ h1 {
 }
 
 .planning-proposal__loading--error {
+  display: grid;
+  gap: 8px;
   border-top-color: var(--blocked);
   color: var(--blocked);
 }
@@ -3666,6 +3668,15 @@ h1 {
   align-content: center;
   justify-items: center;
   text-align: center;
+}
+
+.workspace-empty--error {
+  border-top-color: var(--blocked);
+}
+
+.workspace-empty--error .workspace-empty__glyph,
+.workspace-empty--error strong {
+  color: var(--blocked);
 }
 
 .workspace-empty__glyph {

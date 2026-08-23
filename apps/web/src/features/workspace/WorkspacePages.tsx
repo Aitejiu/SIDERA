@@ -19,26 +19,44 @@ import {
   taskOverviewQueryKey,
   type TaskOverview,
 } from "@/features/tasks/api";
+import {
+  listPlanningRequests,
+  planningRequestsQueryKey,
+} from "@/features/planning/api";
+import {
+  planningNotificationFromRequest,
+  type WorkspaceNotification,
+} from "@/features/attention/notifications";
 import { AsyncState } from "@/shared/ui/AsyncState";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
 export function InboxPage() {
   const stream = useWorkspaceStreamOptional();
-  const notices = stream?.notices;
+  const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
+  const planningAttentionQuery = useQuery({
+    queryKey: planningRequestsQueryKey(workspaceId, true),
+    queryFn: ({ signal }) => listPlanningRequests(workspaceId, { requiresAttention: true, signal }),
+    enabled: workspaceId.length > 0,
+  });
+  const notices = useMemo(
+    () => mergeNotifications(
+      stream?.notices ?? [],
+      (planningAttentionQuery.data?.items ?? [])
+        .map((request) => planningNotificationFromRequest(request))
+        .filter((notice): notice is WorkspaceNotification => notice !== null),
+    ),
+    [planningAttentionQuery.data?.items, stream?.notices],
+  );
   const [filter, setFilter] = useState<"action" | "progress" | "archived">("action");
   const visibleNotices = useMemo(
     () =>
-      (notices ?? []).filter((notice) => {
+      notices.filter((notice) => {
         if (filter === "action") {
-          return notice.kind === "waiting_for_user" || notice.kind === "blocked";
+          return isActionNotice(notice);
         }
         if (filter === "progress") {
-          return (
-            notice.kind === "completed" ||
-            notice.kind === "milestone_completed" ||
-            notice.kind === "root_completed"
-          );
+          return !isActionNotice(notice);
         }
         return false;
       }),
@@ -58,9 +76,7 @@ export function InboxPage() {
           onClick={() => setFilter("action")}
           label="需要处理"
           count={
-            notices?.filter(
-              (notice) => notice.kind === "waiting_for_user" || notice.kind === "blocked",
-            ).length ?? 0
+            notices.filter(isActionNotice).length
           }
         />
         <InboxTab
@@ -68,9 +84,7 @@ export function InboxPage() {
           onClick={() => setFilter("progress")}
           label="进度通报"
           count={
-            notices?.filter(
-              (notice) => notice.kind !== "waiting_for_user" && notice.kind !== "blocked",
-            ).length ?? 0
+            notices.filter((notice) => !isActionNotice(notice)).length
           }
         />
         <InboxTab
@@ -81,6 +95,15 @@ export function InboxPage() {
       </div>
       {filter === "archived" ? (
         <EmptyWorkspaceState icon={<PackageOpen size={18} />} title="暂无已归档事项" />
+      ) : planningAttentionQuery.isError ? (
+        <div className="workspace-empty workspace-empty--error" role="alert">
+          <div className="workspace-empty__glyph"><Radio size={18} /></div>
+          <strong>无法恢复规划信箱</strong>
+          <span>控制面暂时没有返回待处理的 PlanningRequest。</span>
+          <button className="quiet-button" type="button" onClick={() => void planningAttentionQuery.refetch()}>
+            重试读取
+          </button>
+        </div>
       ) : visibleNotices.length === 0 ? (
         <EmptyWorkspaceState
           icon={<CircleDashed size={18} />}
@@ -96,7 +119,9 @@ export function InboxPage() {
               <div className="inbox-item__body">
                 <strong>{notice.title}</strong>
                 <span>{notice.summary}</span>
-                <span className="mono-label">CURSOR {notice.cursor}</span>
+                <span className="mono-label">
+                  {notice.cursor === null ? `REQUEST V${notice.resourceVersion ?? "?"}` : `CURSOR ${notice.cursor}`}
+                </span>
               </div>
               <div className="inbox-item__actions">
                 <Link className="quiet-button" to={notice.href}>
@@ -265,13 +290,51 @@ function EmptyWorkspaceState({ icon, title }: { icon: React.ReactNode; title: st
 }
 
 function StatusIcon({ kind }: { kind: string }) {
-  if (kind === "waiting_for_user") {
+  if (kind === "waiting_for_user" || kind === "planning_clarification") {
     return <CircleDashed size={16} aria-hidden="true" />;
   }
-  if (kind === "blocked") {
+  if (kind === "blocked" || kind === "planning_blocked" || kind === "planning_conflicted") {
     return <Radio size={16} aria-hidden="true" />;
   }
   return <Check size={16} aria-hidden="true" />;
+}
+
+function isActionNotice(notice: WorkspaceNotification): boolean {
+  return notice.kind === "waiting_for_user"
+    || notice.kind === "blocked"
+    || notice.kind === "planning_clarification"
+    || notice.kind === "planning_proposal"
+    || notice.kind === "planning_conflicted"
+    || notice.kind === "planning_blocked";
+}
+
+function mergeNotifications(
+  streamNotices: readonly WorkspaceNotification[],
+  persistedNotices: readonly WorkspaceNotification[],
+): WorkspaceNotification[] {
+  const merged = new Map<string, WorkspaceNotification>();
+  const persistedPlanningResources = new Set(
+    persistedNotices
+      .filter((notice) => isPlanningNotice(notice) && notice.resourceId !== null)
+      .map((notice) => notice.resourceId),
+  );
+  const candidates = [
+    ...persistedNotices,
+    ...streamNotices.filter(
+      (notice) => !isPlanningNotice(notice) || !persistedPlanningResources.has(notice.resourceId),
+    ),
+  ];
+  for (const notice of candidates) {
+    const key = `${notice.kind}:${notice.resourceId ?? notice.id}`;
+    if (!merged.has(key)) {
+      merged.set(key, notice);
+    }
+  }
+  return [...merged.values()];
+}
+
+function isPlanningNotice(notice: WorkspaceNotification): boolean {
+  return notice.kind.startsWith("planning_");
 }
 
 function HistoryRow({

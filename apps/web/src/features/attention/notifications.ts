@@ -1,13 +1,24 @@
 import type { ProjectionChange } from "@/shared/api/projectionStream";
+import type { PlanningRequestSummary } from "@/features/planning/types";
 
 export interface WorkspaceNotification {
   id: string;
-  kind: "completed" | "waiting_for_user" | "blocked" | "milestone_completed" | "root_completed";
+  kind:
+    | "completed"
+    | "waiting_for_user"
+    | "blocked"
+    | "milestone_completed"
+    | "root_completed"
+    | "planning_clarification"
+    | "planning_proposal"
+    | "planning_conflicted"
+    | "planning_blocked"
+    | "planning_materialized";
   title: string;
   summary: string;
   resourceId: string | null;
   resourceVersion: number | null;
-  cursor: number;
+  cursor: number | null;
   href: string;
 }
 
@@ -18,17 +29,26 @@ export function notificationFromChange(
   workspaceId: string,
   change: ProjectionChange,
 ): WorkspaceNotification | null {
+  if (change.projection_type === "planning_request") {
+    return planningNotificationFromChange(workspaceId, change);
+  }
   const kind = notificationKind(change.change_type);
   if (kind === null) {
     return null;
   }
-  const title = {
+  const titleMap: Record<WorkspaceNotification["kind"], string> = {
     completed: "任务节点已完成",
     waiting_for_user: "任务等待用户确认",
     blocked: "任务节点持续阻塞",
     milestone_completed: "里程碑已完成",
     root_completed: "Root Task 已完成",
-  }[kind];
+    planning_clarification: "任务规划需要补充信息",
+    planning_proposal: "任务方案待确认",
+    planning_conflicted: "任务方案已冲突",
+    planning_blocked: "任务规划已阻塞",
+    planning_materialized: "任务已开始",
+  };
+  const title = titleMap[kind];
   const resource = change.resource_id ? ` · ${change.resource_id.slice(0, 8)}` : "";
   return {
     id: notificationDedupeKey(workspaceId, change),
@@ -41,6 +61,51 @@ export function notificationFromChange(
     href: change.resource_id
       ? `/workspaces/${workspaceId}/tasks/${change.resource_id}`
       : `/workspaces/${workspaceId}/tasks`,
+  };
+}
+
+export function planningNotificationFromChange(
+  workspaceId: string,
+  change: ProjectionChange,
+): WorkspaceNotification | null {
+  const kind = planningNotificationKind(change.change_type);
+  if (kind === null) {
+    return null;
+  }
+  const title = planningNotificationTitle(kind);
+  const requestId = change.resource_id;
+  const resource = requestId ? ` · ${requestId.slice(0, 8)}` : "";
+  return {
+    id: `planning:${notificationDedupeKey(workspaceId, change)}`,
+    kind,
+    title,
+    summary: `${title}${resource}`,
+    resourceId: requestId,
+    resourceVersion: change.resource_version,
+    cursor: change.cursor,
+    href: requestId
+      ? `/workspaces/${workspaceId}/planning/${requestId}`
+      : `/workspaces/${workspaceId}/inbox`,
+  };
+}
+
+export function planningNotificationFromRequest(
+  request: Pick<PlanningRequestSummary, "id" | "status" | "version" | "workspace_id">,
+): WorkspaceNotification | null {
+  const kind = planningNotificationKind(request.status);
+  if (kind === null || kind === "planning_materialized") {
+    return null;
+  }
+  const title = planningNotificationTitle(kind);
+  return {
+    id: `planning-fact:${request.workspace_id}:${request.id}:${request.status}:${request.version}`,
+    kind,
+    title,
+    summary: `${title} · ${request.id.slice(0, 8)}`,
+    resourceId: request.id,
+    resourceVersion: request.version,
+    cursor: null,
+    href: `/workspaces/${request.workspace_id}/planning/${request.id}`,
   };
 }
 
@@ -79,6 +144,43 @@ export function notificationDedupeKey(
     change.resource_id ?? "workspace",
     change.resource_version ?? "unknown",
   ].join(":");
+}
+
+function planningNotificationKind(
+  value: string,
+): Extract<WorkspaceNotification["kind"], `planning_${string}`> | null {
+  const normalized = value.toLowerCase();
+  if (
+    normalized.includes("clarif")
+    || (normalized.includes("waiting") && (normalized.includes("user") || normalized.includes("decision")))
+  ) {
+    return "planning_clarification";
+  }
+  if (normalized.includes("proposal") && (normalized.includes("ready") || normalized.includes("confirm"))) {
+    return "planning_proposal";
+  }
+  if (normalized.includes("conflict")) {
+    return "planning_conflicted";
+  }
+  if (normalized.includes("block")) {
+    return "planning_blocked";
+  }
+  if (normalized.includes("material") || normalized.includes("start")) {
+    return "planning_materialized";
+  }
+  return null;
+}
+
+function planningNotificationTitle(
+  kind: Extract<WorkspaceNotification["kind"], `planning_${string}`>,
+): string {
+  return {
+    planning_clarification: "任务规划需要补充信息",
+    planning_proposal: "任务方案待确认",
+    planning_conflicted: "任务方案已冲突",
+    planning_blocked: "任务规划已阻塞",
+    planning_materialized: "任务已开始",
+  }[kind];
 }
 
 export function appendNotification(

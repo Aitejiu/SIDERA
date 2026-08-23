@@ -13,6 +13,7 @@ import type {
   PlanningProfilePage,
   PlanningProposal,
   PlanningRequest,
+  PlanningRequestPage,
   PlanningRunPage,
   PlanningClarificationAnswer,
   RejectPlanningProposalPayload,
@@ -21,6 +22,7 @@ import type {
 } from "./types";
 
 const PLANNING_PROFILES_PATH = "/api/v1/workspaces/{workspace_id}/planning-profiles" as const;
+const PLANNING_REQUESTS_PATH = "/api/v1/workspaces/{workspace_id}/planning-requests" as const;
 const PLANNING_REQUEST_PATH = "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}" as const;
 
 export function planningProfilesQueryKey(workspaceId: string) {
@@ -29,6 +31,10 @@ export function planningProfilesQueryKey(workspaceId: string) {
 
 export function planningRequestQueryKey(workspaceId: string, requestId: string) {
   return ["planning-request", workspaceId, requestId] as const;
+}
+
+export function planningRequestsQueryKey(workspaceId: string, requiresAttention = false) {
+  return ["planning-requests", workspaceId, requiresAttention] as const;
 }
 
 export function planningBriefsQueryKey(workspaceId: string, requestId: string) {
@@ -62,6 +68,20 @@ export async function listPlanningProfiles(
   const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-profiles`;
   const init = signal === undefined ? undefined : { signal };
   return apiGetAt(path, PLANNING_PROFILES_PATH as keyof paths, init);
+}
+
+export async function listPlanningRequests(
+  workspaceId: string,
+  options: { requiresAttention?: boolean; signal?: AbortSignal } = {},
+): Promise<PlanningRequestPage> {
+  const query = new URLSearchParams();
+  if (options.requiresAttention !== undefined) {
+    query.set("requires_attention", String(options.requiresAttention));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests${suffix}`;
+  const init = options.signal === undefined ? undefined : { signal: options.signal };
+  return apiGetAt(path, PLANNING_REQUESTS_PATH as keyof paths, init);
 }
 
 export async function getPlanningRequest(

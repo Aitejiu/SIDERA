@@ -6,6 +6,7 @@ import type { ProjectionChange } from "@/shared/api/projectionStream";
 const WORKSPACE_ID = "workspace-1";
 const ROOT_TASK_ID = "root-task-1";
 const WORKER_ITEM_ID = "worker-item-1";
+const PLANNING_REQUEST_ID = "planning-request-1";
 
 function change(
   projection_type: string,
@@ -64,5 +65,48 @@ describe("WorkspaceStreamProvider projection matching", () => {
         change("worker_item_activity", null),
       ),
     ).toBe(false);
+  });
+
+  it("invalidates planning request lists and only the affected planning subresources", () => {
+    const planningChange = change("planning_request", PLANNING_REQUEST_ID);
+
+    expect(
+      matchesProjectionQuery(
+        ["planning-requests", WORKSPACE_ID, true],
+        WORKSPACE_ID,
+        planningChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["planning-request", WORKSPACE_ID, PLANNING_REQUEST_ID],
+        WORKSPACE_ID,
+        planningChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["planning-proposal", WORKSPACE_ID, PLANNING_REQUEST_ID, 3],
+        WORKSPACE_ID,
+        planningChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["planning-materialization", WORKSPACE_ID, "other-request"],
+        WORKSPACE_ID,
+        planningChange,
+      ),
+    ).toBe(false);
+  });
+
+  it("refreshes every planning query when the planning projection has no resource", () => {
+    expect(
+      matchesProjectionQuery(
+        ["planning-clarifications", WORKSPACE_ID, PLANNING_REQUEST_ID],
+        WORKSPACE_ID,
+        change("planning_request", null),
+      ),
+    ).toBe(true);
   });
 });

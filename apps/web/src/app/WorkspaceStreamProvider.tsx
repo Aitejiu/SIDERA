@@ -157,6 +157,14 @@ export function matchesProjectionQuery(
     case "worker_trace":
       return queryType === "worker-traces" ||
         (queryType === "worker-trace" && matchesResource());
+    case "planning_request":
+      return queryType === "planning-requests"
+        || (queryType === "planning-request" && matchesResource())
+        || (queryType === "planning-briefs" && matchesResource())
+        || (queryType === "planning-runs" && matchesResource())
+        || (queryType === "planning-clarifications" && matchesResource())
+        || (queryType === "planning-proposal" && matchesResource())
+        || (queryType === "planning-materialization" && matchesResource());
     default:
       return false;
   }

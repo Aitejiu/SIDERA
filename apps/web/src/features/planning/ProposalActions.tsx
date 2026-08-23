@@ -30,7 +30,7 @@ export function ProposalActions({
         <p>确认会按当前审阅的 revision 创建 Root Task、Subtask、WorkerItem 和 ExecutionRequest。</p>
       </div>
       {isStale ? (
-        <div className="planning-proposal__stale" role="alert">
+        <div className="planning-proposal__stale" id="proposal-stale-reason" role="alert">
           <strong>方案版本已变化，请重新查看后再确认。</strong>
           {onRevisit ? <button className="quiet-button" type="button" onClick={onRevisit}><RefreshCw size={14} aria-hidden="true" />重新查看最新方案</button> : null}
         </div>
@@ -41,6 +41,8 @@ export function ProposalActions({
           className="primary-button"
           type="button"
           disabled={pending || isStale}
+          aria-describedby={isStale ? "proposal-stale-reason" : undefined}
+          aria-busy={pending}
           onClick={() => onConfirm(reviewedBinding)}
         >
           <CheckCircle2 size={15} aria-hidden="true" />

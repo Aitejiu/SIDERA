@@ -3,6 +3,8 @@ import type { components } from "@/shared/api/schema";
 export type PlanningProfile = components["schemas"]["PlanningProfileResponse"];
 export type PlanningProfilePage = components["schemas"]["PlanningProfilePageResponse"];
 export type PlanningRequest = components["schemas"]["PlanningRequestDetailResponse"];
+export type PlanningRequestPage = components["schemas"]["PlanningRequestPageResponse"];
+export type PlanningRequestSummary = components["schemas"]["PlanningRequestSummaryResponse"];
 export type PlanningBriefPage = components["schemas"]["PlanningBriefPageResponse"];
 export type PlanningRunPage = components["schemas"]["PlanningRunPageResponse"];
 export type PlanningRun = components["schemas"]["PlanningRunResponse"];

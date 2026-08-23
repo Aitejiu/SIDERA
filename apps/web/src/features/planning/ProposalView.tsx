@@ -48,13 +48,20 @@ export function ProposalView({
       </div>
       <ProposalDecisionSummary summary={model.decisionSummary} />
       <div className="planning-proposal__view-switch" role="tablist" aria-label="方案视图">
-        <ViewButton active={mode === "architecture"} label="执行架构" onClick={() => setMode("architecture")} />
-        <ViewButton active={mode === "graph"} label="依赖 DAG" onClick={() => setMode("graph")} />
-        <ViewButton active={mode === "diff"} label="变更" onClick={() => setMode("diff")} />
+        <ViewButton mode="architecture" active={mode === "architecture"} label="执行架构" onClick={() => setMode("architecture")} />
+        <ViewButton mode="graph" active={mode === "graph"} label="依赖 DAG" onClick={() => setMode("graph")} />
+        <ViewButton mode="diff" active={mode === "diff"} label="变更" onClick={() => setMode("diff")} />
       </div>
-      {mode === "architecture" ? <ProposalArchitectureBoard model={model} /> : null}
-      {mode === "graph" ? <ProposalGraph model={model} /> : null}
-      {mode === "diff" ? <ProposalDiff model={model} /> : null}
+      <div
+        id={`proposal-panel-${mode}`}
+        role="tabpanel"
+        aria-labelledby={`proposal-tab-${mode}`}
+        tabIndex={0}
+      >
+        {mode === "architecture" ? <ProposalArchitectureBoard model={model} /> : null}
+        {mode === "graph" ? <ProposalGraph model={model} /> : null}
+        {mode === "diff" ? <ProposalDiff model={model} /> : null}
+      </div>
       <ProposalActions
         binding={binding}
         onConfirm={onConfirm}
@@ -65,9 +72,28 @@ export function ProposalView({
   );
 }
 
-function ViewButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function ViewButton({
+  mode,
+  active,
+  label,
+  onClick,
+}: {
+  mode: ProposalViewMode;
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
   return (
-    <button type="button" role="tab" aria-selected={active} className={active ? "is-active" : ""} onClick={onClick}>
+    <button
+      id={`proposal-tab-${mode}`}
+      type="button"
+      role="tab"
+      aria-selected={active}
+      aria-controls={`proposal-panel-${mode}`}
+      tabIndex={active ? 0 : -1}
+      className={active ? "is-active" : ""}
+      onClick={onClick}
+    >
       {label}
     </button>
   );

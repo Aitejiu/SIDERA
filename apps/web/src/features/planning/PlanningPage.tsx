@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowLeft, X } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { ApiProblem } from "@/shared/api/client";
@@ -293,7 +293,11 @@ export function PlanningPage() {
               <div className="planning-proposal__loading" role="status">正在读取方案结构</div>
             ) : (
               <div className="planning-proposal__loading planning-proposal__loading--error" role="alert">
-                方案结构读取失败，请重新加载规划请求。
+                <strong>方案结构读取失败</strong>
+                <span>方案内容没有完整返回，确认前需要重新读取。</span>
+                <button className="quiet-button" type="button" onClick={() => void proposalQuery.refetch()}>
+                  重新读取方案
+                </button>
               </div>
             )
           ) : null}
@@ -389,16 +393,59 @@ function ConfirmationDialog({
 }) {
   const isCancel = kind === "cancel";
   const title = isCancel ? "确认取消规划" : "确认拒绝方案";
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    closeButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
+      );
+      if (!focusable || focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [onClose]);
+
   return (
     <div className="planning-dialog-backdrop">
-      <div className="planning-dialog" role="dialog" aria-modal="true" aria-labelledby="planning-dialog-title">
+      <div
+        ref={dialogRef}
+        className="planning-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="planning-dialog-title"
+        aria-describedby="planning-dialog-description"
+      >
         <div className="planning-dialog__heading">
           <h2 id="planning-dialog-title">{title}</h2>
-          <button className="icon-button" type="button" aria-label="关闭确认窗口" title="关闭确认窗口" onClick={onClose}>
+          <button ref={closeButtonRef} className="icon-button" type="button" aria-label="关闭确认窗口" title="关闭确认窗口" onClick={onClose}>
             <X size={15} aria-hidden="true" />
           </button>
         </div>
-        <p>{isCancel ? "这会停止当前 PlanningRequest 的后续运行。" : "这会结束当前方案审计，不会删除已有任务。"}</p>
+        <p id="planning-dialog-description">{isCancel ? "这会停止当前 PlanningRequest 的后续运行。" : "这会结束当前方案审计，不会删除已有任务。"}</p>
         <div className="planning-dialog__actions">
           <button className="quiet-button" type="button" onClick={onClose} disabled={pending}>返回</button>
           <button className="quiet-button quiet-button--danger" type="button" onClick={onConfirm} disabled={pending}>

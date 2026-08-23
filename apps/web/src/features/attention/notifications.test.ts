@@ -5,6 +5,8 @@ import type { ProjectionChange } from "@/shared/api/projectionStream";
 import {
   appendNotification,
   browserNotificationsEnabled,
+  planningNotificationFromChange,
+  planningNotificationFromRequest,
   notificationFromChange,
   readLastNotifiedCursor,
   setBrowserNotificationsEnabled,
@@ -68,5 +70,44 @@ describe("workspace notifications", () => {
 
     expect(readLastNotifiedCursor(WORKSPACE_ID, fakeStorage)).toBe(42);
     expect(browserNotificationsEnabled(WORKSPACE_ID, fakeStorage)).toBe(true);
+  });
+
+  it.each([
+    ["PlanningRequestWaitingForUser", "planning_clarification", "任务规划需要补充信息"],
+    ["PlanningProposalReady", "planning_proposal", "任务方案待确认"],
+    ["PlanningRequestConflicted", "planning_conflicted", "任务方案已冲突"],
+    ["PlanningRequestMaterialized", "planning_materialized", "任务已开始"],
+  ])("maps %s to a planning deep-link", (changeType, kind, title) => {
+    const notification = planningNotificationFromChange(
+      WORKSPACE_ID,
+      change({ projection_type: "planning_request", change_type: changeType }),
+    );
+
+    expect(notification).toMatchObject({
+      kind,
+      title,
+      href: `${"/workspaces"}/${WORKSPACE_ID}/planning/${change().resource_id}`,
+    });
+  });
+
+  it.each([
+    ["waiting_for_user", "planning_clarification", "任务规划需要补充信息"],
+    ["proposal_ready", "planning_proposal", "任务方案待确认"],
+    ["conflicted", "planning_conflicted", "任务方案已冲突"],
+    ["blocked", "planning_blocked", "任务规划已阻塞"],
+  ])("keeps persisted %s planning facts actionable after refresh", (status, kind, title) => {
+    const notification = planningNotificationFromRequest({
+      id: "planning-request-2",
+      status,
+      version: 7,
+      workspace_id: WORKSPACE_ID,
+    });
+
+    expect(notification).toMatchObject({
+      kind,
+      title,
+      href: `/workspaces/${WORKSPACE_ID}/planning/planning-request-2`,
+      cursor: null,
+    });
   });
 });
