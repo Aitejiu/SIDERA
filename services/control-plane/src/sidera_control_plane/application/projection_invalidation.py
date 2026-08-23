@@ -52,6 +52,10 @@ _EXECUTION_LIFECYCLE_TYPES = {
     "ExecutionSessionClosed",
     "ExecutionSessionLost",
     "ExecutionRequestCreated",
+    "ExecutionRequestGateBlocked",
+    "ExecutionRequestGateReady",
+    "ExecutionRequestMaterialized",
+    "ExecutionRequestObsoleted",
     "TaskWaitingForDecision",
 }
 

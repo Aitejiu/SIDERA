@@ -107,6 +107,19 @@ class ExecutionRepository:
             is not None
         )
 
+    def list_for_lineage(
+        self, lineage_id: UUID, workspace_id: UUID
+    ) -> tuple[Execution, ...]:
+        rows = self._session.scalars(
+            select(ExecutionModel)
+            .where(
+                ExecutionModel.lineage_id == lineage_id,
+                ExecutionModel.workspace_id == workspace_id,
+            )
+            .order_by(ExecutionModel.attempt.asc(), ExecutionModel.id.asc())
+        ).all()
+        return tuple(_to_domain_execution(row) for row in rows)
+
     def claim_schedulable(
         self,
         *,

@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -227,6 +228,22 @@ class ArtifactRepository:
         ).all()
         return tuple(_to_domain_artifact(row) for row in rows)
 
+    def list_for_executions(
+        self, execution_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Artifact, ...]:
+        ids = tuple(dict.fromkeys(execution_ids))
+        if not ids:
+            return ()
+        rows = self._session.scalars(
+            select(ArtifactModel)
+            .where(
+                ArtifactModel.execution_id.in_(ids),
+                ArtifactModel.workspace_id == workspace_id,
+            )
+            .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
+        ).all()
+        return tuple(_to_domain_artifact(row) for row in rows)
+
 
 class EvidenceClaimRepository:
     def __init__(
@@ -279,6 +296,22 @@ class EvidenceClaimRepository:
             select(EvidenceClaimModel)
             .where(
                 EvidenceClaimModel.task_id == task_id,
+                EvidenceClaimModel.workspace_id == workspace_id,
+            )
+            .order_by(EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc())
+        ).all()
+        return tuple(_to_domain_claim(row) for row in rows)
+
+    def list_for_executions(
+        self, execution_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[EvidenceClaim, ...]:
+        ids = tuple(dict.fromkeys(execution_ids))
+        if not ids:
+            return ()
+        rows = self._session.scalars(
+            select(EvidenceClaimModel)
+            .where(
+                EvidenceClaimModel.execution_id.in_(ids),
                 EvidenceClaimModel.workspace_id == workspace_id,
             )
             .order_by(EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc())

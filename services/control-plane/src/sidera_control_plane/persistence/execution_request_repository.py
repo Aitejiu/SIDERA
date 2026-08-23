@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from types import MappingProxyType
 from uuid import UUID
@@ -87,10 +88,26 @@ class ExecutionRequestRepository:
     def claim_ready(
         self, *, now: datetime, limit: int
     ) -> tuple[ExecutionRequest, ...]:
-        rows = self._session.scalars(
+        rows = self._claim_status(
+            status=ExecutionRequestStatus.READY, now=now, limit=limit
+        )
+        return tuple(_to_request(row) for row in rows)
+
+    def claim_blocked(
+        self, *, now: datetime, limit: int
+    ) -> tuple[ExecutionRequest, ...]:
+        rows = self._claim_status(
+            status=ExecutionRequestStatus.BLOCKED, now=now, limit=limit
+        )
+        return tuple(_to_request(row) for row in rows)
+
+    def _claim_status(
+        self, *, status: ExecutionRequestStatus, now: datetime, limit: int
+    ) -> Sequence[ExecutionRequestModel]:
+        return self._session.scalars(
             select(ExecutionRequestModel)
             .where(
-                ExecutionRequestModel.status == ExecutionRequestStatus.READY.value,
+                ExecutionRequestModel.status == status.value,
                 ExecutionRequestModel.not_before <= now,
             )
             .order_by(
@@ -101,7 +118,6 @@ class ExecutionRequestRepository:
             .limit(limit)
             .with_for_update(skip_locked=True)
         ).all()
-        return tuple(_to_request(row) for row in rows)
 
     def add_dependency(self, dependency: ExecutionRequestDependency) -> None:
         workspace_id = self._request_workspace(dependency.downstream_request_id)

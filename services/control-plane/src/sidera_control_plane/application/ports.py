@@ -285,6 +285,11 @@ class ExecutionRequestRepositoryPort(Protocol):
     ) -> tuple[ExecutionRequest, ...]:
         raise NotImplementedError
 
+    def claim_blocked(
+        self, *, now: datetime, limit: int
+    ) -> tuple[ExecutionRequest, ...]:
+        raise NotImplementedError
+
     def add_dependency(self, dependency: ExecutionRequestDependency) -> None:
         raise NotImplementedError
 
@@ -446,6 +451,11 @@ class ExecutionRepositoryPort(Protocol):
     def attempt_exists(self, lineage_id: UUID, attempt: int) -> bool:
         raise NotImplementedError
 
+    def list_for_lineage(
+        self, lineage_id: UUID, workspace_id: UUID
+    ) -> tuple[Execution, ...]:
+        raise NotImplementedError
+
     def claim_schedulable(
         self,
         *,
@@ -589,6 +599,11 @@ class ArtifactRepositoryPort(Protocol):
     ) -> tuple[Artifact, ...]:
         raise NotImplementedError
 
+    def list_for_executions(
+        self, execution_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Artifact, ...]:
+        raise NotImplementedError
+
 
 class ArtifactContentWriter(Protocol):
     def put(
@@ -607,6 +622,11 @@ class EvidenceClaimRepositoryPort(Protocol):
 
     def list_for_task(
         self, task_id: UUID, workspace_id: UUID
+    ) -> tuple[EvidenceClaim, ...]:
+        raise NotImplementedError
+
+    def list_for_executions(
+        self, execution_ids: Collection[UUID], workspace_id: UUID
     ) -> tuple[EvidenceClaim, ...]:
         raise NotImplementedError
 
