@@ -18,6 +18,7 @@ from sidera_control_plane.api.planning_queries import router as planning_queries
 from sidera_control_plane.api.projection_stream import (
     router as projection_stream_router,
 )
+from sidera_control_plane.api.runtime_queries import router as runtime_queries_router
 from sidera_control_plane.api.subtask_queries import (
     router as subtask_queries_router,
 )
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(task_queries_router)
     app.include_router(plan_queries_router)
     app.include_router(planning_queries_router)
+    app.include_router(runtime_queries_router)
     app.include_router(projection_stream_router)
     app.include_router(worker_queries_router)
     app.include_router(module_queries_router)

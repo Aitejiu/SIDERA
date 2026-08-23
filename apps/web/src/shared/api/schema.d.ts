@@ -701,6 +701,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/runtime-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Runtime Metrics */
+        get: operations["get_runtime_metrics_api_v1_workspaces__workspace_id__runtime_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/task-overviews": {
         parameters: {
             query?: never;
@@ -2335,6 +2352,45 @@ export interface components {
              * @constant
              */
             unknown_outcome_decision: "retry";
+        };
+        /** RuntimeDurationMetricsResponse */
+        RuntimeDurationMetricsResponse: {
+            /** Average Seconds */
+            average_seconds: number;
+            /** Count */
+            count: number;
+            /** Max Seconds */
+            max_seconds: number;
+            /** Total Seconds */
+            total_seconds: number;
+        };
+        /** RuntimeMetricsResponse */
+        RuntimeMetricsResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Runtime Binding Failures Total */
+            runtime_binding_failures_total: {
+                [key: string]: number;
+            };
+            scheduler_assignment_duration_seconds: components["schemas"]["RuntimeDurationMetricsResponse"];
+            /** Scheduler Assignments Total */
+            scheduler_assignments_total: number;
+            /** Scheduler Blocks Active */
+            scheduler_blocks_active: {
+                [key: string]: number;
+            };
+            /** Worker Runtime Configuration Status */
+            worker_runtime_configuration_status: {
+                [key: string]: number;
+            };
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** SetModuleLifecyclePayload */
         SetModuleLifecyclePayload: {
@@ -5054,6 +5110,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_runtime_metrics_api_v1_workspaces__workspace_id__runtime_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeMetricsResponse"];
                 };
             };
             /** @description Validation Error */

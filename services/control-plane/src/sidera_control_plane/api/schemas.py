@@ -39,6 +39,9 @@ from sidera_control_plane.application.resource_queries import (
     WorkerSummaryView,
     WorkerView,
 )
+from sidera_control_plane.application.runtime_metrics import (
+    RuntimeMetricsView,
+)
 from sidera_control_plane.application.task_queries import (
     TaskPage,
     TaskView,
@@ -2420,6 +2423,40 @@ class PlanningMetricsResponse(BaseModel):
                 blocked=view.execution_requests.blocked,
                 ready=view.execution_requests.ready,
                 gate_wait_seconds=view.execution_requests.gate_wait_seconds,
+            ),
+        )
+
+
+class RuntimeDurationMetricsResponse(BaseModel):
+    count: int
+    total_seconds: float
+    average_seconds: float
+    max_seconds: float
+
+
+class RuntimeMetricsResponse(BaseModel):
+    workspace_id: UUID
+    as_of: datetime
+    scheduler_assignments_total: int
+    scheduler_blocks_active: dict[str, int]
+    worker_runtime_configuration_status: dict[str, int]
+    runtime_binding_failures_total: dict[str, int]
+    scheduler_assignment_duration_seconds: RuntimeDurationMetricsResponse
+
+    @classmethod
+    def from_view(cls, view: RuntimeMetricsView) -> "RuntimeMetricsResponse":
+        return cls(
+            workspace_id=view.workspace_id,
+            as_of=view.as_of,
+            scheduler_assignments_total=view.scheduler_assignments_total,
+            scheduler_blocks_active=view.scheduler_blocks_active,
+            worker_runtime_configuration_status=view.worker_runtime_configuration_status,
+            runtime_binding_failures_total=view.runtime_binding_failures_total,
+            scheduler_assignment_duration_seconds=RuntimeDurationMetricsResponse(
+                count=view.scheduler_assignment_duration_seconds.count,
+                total_seconds=view.scheduler_assignment_duration_seconds.total_seconds,
+                average_seconds=view.scheduler_assignment_duration_seconds.average_seconds,
+                max_seconds=view.scheduler_assignment_duration_seconds.max_seconds,
             ),
         )
 

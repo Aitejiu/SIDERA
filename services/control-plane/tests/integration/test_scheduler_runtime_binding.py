@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -255,14 +256,48 @@ def _seed(
     )
 
 
-def _scheduler(database: Database) -> Scheduler:
+def _scheduler(database: Database, *, monotonic_clock=None) -> Scheduler:
     return Scheduler(
         uow_factory=lambda: SqlAlchemyUnitOfWork(database),
         policy=LowestCostWorkerPolicy(),
         clock=lambda: NOW,
         assignment_lease_seconds=30,
         worker_heartbeat_timeout_seconds=45,
+        monotonic_clock=monotonic_clock,
     )
+
+
+def test_scheduler_records_finite_assignment_duration_and_safe_log(
+    database: Database,
+    workspace_id: UUID,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fixture = _seed(database, workspace_id, configured_worker_indexes=(1,))
+    ticks = iter((10.0, 10.25))
+    caplog.set_level(logging.INFO, logger="sidera_control_plane.application.scheduler")
+
+    result = _scheduler(database, monotonic_clock=lambda: next(ticks)).run_once(limit=1)
+
+    assert result.assigned == 1
+    with database.session() as session:
+        event = session.scalar(
+            select(EventModel).where(
+                EventModel.workspace_id == workspace_id,
+                EventModel.event_type == "ExecutionRuntimeBound",
+            )
+        )
+    assert event is not None
+    assert event.payload["assignment_duration_seconds"] == pytest.approx(0.25)
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage() == "scheduler_assignment_committed"
+    )
+    record_fields = record.__dict__
+    assert record_fields["workspace_id"] == str(workspace_id)
+    assert record_fields["execution_id"] == str(fixture.execution.id)
+    assert record_fields["duration_seconds"] == pytest.approx(0.25)
+    assert not hasattr(record, "config")
 
 
 def test_scheduler_binds_exact_runtime_and_emits_runtime_audit_event(

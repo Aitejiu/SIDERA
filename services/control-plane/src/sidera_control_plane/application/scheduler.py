@@ -1,3 +1,6 @@
+import logging
+import math
+import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -35,6 +38,7 @@ from sidera_control_plane.domain.worker import Worker
 
 ACTIVE_EXECUTION_LEASE_CONSTRAINT = "uq_assignment_leases_active_execution"
 EXECUTION_BINDING_CONSTRAINT = "uq_bindings_execution"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +59,7 @@ class Scheduler:
         worker_heartbeat_timeout_seconds: int = 45,
         runtime_resolver: WorkerRuntimeResolver | None = None,
         scheduling_blocks: SchedulingBlockService | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         if assignment_lease_seconds <= 0:
             raise ValueError("assignment_lease_seconds must be positive")
@@ -67,6 +72,7 @@ class Scheduler:
         self._worker_heartbeat_timeout_seconds = worker_heartbeat_timeout_seconds
         self._runtime_resolver = runtime_resolver or WorkerRuntimeResolver()
         self._scheduling_blocks = scheduling_blocks or SchedulingBlockService()
+        self._monotonic_clock = monotonic_clock or time.monotonic
 
     def run_once(self, limit: int) -> SchedulerRunResult:
         if limit < 1:
@@ -103,6 +109,7 @@ class Scheduler:
         self, *, excluded_ids: Collection[UUID]
     ) -> tuple[int, int, int, UUID | None]:
         now = self._clock()
+        assignment_started_at = self._monotonic_clock()
         execution_id: UUID | None = None
         try:
             with self._uow_factory() as uow:
@@ -197,6 +204,7 @@ class Scheduler:
                         decision_reason=decision.reason,
                         now=now,
                         execution_id=execution_id,
+                        assignment_started_at=assignment_started_at,
                     )
 
                 issue = aggregate_runtime_issues(
@@ -227,6 +235,7 @@ class Scheduler:
         decision_reason: dict[str, object],
         now: datetime,
         execution_id: UUID,
+        assignment_started_at: float,
     ) -> tuple[int, int, int, UUID]:
         previous_execution_version = execution.version
         previous_worker_version = worker.version
@@ -260,6 +269,9 @@ class Scheduler:
             lease_id=lease.id,
             fencing_token=fencing_token,
             version=1,
+        )
+        assignment_duration_seconds = _safe_duration(
+            self._monotonic_clock() - assignment_started_at
         )
         uow.leases.add(lease)
         uow.bindings.add(binding)
@@ -297,6 +309,7 @@ class Scheduler:
                     "capability_snapshot": _capability_payload(
                         binding.capability_snapshot
                     ),
+                    "assignment_duration_seconds": assignment_duration_seconds,
                 },
             ),
             _event(
@@ -351,6 +364,21 @@ class Scheduler:
         )
         all_events = events + unblocked_events
         _commit_events(uow, envelope, execution, all_events)
+        logger.info(
+            "scheduler_assignment_committed",
+            extra={
+                "event_name": "scheduler_assignment_committed",
+                "workspace_id": str(execution.workspace_id),
+                "execution_id": str(execution.id),
+                "worker_id": str(worker.id),
+                "binding_id": str(binding.id),
+                "lease_id": str(lease.id),
+                "adapter_module_instance_id": str(binding.adapter_module_id),
+                "workspace_module_instance_id": str(binding.workspace_module_id),
+                "correlation_id": str(envelope.correlation_id),
+                "duration_seconds": assignment_duration_seconds,
+            },
+        )
         return 1, 1, 0, execution_id
 
     def _commit_deferred(
@@ -381,6 +409,14 @@ class Scheduler:
             now=now,
         )
         _commit_events(uow, envelope, execution, events)
+        logger.info(
+            "scheduler_assignment_deferred",
+            extra={
+                "event_name": "scheduler_assignment_deferred",
+                "reason_code": issue.reason_code.value,
+                "candidate_count": _candidate_count(issue.reason_details),
+            },
+        )
         return 1, 0, 1, execution_id
 
 
@@ -461,6 +497,19 @@ def _plain_json(value: object) -> Any:
         return {str(key): _plain_json(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain_json(item) for item in value]
+    return value
+
+
+def _safe_duration(value: float) -> float:
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return value
+
+
+def _candidate_count(details: Mapping[str, object]) -> int:
+    value = details.get("candidate_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
     return value
 
 

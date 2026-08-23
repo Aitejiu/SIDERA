@@ -54,9 +54,9 @@ def scheduling_block_summary(
         candidate_count = None
 
     raw_counts = reason_details.get("candidate_issue_counts")
-    counts: Mapping[object, object]
+    counts: Mapping[str, object]
     if isinstance(raw_counts, Mapping):
-        counts = raw_counts
+        counts = {str(key): value for key, value in raw_counts.items()}
     else:
         counts = {
             key: reason_details[key]

@@ -21,6 +21,7 @@ from sidera_control_plane.application.planning_queries import PlanningQueryServi
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
+from sidera_control_plane.application.runtime_metrics import RuntimeMetricsService
 from sidera_control_plane.application.subtask_workspace_queries import (
     SubtaskWorkspaceQueryService,
 )
@@ -50,6 +51,9 @@ from sidera_control_plane.persistence.planning_query_store import (
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyModuleQueryStore,
     SqlAlchemyResourceQueryStore,
+)
+from sidera_control_plane.persistence.runtime_metrics_store import (
+    SqlAlchemyRuntimeMetricsStore,
 )
 from sidera_control_plane.persistence.subtask_workspace_query_store import (
     SqlAlchemySubtaskWorkspaceQueryStore,
@@ -126,6 +130,12 @@ def get_planning_metrics_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> PlanningMetricsService:
     return PlanningMetricsService(SqlAlchemyPlanningMetricsStore(database))
+
+
+def get_runtime_metrics_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> RuntimeMetricsService:
+    return RuntimeMetricsService(SqlAlchemyRuntimeMetricsStore(database))
 
 
 def get_resource_query_service(

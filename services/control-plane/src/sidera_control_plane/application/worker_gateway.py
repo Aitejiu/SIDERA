@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -72,6 +73,7 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "runtime_capability_mismatch",
     }
 )
+logger = logging.getLogger(__name__)
 
 
 class GatewayError(RuntimeError):
@@ -283,31 +285,39 @@ class WorkerGateway:
         self, message: OutboxMessage
     ) -> GatewayExecutionResult | GatewayStopResult:
         if message.topic == STOP_TOPIC:
-            return self.handle_stop(message)
+            try:
+                return self.handle_stop(message)
+            except GatewayError as exc:
+                _log_gateway_error(message, exc)
+                raise
         try:
             context = self._load_context(message)
+            spec = self._spec_factory.create(
+                context.execution,
+                context.task,
+                context.binding,
+                context.adapter_instance,
+                context.workspace_instance,
+            )
+            workspace = self._ensure_workspace(context, spec)
+            result = self._ensure_session(context, spec, workspace)
+            self._ensure_initial_prompt(context, spec, result)
+            self.sync_session(
+                workspace_id=context.execution.workspace_id,
+                execution_id=context.execution.id,
+                session_id=result.session_id,
+                lease_id=context.lease.id,
+                fencing_token=context.binding.fencing_token,
+            )
+            return result
         except GatewayMessageError as exc:
             if exc.code in _START_BLOCK_FAILURE_CODES:
                 self._audit_start_block_from_message(message, exc.code)
+            _log_gateway_error(message, exc)
             raise
-        spec = self._spec_factory.create(
-            context.execution,
-            context.task,
-            context.binding,
-            context.adapter_instance,
-            context.workspace_instance,
-        )
-        workspace = self._ensure_workspace(context, spec)
-        result = self._ensure_session(context, spec, workspace)
-        self._ensure_initial_prompt(context, spec, result)
-        self.sync_session(
-            workspace_id=context.execution.workspace_id,
-            execution_id=context.execution.id,
-            session_id=result.session_id,
-            lease_id=context.lease.id,
-            fencing_token=context.binding.fencing_token,
-        )
-        return result
+        except GatewayError as exc:
+            _log_gateway_error(message, exc)
+            raise
 
     def handle_stop(self, message: OutboxMessage) -> GatewayStopResult:
         (
@@ -1861,3 +1871,45 @@ def _failure_code(exc: Exception) -> str:
     value = str(exc).lower().replace(" ", "_")
     clean = "".join(char if char.isalnum() or char == "_" else "_" for char in value)
     return clean.strip("_")[:100] or type(exc).__name__.lower()
+
+
+def _log_gateway_error(message: OutboxMessage, error: GatewayError) -> None:
+    fields: dict[str, object] = {
+        "event_name": "worker_gateway_error",
+        "message_id": str(message.id),
+        "event_id": str(message.event_id),
+        "topic": message.topic,
+        "attempts": message.attempts,
+        "error_code": _stable_gateway_error_code(error),
+    }
+    try:
+        if message.topic == ASSIGNMENT_TOPIC:
+            workspace_id, execution_id, lease_id, _, _ = _assignment_ids(message)
+            fields.update(
+                {
+                    "workspace_id": str(workspace_id),
+                    "execution_id": str(execution_id),
+                    "lease_id": str(lease_id),
+                }
+            )
+        elif message.topic == STOP_TOPIC:
+            workspace_id, execution_id, lease_id, _, session_id, _ = _stop_ids(message)
+            fields.update(
+                {
+                    "workspace_id": str(workspace_id),
+                    "execution_id": str(execution_id),
+                    "lease_id": str(lease_id),
+                    "session_id": str(session_id),
+                }
+            )
+    except GatewayMessageError:
+        pass
+    logger.warning("worker_gateway_error", extra=fields)
+
+
+def _stable_gateway_error_code(error: GatewayError) -> str:
+    if isinstance(error, GatewayMessageError) and error.code:
+        return error.code
+    if isinstance(error, GatewayRecoveryRequired):
+        return "gateway_recovery_required"
+    return "gateway_error"
