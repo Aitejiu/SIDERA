@@ -12,6 +12,7 @@ from sidera_control_plane.application.proposal_materializer import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     OperatorRequired,
+    PlanningConflict,
     ValidationError,
     VersionConflict,
 )
@@ -348,7 +349,7 @@ class PlanningCommandHandler:
         if request is None:
             raise NotFound("planning request not found")
         if request.version != envelope.expected_version:
-            raise VersionConflict(envelope.expected_version, request.version)
+            raise _planning_conflict(request)
         previous_request_version = request.version
         previous_run_versions = {
             run.id: run.version
@@ -596,6 +597,13 @@ class PlanningCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         request = self._request_for_mutation(uow, envelope)
+        self._assert_current_proposal(
+            uow,
+            request,
+            envelope.payload,
+            revision_key="proposal_revision",
+            content_hash_key="proposal_content_hash",
+        )
         proposal = uow.planning_records.get_current_proposal(
             request.id, request.workspace_id
         )
@@ -707,7 +715,7 @@ class PlanningCommandHandler:
         if request is None:
             raise NotFound("planning request not found")
         if request.version != envelope.expected_version:
-            raise VersionConflict(envelope.expected_version, request.version)
+            raise _planning_conflict(request)
         return request
 
     def _run_for_mutation(
@@ -729,20 +737,23 @@ class PlanningCommandHandler:
         uow: ControlPlaneUnitOfWork,
         request: PlanningRequest,
         payload: Mapping[str, object],
+        *,
+        revision_key: str = "current_proposal_revision",
+        content_hash_key: str = "current_proposal_content_hash",
     ) -> None:
         proposal = uow.planning_records.get_current_proposal(
             request.id, request.workspace_id
         )
         if proposal is None:
             raise NotFound("current planning proposal not found")
-        revision = _positive_int(payload, "current_proposal_revision")
+        revision = _positive_int(payload, revision_key)
         content_hash = _content_hash(
-            _required_string(payload, "current_proposal_content_hash")
+            _required_string(payload, content_hash_key)
         )
         if proposal.revision != revision:
-            raise ValidationError("proposal revision does not match current proposal")
+            raise _planning_conflict(request)
         if proposal.content_hash != content_hash:
-            raise ValidationError("proposal content hash does not match current proposal")
+            raise _planning_conflict(request)
 
     def _persist_appended_revision(
         self,
@@ -984,6 +995,14 @@ def _positive_int(value: Mapping[str, object], name: str) -> int:
     if not isinstance(item, int) or isinstance(item, bool) or item < 1:
         raise ValidationError(f"{name} must be positive")
     return item
+
+
+def _planning_conflict(request: PlanningRequest) -> PlanningConflict:
+    return PlanningConflict(
+        current_request_version=request.version,
+        current_proposal_revision=request.current_proposal_revision,
+        current_proposal_content_hash=request.current_proposal_content_hash,
+    )
 
 
 def _non_negative_int(value: Mapping[str, object], name: str) -> int:

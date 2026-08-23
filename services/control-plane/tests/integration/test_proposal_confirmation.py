@@ -314,9 +314,9 @@ def test_confirm_replay_returns_same_mapping_without_second_root_task(
 
     replay = client.post(
         "/api/v1/commands",
-        json={**first, "command_id": str(uuid4()), "correlation_id": str(uuid4())},
+        json={**first, "correlation_id": str(uuid4())},
     )
-    assert replay.status_code == 200, replay.text
+    assert replay.status_code == 201, replay.text
     assert replay.json() == created.json()
 
     with database.session() as session:
@@ -345,8 +345,16 @@ def test_invalid_confirmation_rolls_back_without_creating_task_rows(
         ),
     )
 
-    assert response.status_code == 422, response.text
-    assert response.json()["error"]["code"] == "validation_error"
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "planning_conflict",
+        "message": "planning request or proposal changed",
+        "details": {
+            "current_request_version": 4,
+            "current_proposal_revision": 1,
+            "current_proposal_content_hash": content_hash,
+        },
+    }
     assert content_hash != "0" * 64
     with database.session() as session:
         _assert_no_materialization_rows(session)
@@ -375,7 +383,15 @@ def test_stale_request_version_rejects_before_materialization(
     )
 
     assert response.status_code == 409, response.text
-    assert response.json()["error"]["code"] == "version_conflict"
+    assert response.json()["error"] == {
+        "code": "planning_conflict",
+        "message": "planning request or proposal changed",
+        "details": {
+            "current_request_version": 4,
+            "current_proposal_revision": 1,
+            "current_proposal_content_hash": content_hash,
+        },
+    }
     with database.session() as session:
         _assert_no_materialization_rows(session)
 
@@ -402,8 +418,78 @@ def test_non_current_proposal_revision_rejects_before_materialization(
         ),
     )
 
-    assert response.status_code == 422, response.text
-    assert response.json()["error"]["code"] == "validation_error"
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "planning_conflict",
+        "message": "planning request or proposal changed",
+        "details": {
+            "current_request_version": 4,
+            "current_proposal_revision": 1,
+            "current_proposal_content_hash": content_hash,
+        },
+    }
+    with database.session() as session:
+        _assert_no_materialization_rows(session)
+
+
+@pytest.mark.parametrize(
+    ("command_type", "proposal_payload"),
+    [
+        (
+            "RequestProposalRevision",
+            {
+                "current_proposal_revision": 2,
+                "current_proposal_content_hash": "0" * 64,
+                "feedback": "narrow the scope",
+            },
+        ),
+        (
+            "RejectPlanningProposal",
+            {
+                "current_proposal_revision": 2,
+                "current_proposal_content_hash": "0" * 64,
+                "reason": "proposal is out of scope",
+            },
+        ),
+    ],
+)
+def test_stale_proposal_reference_returns_actionable_conflict(
+    client: TestClient,
+    database,
+    workspace_id: UUID,
+    uow_factory,
+    command_type: str,
+    proposal_payload: dict[str, object],
+) -> None:
+    request_id, _profile_id, content_hash, _proposal_id = seed_proposal(
+        uow_factory, workspace_id
+    )
+    response = client.post(
+        "/api/v1/commands",
+        json={
+            "command_id": str(uuid4()),
+            "workspace_id": str(workspace_id),
+            "command_type": command_type,
+            "target_type": "planning_request",
+            "actor": {"type": "local", "id": "operator"},
+            "target_id": str(request_id),
+            "expected_version": 4,
+            "idempotency_key": f"stale-{command_type}",
+            "correlation_id": str(uuid4()),
+            "payload": {**proposal_payload, "current_proposal_content_hash": "0" * 64},
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "planning_conflict",
+        "message": "planning request or proposal changed",
+        "details": {
+            "current_request_version": 4,
+            "current_proposal_revision": 1,
+            "current_proposal_content_hash": content_hash,
+        },
+    }
     with database.session() as session:
         _assert_no_materialization_rows(session)
 

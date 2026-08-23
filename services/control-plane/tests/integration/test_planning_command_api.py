@@ -469,6 +469,48 @@ def test_answer_planning_clarification_persists_new_brief_and_queued_run(
         assert any(run.status == "queued" and run.attempt == 2 for run in runs)
 
 
+def test_stale_answer_returns_actionable_planning_conflict(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    request_id, clarification_id, current_version = _seed_waiting_request(
+        database, workspace_id
+    )
+    response = client.post(
+        "/api/v1/commands",
+        json=_command(
+            workspace_id,
+            "AnswerPlanningClarification",
+            "planning_request",
+            {
+                "answers": [
+                    {"clarification_id": str(clarification_id), "answer": "fake"}
+                ]
+            },
+            idempotency_key="planning-answer-stale",
+            target_id=request_id,
+            expected_version=current_version - 1,
+        ),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "planning_conflict",
+        "message": "planning request or proposal changed",
+        "details": {
+            "current_request_version": current_version,
+            "current_proposal_revision": None,
+            "current_proposal_content_hash": None,
+        },
+    }
+    detail = client.get(
+        f"/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}"
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["version"] == current_version
+
+
 @pytest.mark.parametrize(
     ("command_type", "target_type", "payload"),
     [

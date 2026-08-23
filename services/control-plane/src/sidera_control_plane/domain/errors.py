@@ -40,6 +40,26 @@ class VersionConflict(DomainError):
         self.actual = actual
 
 
+class PlanningConflict(DomainError):
+    code = "planning_conflict"
+
+    def __init__(
+        self,
+        *,
+        current_request_version: int,
+        current_proposal_revision: int | None,
+        current_proposal_content_hash: str | None,
+    ) -> None:
+        super().__init__(
+            "planning request or proposal changed",
+            details={
+                "current_request_version": current_request_version,
+                "current_proposal_revision": current_proposal_revision,
+                "current_proposal_content_hash": current_proposal_content_hash,
+            },
+        )
+
+
 class ExecutionContextChanged(DomainError):
     code = "execution_context_changed"
 
