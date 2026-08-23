@@ -37,6 +37,7 @@ def make_request(*, request_id: UUID = REQUEST_ID) -> ExecutionRequest:
         purpose="Implement the backend",
         capability_requirements=frozenset({"python"}),
         adapter_preferences=("opencode",),
+        adapter_forbidden=("unsafe",),
         budget_class="standard",
         not_before=NOW,
         max_attempts=2,
@@ -69,6 +70,7 @@ def test_execution_request_starts_blocked_and_materializes_once() -> None:
     assert request.status is ExecutionRequestStatus.BLOCKED
     assert request.plan_snapshot_id == PLAN_ID
     assert request.plan_generation == 1
+    assert request.adapter_forbidden == frozenset({"unsafe"})
     request.mark_ready(now=NOW)
     assert request.status is ExecutionRequestStatus.READY
 
@@ -126,6 +128,33 @@ def test_request_rejects_unscoped_required_refs_and_invalid_snapshot() -> None:
             not_before=NOW,
             max_attempts=1,
             expected_artifact_refs=("free-form output",),
+            expected_evidence_refs=(),
+            now=NOW,
+        )
+
+
+def test_request_rejects_an_adapter_preference_that_is_forbidden() -> None:
+    with pytest.raises(ValidationError, match="forbidden"):
+        ExecutionRequest.create(
+            request_id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            planning_request_id=uuid4(),
+            proposal_revision_id=PROPOSAL_ID,
+            plan_snapshot_id=PLAN_ID,
+            plan_generation=1,
+            root_task_id=ROOT_TASK_ID,
+            subtask_id=SUBTASK_ID,
+            worker_item_id=WORKER_ITEM_ID,
+            worker_item_key="backend",
+            intent_key="backend-implementation",
+            purpose="Implement the backend",
+            capability_requirements=frozenset({"python"}),
+            adapter_preferences=("opencode",),
+            adapter_forbidden=("opencode",),
+            budget_class="standard",
+            not_before=NOW,
+            max_attempts=1,
+            expected_artifact_refs=(),
             expected_evidence_refs=(),
             now=NOW,
         )

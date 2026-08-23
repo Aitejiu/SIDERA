@@ -1,11 +1,11 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
-from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 
 
 class CapabilityInput(StrEnum):
@@ -246,6 +246,7 @@ class ModuleDefinition:
     config_schema_version: int
     capabilities: ModuleCapabilityProfile
     lifecycle: ModuleLifecycle
+    resource_version: int = 1
 
     def __post_init__(self) -> None:
         module_type = canonical_module_type(self.module_type)
@@ -254,6 +255,7 @@ class ModuleDefinition:
         _require_text(self.interface_version, "interface_version")
         if self.config_schema_version < 1:
             raise ValidationError("config_schema_version must be positive")
+        _require_resource_version(self.resource_version)
         expected_profile = _profile_type_for_module(module_type)
         if not isinstance(self.capabilities, expected_profile):
             raise ValidationError(
@@ -263,6 +265,15 @@ class ModuleDefinition:
             self,
             "lifecycle",
             _enum_value(self.lifecycle, ModuleLifecycle, "module lifecycle"),
+        )
+
+    def with_lifecycle(self, lifecycle: ModuleLifecycle | str) -> "ModuleDefinition":
+        target = _module_lifecycle(lifecycle)
+        _validate_lifecycle_transition(self.lifecycle, target)
+        return replace(
+            self,
+            lifecycle=target,
+            resource_version=self.resource_version + 1,
         )
 
 
@@ -277,6 +288,7 @@ class ModuleInstance:
     config: Mapping[str, Any]
     secret_refs: tuple[str, ...]
     lifecycle: ModuleLifecycle
+    resource_version: int = 1
 
     def __post_init__(self) -> None:
         _require_text(self.instance_name, "instance_name")
@@ -285,6 +297,7 @@ class ModuleInstance:
             raise ValidationError("config namespace is required")
         if self.config_version < 1:
             raise ValidationError("config_version must be positive")
+        _require_resource_version(self.resource_version)
         if not isinstance(self.config, Mapping):
             raise ValidationError("config must be a mapping")
         prefix = f"{namespace}."
@@ -303,6 +316,15 @@ class ModuleInstance:
             self,
             "lifecycle",
             _enum_value(self.lifecycle, ModuleLifecycle, "module lifecycle"),
+        )
+
+    def with_lifecycle(self, lifecycle: ModuleLifecycle | str) -> "ModuleInstance":
+        target = _module_lifecycle(lifecycle)
+        _validate_lifecycle_transition(self.lifecycle, target)
+        return replace(
+            self,
+            lifecycle=target,
+            resource_version=self.resource_version + 1,
         )
 
 
@@ -350,6 +372,37 @@ def _profile_type_for_module(module_type: str) -> type[object]:
     if module_type == WORKSPACE_PROVIDER_MODULE_TYPE:
         return WorkspaceProviderCapabilityProfile
     return PlannerAdapterCapabilityProfile
+
+
+def _module_lifecycle(value: ModuleLifecycle | str) -> ModuleLifecycle:
+    try:
+        return value if isinstance(value, ModuleLifecycle) else ModuleLifecycle(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported module lifecycle: {value!r}") from exc
+
+
+def _validate_lifecycle_transition(
+    current: ModuleLifecycle,
+    target: ModuleLifecycle,
+) -> None:
+    if current is target:
+        raise InvalidTransition("module lifecycle is unchanged")
+    if current is ModuleLifecycle.DISABLED:
+        raise InvalidTransition("disabled module lifecycle cannot change")
+    if (current, target) not in {
+        (ModuleLifecycle.ACTIVE, ModuleLifecycle.DRAINING),
+        (ModuleLifecycle.ACTIVE, ModuleLifecycle.DISABLED),
+        (ModuleLifecycle.DRAINING, ModuleLifecycle.ACTIVE),
+        (ModuleLifecycle.DRAINING, ModuleLifecycle.DISABLED),
+    }:
+        raise InvalidTransition(
+            f"module lifecycle cannot change from {current} to {target}"
+        )
+
+
+def _require_resource_version(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValidationError("resource_version must be a positive integer")
 
 
 def _enum_value(value: Any, enum_type: type[StrEnum], label: str) -> StrEnum:

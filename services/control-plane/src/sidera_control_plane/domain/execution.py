@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -59,6 +60,8 @@ class Execution:
     stop_requested: bool = False
     source_execution_id: UUID | None = None
     source_session_id: UUID | None = None
+    adapter_preferences: tuple[str, ...] = ()
+    adapter_forbidden: frozenset[str] = frozenset()
 
     @classmethod
     def create(
@@ -77,6 +80,8 @@ class Execution:
         not_before: datetime,
         source_execution_id: UUID | None = None,
         source_session_id: UUID | None = None,
+        adapter_preferences: Iterable[str] = (),
+        adapter_forbidden: Iterable[str] = (),
     ) -> "Execution":
         clean_purpose = purpose.strip()
         clean_requirements = frozenset(
@@ -88,6 +93,14 @@ class Execution:
             raise ValidationError("purpose and capability_requirements are required")
         if not_before.tzinfo is None:
             raise ValidationError("not_before must be timezone-aware")
+        preferences = _clean_policy_values(adapter_preferences, "adapter_preferences")
+        forbidden = frozenset(
+            _clean_policy_values(adapter_forbidden, "adapter_forbidden")
+        )
+        if set(preferences).intersection(forbidden):
+            raise ValidationError(
+                "adapter preferences cannot contain forbidden adapter types"
+            )
         return cls(
             id=execution_id,
             workspace_id=workspace_id,
@@ -111,7 +124,29 @@ class Execution:
             stop_requested=False,
             source_execution_id=source_execution_id,
             source_session_id=source_session_id,
+            adapter_preferences=preferences,
+            adapter_forbidden=forbidden,
         )
+
+    def pin_worker(self, worker_id: UUID) -> None:
+        self._require_queued_routing_mutation()
+        if self.pinned_worker_id == worker_id:
+            raise ValidationError("worker is already pinned")
+        self.pinned_worker_id = worker_id
+        self.version += 1
+
+    def clear_worker_pin(self) -> None:
+        self._require_queued_routing_mutation()
+        if self.pinned_worker_id is None:
+            raise ValidationError("execution has no worker pin")
+        self.pinned_worker_id = None
+        self.version += 1
+
+    def _require_queued_routing_mutation(self) -> None:
+        if self.status is not ExecutionStatus.QUEUED:
+            raise InvalidTransition(
+                "worker routing can only change for a queued execution"
+            )
 
     def _assert_mutable(self) -> None:
         if self.status in TERMINAL_EXECUTION_STATUSES:
@@ -233,6 +268,17 @@ class Execution:
     def assert_fence(self, *, lease_id: UUID, fencing_token: int) -> None:
         if self.active_lease_id != lease_id or self.last_fencing_token != fencing_token:
             raise StaleFencingToken("execution is owned by a different lease or token")
+
+
+def _clean_policy_values(values: Iterable[str], label: str) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValidationError(f"{label} must contain strings")
+        item = value.strip()
+        if item and item not in cleaned:
+            cleaned.append(item)
+    return tuple(cleaned)
 
 
 @dataclass(slots=True)

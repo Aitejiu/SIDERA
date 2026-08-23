@@ -239,6 +239,7 @@ class ExecutionRequest:
     created_at: datetime
     updated_at: datetime
     expected_outputs: tuple[str, ...] = ()
+    adapter_forbidden: frozenset[str] = frozenset()
 
     @classmethod
     def create(
@@ -265,6 +266,7 @@ class ExecutionRequest:
         expected_evidence_refs: tuple[str, ...] | Iterable[str],
         now: datetime,
         expected_outputs: tuple[str, ...] | Iterable[str] = (),
+        adapter_forbidden: tuple[str, ...] | Iterable[str] = (),
     ) -> ExecutionRequest:
         for name, value in (
             ("request_id", request_id),
@@ -290,6 +292,13 @@ class ExecutionRequest:
         if not capabilities:
             raise ValidationError("capability_requirements are required")
         preferences = _clean_strings(adapter_preferences, "adapter_preferences")
+        forbidden = frozenset(
+            _clean_strings(adapter_forbidden, "adapter_forbidden")
+        )
+        if set(preferences).intersection(forbidden):
+            raise ValidationError(
+                "adapter preferences cannot contain forbidden adapter types"
+            )
         if max_attempts < 1:
             raise ValidationError("max_attempts must be positive")
         _aware(not_before, "not_before")
@@ -328,6 +337,7 @@ class ExecutionRequest:
             created_at=now,
             updated_at=now,
             expected_outputs=outputs,
+            adapter_forbidden=forbidden,
         )
 
     @property

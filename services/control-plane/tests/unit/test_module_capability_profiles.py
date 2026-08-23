@@ -2,12 +2,13 @@ from uuid import uuid4
 
 import pytest
 
-from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
     CapabilityInput,
     IdempotencyCapability,
     ModuleDefinition,
+    ModuleInstance,
     ModuleLifecycle,
     PlannerAdapterCapabilityProfile,
     ResumeCapability,
@@ -159,3 +160,50 @@ def test_module_type_alias_is_stored_as_canonical_value() -> None:
     )
 
     assert item.module_type == "worker_adapter"
+
+
+def test_module_lifecycle_uses_an_independent_resource_version() -> None:
+    item = definition(
+        module_type="worker_adapter",
+        capabilities=worker_capabilities(),
+    )
+
+    draining = item.with_lifecycle(ModuleLifecycle.DRAINING)
+    active_again = draining.with_lifecycle(ModuleLifecycle.ACTIVE)
+    disabled = active_again.with_lifecycle(ModuleLifecycle.DISABLED)
+
+    assert item.lifecycle is ModuleLifecycle.ACTIVE
+    assert item.resource_version == 1
+    assert draining.lifecycle is ModuleLifecycle.DRAINING
+    assert draining.resource_version == 2
+    assert active_again.lifecycle is ModuleLifecycle.ACTIVE
+    assert active_again.resource_version == 3
+    assert disabled.lifecycle is ModuleLifecycle.DISABLED
+    assert disabled.resource_version == 4
+    assert disabled.config_schema_version == item.config_schema_version
+
+    with pytest.raises(InvalidTransition, match="disabled"):
+        disabled.with_lifecycle(ModuleLifecycle.ACTIVE)
+
+
+def test_module_instance_lifecycle_also_has_a_resource_version() -> None:
+    definition_id = uuid4()
+    item = ModuleInstance(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        definition_id=definition_id,
+        instance_name="fake-worker",
+        config_version=3,
+        config_namespace="worker",
+        config={"worker.command": "fake"},
+        secret_refs=(),
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+
+    draining = item.with_lifecycle(ModuleLifecycle.DRAINING)
+    disabled = draining.with_lifecycle(ModuleLifecycle.DISABLED)
+
+    assert item.resource_version == 1
+    assert draining.resource_version == 2
+    assert disabled.resource_version == 3
+    assert disabled.config_version == 3

@@ -119,6 +119,59 @@ def test_execution_never_reopens_after_lost() -> None:
         execution.assign(lease_id=uuid4(), worker_id=worker_id, fencing_token=2)
 
 
+def test_execution_canonicalizes_adapter_preference_and_forbidden_policy() -> None:
+    execution = Execution.create(
+        execution_id=uuid4(),
+        workspace_id=uuid4(),
+        task_id=uuid4(),
+        lineage_id=uuid4(),
+        attempt=1,
+        max_attempts=1,
+        purpose="route execution",
+        capability_requirements=frozenset({"python"}),
+        pinned_worker_id=None,
+        not_before=NOW,
+        adapter_preferences=(" opencode ", "opencode", "codex"),
+        adapter_forbidden=(" unsafe ", "unsafe"),
+    )
+
+    assert execution.adapter_preferences == ("opencode", "codex")
+    assert execution.adapter_forbidden == frozenset({"unsafe"})
+
+    with pytest.raises(ValidationError, match="forbidden"):
+        Execution.create(
+            execution_id=uuid4(),
+            workspace_id=uuid4(),
+            task_id=uuid4(),
+            lineage_id=uuid4(),
+            attempt=1,
+            max_attempts=1,
+            purpose="route execution",
+            capability_requirements=frozenset({"python"}),
+            pinned_worker_id=None,
+            not_before=NOW,
+            adapter_preferences=("opencode",),
+            adapter_forbidden=("opencode",),
+        )
+
+
+def test_execution_pin_and_clear_are_queued_only_versioned_mutations() -> None:
+    execution = make_execution()
+    worker_id = uuid4()
+
+    execution.pin_worker(worker_id)
+    assert execution.pinned_worker_id == worker_id
+    assert execution.version == 2
+
+    execution.clear_worker_pin()
+    assert execution.pinned_worker_id is None
+    assert execution.version == 3
+
+    execution.assign(lease_id=uuid4(), worker_id=worker_id, fencing_token=1)
+    with pytest.raises(InvalidTransition, match="queued"):
+        execution.pin_worker(uuid4())
+
+
 def test_execution_cancel_accepts_non_terminal_states_only() -> None:
     queued = make_execution()
     queued.cancel(now=NOW)
