@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -84,6 +85,45 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         "sidera_reject_proposal",
         "sidera_get_task_status",
     }
+
+
+def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:
+    from agent.plugins.registry import MetadataKind, plugin_registry
+
+    metadata = {
+        item.tool_name: item
+        for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
+        if item.kind is MetadataKind.TOOL
+    }
+
+    submit_schema = metadata["sidera_submit_brief"].tool_schema
+    assert submit_schema is not None
+    assert all(
+        submit_schema["properties"][name]["type"] == "array"
+        for name in ("constraints", "acceptance_criteria", "context_refs", "requested_outputs")
+    )
+
+    clarification_schema = metadata["sidera_answer_clarifications"].tool_schema
+    assert clarification_schema is not None
+    assert clarification_schema["properties"]["answers"]["type"] == "array"
+
+
+def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
+    submit = inspect.signature(plugin.SideraTaskBridge.sidera_submit_brief)
+    clarification = inspect.signature(
+        plugin.SideraTaskBridge.sidera_answer_clarifications
+    )
+
+    assert all(
+        submit.parameters[name].annotation is list
+        for name in (
+            "constraints",
+            "acceptance_criteria",
+            "context_refs",
+            "requested_outputs",
+        )
+    )
+    assert clarification.parameters["answers"].annotation is list
 
 
 def test_plugin_loads_with_akashic_installer_module_boundary() -> None:

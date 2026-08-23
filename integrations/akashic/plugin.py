@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from typing import cast
 
 from agent.plugins import Plugin, tool
 
@@ -94,20 +95,20 @@ class SideraTaskBridge(Plugin):
         self,
         event: object,
         goal: str,
-        constraints: list[str],
-        acceptance_criteria: list[str],
-        context_refs: list[str],
-        requested_outputs: list[str],
+        constraints: list,
+        acceptance_criteria: list,
+        context_refs: list,
+        requested_outputs: list,
     ) -> str:
         """Submit a structured user brief to the SIDERA planning control plane."""
 
         return await self._toolset().sidera_submit_brief(
             event,
             goal,
-            constraints,
-            acceptance_criteria,
-            context_refs,
-            requested_outputs,
+            cast(list[str], constraints),
+            cast(list[str], acceptance_criteria),
+            cast(list[str], context_refs),
+            cast(list[str], requested_outputs),
         )
 
     @tool(name="sidera_get_planning_status", risk="read-only", always_on=True)
@@ -130,7 +131,7 @@ class SideraTaskBridge(Plugin):
         event: object,
         planning_request_id: str,
         request_version: int,
-        answers: list[dict[str, str]],
+        answers: list,
     ) -> str:
         """Answer the current blocking SIDERA planning questions."""
 
@@ -138,7 +139,7 @@ class SideraTaskBridge(Plugin):
             event,
             planning_request_id,
             request_version,
-            answers,
+            cast(list[dict[str, str]], answers),
         )
 
     @tool(
