@@ -25,6 +25,7 @@ from .state import BridgeStateStore
 
 _CONFLICT_CODES = {
     "planning_conflict",
+    "profile_conflict",
     "version_conflict",
     "idempotency_conflict",
     "resource_busy",
@@ -225,6 +226,314 @@ class SideraTaskTools:
             )
         except ControlPlaneRejected as exc:
             return _encode(_rejected_envelope(exc.code, "planning status"))
+
+    @tool(
+        name="sidera_answer_clarifications",
+        risk="write",
+        search_hint="SIDERA planning clarification answer question",
+    )
+    async def sidera_answer_clarifications(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        answers: list[dict[str, str]],
+    ) -> str:
+        """Submit explicit answers for the current blocking planning questions."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        normalized = _normalize_answers(answers)
+        if request_id is None:
+            return _encode(_invalid_resource("planning request"))
+        if normalized is None or request_version < 1:
+            return _encode(
+                ToolEnvelope(
+                    outcome="failed",
+                    summary="The clarification answers are invalid.",
+                    error_code="invalid_answers",
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _version_preflight(detail, request_version)
+            if preflight is not None:
+                return _encode(self._with_request_ref(preflight, request_id))
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="AnswerPlanningClarification",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={"answers": normalized},
+                ),
+            )
+            return _encode(
+                self._mutation_result(
+                    result,
+                    request_id,
+                    "clarification answers",
+                )
+            )
+        except TransportUnavailable:
+            return _encode(self._with_request_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_request_ref(
+                    _rejected_envelope(exc.code, "clarification answers"), request_id
+                )
+            )
+
+    @tool(
+        name="sidera_request_proposal_revision",
+        risk="write",
+        search_hint="SIDERA planning proposal revise feedback",
+    )
+    async def sidera_request_proposal_revision(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        feedback: str,
+    ) -> str:
+        """Request a new immutable planning proposal revision with user feedback."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("planning request"))
+        if (
+            request_version < 1
+            or proposal_revision < 1
+            or not _non_empty_text(proposal_content_hash)
+            or not _non_empty_text(feedback)
+        ):
+            return _encode(
+                ToolEnvelope(
+                    outcome="failed",
+                    summary="The proposal revision request is invalid.",
+                    error_code="invalid_proposal_revision",
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _proposal_preflight(
+                detail,
+                request_version,
+                proposal_revision,
+                proposal_content_hash,
+            )
+            if preflight is not None:
+                return _encode(self._with_request_ref(preflight, request_id))
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="RequestProposalRevision",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={
+                        "current_proposal_revision": proposal_revision,
+                        "current_proposal_content_hash": proposal_content_hash.strip(),
+                        "feedback": feedback.strip(),
+                    },
+                ),
+            )
+            return _encode(
+                self._mutation_result(result, request_id, "proposal revision request")
+            )
+        except TransportUnavailable:
+            return _encode(self._with_request_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_request_ref(
+                    _rejected_envelope(exc.code, "proposal revision request"),
+                    request_id,
+                )
+            )
+
+    @tool(
+        name="sidera_confirm_proposal",
+        risk="write",
+        search_hint="SIDERA planning proposal confirm approve",
+    )
+    async def sidera_confirm_proposal(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        explicit_user_confirmation: bool,
+    ) -> str:
+        """Confirm one exact proposal revision after an explicit user confirmation."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("planning request"))
+        if not explicit_user_confirmation:
+            return _encode(
+                ToolEnvelope(
+                    outcome="needs_user",
+                    summary="Explicit user confirmation is required before materialization.",
+                    resource_ref=f"planning:{request_id}",
+                    web_url=self._planning_url(request_id),
+                    error_code="explicit_confirmation_required",
+                )
+            )
+        if request_version < 1 or proposal_revision < 1 or not _non_empty_text(
+            proposal_content_hash
+        ):
+            return _encode(
+                ToolEnvelope(
+                    outcome="failed",
+                    summary="The proposal confirmation fields are invalid.",
+                    error_code="invalid_proposal_confirmation",
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _proposal_preflight(
+                detail,
+                request_version,
+                proposal_revision,
+                proposal_content_hash,
+                expected_profile=(
+                    self._config.planning_profile_id,
+                    self._config.planning_profile_version,
+                ),
+            )
+            if preflight is not None:
+                return _encode(self._with_request_ref(preflight, request_id))
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="ConfirmPlanningProposal",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={
+                        "proposal_revision": proposal_revision,
+                        "proposal_content_hash": proposal_content_hash.strip(),
+                        "profile_id": str(self._config.planning_profile_id),
+                        "profile_version": self._config.planning_profile_version,
+                    },
+                ),
+            )
+            return _encode(
+                self._mutation_result(result, request_id, "proposal confirmation")
+            )
+        except TransportUnavailable:
+            return _encode(self._with_request_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_request_ref(
+                    _rejected_envelope(exc.code, "proposal confirmation"), request_id
+                )
+            )
+
+    @tool(
+        name="sidera_reject_proposal",
+        risk="write",
+        search_hint="SIDERA planning proposal reject decline",
+    )
+    async def sidera_reject_proposal(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        reason: str,
+    ) -> str:
+        """Reject one exact proposal revision with a user-provided reason."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("planning request"))
+        if request_version < 1 or proposal_revision < 1 or not _non_empty_text(
+            proposal_content_hash
+        ) or not _non_empty_text(reason):
+            return _encode(
+                ToolEnvelope(
+                    outcome="failed",
+                    summary="The proposal rejection fields are invalid.",
+                    error_code="invalid_proposal_rejection",
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _proposal_preflight(
+                detail,
+                request_version,
+                proposal_revision,
+                proposal_content_hash,
+            )
+            if preflight is not None:
+                return _encode(self._with_request_ref(preflight, request_id))
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="RejectPlanningProposal",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={
+                        "current_proposal_revision": proposal_revision,
+                        "current_proposal_content_hash": proposal_content_hash.strip(),
+                        "reason": reason.strip(),
+                    },
+                ),
+            )
+            return _encode(self._mutation_result(result, request_id, "proposal rejection"))
+        except TransportUnavailable:
+            return _encode(self._with_request_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_request_ref(
+                    _rejected_envelope(exc.code, "proposal rejection"), request_id
+                )
+            )
+
+    def _mutation_result(
+        self, result: DispatchResult, request_id: UUID, operation: str
+    ) -> ToolEnvelope:
+        if result.status != "applied":
+            return self._with_request_ref(_dispatch_envelope(result, operation), request_id)
+        data = _result_data(result)
+        safe_data: dict[str, JsonValue] = {
+            key: data[key]
+            for key in (
+                "planning_request_id",
+                "planning_run_id",
+                "brief_revision",
+                "status",
+            )
+            if key in data and isinstance(data[key], (str, int))
+        }
+        safe_data.setdefault("planning_request_id", str(request_id))
+        return ToolEnvelope(
+            outcome="ok",
+            summary=f"The {operation} was accepted.",
+            resource_ref=f"planning:{request_id}",
+            web_url=self._planning_url(request_id),
+            data=safe_data,
+        )
+
+    def _with_request_ref(
+        self, envelope: ToolEnvelope, request_id: UUID
+    ) -> ToolEnvelope:
+        return envelope.model_copy(
+            update={
+                "resource_ref": f"planning:{request_id}",
+                "web_url": self._planning_url(request_id),
+            }
+        )
 
     @tool(
         name="sidera_get_task_status",
@@ -521,3 +830,95 @@ def _invalid_resource(resource_name: str) -> ToolEnvelope:
         summary=f"The {resource_name} reference is invalid.",
         error_code="invalid_resource_id",
     )
+
+
+def _unavailable_error() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="unavailable",
+        summary="The SIDERA control plane is temporarily unavailable.",
+        error_code="service_unavailable",
+    )
+
+
+def _normalize_answers(
+    answers: list[dict[str, str]],
+) -> list[JsonValue] | None:
+    normalized: list[JsonValue] = []
+    seen: set[UUID] = set()
+    for item in answers:
+        clarification_id = _parse_uuid(item.get("clarification_id"))
+        answer = item.get("answer")
+        if clarification_id is None or not isinstance(answer, str) or not answer.strip():
+            return None
+        if clarification_id in seen:
+            return None
+        seen.add(clarification_id)
+        normalized.append(
+            {
+                "clarification_id": str(clarification_id),
+                "answer": answer.strip(),
+            }
+        )
+    return normalized or None
+
+
+def _version_preflight(
+    detail: Mapping[str, JsonValue], expected_version: int
+) -> ToolEnvelope | None:
+    actual_version = detail.get("version")
+    if isinstance(actual_version, bool) or not isinstance(actual_version, int):
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an invalid planning version.",
+            error_code="invalid_control_plane_response",
+        )
+    if actual_version != expected_version:
+        return ToolEnvelope(
+            outcome="conflict",
+            summary="The planning request has changed; reload the latest status.",
+            error_code="version_conflict",
+        )
+    return None
+
+
+def _proposal_preflight(
+    detail: Mapping[str, JsonValue],
+    expected_version: int,
+    expected_revision: int,
+    expected_hash: str,
+    *,
+    expected_profile: tuple[UUID, int] | None = None,
+) -> ToolEnvelope | None:
+    version_result = _version_preflight(detail, expected_version)
+    if version_result is not None:
+        return version_result
+    actual_revision = detail.get("current_proposal_revision")
+    actual_hash = detail.get("current_proposal_content_hash")
+    if (
+        isinstance(actual_revision, bool)
+        or not isinstance(actual_revision, int)
+        or actual_revision != expected_revision
+        or not isinstance(actual_hash, str)
+        or actual_hash != expected_hash.strip()
+    ):
+        return ToolEnvelope(
+            outcome="conflict",
+            summary="The proposal has changed; reload the latest proposal before acting.",
+            error_code="proposal_conflict",
+        )
+    if expected_profile is not None:
+        actual_profile = _parse_uuid(detail.get("planning_profile_id"))
+        actual_profile_version = detail.get("planning_profile_version")
+        if (
+            actual_profile is None
+            or actual_profile != expected_profile[0]
+            or isinstance(actual_profile_version, bool)
+            or not isinstance(actual_profile_version, int)
+            or actual_profile_version != expected_profile[1]
+        ):
+            return ToolEnvelope(
+                outcome="conflict",
+                summary="The planning profile has changed; reload the latest status.",
+                error_code="profile_conflict",
+            )
+    return None

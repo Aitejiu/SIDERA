@@ -152,6 +152,10 @@ def test_submit_schema_exposes_only_business_fields() -> None:
         "sidera_submit_brief",
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_answer_clarifications",
+        "sidera_request_proposal_revision",
+        "sidera_confirm_proposal",
+        "sidera_reject_proposal",
     }
     forbidden = {
         "workspace_id",
@@ -337,5 +341,205 @@ def test_invalid_resource_id_is_local_failed_without_client_call() -> None:
         result = decode(await bridge.sidera_get_task_status(None, "not-a-uuid"))
         assert result["outcome"] == "failed"
         assert result["error_code"] == "invalid_resource_id"
+
+    asyncio.run(scenario())
+
+
+def test_answer_clarifications_validates_and_dispatches_exact_target() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = {"version": 4, "status": "needs_clarification"}
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="applied",
+                command_id=COMMAND_ID,
+                execution=response_data(COMMAND_ID),
+            )
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        answer_id = "00000000-0000-0000-0000-000000000040"
+        result = decode(
+            await bridge.sidera_answer_clarifications(
+                None,
+                str(REQUEST_ID),
+                4,
+                [{"clarification_id": answer_id, "answer": "REST"}],
+            )
+        )
+
+        assert result["outcome"] == "ok"
+        resource, command = dispatcher.calls[0]
+        assert resource == f"planning:request:{REQUEST_ID}"
+        assert isinstance(command, CommandIntent)
+        assert command.target_type == "planning_request"
+        assert command.target_id == REQUEST_ID
+        assert command.expected_version == 4
+        assert command.payload == {
+            "answers": [{"clarification_id": answer_id, "answer": "REST"}]
+        }
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_or_empty_clarification_answers_fail_before_http() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = {"version": 4, "status": "needs_clarification"}
+        dispatcher = FakeDispatcher(
+            DispatchResult(status="applied", command_id=COMMAND_ID)
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        answer_id = "00000000-0000-0000-0000-000000000040"
+        result = decode(
+            await bridge.sidera_answer_clarifications(
+                None,
+                str(REQUEST_ID),
+                4,
+                [
+                    {"clarification_id": answer_id, "answer": ""},
+                    {"clarification_id": answer_id, "answer": "GraphQL"},
+                ],
+            )
+        )
+
+        assert result["outcome"] == "failed"
+        assert result["error_code"] == "invalid_answers"
+        assert dispatcher.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_stale_proposal_revision_is_conflict_without_dispatch() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = {
+            "version": 4,
+            "current_proposal_revision": 2,
+            "current_proposal_content_hash": "hash-current",
+        }
+        dispatcher = FakeDispatcher(
+            DispatchResult(status="applied", command_id=COMMAND_ID)
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        result = decode(
+            await bridge.sidera_request_proposal_revision(
+                None,
+                str(REQUEST_ID),
+                4,
+                1,
+                "hash-old",
+                "Change the worker split",
+            )
+        )
+
+        assert result["outcome"] == "conflict"
+        assert result["error_code"] == "proposal_conflict"
+        assert dispatcher.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_confirm_requires_explicit_user_confirmation_without_preflight() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        dispatcher = FakeDispatcher(
+            DispatchResult(status="applied", command_id=COMMAND_ID)
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        result = decode(
+            await bridge.sidera_confirm_proposal(
+                None,
+                str(REQUEST_ID),
+                4,
+                2,
+                "hash-current",
+                False,
+            )
+        )
+
+        assert result["outcome"] == "needs_user"
+        assert result["error_code"] == "explicit_confirmation_required"
+        assert dispatcher.calls == []
+        assert client.detail == {}
+
+    asyncio.run(scenario())
+
+
+def test_confirm_sends_exact_proposal_and_profile_snapshot() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = {
+            "version": 4,
+            "current_proposal_revision": 2,
+            "current_proposal_content_hash": "hash-current",
+            "planning_profile_id": str(PROFILE_ID),
+            "planning_profile_version": 3,
+        }
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="applied",
+                command_id=COMMAND_ID,
+                execution=response_data(COMMAND_ID),
+            )
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        result = decode(
+            await bridge.sidera_confirm_proposal(
+                None,
+                str(REQUEST_ID),
+                4,
+                2,
+                "hash-current",
+                True,
+            )
+        )
+
+        assert result["outcome"] == "ok"
+        _, command = dispatcher.calls[0]
+        assert isinstance(command, CommandIntent)
+        assert command.command_type == "ConfirmPlanningProposal"
+        assert command.target_type == "planning_request"
+        assert command.target_id == REQUEST_ID
+        assert command.expected_version == 4
+        assert command.payload == {
+            "proposal_revision": 2,
+            "proposal_content_hash": "hash-current",
+            "profile_id": str(PROFILE_ID),
+            "profile_version": 3,
+        }
+        assert "explicit_user_confirmation" not in command.payload
+
+    asyncio.run(scenario())
+
+
+def test_control_plane_conflict_maps_to_conflict_for_reject() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = {
+            "version": 4,
+            "current_proposal_revision": 2,
+            "current_proposal_content_hash": "hash-current",
+        }
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="rejected",
+                command_id=COMMAND_ID,
+                error_code="planning_conflict",
+            )
+        )
+        bridge, _, _ = tools(client=client, dispatcher=dispatcher)
+        result = decode(
+            await bridge.sidera_reject_proposal(
+                None,
+                str(REQUEST_ID),
+                4,
+                2,
+                "hash-current",
+                "The proposal needs a different scope.",
+            )
+        )
+
+        assert result["outcome"] == "conflict"
+        assert result["error_code"] == "planning_conflict"
 
     asyncio.run(scenario())
