@@ -2,11 +2,18 @@ from collections.abc import Mapping
 
 from agent.plugins import Plugin, tool
 
-from sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
-from sidera_task_bridge.config import TaskBridgeConfig
-from sidera_task_bridge.source_routes import SourceContextResolver
-from sidera_task_bridge.state import BridgeStateStore
-from sidera_task_bridge.tools import SideraTaskTools
+if __package__:
+    from .sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
+    from .sidera_task_bridge.config import TaskBridgeConfig
+    from .sidera_task_bridge.source_routes import SourceContextResolver
+    from .sidera_task_bridge.state import BridgeStateStore
+    from .sidera_task_bridge.tools import SideraTaskTools
+else:
+    from sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
+    from sidera_task_bridge.config import TaskBridgeConfig
+    from sidera_task_bridge.source_routes import SourceContextResolver
+    from sidera_task_bridge.state import BridgeStateStore
+    from sidera_task_bridge.tools import SideraTaskTools
 
 
 class SideraTaskBridge(Plugin):

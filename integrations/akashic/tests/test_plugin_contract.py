@@ -1,4 +1,7 @@
 import asyncio
+import importlib.util
+import sys
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
@@ -81,6 +84,48 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         "sidera_reject_proposal",
         "sidera_get_task_status",
     }
+
+
+def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
+    """Mirror the host installer, which gives plugin.py a package search root."""
+
+    from agent.plugins.registry import plugin_registry
+
+    root = Path(__file__).parents[1]
+    module_name = "task_bridge_installer_boundary_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        root / "plugin.py",
+        submodule_search_locations=[str(root)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    root_text = str(root.resolve())
+    saved_path = sys.path[:]
+    saved_bridge_modules = {
+        name: value
+        for name, value in sys.modules.items()
+        if name == "sidera_task_bridge" or name.startswith("sidera_task_bridge.")
+    }
+    sys.path[:] = [item for item in sys.path if item != root_text]
+    for imported_name in saved_bridge_modules:
+        _ = sys.modules.pop(imported_name, None)
+    try:
+        spec.loader.exec_module(module)
+        assert module.SideraTaskBridge.name == "sidera-task-bridge"
+    finally:
+        plugin_registry.remove_module_tree(module_name)
+        for imported_name in tuple(sys.modules):
+            if imported_name == module_name or imported_name.startswith(f"{module_name}."):
+                _ = sys.modules.pop(imported_name, None)
+        for imported_name in tuple(sys.modules):
+            if imported_name == "sidera_task_bridge" or imported_name.startswith(
+                "sidera_task_bridge."
+            ):
+                _ = sys.modules.pop(imported_name, None)
+        sys.modules.update(saved_bridge_modules)
+        sys.path[:] = saved_path
 
 
 def test_prepare_constructs_bridge_without_starting_recovery_or_network() -> None:
