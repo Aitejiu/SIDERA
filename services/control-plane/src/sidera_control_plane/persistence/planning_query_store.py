@@ -559,6 +559,8 @@ def _request_summary_view(
         workspace_id=row.workspace_id,
         kind=row.kind,
         status=row.status,
+        source_type=row.source_type,
+        source_ref=row.source_ref,
         current_brief_revision=row.current_brief_revision or 0,
         current_proposal_revision=row.current_proposal_revision,
         current_proposal_content_hash=row.current_proposal_content_hash,

@@ -2169,6 +2169,8 @@ class PlanningRequestSummaryResponse(BaseModel):
     workspace_id: UUID
     kind: str
     status: str
+    source_type: str
+    source_ref: str | None
     current_brief_revision: int
     current_proposal_revision: int | None
     current_proposal_content_hash: str | None
@@ -2190,6 +2192,8 @@ class PlanningRequestSummaryResponse(BaseModel):
             workspace_id=view.workspace_id,
             kind=view.kind,
             status=view.status,
+            source_type=view.source_type,
+            source_ref=view.source_ref,
             current_brief_revision=view.current_brief_revision,
             current_proposal_revision=view.current_proposal_revision,
             current_proposal_content_hash=view.current_proposal_content_hash,

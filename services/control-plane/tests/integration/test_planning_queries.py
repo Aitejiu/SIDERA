@@ -25,7 +25,14 @@ def test_planning_queries_return_safe_request_views(
     database: Database,
     workspace_id: UUID,
 ) -> None:
-    request_id, _, _ = _seed_waiting_request(database, workspace_id)
+    source_type = "akashic_private"
+    source_ref = "src_7f6ea4c5b91c4a089c91e3108a746550"
+    request_id, _, _ = _seed_waiting_request(
+        database,
+        workspace_id,
+        source_type=source_type,
+        source_ref=source_ref,
+    )
     base = f"/api/v1/workspaces/{workspace_id}"
 
     profiles = client.get(f"{base}/planning-profiles")
@@ -43,13 +50,20 @@ def test_planning_queries_return_safe_request_views(
     assert "policy" not in profiles.json()["items"][0]
 
     assert requests.status_code == 200, requests.text
-    assert requests.json()["items"][0]["id"] == str(request_id)
-    assert requests.json()["items"][0]["requires_attention"] is True
+    list_item = requests.json()["items"][0]
+    assert list_item["id"] == str(request_id)
+    assert list_item["requires_attention"] is True
+    assert list_item["source_type"] == source_type
+    assert list_item["source_ref"] == source_ref
 
     assert detail.status_code == 200, detail.text
     detail_body = detail.json()
     assert detail_body["id"] == str(request_id)
     assert detail_body["status"] == "waiting_for_user"
+    assert detail_body["source_type"] == source_type
+    assert detail_body["source_ref"] == source_ref
+    assert "channel" not in detail_body
+    assert "chat_id" not in detail_body
     assert detail_body["active_run"]["status"] == "needs_clarification"
     assert detail_body["pending_clarifications"]
     assert "error_message" not in detail_body["active_run"]
@@ -61,6 +75,30 @@ def test_planning_queries_return_safe_request_views(
     assert runs.json()["items"][0]["status"] == "needs_clarification"
     assert clarifications.status_code == 200, clarifications.text
     assert clarifications.json()["items"][0]["blocking"] is True
+
+
+def test_planning_queries_preserve_nullable_web_source_ref(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    request_id, _, _ = _seed_waiting_request(
+        database,
+        workspace_id,
+        source_type="web",
+        source_ref=None,
+    )
+    base = f"/api/v1/workspaces/{workspace_id}"
+
+    requests = client.get(f"{base}/planning-requests", params={"limit": 1})
+    detail = client.get(f"{base}/planning-requests/{request_id}")
+
+    assert requests.status_code == 200, requests.text
+    assert requests.json()["items"][0]["source_type"] == "web"
+    assert requests.json()["items"][0]["source_ref"] is None
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["source_type"] == "web"
+    assert detail.json()["source_ref"] is None
 
 
 def test_planning_queries_support_attention_filter_and_same_workspace_not_found(

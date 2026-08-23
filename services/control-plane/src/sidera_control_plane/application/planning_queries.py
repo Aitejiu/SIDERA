@@ -106,6 +106,8 @@ class PlanningRequestSummaryView:
     workspace_id: UUID
     kind: str
     status: str
+    source_type: str
+    source_ref: str | None
     current_brief_revision: int
     current_proposal_revision: int | None
     current_proposal_content_hash: str | None
