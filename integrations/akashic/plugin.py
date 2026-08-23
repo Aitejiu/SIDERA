@@ -229,8 +229,8 @@ class SideraTaskBridge(Plugin):
         return await self._toolset().sidera_get_task_status(event, task_id)
 
 
-def _patch_host_collection_schemas() -> None:
-    """Restore collection schemas lost by Akashic's future-annotation loader."""
+def _patch_host_tool_schemas() -> None:
+    """Restore schemas lost by Akashic's future-annotation loader."""
 
     collection_items = {
         "sidera_submit_brief": {
@@ -243,6 +243,22 @@ def _patch_host_collection_schemas() -> None:
             "answers": {"type": "object"},
         },
     }
+    scalar_types = {
+        "sidera_answer_clarifications": {"request_version": "number"},
+        "sidera_request_proposal_revision": {
+            "request_version": "number",
+            "proposal_revision": "number",
+        },
+        "sidera_confirm_proposal": {
+            "request_version": "number",
+            "proposal_revision": "number",
+            "explicit_user_confirmation": "boolean",
+        },
+        "sidera_reject_proposal": {
+            "request_version": "number",
+            "proposal_revision": "number",
+        },
+    }
     for metadata in plugin_registry.get_handlers_by_module_path(__name__):
         if metadata.kind is not MetadataKind.TOOL:
             continue
@@ -253,6 +269,10 @@ def _patch_host_collection_schemas() -> None:
         properties = schema.get("properties")
         if not isinstance(properties, dict):
             continue
+        for name, json_type in scalar_types.get(metadata.tool_name or "", {}).items():
+            property_schema = properties.get(name)
+            if isinstance(property_schema, dict):
+                property_schema["type"] = json_type
         for name, item_schema in fields.items():
             property_schema = properties.get(name)
             if isinstance(property_schema, dict):
@@ -260,7 +280,7 @@ def _patch_host_collection_schemas() -> None:
                 property_schema["items"] = item_schema
 
 
-_patch_host_collection_schemas()
+_patch_host_tool_schemas()
 
 
 __all__ = ["SideraTaskBridge"]

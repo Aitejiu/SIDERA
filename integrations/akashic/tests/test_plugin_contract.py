@@ -108,6 +108,30 @@ def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:
     assert clarification_schema["properties"]["answers"]["type"] == "array"
 
 
+def test_plugin_schema_preserves_write_argument_scalar_types() -> None:
+    from agent.plugins.registry import MetadataKind, plugin_registry
+
+    metadata = {
+        item.tool_name: item
+        for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
+        if item.kind is MetadataKind.TOOL
+    }
+
+    revision_schema = metadata["sidera_request_proposal_revision"].tool_schema
+    assert revision_schema is not None
+    assert revision_schema["properties"]["request_version"]["type"] == "number"
+    assert revision_schema["properties"]["proposal_revision"]["type"] == "number"
+
+    confirmation_schema = metadata["sidera_confirm_proposal"].tool_schema
+    assert confirmation_schema is not None
+    assert confirmation_schema["properties"]["request_version"]["type"] == "number"
+    assert confirmation_schema["properties"]["proposal_revision"]["type"] == "number"
+    assert (
+        confirmation_schema["properties"]["explicit_user_confirmation"]["type"]
+        == "boolean"
+    )
+
+
 def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
     submit = inspect.signature(plugin.SideraTaskBridge.sidera_submit_brief)
     clarification = inspect.signature(
