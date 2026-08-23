@@ -188,7 +188,12 @@ function WorkerItemContent({
             onRefresh={onRefresh}
           />
         </div>
-        <WorkerSidebar workspace={workspace} taskTitle={taskTitle} subtaskTitle={subtaskTitle} />
+        <WorkerSidebar
+          workspace={workspace}
+          taskTitle={taskTitle}
+          subtaskTitle={subtaskTitle}
+          onRefresh={onRefresh}
+        />
       </div>
       {traceDescriptor ? (
         <WorkerTraceDialog

@@ -16,6 +16,10 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
     WorkItemKind,
 )
+from sidera_control_plane.domain.scheduling import (
+    SchedulingBlockReason,
+    scheduling_fingerprint,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
@@ -26,6 +30,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
+    SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
@@ -599,6 +604,84 @@ def test_worker_item_workspace_and_activity_are_stable_and_scoped(
         "/api/v1/workspaces/00000000-0000-0000-0000-000000000099/"
         f"worker-items/{WORKER_ITEM_ID}/workspace"
     ).status_code == 404
+
+
+def test_worker_item_workspace_exposes_execution_routing_facts(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    _seed(database)
+    workspace_url = (
+        f"/api/v1/workspaces/{workspace_id}/worker-items/{WORKER_ITEM_ID}/workspace"
+    )
+
+    running = client.get(workspace_url)
+    assert running.status_code == 200, running.text
+    running_execution = running.json()["execution_history"][0]
+    assert running_execution["version"] == 3
+    assert running_execution["adapter_preferences"] == []
+    assert running_execution["adapter_forbidden"] == []
+    assert running_execution["scheduling_status"] == "assigned"
+    assert running_execution["assigned_worker_summary"]["display_name"] == (
+        "OpenCode callback worker"
+    )
+    assert running_execution["waiting_reason"] is None
+    assert running_execution["binding_summary"] is None
+
+    block_id = UUID("b3000000-0000-0000-0000-000000000001")
+    details = {"candidate_count": 2}
+    with database.session() as session:
+        session.execute(
+            update(ExecutionModel)
+            .where(
+                ExecutionModel.workspace_id == workspace_id,
+                ExecutionModel.id == EXECUTION_TWO_ID,
+            )
+            .values(
+                status="queued",
+                assigned_worker_id=None,
+                active_lease_id=None,
+                version=4,
+                updated_at=NOW + timedelta(minutes=10),
+            )
+        )
+        session.add(
+            SchedulingBlockModel(
+                id=block_id,
+                workspace_id=workspace_id,
+                execution_id=EXECUTION_TWO_ID,
+                status="active",
+                reason_code=SchedulingBlockReason.NO_ELIGIBLE_WORKER.value,
+                reason_details=details,
+                fingerprint=scheduling_fingerprint(
+                    SchedulingBlockReason.NO_ELIGIBLE_WORKER,
+                    details,
+                    requires_operator=False,
+                ),
+                requires_operator=False,
+                first_seen_at=NOW + timedelta(minutes=10),
+                last_seen_at=NOW + timedelta(minutes=10),
+                occurrence_count=1,
+                resolved_at=None,
+                version=1,
+            )
+        )
+        session.commit()
+
+    queued = client.get(workspace_url)
+    assert queued.status_code == 200, queued.text
+    queued_execution = queued.json()["execution_history"][0]
+    assert queued_execution["version"] == 4
+    assert queued_execution["status"] == "queued"
+    assert queued_execution["scheduling_status"] == "waiting"
+    assert queued_execution["waiting_reason"] == "no_eligible_worker"
+    assert queued_execution["waiting_details_summary"] == "2 个候选执行节点暂不可用"
+    assert queued_execution["requires_operator"] is False
+    assert queued_execution["blocked_since"] == "2026-08-22T20:10:00+08:00"
+    assert queued_execution["pinned_worker_summary"]["display_name"] == (
+        "OpenCode callback worker"
+    )
 
 
 def test_worker_item_without_runtime_history_is_read_only_and_loadable(

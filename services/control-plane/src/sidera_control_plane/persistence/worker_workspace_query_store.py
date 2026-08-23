@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -32,6 +33,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionModel,
     ExecutionSessionModel,
     ProjectionChangeModel,
+    SchedulingBlockModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
@@ -82,6 +84,17 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 .order_by(ExecutionModel.created_at.asc(), ExecutionModel.id.asc())
             ).all()
             execution_ids = {row.id for row in execution_rows}
+
+            active_block_rows = session.scalars(
+                select(SchedulingBlockModel).where(
+                    SchedulingBlockModel.workspace_id == workspace_id,
+                    SchedulingBlockModel.execution_id.in_(
+                        execution_ids or {UUID(int=0)}
+                    ),
+                    SchedulingBlockModel.status == "active",
+                )
+            ).all()
+            active_blocks = {row.execution_id: row for row in active_block_rows}
 
             session_rows = session.scalars(
                 select(ExecutionSessionModel)
@@ -215,11 +228,16 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 *(item.updated_at for item in inputs),
                 *(artifact.created_at for artifact in artifacts),
                 *(claim.created_at for claim in evidence),
+                *(block.first_seen_at for block in active_block_rows),
+                *(block.last_seen_at for block in active_block_rows),
             ))
             return WorkerWorkspaceQuerySnapshot(
                 worker_item=worker_item,
                 placements=placements,
-                executions=tuple(_execution(row) for row in execution_rows),
+                executions=tuple(
+                    _execution(row, active_blocks.get(row.id))
+                    for row in execution_rows
+                ),
                 sessions=sessions,
                 workers=workers,
                 bindings=bindings,
@@ -262,7 +280,10 @@ def _placement(row: WorkerItemPlacementModel) -> WorkerItemPlacementFact:
     )
 
 
-def _execution(row: ExecutionModel) -> ExecutionFact:
+def _execution(
+    row: ExecutionModel,
+    active_block: SchedulingBlockModel | None,
+) -> ExecutionFact:
     if row.worker_item_id is None:
         raise ValueError("WorkerItem execution must have worker_item_id")
     return ExecutionFact(
@@ -280,6 +301,32 @@ def _execution(row: ExecutionModel) -> ExecutionFact:
         updated_at=_as_utc(row.updated_at),
         started_at=_as_utc_optional(row.started_at),
         finished_at=_as_utc_optional(row.finished_at),
+        version=row.version,
+        capability_requirements=tuple(sorted(row.capability_requirements or ())),
+        adapter_preferences=tuple(row.adapter_preferences or ()),
+        adapter_forbidden=tuple(sorted(row.adapter_forbidden or ())),
+        scheduling_status=(
+            "waiting"
+            if row.status == "queued" and active_block is not None
+            else ""
+        ),
+        waiting_reason=active_block.reason_code if active_block is not None else None,
+        waiting_details_summary=(
+            _waiting_details_summary(
+                active_block.reason_code,
+                active_block.reason_details,
+            )
+            if active_block is not None
+            else None
+        ),
+        requires_operator=(
+            bool(active_block.requires_operator) if active_block is not None else False
+        ),
+        blocked_since=(
+            _as_utc(active_block.first_seen_at)
+            if active_block is not None
+            else None
+        ),
     )
 
 
@@ -302,6 +349,11 @@ def _worker(row: WorkerModel) -> WorkerFact:
         id=row.id,
         display_name=row.display_name,
         adapter_type=row.adapter_type,
+        status=row.status,
+        desired_state=row.desired_state,
+        capabilities=tuple(sorted(row.capabilities or ())),
+        current_load=row.current_load,
+        capacity=row.capacity,
     )
 
 
@@ -312,6 +364,12 @@ def _binding(row: ExecutionBindingModel) -> BindingFact:
         lease_id=row.lease_id,
         fencing_token=row.fencing_token,
         updated_at=_as_utc(row.updated_at),
+        id=row.id,
+        adapter_module_id=row.adapter_module_id,
+        workspace_module_id=row.workspace_module_id,
+        adapter_config_version=row.adapter_config_version,
+        workspace_config_version=row.workspace_config_version,
+        version=row.version,
     )
 
 
@@ -395,3 +453,52 @@ def _as_utc(value: datetime) -> datetime:
 
 def _as_utc_optional(value: datetime | None) -> datetime | None:
     return _as_utc(value) if value is not None else None
+
+
+_WAITING_REASON_LABELS = {
+    "no_eligible_worker": "暂无可用执行节点",
+    "pinned_worker_unavailable": "固定执行节点不可用",
+    "runtime_configuration_missing": "运行环境未配置",
+    "runtime_configuration_invalid": "运行环境配置无效",
+    "adapter_module_unavailable": "适配器不可用",
+    "workspace_module_unavailable": "工作区提供器不可用",
+    "runtime_capability_mismatch": "运行能力不匹配",
+    "adapter_policy_rejected": "适配器策略已过滤",
+}
+
+
+def _waiting_details_summary(
+    reason: str | None, details: Mapping[str, object] | None
+) -> str:
+    if reason is None:
+        return "执行暂时无法分配"
+    safe_details = details if isinstance(details, Mapping) else {}
+    candidate_count = safe_details.get("candidate_count")
+    if not isinstance(candidate_count, int) or isinstance(candidate_count, bool):
+        candidate_count = None
+
+    raw_counts = safe_details.get("candidate_issue_counts")
+    counts: Mapping[str, object]
+    if isinstance(raw_counts, Mapping):
+        counts = raw_counts
+    else:
+        counts = {
+            key: safe_details[key]
+            for key in _WAITING_REASON_LABELS
+            if key in safe_details
+        }
+    parts = [
+        f"{_WAITING_REASON_LABELS.get(key, '其他原因')} {value} 个"
+        for key, value in sorted(counts.items())
+        if key in _WAITING_REASON_LABELS
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    ]
+    if candidate_count is not None and parts:
+        return f"{candidate_count} 个候选执行节点暂不可用：" + "，".join(parts)
+    if candidate_count is not None and reason == "no_eligible_worker":
+        return f"{candidate_count} 个候选执行节点暂不可用"
+    if candidate_count is not None and reason == "runtime_configuration_missing":
+        return f"{candidate_count} 个候选执行节点未配置运行环境"
+    return _WAITING_REASON_LABELS.get(reason, "执行暂时无法分配")

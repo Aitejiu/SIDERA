@@ -14,18 +14,22 @@ import { Link } from "react-router-dom";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { ExecutionRoutingPanel } from "./ExecutionRoutingPanel";
 import type { WorkerPlacement, WorkerWorkspace } from "./types";
 
 export function WorkerSidebar({
   workspace,
   taskTitle,
   subtaskTitle,
+  onRefresh,
 }: {
   workspace: WorkerWorkspace;
   taskTitle: string;
   subtaskTitle: string;
+  onRefresh: () => Promise<void>;
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
+  const currentExecution = workspace.execution_history[0] ?? null;
   const contextSynchronized = workerItem.context_version === workerItem.acknowledged_context_version;
   return (
     <aside className="worker-item-sidebar" aria-label="WorkerItem 事实">
@@ -36,6 +40,15 @@ export function WorkerSidebar({
         </div>
         <StatusMark kind={workerStatusKind(workerItem.status)} />
       </div>
+
+      <ExecutionRoutingPanel
+        workspaceId={workspace.workspace_id}
+        execution={currentExecution}
+        workerItemId={workerItem.id}
+        rootTaskId={workerItem.root_task_id}
+        subtaskKey={workspace.current_placement.subtask_key}
+        onRefresh={onRefresh}
+      />
 
       <section className="worker-item-sidebar__section">
         <h3><ServerCog size={15} aria-hidden="true" />当前 Agent</h3>

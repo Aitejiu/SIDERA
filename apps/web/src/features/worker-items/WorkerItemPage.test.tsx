@@ -87,6 +87,27 @@ const workspace = {
       finished_at: null,
       created_at: "2026-08-23T07:59:00Z",
       updated_at: "2026-08-23T08:05:00Z",
+      version: 3,
+      adapter_preferences: ["opencode"],
+      adapter_forbidden: [],
+      scheduling_status: "assigned",
+      waiting_reason: null,
+      waiting_details_summary: null,
+      requires_operator: false,
+      blocked_since: null,
+      pinned_worker_id: null,
+      assigned_worker_id: "80000000-0000-0000-0000-000000000001",
+      pinned_worker_summary: null,
+      assigned_worker_summary: {
+        id: "80000000-0000-0000-0000-000000000001",
+        display_name: "OpenCode Worker",
+        adapter_type: "opencode",
+        status: "busy",
+        desired_state: "active",
+        current_load: 1,
+        capacity: 2,
+      },
+      binding_summary: null,
     },
     {
       execution_id: EXECUTION_ONE_ID,
@@ -351,6 +372,8 @@ describe("WorkerItemPage", () => {
     expect(screen.getByText("Session 2 · 当前")).toBeVisible();
     expect(screen.getByText("只修改这个回调重试规则")).toBeVisible();
     expect(screen.getAllByText("OpenCode Worker").length).toBeGreaterThan(0);
+    expect(screen.getByText("执行尝试 #2")).toBeVisible();
+    expect(screen.getByText("当前执行已绑定；更换节点需要停止并创建新的执行尝试")).toBeVisible();
     expect(screen.getByText("运行回调测试")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
   });

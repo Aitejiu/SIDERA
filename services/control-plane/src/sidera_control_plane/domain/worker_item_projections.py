@@ -57,6 +57,15 @@ class ExecutionFact:
     updated_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    version: int = 1
+    capability_requirements: tuple[str, ...] = ()
+    adapter_preferences: tuple[str, ...] = ()
+    adapter_forbidden: tuple[str, ...] = ()
+    scheduling_status: str = ""
+    waiting_reason: str | None = None
+    waiting_details_summary: str | None = None
+    requires_operator: bool = False
+    blocked_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,11 @@ class WorkerFact:
     id: UUID
     display_name: str
     adapter_type: str
+    status: str = "offline"
+    desired_state: str = "active"
+    capabilities: tuple[str, ...] = ()
+    current_load: int = 0
+    capacity: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +100,35 @@ class BindingFact:
     lease_id: UUID
     fencing_token: int
     updated_at: datetime
+    id: UUID | None = None
+    adapter_module_id: UUID | None = None
+    workspace_module_id: UUID | None = None
+    adapter_config_version: int | None = None
+    workspace_config_version: int | None = None
+    version: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerSummaryProjection:
+    id: UUID
+    display_name: str
+    adapter_type: str
+    status: str
+    desired_state: str
+    current_load: int
+    capacity: int
+
+
+@dataclass(frozen=True, slots=True)
+class BindingSummaryProjection:
+    id: UUID
+    worker_id: UUID
+    adapter_module_id: UUID
+    workspace_module_id: UUID
+    adapter_config_version: int
+    workspace_config_version: int
+    fencing_token: int
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +271,20 @@ class ExecutionSummaryProjection:
     finished_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    version: int
+    capability_requirements: tuple[str, ...]
+    adapter_preferences: tuple[str, ...]
+    adapter_forbidden: tuple[str, ...]
+    scheduling_status: str
+    waiting_reason: str | None
+    waiting_details_summary: str | None
+    requires_operator: bool
+    blocked_since: datetime | None
+    pinned_worker_summary: WorkerSummaryProjection | None
+    assigned_worker_summary: WorkerSummaryProjection | None
+    binding_summary: BindingSummaryProjection | None
+    pinned_worker_id: UUID | None = None
+    assigned_worker_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +619,7 @@ def _execution_projection(
     leases: Mapping[UUID, LeaseFact],
 ) -> ExecutionSummaryProjection:
     runtime = _runtime_projection(execution, session, workers, bindings, leases)
+    scheduling_status = _scheduling_status(execution)
     return ExecutionSummaryProjection(
         execution_id=execution.id,
         task_id=execution.task_id,
@@ -574,6 +632,80 @@ def _execution_projection(
         finished_at=execution.finished_at,
         created_at=execution.created_at,
         updated_at=execution.updated_at,
+        version=execution.version,
+        capability_requirements=execution.capability_requirements,
+        adapter_preferences=execution.adapter_preferences,
+        adapter_forbidden=execution.adapter_forbidden,
+        scheduling_status=scheduling_status,
+        waiting_reason=execution.waiting_reason if scheduling_status == "waiting" else None,
+        waiting_details_summary=(
+            execution.waiting_details_summary
+            if scheduling_status == "waiting"
+            else None
+        ),
+        requires_operator=(
+            execution.requires_operator if scheduling_status == "waiting" else False
+        ),
+        blocked_since=(
+            execution.blocked_since if scheduling_status == "waiting" else None
+        ),
+        pinned_worker_summary=_worker_summary(
+            workers.get(execution.pinned_worker_id)
+            if execution.pinned_worker_id is not None
+            else None
+        ),
+        assigned_worker_summary=_worker_summary(
+            workers.get(execution.assigned_worker_id)
+            if execution.assigned_worker_id is not None
+            else None
+        ),
+        binding_summary=_binding_summary(bindings.get(execution.id)),
+        pinned_worker_id=execution.pinned_worker_id,
+        assigned_worker_id=execution.assigned_worker_id,
+    )
+
+
+def _scheduling_status(execution: ExecutionFact) -> str:
+    if execution.status in {"succeeded", "failed", "canceled", "lost"}:
+        return "terminal"
+    if execution.status == "queued":
+        return execution.scheduling_status or "ready"
+    return "assigned"
+
+
+def _worker_summary(worker: WorkerFact | None) -> WorkerSummaryProjection | None:
+    if worker is None:
+        return None
+    return WorkerSummaryProjection(
+        id=worker.id,
+        display_name=worker.display_name,
+        adapter_type=worker.adapter_type,
+        status=worker.status,
+        desired_state=worker.desired_state,
+        current_load=worker.current_load,
+        capacity=worker.capacity,
+    )
+
+
+def _binding_summary(binding: BindingFact | None) -> BindingSummaryProjection | None:
+    if (
+        binding is None
+        or binding.id is None
+        or binding.adapter_module_id is None
+        or binding.workspace_module_id is None
+        or binding.adapter_config_version is None
+        or binding.workspace_config_version is None
+    ):
+        return None
+    return BindingSummaryProjection(
+        id=binding.id,
+        worker_id=binding.worker_id,
+        adapter_module_id=binding.adapter_module_id,
+        workspace_module_id=binding.workspace_module_id,
+        adapter_config_version=binding.adapter_config_version,
+        workspace_config_version=binding.workspace_config_version,
+        fencing_token=binding.fencing_token,
+        version=binding.version,
     )
 
 

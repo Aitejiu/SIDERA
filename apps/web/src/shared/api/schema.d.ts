@@ -3190,8 +3190,20 @@ export interface components {
         };
         /** WorkerExecutionSummaryProjectionResponse */
         WorkerExecutionSummaryProjectionResponse: {
+            /** Adapter Forbidden */
+            adapter_forbidden: string[];
+            /** Adapter Preferences */
+            adapter_preferences: string[];
+            /** Assigned Worker Id */
+            assigned_worker_id: string | null;
+            assigned_worker_summary: components["schemas"]["WorkerSummaryResponse"] | null;
             /** Attempt */
             attempt: number;
+            binding_summary: components["schemas"]["ExecutionBindingSummaryResponse"] | null;
+            /** Blocked Since */
+            blocked_since: string | null;
+            /** Capability Requirements */
+            capability_requirements: string[];
             /**
              * Created At
              * Format: date-time
@@ -3206,6 +3218,13 @@ export interface components {
             failure_code: string | null;
             /** Finished At */
             finished_at: string | null;
+            /** Pinned Worker Id */
+            pinned_worker_id: string | null;
+            pinned_worker_summary: components["schemas"]["WorkerSummaryResponse"] | null;
+            /** Requires Operator */
+            requires_operator: boolean;
+            /** Scheduling Status */
+            scheduling_status: string;
             /** Session Id */
             session_id: string | null;
             /** Started At */
@@ -3222,6 +3241,12 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            /** Version */
+            version: number;
+            /** Waiting Details Summary */
+            waiting_details_summary: string | null;
+            /** Waiting Reason */
+            waiting_reason: string | null;
             /** Worker Id */
             worker_id: string | null;
         };

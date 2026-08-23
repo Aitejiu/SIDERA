@@ -620,6 +620,20 @@ class WorkerExecutionSummaryProjectionResponse(BaseModel):
     finished_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    version: int
+    capability_requirements: tuple[str, ...]
+    adapter_preferences: tuple[str, ...]
+    adapter_forbidden: tuple[str, ...]
+    scheduling_status: str
+    waiting_reason: str | None
+    waiting_details_summary: str | None
+    requires_operator: bool
+    blocked_since: datetime | None
+    pinned_worker_id: UUID | None
+    assigned_worker_id: UUID | None
+    pinned_worker_summary: "WorkerSummaryResponse | None"
+    assigned_worker_summary: "WorkerSummaryResponse | None"
+    binding_summary: "ExecutionBindingSummaryResponse | None"
 
 
 class WorkerCheckpointSummaryProjectionResponse(BaseModel):
