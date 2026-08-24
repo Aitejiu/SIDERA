@@ -154,6 +154,7 @@ class ControlPlaneClient:
         self._config = config
         self._client = httpx.AsyncClient(
             base_url=str(config.control_plane_url).rstrip("/"),
+            trust_env=False,
             timeout=httpx.Timeout(
                 timeout=config.request_timeout_seconds,
                 connect=config.connect_timeout_seconds,

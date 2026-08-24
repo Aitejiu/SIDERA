@@ -55,6 +55,17 @@ def command_response(command_id: UUID) -> dict[str, Any]:
     }
 
 
+def test_client_does_not_inherit_host_proxy_for_loopback_control_plane() -> None:
+    async def scenario() -> None:
+        client = ControlPlaneClient(make_config())
+        try:
+            assert client._client._trust_env is False
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_execute_command_injects_config_identity_and_parses_201() -> None:
     async def scenario() -> None:
         envelope = make_envelope()
