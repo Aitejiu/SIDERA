@@ -203,7 +203,26 @@ class OpenCodePlannerAdapter:
                 session_id=session_id,
                 prompt_result=prompt_result,
             )
-            return _parse_result(response_text, planner_input, self.provider_ref)
+            try:
+                return _parse_result(response_text, planner_input, self.provider_ref)
+            except OpenCodePlannerError:
+                # Keep the same session so the model can correct its own schema
+                # response without rebuilding the full planning context.
+                repair_result = transport.request(
+                    "session/prompt",
+                    {
+                        "sessionId": session_id,
+                        "prompt": [{"type": "text", "text": _repair_prompt()}],
+                    },
+                    timeout=self._remaining_timeout(control),
+                )
+                transport.read_available(timeout=0)
+                repaired_text = _response_text(
+                    transport.drain_notifications(),
+                    session_id=session_id,
+                    prompt_result=repair_result,
+                )
+                return _parse_result(repaired_text, planner_input, self.provider_ref)
         except OpenCodePlannerError:
             raise
         except ACPProcessError as exc:
@@ -252,15 +271,9 @@ class OpenCodePlannerAdapter:
                         f"SIDERA_PLANNER_SECRET_{index}": secret.get_secret_value()
                         for index, secret in enumerate(self._secret_values)
                     },
-                    **(
-                        {
-                            "OPENCODE_CONFIG_CONTENT": json.dumps(
-                                {"model": self._model},
-                                separators=(",", ":"),
-                            )
-                        }
-                        if self._model is not None
-                        else {}
+                    "OPENCODE_CONFIG_CONTENT": json.dumps(
+                        _planner_opencode_config(self._model),
+                        separators=(",", ":"),
                     ),
                 },
             )
@@ -359,8 +372,18 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
     return (
         "Return exactly one JSON object. Do not use Markdown or explanatory text. "
         "The result_type must be proposal or clarification. A proposal uses the "
-        "PlanningProposalPayload schema version requested by policy; a clarification "
-        "uses question, rationale, answer_type, options, and blocking fields. "
+        "PlanningProposalPayload schema version requested by policy. A clarification "
+        "must use the top-level shape {result_type: clarification, clarifications: "
+        "[{question, rationale, answer_type, options, blocking}], usage}; do not "
+        "put clarification fields at the top level. Every subtask with expected "
+        "outputs must have a corresponding WorkerItem. Do not invent extra "
+        "verification-only subtasks or WorkerItems beyond the brief. Proposal "
+        "confirmation is handled by SIDERA outside the payload; set "
+        "impact_policy.manual_gate to false and never use it to represent "
+        "Proposal confirmation. Every expected_artifact_refs value must use one "
+        "of these exact references: artifact_type:diff, artifact_type:log, "
+        "artifact_type:report, artifact_type:screenshot, artifact_type:build, "
+        "or artifact_type:external; do not invent artifact types. "
         "Always include usage with integer input_tokens, output_tokens, "
         "cost_microunits, runtime_seconds, and context_bytes. For a proposal, copy "
         "the exact field names from this minimal valid shape, replace the example "
@@ -370,6 +393,20 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         + "\n"
         + json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
+
+
+def _planner_opencode_config(model: str | None) -> dict[str, object]:
+    """Run planning as a pure text transformation with no tool approvals."""
+    config: dict[str, object] = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "deny",
+            "external_directory": "deny",
+        },
+    }
+    if model is not None:
+        config["model"] = model
+    return config
 
 
 def _proposal_shape_hint() -> dict[str, object]:
@@ -460,6 +497,18 @@ def _proposal_shape_hint() -> dict[str, object]:
     }
 
 
+def _repair_prompt() -> str:
+    return (
+        "Your previous response failed SIDERA strict schema validation. Return exactly "
+        "one corrected JSON object now, with no Markdown or explanatory text. Re-read "
+        "the original planner contract and the minimal valid shape. Do not add fields, "
+        "invent artifact types, or flatten the proposal envelope. For a proposal use "
+        "result_type, proposal, and usage; for a clarification use result_type, "
+        "clarifications, and usage. Keep the result directly executable and wait for "
+        "SIDERA to handle Proposal confirmation."
+    )
+
+
 def _parse_result(
     text: str, planner_input: PlannerInput, provider_ref: str
 ) -> PlannerResult:
@@ -490,8 +539,7 @@ def _parse_result(
             )
             return PlannerProposalResult(proposal=proposal, usage=usage)
         if result_type == "clarification":
-            _strict_keys(value, {"result_type", "clarifications", "usage"})
-            raw_items = value.get("clarifications")
+            raw_items = _clarification_items(value)
             if not isinstance(raw_items, list) or not raw_items:
                 raise ValueError("clarifications must be a non-empty list")
             clarifications = tuple(
@@ -511,6 +559,18 @@ def _strict_keys(value: Mapping[str, object], allowed: set[str]) -> None:
     unknown = [str(key) for key in value if key not in allowed]
     if unknown:
         raise ValueError("response contains unknown fields")
+
+
+def _clarification_items(value: Mapping[str, object]) -> object:
+    if "clarifications" in value:
+        _strict_keys(value, {"result_type", "clarifications", "usage"})
+        return value.get("clarifications")
+
+    # Some providers flatten a single clarification despite the envelope prompt.
+    # Normalize only that exact shape; arbitrary extra fields remain invalid.
+    fields = {"question", "rationale", "answer_type", "options", "blocking"}
+    _strict_keys(value, {"result_type", "usage", *fields})
+    return [{field: value.get(field) for field in fields}]
 
 
 def _parse_usage(value: object) -> PlanningUsage:
@@ -579,7 +639,8 @@ def _response_text(
     session_id: str,
     prompt_result: Mapping[str, Any],
 ) -> str:
-    chunks: list[str] = []
+    message_chunks: dict[str, list[str]] = {}
+    message_order: list[str] = []
     for message in notifications:
         if message.get("method") != "session/update":
             continue
@@ -598,12 +659,20 @@ def _response_text(
         if isinstance(content, Mapping):
             content = content.get("text")
         if isinstance(content, str):
-            chunks.append(content)
-    if not chunks and isinstance(prompt_result.get("output"), str):
-        chunks.append(prompt_result["output"])
-    if not chunks:
-        raise OpenCodePlannerError("strict JSON planner response is missing")
-    return "".join(chunks)
+            message_id = update.get("messageId")
+            key = message_id if isinstance(message_id, str) and message_id else "__default__"
+            if key not in message_chunks:
+                message_chunks[key] = []
+                message_order.append(key)
+            message_chunks[key].append(content)
+    if message_order:
+        # OpenCode may emit a corrected assistant message after an invalid one.
+        # Concatenating different message IDs creates invalid JSON; the latest
+        # assistant message is the provider's final answer for this prompt.
+        return "".join(message_chunks[message_order[-1]])
+    if isinstance(prompt_result.get("output"), str):
+        return prompt_result["output"]
+    raise OpenCodePlannerError("strict JSON planner response is missing")
 
 
 def _session_id(result: Mapping[str, Any]) -> str:

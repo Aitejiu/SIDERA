@@ -35,7 +35,7 @@ done
 
 [ -f "$ENV_FILE" ] || fail "env file is missing"
 
-ALLOWED_KEYS='SIDERA_DATABASE_URL|SIDERA_WORKSPACE_ID|SIDERA_PLANNING_PROFILE_ID|SIDERA_PLANNING_PROFILE_VERSION|SIDERA_CONTROL_PLANE_URL|SIDERA_WEB_URL|SIDERA_MAIN_AGENT_GATEWAY_URL|SIDERA_AKASHIC_ENDPOINT|SIDERA_AKASHIC_WORKSPACE_TOKEN|SIDERA_AKASHIC_WORKSPACE|SIDERA_AKASHIC_CONFIG|SIDERA_OPENCODE_EXECUTABLE|SIDERA_OPENCODE_EXPECTED_VERSION|SIDERA_OPENCODE_MODEL'
+ALLOWED_KEYS='SIDERA_DATABASE_URL|SIDERA_R5_2_TEST_DATABASE_URL|SIDERA_WORKSPACE_ID|SIDERA_PLANNING_PROFILE_ID|SIDERA_PLANNING_PROFILE_VERSION|SIDERA_CONTROL_PLANE_URL|SIDERA_WEB_URL|SIDERA_MAIN_AGENT_GATEWAY_URL|SIDERA_AKASHIC_ENDPOINT|SIDERA_AKASHIC_WORKSPACE_TOKEN|SIDERA_AKASHIC_WORKSPACE|SIDERA_AKASHIC_CONFIG|SIDERA_OPENCODE_EXECUTABLE|SIDERA_OPENCODE_EXPECTED_VERSION|SIDERA_OPENCODE_MODEL|SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS'
 SEEN_KEYS=''
 
 is_allowed_key() {
@@ -98,6 +98,7 @@ require_value() {
 
 for required_key in \
   SIDERA_DATABASE_URL \
+  SIDERA_R5_2_TEST_DATABASE_URL \
   SIDERA_WORKSPACE_ID \
   SIDERA_PLANNING_PROFILE_ID \
   SIDERA_PLANNING_PROFILE_VERSION \
@@ -110,7 +111,8 @@ for required_key in \
   SIDERA_AKASHIC_CONFIG \
   SIDERA_OPENCODE_EXECUTABLE \
   SIDERA_OPENCODE_EXPECTED_VERSION \
-  SIDERA_OPENCODE_MODEL; do
+  SIDERA_OPENCODE_MODEL \
+  SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS; do
   require_value "$required_key"
 done
 
@@ -155,6 +157,7 @@ validate_loopback_url() {
 validate_uuid SIDERA_WORKSPACE_ID
 validate_uuid SIDERA_PLANNING_PROFILE_ID
 validate_positive_integer SIDERA_PLANNING_PROFILE_VERSION
+validate_positive_integer SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS
 validate_loopback_url SIDERA_CONTROL_PLANE_URL
 validate_loopback_url SIDERA_WEB_URL
 validate_loopback_url SIDERA_MAIN_AGENT_GATEWAY_URL
@@ -204,19 +207,31 @@ git --version >/dev/null 2>&1 || fail "git is unavailable"
 [ -d "$SIDERA_AKASHIC_WORKSPACE" ] || fail "Akashic workspace path is missing"
 [ -x "$SIDERA_OPENCODE_EXECUTABLE" ] || fail "OpenCode executable is not executable"
 
-db_without_scheme=${SIDERA_DATABASE_URL#*://}
-db_authority=${db_without_scheme#*@}
-db_host_port=${db_authority%%/*}
-db_host=${db_host_port%%:*}
-db_port=${db_host_port##*:}
-case "$db_host" in
-  127.0.0.1|localhost) ;;
-  *) fail "SIDERA_DATABASE_URL must use a loopback host" ;;
-esac
-case "$db_port" in
-  ''|*[!0-9]*) fail "SIDERA_DATABASE_URL must include a numeric port" ;;
-esac
-pg_isready -h "$db_host" -p "$db_port" >/dev/null 2>&1 || fail "PostgreSQL is not ready"
+validate_database_url() {
+  local key=$1 value db_without_scheme db_authority db_host_port db_host db_port
+  eval "value=\${$key}"
+  case "$value" in
+    postgresql://*|postgresql+psycopg://*) ;;
+    *) fail "$key must use a PostgreSQL URL" ;;
+  esac
+  db_without_scheme=${value#*://}
+  db_authority=${db_without_scheme#*@}
+  db_host_port=${db_authority%%/*}
+  db_host=${db_host_port%%:*}
+  db_port=${db_host_port##*:}
+  case "$db_host" in
+    127.0.0.1|localhost) ;;
+    *) fail "$key must use a loopback host" ;;
+  esac
+  case "$db_port" in
+    ''|*[!0-9]*) fail "$key must include a numeric port" ;;
+  esac
+  [ "$db_port" -ge 1 ] && [ "$db_port" -le 65535 ] || fail "$key port is invalid"
+  pg_isready -h "$db_host" -p "$db_port" >/dev/null 2>&1 || fail "PostgreSQL is not ready"
+}
+
+validate_database_url SIDERA_DATABASE_URL
+validate_database_url SIDERA_R5_2_TEST_DATABASE_URL
 
 heads_file=$(mktemp "${TMPDIR:-/tmp}/sidera-r5-2-heads.XXXXXX")
 trap 'rm -f "$heads_file"' EXIT HUP INT TERM
@@ -243,7 +258,7 @@ port_from_url() {
 }
 
 check_port_identity() {
-  local port=$1 component pid_file pid_list pid cmd expected
+  local port=$1 component=$2 pid_file pid_list pid cmd expected
   if ! command -v lsof >/dev/null 2>&1; then
     return 0
   fi

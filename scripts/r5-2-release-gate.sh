@@ -18,7 +18,7 @@ fi
 
 [ -f "$ENV_FILE" ] || fail "env file is missing"
 
-ALLOWED_KEYS='SIDERA_DATABASE_URL|SIDERA_WORKSPACE_ID|SIDERA_PLANNING_PROFILE_ID|SIDERA_PLANNING_PROFILE_VERSION|SIDERA_CONTROL_PLANE_URL|SIDERA_WEB_URL|SIDERA_MAIN_AGENT_GATEWAY_URL|SIDERA_AKASHIC_ENDPOINT|SIDERA_AKASHIC_WORKSPACE_TOKEN|SIDERA_AKASHIC_WORKSPACE|SIDERA_AKASHIC_CONFIG|SIDERA_OPENCODE_EXECUTABLE|SIDERA_OPENCODE_EXPECTED_VERSION|SIDERA_OPENCODE_MODEL'
+ALLOWED_KEYS='SIDERA_DATABASE_URL|SIDERA_R5_2_TEST_DATABASE_URL|SIDERA_WORKSPACE_ID|SIDERA_PLANNING_PROFILE_ID|SIDERA_PLANNING_PROFILE_VERSION|SIDERA_CONTROL_PLANE_URL|SIDERA_WEB_URL|SIDERA_MAIN_AGENT_GATEWAY_URL|SIDERA_AKASHIC_ENDPOINT|SIDERA_AKASHIC_WORKSPACE_TOKEN|SIDERA_AKASHIC_WORKSPACE|SIDERA_AKASHIC_CONFIG|SIDERA_OPENCODE_EXECUTABLE|SIDERA_OPENCODE_EXPECTED_VERSION|SIDERA_OPENCODE_MODEL|SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS'
 SEEN_KEYS=''
 
 is_allowed_key() {
@@ -32,6 +32,7 @@ set_config_value() {
   local key=$1 value=$2
   case "$key" in
     SIDERA_DATABASE_URL) SIDERA_DATABASE_URL=$value ;;
+    SIDERA_R5_2_TEST_DATABASE_URL) SIDERA_R5_2_TEST_DATABASE_URL=$value ;;
     SIDERA_WORKSPACE_ID) SIDERA_WORKSPACE_ID=$value ;;
     SIDERA_PLANNING_PROFILE_ID) SIDERA_PLANNING_PROFILE_ID=$value ;;
     SIDERA_PLANNING_PROFILE_VERSION) SIDERA_PLANNING_PROFILE_VERSION=$value ;;
@@ -44,6 +45,7 @@ set_config_value() {
     SIDERA_OPENCODE_EXECUTABLE) SIDERA_OPENCODE_EXECUTABLE=$value ;;
     SIDERA_OPENCODE_EXPECTED_VERSION) SIDERA_OPENCODE_EXPECTED_VERSION=$value ;;
     SIDERA_OPENCODE_MODEL) SIDERA_OPENCODE_MODEL=$value ;;
+    SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS) SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=$value ;;
     SIDERA_AKASHIC_WORKSPACE_TOKEN) : ;;
   esac
 }
@@ -79,6 +81,7 @@ require_value() {
 
 load_config
 require_value SIDERA_DATABASE_URL "${SIDERA_DATABASE_URL:-}"
+require_value SIDERA_R5_2_TEST_DATABASE_URL "${SIDERA_R5_2_TEST_DATABASE_URL:-}"
 require_value SIDERA_WORKSPACE_ID "${SIDERA_WORKSPACE_ID:-}"
 require_value SIDERA_PLANNING_PROFILE_ID "${SIDERA_PLANNING_PROFILE_ID:-}"
 require_value SIDERA_CONTROL_PLANE_URL "${SIDERA_CONTROL_PLANE_URL:-}"
@@ -163,6 +166,7 @@ run_step 'stack health' verify_stack_health
 run_step 'control-plane unit' uv run --project "$REPO_ROOT/services/control-plane" \
   pytest "$REPO_ROOT/services/control-plane/tests/unit" -q
 run_step 'control-plane integration' uv run --project "$REPO_ROOT/services/control-plane" \
+  env SIDERA_DATABASE_URL="$SIDERA_R5_2_TEST_DATABASE_URL" \
   pytest -m integration "$REPO_ROOT/services/control-plane/tests/integration" -q
 run_step 'control-plane ruff' uv run --project "$REPO_ROOT/services/control-plane" \
   ruff check "$REPO_ROOT/services/control-plane/src" "$REPO_ROOT/services/control-plane/tests"
@@ -190,11 +194,21 @@ run_step 'Gateway pyright' uv run --project "$REPO_ROOT/services/main-agent-gate
 run_step 'Web unit' npm --prefix "$REPO_ROOT/apps/web" test
 run_step 'Web lint' npm --prefix "$REPO_ROOT/apps/web" run lint
 run_step 'Web build' npm --prefix "$REPO_ROOT/apps/web" run build
-run_step 'Web deterministic E2E' npm --prefix "$REPO_ROOT/apps/web" run test:e2e
+run_step 'Web deterministic E2E' env \
+  -u SIDERA_RUN_REAL_MAIN_AGENT \
+  -u SIDERA_REAL_MAIN_AGENT_PROVIDER \
+  -u SIDERA_REAL_GATE_HELPER \
+  SIDERA_DATABASE_URL="$SIDERA_R5_2_TEST_DATABASE_URL" \
+  SIDERA_E2E_CONTROL_PLANE_PORT="${SIDERA_R5_2_E2E_CONTROL_PLANE_PORT:-18001}" \
+  SIDERA_E2E_WEB_PORT=4173 \
+  npm --prefix "$REPO_ROOT/apps/web" run test:e2e
 
 run_step 'real Gateway loop' uv run --project "$REPO_ROOT/services/main-agent-gateway" \
   pytest "$REPO_ROOT/services/main-agent-gateway/tests/integration/test_real_vertical_loop.py" -q
-run_step 'real Web journey' npm --prefix "$REPO_ROOT/apps/web" run test:e2e -- \
+run_step 'real Web journey' env \
+  SIDERA_E2E_CONTROL_PLANE_PORT=8000 \
+  SIDERA_E2E_WEB_PORT=4174 \
+  npm --prefix "$REPO_ROOT/apps/web" run test:e2e -- \
   tests/e2e/real-main-agent.spec.ts --project=desktop-chromium
 
 run_step 'Akashic host identity' verify_repo_boundary

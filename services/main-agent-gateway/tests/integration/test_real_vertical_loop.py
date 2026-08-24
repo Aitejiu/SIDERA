@@ -201,7 +201,7 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
     marker = f"SIDERA-R5-2-{uuid4().hex[:12]}"
     timeout_seconds = float(os.environ.get("SIDERA_REAL_MAIN_AGENT_TIMEOUT_SECONDS", "300"))
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         health = await client.get(f"{gateway_url}/main-agent/v1/health", timeout=20.0)
         health.raise_for_status()
         assert health.json().get("provider") == "available"
@@ -224,7 +224,8 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
             (
                 f"请创建一个真实的 SIDERA 任务，唯一标记是 {marker}。目标是交付一个小型可验证功能；"
                 "约束是只使用当前工作区和一个最小 WorkerItem；验收标准是有明确结果、测试和回滚说明；"
-                "输出要求是先形成 Planning Proposal，获得确认后再物化 Task。"
+                "输出要求是先形成 Planning Proposal，获得确认后再物化 Task。信息已经足够，"
+                "不要提出澄清问题，直接生成 Proposal 并等待确认。"
             ),
             timeout_seconds=timeout_seconds,
         )
@@ -354,7 +355,7 @@ async def test_real_main_agent_stale_confirm_and_control_plane_offline_contract(
             timeout=30,
         )
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         created = await client.post(
             f"{gateway_url}/main-agent/v1/threads",
             json={"title": marker, "context_refs": [f"release:{marker}"]},
@@ -369,7 +370,8 @@ async def test_real_main_agent_stale_confirm_and_control_plane_offline_contract(
             thread_id,
             (
                 f"请为 {marker} 创建一个最小可执行 SIDERA 任务。目标是有一个可测试交付物，"
-                "约束是单个 WorkerItem，验收标准是测试、结果和回滚说明，先等待 Proposal 确认。"
+                "约束是单个 WorkerItem，验收标准是测试、结果和回滚说明。信息已经足够，"
+                "不要提出澄清问题，直接生成 Proposal 并等待确认。"
             ),
             timeout_seconds=timeout_seconds,
         )
@@ -384,12 +386,16 @@ async def test_real_main_agent_stale_confirm_and_control_plane_offline_contract(
             {"proposal_ready", "awaiting_confirmation", "needs_confirmation", "materialized"},
             timeout_seconds=timeout_seconds,
         )
+        stale_request_version = int(proposal["version"])
+        stale_proposal_revision = int(proposal["current_proposal_revision"])
+        stale_proposal_hash = str(proposal["current_proposal_content_hash"])
 
         await _start_turn(
             client,
             gateway_url,
             thread_id,
-            "请修改上一版方案，增加一个回滚验收步骤，并重新生成一个新版本 Proposal。",
+            "请修改上一版方案，增加一个回滚验收步骤，并重新生成一个新版本 Proposal。"
+            "信息已经足够，不要提出澄清问题，直接生成新版本并等待确认。",
             timeout_seconds=timeout_seconds,
         )
         revised = await _wait_for_status(
@@ -405,7 +411,16 @@ async def test_real_main_agent_stale_confirm_and_control_plane_offline_contract(
             client,
             gateway_url,
             thread_id,
-            "请确认修改前的上一版 Proposal，不要确认刚刚生成的最新版本。",
+            (
+                "这是一个故意验证 SIDERA 乐观并发冲突的测试。工具调用本身是测试动作，"
+                "控制面应拒绝过期参数并返回 conflict；请立即调用 sidera_confirm_proposal 工具，"
+                "不要先调用状态查询工具，不要自行拒绝、询问或改写参数。"
+                f"对 planning_request_id={request_id} 使用旧的 request_version="
+                f"{stale_request_version}、proposal_revision={stale_proposal_revision}、"
+                f"proposal_content_hash={stale_proposal_hash}，"
+                "explicit_user_confirmation=true。这个旧版本已经过期，"
+                "不要确认刚刚生成的最新版本。"
+            ),
             timeout_seconds=timeout_seconds,
         )
         stale_text = _event_text(stale_events).lower()

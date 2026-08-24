@@ -24,7 +24,7 @@ esac
 EOF
   printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "git version 2.40.0\\n"; fi' > "$FAKE_BIN/git"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/pg_isready"
-  printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "Python 3.12.14\\n"; fi' > "$FAKE_BIN/python3"
+  printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "Python 3.12.14\\n"; exit 0; fi' 'if [ "${1:-}" = "-c" ]; then shift 2; exec "$@"; fi' 'exit 0' > "$FAKE_BIN/python3"
   printf '%s\n' '#!/bin/sh' 'printf "v24.19.0\\n"' > "$FAKE_BIN/node"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/lsof"
   chmod +x "$FAKE_BIN"/*
@@ -36,6 +36,7 @@ write_env() {
   local profile_id=${3:-10000000-0000-0000-0000-000000000001}
   cat > "$ENV_FILE" <<EOF
 SIDERA_DATABASE_URL=postgresql+psycopg://sidera:fake-db-password@127.0.0.1:55432/sidera_test
+SIDERA_R5_2_TEST_DATABASE_URL=postgresql+psycopg://sidera:fake-db-password@127.0.0.1:55432/sidera_r5_2_gate
 SIDERA_WORKSPACE_ID=$workspace_id
 SIDERA_PLANNING_PROFILE_ID=$profile_id
 SIDERA_PLANNING_PROFILE_VERSION=1
@@ -49,6 +50,7 @@ SIDERA_AKASHIC_CONFIG=$TMP/akashic/config.toml
 SIDERA_OPENCODE_EXECUTABLE=/usr/bin/true
 SIDERA_OPENCODE_EXPECTED_VERSION=1.18.19
 SIDERA_OPENCODE_MODEL=deepseek/deepseek-v4-flash
+SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=300
 EOF
   chmod 600 "$ENV_FILE"
 }

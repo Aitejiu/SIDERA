@@ -78,7 +78,11 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         assert "self" not in item.tool_schema["properties"]
         assert "event" not in item.tool_schema["properties"]
     always_on = {item.tool_name for item in metadata if item.tool_always_on}
-    assert always_on == {"sidera_submit_brief", "sidera_get_planning_status"}
+    assert always_on == {
+        "sidera_submit_brief",
+        "sidera_get_planning_status",
+        "sidera_get_task_status",
+    }
     hints = {
         item.tool_name for item in metadata if item.tool_search_hint is not None
     }
@@ -87,7 +91,6 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
-        "sidera_get_task_status",
     }
 
 

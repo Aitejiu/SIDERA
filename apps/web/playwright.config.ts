@@ -1,11 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
 import { resolve } from "node:path";
 
+import { resolveE2eRuntime } from "./src/e2eConfig.js";
+
 const webRoot = resolve(import.meta.dirname);
 const repositoryRoot = resolve(webRoot, "../..");
 const controlPlaneRoot = resolve(repositoryRoot, "services/control-plane");
 const databaseUrl = process.env.SIDERA_DATABASE_URL
   ?? "postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_test";
+const { controlPlanePort, webPort } = resolveE2eRuntime(process.env);
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -19,7 +22,7 @@ export default defineConfig({
   outputDir: "test-results",
   snapshotPathTemplate: "{testDir}/snapshots/{projectName}/{arg}{ext}",
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: `http://127.0.0.1:${webPort}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -47,9 +50,9 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: `${resolve(controlPlaneRoot, ".venv/bin/uvicorn")} sidera_control_plane.api.app:create_app --factory --host 127.0.0.1 --port 8000`,
+      command: `${resolve(controlPlaneRoot, ".venv/bin/uvicorn")} sidera_control_plane.api.app:create_app --factory --host 127.0.0.1 --port ${controlPlanePort}`,
       cwd: controlPlaneRoot,
-      url: "http://127.0.0.1:8000/healthz",
+      url: `http://127.0.0.1:${controlPlanePort}/healthz`,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
       env: {
@@ -59,7 +62,7 @@ export default defineConfig({
       },
     },
     {
-      command: "npm run dev -- --port 4173",
+      command: `npm run dev -- --port ${webPort}`,
       cwd: webRoot,
       url: "http://127.0.0.1:4173/",
       timeout: 30_000,

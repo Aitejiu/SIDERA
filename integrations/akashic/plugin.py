@@ -284,10 +284,15 @@ class SideraTaskBridge(Plugin):
     @tool(
         name="sidera_get_task_status",
         risk="read-only",
-        search_hint="SIDERA task progress status milestone worker next work item",
+        always_on=True,
     )
     async def sidera_get_task_status(self, event: object, task_id: str) -> str:
-        """Read the bounded SIDERA Task First overview."""
+        """Read the bounded SIDERA Task First overview.
+
+        Use this tool whenever the user asks for the status or progress of a
+        materialized SIDERA task. Do not use shell or direct control-plane
+        requests for SIDERA task state.
+        """
 
         return await self._toolset().sidera_get_task_status(event, task_id)
 

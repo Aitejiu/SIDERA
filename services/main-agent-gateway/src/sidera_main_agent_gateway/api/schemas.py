@@ -15,7 +15,11 @@ class ApiModel(BaseModel):
 
 class CreateThreadRequest(ApiModel):
     title: str | None = Field(default=None, max_length=120)
-    context_refs: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    context_refs: tuple[str, ...] = Field(
+        default_factory=tuple,
+        alias="contextRefs",
+        max_length=20,
+    )
 
     @field_validator("context_refs")
     @classmethod

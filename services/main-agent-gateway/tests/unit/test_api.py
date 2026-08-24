@@ -252,6 +252,20 @@ def test_thread_create_and_turn_start_use_expected_status_codes(
     assert started.json()["id"] == "turn-1"
 
 
+def test_thread_create_accepts_public_camelcase_context_refs(
+    client: tuple[TestClient, FakeAdapter],
+) -> None:
+    test_client, adapter = client
+
+    created = test_client.post(
+        "/main-agent/v1/threads",
+        json={"title": "Web chat", "contextRefs": ["task:1"]},
+    )
+
+    assert created.status_code == 201
+    assert adapter.created == [("Web chat", ("task:1",))]
+
+
 def test_thread_read_returns_persisted_turns(
     client: tuple[TestClient, FakeAdapter],
 ) -> None:

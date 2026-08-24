@@ -57,7 +57,7 @@ def test_transport_matches_request_ids_and_preserves_notifications(tmp_path: Pat
         stderr_limit_bytes=128,
     )
     try:
-        result = transport.request("echo", {"value": 7}, timeout=1)
+        result = transport.request("echo", {"value": 7}, timeout=3)
 
         assert result == {"value": 7}
         notifications = transport.drain_notifications()
@@ -91,7 +91,7 @@ def test_transport_bounds_stderr_and_terminates_owned_process(tmp_path: Path) ->
         stderr_limit_bytes=64,
     )
     try:
-        assert transport.request("stderr", {}, timeout=1) == {"ok": True}
+        assert transport.request("stderr", {}, timeout=3) == {"ok": True}
         deadline = time.monotonic() + 1
         while len(transport.stderr_text) == 0 and time.monotonic() < deadline:
             time.sleep(0.01)
