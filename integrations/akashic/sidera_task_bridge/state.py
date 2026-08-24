@@ -401,7 +401,18 @@ class BridgeStateStore:
                 None,
             )
             if existing is not None:
-                if existing != notice:
+                immutable_fields = (
+                    "cursor",
+                    "resource_key",
+                    "source_ref",
+                    "kind",
+                    "message",
+                    "web_url",
+                )
+                if any(
+                    getattr(existing, field) != getattr(notice, field)
+                    for field in immutable_fields
+                ):
                     raise StateConflict("notification identity already has different state")
                 return
             if notice.cursor < state.notification_cursor:

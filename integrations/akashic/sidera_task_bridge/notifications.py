@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -13,7 +15,9 @@ from .contracts import ProjectionChange
 from .state import (
     BridgeStateStore,
     NotificationSnapshot,
+    PendingNotification,
     ResourceSourceBinding,
+    UndeliverableAudit,
 )
 
 type NoticeKind = Literal[
@@ -51,6 +55,105 @@ class NotificationEvaluation:
     cursor: int
     snapshot: NotificationSnapshot
     notice: NotificationNotice | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryResult:
+    outcome: Literal["ignored", "sent", "pending", "undeliverable", "deferred"]
+    notice_id: str | None
+
+
+class NotificationDelivery:
+    """Persist pending notices and deliver them serially through message_push."""
+
+    def __init__(
+        self,
+        config: TaskBridgeConfig,
+        *,
+        state: BridgeStateStore,
+        tool_registry: Any,
+        clock: Any | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        self._config = config
+        self._state = state
+        self._tool_registry = tool_registry
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._timeout_seconds = timeout_seconds or float(
+            getattr(config, "notification_delivery_timeout_seconds", 15.0)
+        )
+
+    async def deliver(self, evaluation: NotificationEvaluation) -> DeliveryResult:
+        notice = evaluation.notice
+        if notice is None:
+            await self._state.save_notification_snapshot(
+                evaluation.resource_key, evaluation.snapshot
+            )
+            await self._state.advance_notification_cursor(evaluation.cursor)
+            return DeliveryResult("ignored", None)
+
+        await self._state.enqueue_notification(
+            PendingNotification(
+                notice_id=notice.notice_id,
+                cursor=notice.cursor,
+                resource_key=notice.resource_key,
+                source_ref=notice.source_ref,
+                kind=notice.kind,
+                message=notice.message,
+                web_url=notice.web_url,
+                created_at=self._clock(),
+            )
+        )
+        pending = await self._state.list_pending_notifications()
+        if not pending or pending[0].notice_id != notice.notice_id:
+            return DeliveryResult("deferred", notice.notice_id)
+
+        route = (await self._state.snapshot()).source_routes.get(notice.source_ref)
+        if route is None:
+            await self._state.record_undeliverable(
+                UndeliverableAudit(
+                    notice_id=notice.notice_id,
+                    resource_key=notice.resource_key,
+                    kind=notice.kind,
+                    reason_code="route_missing",
+                    recorded_at=self._clock(),
+                )
+            )
+            await self._state.settle_notification(notice.notice_id)
+            await self._state.save_notification_snapshot(
+                evaluation.resource_key, evaluation.snapshot
+            )
+            await self._state.advance_notification_cursor(notice.cursor)
+            return DeliveryResult("undeliverable", notice.notice_id)
+
+        await self._state.record_notification_attempt(
+            notice.notice_id, at=self._clock()
+        )
+        try:
+            receipt = await asyncio.wait_for(
+                self._tool_registry.execute(
+                    "message_push",
+                    {
+                        "target_channel": route.channel,
+                        "target_chat_id": route.chat_id,
+                        "message": notice.message,
+                        "_outbound_metadata": {"delivery_id": notice.notice_id},
+                    },
+                    raise_errors=True,
+                ),
+                timeout=self._timeout_seconds,
+            )
+        except Exception:  # noqa: BLE001 - external delivery failures retain pending
+            return DeliveryResult("pending", notice.notice_id)
+        if receipt != "消息已发送":
+            return DeliveryResult("pending", notice.notice_id)
+
+        await self._state.settle_notification(notice.notice_id)
+        await self._state.save_notification_snapshot(
+            evaluation.resource_key, evaluation.snapshot
+        )
+        await self._state.advance_notification_cursor(notice.cursor)
+        return DeliveryResult("sent", notice.notice_id)
 
 
 @dataclass(frozen=True, slots=True)
