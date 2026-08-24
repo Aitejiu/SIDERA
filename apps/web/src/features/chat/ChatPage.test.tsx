@@ -256,6 +256,31 @@ describe("Main Agent chat workspace", () => {
     expect(screen.getByRole("button", { name: "停止当前对话" })).toBeEnabled();
   });
 
+  it("retries a message when the Gateway reports a transient busy thread", async () => {
+    const user = userEvent.setup();
+    useBaseHandlers();
+    let startCount = 0;
+    server.use(
+      http.post("/main-agent/v1/threads/:threadId/turns", () => {
+        startCount += 1;
+        if (startCount === 1) {
+          return HttpResponse.json(
+            { error: { code: "thread_busy", message: "busy", retryable: true } },
+            { status: 409 },
+          );
+        }
+        return HttpResponse.json(turn({ id: "turn-2" }), { status: 202 });
+      }),
+    );
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    await user.type(await screen.findByRole("textbox", { name: "给 Main Agent 的消息" }), "重试忙碌线程");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() => expect(startCount).toBe(2));
+    expect(screen.queryByText("消息未发送，输入内容已保留。请检查 Gateway 后重试。")).not.toBeInTheDocument();
+  });
+
   it("interrupts only the current active turn", async () => {
     const user = userEvent.setup();
     useBaseHandlers({

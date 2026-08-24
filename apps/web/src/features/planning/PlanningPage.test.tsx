@@ -3,12 +3,20 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
 
 import { PlanningPage } from "./PlanningPage";
 import { planningProposalDraftKey } from "./ProposalFeedbackComposer";
+
+const { seedSnapshotCursor } = vi.hoisted(() => ({
+  seedSnapshotCursor: vi.fn(),
+}));
+
+vi.mock("@/app/WorkspaceStreamProvider", () => ({
+  useWorkspaceStreamOptional: () => ({ seedSnapshotCursor }),
+}));
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const REQUEST_ID = "30000000-0000-0000-0000-000000000001";
@@ -270,6 +278,17 @@ describe("PlanningPage", () => {
   beforeEach(() => {
     server.resetHandlers();
     window.localStorage.clear();
+    seedSnapshotCursor.mockClear();
+  });
+
+  it("seeds the projection stream from the planning request snapshot", async () => {
+    installHandlers({
+      request: makeRequest("planning", { last_change_cursor: 42 }),
+    });
+    renderPage();
+
+    expect(await screen.findByText("规划中")).toBeVisible();
+    await waitFor(() => expect(seedSnapshotCursor).toHaveBeenCalledWith(42));
   });
 
   it.each([

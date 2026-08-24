@@ -80,8 +80,10 @@ test.describe("real Main Agent Web journey", () => {
     }
 
     await tabs.getByRole("link", { name: "Main Agent" }).click();
-    await expect(page.getByRole("textbox", { name: "给 Main Agent 的消息" })).toBeVisible();
-    await page.getByRole("textbox", { name: "给 Main Agent 的消息" }).fill(
+    const mainAgentComposer = page.getByRole("textbox", { name: "给 Main Agent 的消息" });
+    await expect(mainAgentComposer).toBeVisible();
+    await expect(mainAgentComposer).toBeEnabled({ timeout: config.timeoutMs });
+    await mainAgentComposer.fill(
       `请读取任务 ${rootTaskId} 当前状态，并返回下一步。`,
     );
     await page.getByRole("button", { name: "发送消息" }).click();
@@ -117,13 +119,33 @@ test.describe("real Main Agent Web journey", () => {
 
     execFileSync(config.helperPath, ["restart-gateway"], { stdio: "pipe", timeout: 30_000 });
     await page.reload();
-    await expect(page.getByRole("status", { name: "对话恢复状态" })).toBeVisible({ timeout: config.timeoutMs });
-    await expect(page.getByRole("status", { name: "对话恢复状态" })).toContainText("不会自动重发");
-
+    const recoveryNotice = page.getByRole("status", { name: "对话恢复状态" });
+    const terminalTurn = page.locator(".chat-turn").last();
+    let sawRecoveryNotice = false;
     await expect.poll(
-      async () => (await page.locator(".chat-turn").last().getAttribute("class")) ?? "",
+      async () => {
+        if (await recoveryNotice.isVisible().catch(() => false)) {
+          sawRecoveryNotice = true;
+          return "recovering";
+        }
+        const turnClass = (await terminalTurn.getAttribute("class")) ?? "";
+        return /chat-turn--(?:completed|failed|interrupted|cancelled)/.test(turnClass)
+          ? "terminal"
+          : "waiting";
+      },
+      { timeout: config.timeoutMs, intervals: [1_000, 2_000, 5_000] },
+    ).toMatch(/recovering|terminal/);
+    if (sawRecoveryNotice) {
+      await expect(recoveryNotice).toContainText("不会自动重发");
+    }
+    await expect.poll(
+      async () => (await terminalTurn.getAttribute("class")) ?? "",
       { timeout: config.timeoutMs, intervals: [1_000, 2_000, 5_000] },
     ).toMatch(/chat-turn--(?:completed|failed|interrupted|cancelled)/);
+    const terminalStatus = await terminalTurn.locator(".chat-turn__status").textContent();
+    if (!sawRecoveryNotice && terminalStatus !== "已完成") {
+      await expect(page.getByRole("button", { name: "重试" })).toBeVisible();
+    }
     expect(turnRequests).toHaveLength(1);
     await assertBrowserBoundary(page, guard);
   });

@@ -12,6 +12,10 @@ export function resolveE2eRuntime(environment: E2eEnvironment): E2eRuntime {
   };
 }
 
+export function resolveE2eWebUrl(webPort: number): string {
+  return `http://127.0.0.1:${webPort}/`;
+}
+
 function parsePort(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === "") return fallback;
   const port = Number(value);

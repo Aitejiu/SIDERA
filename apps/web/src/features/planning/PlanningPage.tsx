@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { ApiProblem } from "@/shared/api/client";
+import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 
 import {
   buildAnswerPlanningClarificationCommand,
@@ -39,6 +40,7 @@ export function PlanningPage() {
   } = useParams<{ workspaceId: string; planningRequestId: string }>();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const stream = useWorkspaceStreamOptional();
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedbackLockRevision, setFeedbackLockRevision] = useState<number | null>(null);
@@ -76,6 +78,13 @@ export function PlanningPage() {
   });
 
   const requestData = requestQuery.data;
+  useEffect(() => {
+    const cursor = requestData?.last_change_cursor;
+    if (stream !== null && cursor !== undefined) {
+      stream.seedSnapshotCursor(cursor);
+    }
+  }, [requestData?.last_change_cursor, stream]);
+
   if (requestData === undefined) {
     if (requestQuery.isPending) {
       return <PlanningPageState title="正在读取规划请求" detail="正在恢复请求状态和历史记录。" />;

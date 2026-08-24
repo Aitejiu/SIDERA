@@ -14,6 +14,7 @@ import {
   mainAgentThreadQueryKey,
   mainAgentThreadsQueryKey,
   startTurn,
+  MainAgentApiProblem,
 } from "./api";
 import { ChatComposer } from "./ChatComposer";
 import { ChatContextPanel, collectContextReferences } from "./ChatContextPanel";
@@ -27,6 +28,7 @@ const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const NEW_THREAD_SCOPE = "__new__";
 const ACTIVE_STATUSES = new Set<MainAgentTurn["status"]>(["queued", "in_progress"]);
 const TERMINAL_EVENT_NAMES = new Set(["completed", "failed", "interrupted", "cancelled"]);
+const THREAD_BUSY_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000] as const;
 
 type ScopedTurnMap = Record<string, Record<string, MainAgentTurn>>;
 type ScopedInputMap = Record<string, Record<string, string>>;
@@ -44,6 +46,7 @@ export function ChatPage() {
   const [pollingTurn, setPollingTurn] = useState<{ threadId: string; turnId: string } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [contextSendPending, setContextSendPending] = useState(false);
+  const [sendPending, setSendPending] = useState(false);
   const rawContextRef = searchParams.get("context_ref");
   const pendingContextRef = useMemo(() => {
     if (rawContextRef === null) return null;
@@ -205,7 +208,7 @@ export function ChatPage() {
 
   const send = async (input: string) => {
     const normalizedInput = input.trim();
-    if (activeTurn !== undefined || normalizedInput === "") return;
+    if (activeTurn !== undefined || normalizedInput === "" || sendPending) return;
     setErrorMessage(null);
 
     if (threadId === undefined) {
@@ -221,7 +224,7 @@ export function ChatPage() {
         setDrafts((current) => ({ ...current, [created.id]: normalizedInput }));
         navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(created.id)}`);
         try {
-          const turn = await startTurn(created.id, normalizedInput);
+          const turn = await startTurnWithBusyRetry(created.id, normalizedInput);
           setTurnInputsByScope((current) => ({
             ...current,
             [created.id]: { ...current[created.id], [turn.id]: normalizedInput },
@@ -242,8 +245,9 @@ export function ChatPage() {
       return;
     }
 
+    setSendPending(true);
     try {
-      const turn = await startTurn(threadId, normalizedInput);
+      const turn = await startTurnWithBusyRetry(threadId, normalizedInput);
       setTurnInputsByScope((current) => ({
         ...current,
         [threadId]: { ...current[threadId], [turn.id]: normalizedInput },
@@ -255,6 +259,8 @@ export function ChatPage() {
       }
     } catch {
       setErrorMessage("消息未发送，输入内容已保留。请检查 Gateway 后重试。");
+    } finally {
+      setSendPending(false);
     }
   };
 
@@ -372,7 +378,7 @@ export function ChatPage() {
               <ChatComposer
                 value={draft}
                 active={activeTurn !== undefined}
-                disabled={threadQuery.isError || createMutation.isPending || contextSendPending}
+                disabled={threadQuery.isError || createMutation.isPending || contextSendPending || sendPending}
                 errorMessage={errorMessage}
                 onChange={(value) => {
                   setDrafts((current) => ({ ...current, [scope]: value }));
@@ -393,6 +399,33 @@ export function ChatPage() {
       </div>
     </section>
   );
+}
+
+async function startTurnWithBusyRetry(threadId: string, input: string): Promise<MainAgentTurn> {
+  for (let retryIndex = 0; ; retryIndex += 1) {
+    try {
+      return await startTurn(threadId, input);
+    } catch (error) {
+      const retryDelay = THREAD_BUSY_RETRY_DELAYS_MS[retryIndex];
+      if (!isRetryableThreadBusy(error) || retryDelay === undefined) {
+        throw error;
+      }
+      await wait(retryDelay);
+    }
+  }
+}
+
+function isRetryableThreadBusy(error: unknown): error is MainAgentApiProblem {
+  return error instanceof MainAgentApiProblem
+    && error.status === 409
+    && error.code === "thread_busy"
+    && error.retryable;
+}
+
+function wait(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, delayMs);
+  });
 }
 
 async function refreshTurn(

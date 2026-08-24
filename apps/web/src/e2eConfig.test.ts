@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveE2eRuntime } from "./e2eConfig";
+import { resolveE2eRuntime, resolveE2eWebUrl } from "./e2eConfig";
 
 describe("E2E runtime endpoints", () => {
   it("uses explicit control-plane and Web ports when provided", () => {
@@ -14,5 +14,9 @@ describe("E2E runtime endpoints", () => {
 
   it("falls back to the local deterministic E2E ports", () => {
     expect(resolveE2eRuntime({})).toEqual({ controlPlanePort: 8000, webPort: 4173 });
+  });
+
+  it("builds the Web readiness URL from the selected Web port", () => {
+    expect(resolveE2eWebUrl(4174)).toBe("http://127.0.0.1:4174/");
   });
 });

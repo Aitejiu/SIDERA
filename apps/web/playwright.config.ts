@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 import { resolve } from "node:path";
 
-import { resolveE2eRuntime } from "./src/e2eConfig.js";
+import { resolveE2eRuntime, resolveE2eWebUrl } from "./src/e2eConfig.js";
 
 const webRoot = resolve(import.meta.dirname);
 const repositoryRoot = resolve(webRoot, "../..");
@@ -64,7 +64,7 @@ export default defineConfig({
     {
       command: `npm run dev -- --port ${webPort}`,
       cwd: webRoot,
-      url: "http://127.0.0.1:4173/",
+      url: resolveE2eWebUrl(webPort),
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
     },
