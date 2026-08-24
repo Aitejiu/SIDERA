@@ -12,9 +12,16 @@ mkdir -p "$FAKE_BIN" "$TMP/akashic"
 touch "$TMP/akashic/config.toml"
 
 make_fake_commands() {
-  printf '%s\n' '#!/bin/sh' 'case "$1" in' '  --version) printf "uv 0.6.0\\n" ;;' '  *) case "$*" in *alembic*heads*) printf "0015_r5_1_1_worker_runtime_binding (head)\\n" ;; esac ;;' 'esac' > "$FAKE_BIN/uv"
-  printf '%s\n' '#!/bin/sh' 'printf "11.17.0\\n"' > "$FAKE_BIN/npm"
-  printf '%s\n' '#!/bin/sh' 'printf "curl 8.0.0\\n"' > "$FAKE_BIN/curl"
+  printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  --version) printf "uv 0.6.0\\n"; exit 0 ;;' 'esac' 'case "$*" in' '  *alembic*heads*) printf "0015_r5_1_1_worker_runtime_binding (head)\\n" ;;' '  *uvicorn*|*sidera_control_plane.planning_worker*) while :; do sleep 1; done ;;' 'esac' > "$FAKE_BIN/uv"
+  printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "11.17.0\\n"; exit 0; fi' 'case "$*" in *run*dev*) while :; do sleep 1; done ;; esac' > "$FAKE_BIN/npm"
+  cat > "$FAKE_BIN/curl" <<'EOF'
+#!/bin/sh
+if [ "${R5_2_FAKE_CURL_FAIL:-0}" = "1" ]; then exit 1; fi
+case "$*" in
+  *main-agent*) printf '%s\n' '{"provider":"available"}' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+EOF
   printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "git version 2.40.0\\n"; fi' > "$FAKE_BIN/git"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/pg_isready"
   printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "Python 3.12.14\\n"; fi' > "$FAKE_BIN/python3"
@@ -104,3 +111,79 @@ if [ -e /tmp/should-not-run ]; then
 fi
 
 printf 'r5-2 preflight tests passed\n'
+
+write_env
+export PATH="$FAKE_BIN:/usr/bin:/bin"
+export SIDERA_R5_2_ENV_FILE="$ENV_FILE"
+export SIDERA_R5_2_RUNTIME_DIR="$RUNTIME_DIR"
+
+if ! output=$(/bin/bash "$ROOT/scripts/r5-2-stack.sh" start 2>&1); then
+  printf '%s\n' "$output" >&2
+  fail "stack start should pass with fake services"
+fi
+case "$output" in
+  *fake-db-password*|*fake-akashic-token*) fail "stack output leaked a secret" ;;
+esac
+
+components="control-plane planning-worker main-agent-gateway web"
+for component in $components; do
+  [ -f "$RUNTIME_DIR/pids/$component.pid" ] || fail "missing PID file for $component"
+  [ -f "$RUNTIME_DIR/identity/$component.identity" ] || fail "missing identity for $component"
+done
+
+first_pids=''
+for component in $components; do
+  first_pids="$first_pids $(sed -n '1p' "$RUNTIME_DIR/pids/$component.pid")"
+done
+if ! /bin/bash "$ROOT/scripts/r5-2-stack.sh" start >/dev/null 2>&1; then
+  fail "second stack start should be idempotent"
+fi
+second_pids=''
+for component in $components; do
+  second_pids="$second_pids $(sed -n '1p' "$RUNTIME_DIR/pids/$component.pid")"
+done
+[ "$first_pids" = "$second_pids" ] || fail "second start created duplicate processes"
+
+/bin/bash "$ROOT/scripts/r5-2-stack.sh" status >/dev/null 2>&1 || fail "healthy stack status should pass"
+for component in $components; do
+  /bin/bash "$ROOT/scripts/r5-2-stack.sh" logs "$component" >/dev/null || fail "logs should resolve $component"
+done
+
+if /bin/bash "$ROOT/scripts/r5-2-stack.sh" invalid-action >/dev/null 2>&1; then
+  fail "unknown action should fail"
+fi
+if /bin/bash "$ROOT/scripts/r5-2-stack.sh" logs unknown >/dev/null 2>&1; then
+  fail "unknown component should fail"
+fi
+
+/bin/bash "$ROOT/scripts/r5-2-stack.sh" stop >/dev/null 2>&1 || fail "stack stop should pass"
+status_output=$(/bin/bash "$ROOT/scripts/r5-2-stack.sh" status 2>&1) || fail "stopped stack status should be readable"
+case "$status_output" in *'control-plane: stopped'*) ;; *) fail "stopped stack status was not reported" ;; esac
+
+# An unrelated process in a PID file is quarantined and never signalled.
+sleep 30 &
+unrelated_pid=$!
+mkdir -p "$RUNTIME_DIR/pids" "$RUNTIME_DIR/identity"
+printf '%s\n' "$unrelated_pid" > "$RUNTIME_DIR/pids/control-plane.pid"
+printf 'pid=%s\ncomponent=control-plane\nrepo=%s\nmarker=sidera-r5-2:control-plane\n' "$unrelated_pid" "$ROOT" > "$RUNTIME_DIR/identity/control-plane.identity"
+if ! /bin/bash "$ROOT/scripts/r5-2-stack.sh" start >/dev/null 2>&1; then
+  kill "$unrelated_pid" >/dev/null 2>&1 || true
+  fail "stack should quarantine a stale PID and start"
+fi
+ls "$RUNTIME_DIR/pids/control-plane.pid.stale."* >/dev/null 2>&1 || fail "stale PID was not quarantined"
+kill -0 "$unrelated_pid" >/dev/null 2>&1 || fail "stack signalled an unrelated PID"
+kill "$unrelated_pid" >/dev/null 2>&1 || true
+/bin/bash "$ROOT/scripts/r5-2-stack.sh" stop >/dev/null 2>&1 || true
+
+# A health failure rolls back only this invocation's newly started processes.
+export SIDERA_R5_2_HEALTH_ATTEMPTS=2
+export R5_2_FAKE_CURL_FAIL=1
+if /bin/bash "$ROOT/scripts/r5-2-stack.sh" start >/dev/null 2>&1; then
+  fail "health failure should make start non-zero"
+fi
+unset R5_2_FAKE_CURL_FAIL SIDERA_R5_2_HEALTH_ATTEMPTS
+for component in $components; do
+  [ ! -f "$RUNTIME_DIR/pids/$component.pid" ] || fail "failed start left $component PID"
+done
+
+printf 'r5-2 lifecycle tests passed\n'
