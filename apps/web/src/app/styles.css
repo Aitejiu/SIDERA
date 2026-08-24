@@ -6877,6 +6877,40 @@ h1 {
   background: var(--surface);
 }
 
+.chat-recovery-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 16px clamp(18px, 3vw, 38px) 0;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--attention) 38%, var(--structure));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--attention) 8%, var(--surface));
+}
+
+.chat-recovery-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--attention);
+}
+
+.chat-recovery-notice > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-recovery-notice strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-recovery-notice span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .chat-context-panel {
   display: flex;
   flex-direction: column;

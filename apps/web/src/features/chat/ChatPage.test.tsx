@@ -308,6 +308,30 @@ describe("Main Agent chat workspace", () => {
     expect(readCount).toBeGreaterThan(0);
   });
 
+  it("explains polling recovery without offering an automatic replay", async () => {
+    useBaseHandlers({
+      thread: thread({
+        turns: [turn({
+          status: "in_progress",
+          completedAt: null,
+          finalResponse: null,
+          streamAvailable: false,
+          recoveryMode: "poll",
+        })],
+      }),
+    });
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+
+    expect(await screen.findByRole("status", { name: "对话恢复状态" })).toHaveTextContent(
+      "正在恢复原回合状态",
+    );
+    expect(screen.getByRole("status", { name: "对话恢复状态" })).toHaveTextContent(
+      "不会自动重发",
+    );
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+  });
+
   it("keeps the original input for an explicit retry after failure", async () => {
     const user = userEvent.setup();
     useBaseHandlers();

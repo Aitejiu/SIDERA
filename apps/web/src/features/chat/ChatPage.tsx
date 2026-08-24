@@ -310,6 +310,15 @@ export function ChatPage() {
         />
 
         <main className="chat-main" aria-label="Main Agent 对话工作面">
+          {threadId !== undefined && activeTurn !== undefined && (!activeTurn.streamAvailable || pollingTurn !== null) ? (
+            <div className="chat-recovery-notice" role="status" aria-label="对话恢复状态">
+              <RefreshCw size={16} aria-hidden="true" />
+              <div>
+                <strong>正在恢复原回合状态</strong>
+                <span>不会自动重发这条消息；Gateway 重启后可能缺少部分实时片段。</span>
+              </div>
+            </div>
+          ) : null}
           {unavailable ? (
             <div className="chat-main__offline" role="alert">
               <CircleAlert size={19} aria-hidden="true" />

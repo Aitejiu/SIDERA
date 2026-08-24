@@ -79,6 +79,42 @@ The scale fixture contains 200 WorkItems, 400 informational edges and 50,000
 trace events. Playwright checks the HTTP page size, reverse pagination and a
 virtualized trace DOM bounded to 120 rows.
 
+## R5.2 Real Main Agent Web Gate
+
+The real Web gate is opt-in and never replaces the deterministic Chat tests.
+It uses the running Control Plane, Main Agent Gateway and Akashic provider
+through the browser's same-origin `/main-agent/v1` proxy. The browser receives
+no provider endpoint or workspace token, and the test does not install a
+Playwright route or mock Chat API responses.
+
+Configure the same local values used by the R5.2 stack, then provide an
+identity-checked helper that accepts `restart-gateway` for the Gateway recovery
+case:
+
+```bash
+export SIDERA_RUN_REAL_MAIN_AGENT=1
+export SIDERA_WORKSPACE_ID="<test-workspace-uuid>"
+export SIDERA_MAIN_AGENT_GATEWAY_URL="http://127.0.0.1:8010"
+export SIDERA_CONTROL_PLANE_URL="http://127.0.0.1:8000"
+export SIDERA_REAL_GATE_HELPER="/absolute/path/to/identity-checked-gate-helper"
+export SIDERA_REAL_MAIN_AGENT_TIMEOUT_SECONDS=300
+
+npm --prefix apps/web run test:e2e -- \
+  --project=desktop-chromium tests/e2e/real-main-agent.spec.ts
+```
+
+The helper must operate only on the PID recorded by the current SIDERA
+runtime, reject every action except the explicitly documented one, and leave
+PostgreSQL, Akashic, plugin-data, Tasks, Artifacts and conversation history
+untouched. It must not use `pkill`, `killall`, a broad process match or a shell
+command string. The test verifies Chat -> Planning -> Task -> WorkerItem ->
+Trace -> Chat, and verifies that a Gateway restart polls the original turn
+without automatically sending the composer input again.
+
+Without `SIDERA_RUN_REAL_MAIN_AGENT=1`, this file is expected to collect as two
+explicit skips. A skipped test is collection evidence only, not a real
+provider or release-gate pass.
+
 ## R5.1 Real OpenCode Planning Gate
 
 Run the real provider only after the pinned executable passes preflight:
