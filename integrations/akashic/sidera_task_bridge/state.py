@@ -133,6 +133,7 @@ class BridgeStateStore:
     def __init__(self, kv_store: KeyValueStore) -> None:
         self._kv_store = kv_store
         self._lock = asyncio.Lock()
+        self._changed = asyncio.Event()
 
     async def snapshot(self) -> BridgeState:
         async with self._lock:
@@ -389,6 +390,12 @@ class BridgeStateStore:
                 )
             )
 
+    async def wait_for_change(self) -> None:
+        """Wait for a durable state mutation without polling the KV store."""
+
+        await self._changed.wait()
+        self._changed.clear()
+
     async def enqueue_notification(self, notice: PendingNotification) -> None:
         async with self._lock:
             state = self._load()
@@ -526,6 +533,7 @@ class BridgeStateStore:
 
     def _save(self, state: BridgeState) -> None:
         self._kv_store.set(STATE_KEY, state.model_dump(mode="json"))
+        self._changed.set()
 
 
 def _resource_key(kind: ResourceKind, resource_id: UUID) -> str:

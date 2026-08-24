@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from .client import ControlPlaneRejected, TransportUnavailable
+from .client import (
+    ControlPlaneRejected,
+    ProjectionResyncRequired,
+    ProjectionStreamDisconnected,
+    TransportUnavailable,
+)
 from .config import TaskBridgeConfig
 from .contracts import ProjectionChange
 from .state import (
@@ -35,6 +40,10 @@ type NotificationMode = Literal["live", "resync"]
 
 class NotificationQueryUnavailable(RuntimeError):
     """The authoritative snapshot cannot be read yet and must be retried."""
+
+
+class NotificationDeliveryPending(RuntimeError):
+    """A pending notice could not settle, so its cursor must not advance."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,13 +92,19 @@ class NotificationDelivery:
             getattr(config, "notification_delivery_timeout_seconds", 15.0)
         )
 
-    async def deliver(self, evaluation: NotificationEvaluation) -> DeliveryResult:
+    async def deliver(
+        self,
+        evaluation: NotificationEvaluation,
+        *,
+        advance_cursor: bool = True,
+    ) -> DeliveryResult:
         notice = evaluation.notice
         if notice is None:
             await self._state.save_notification_snapshot(
                 evaluation.resource_key, evaluation.snapshot
             )
-            await self._state.advance_notification_cursor(evaluation.cursor)
+            if advance_cursor:
+                await self._state.advance_notification_cursor(evaluation.cursor)
             return DeliveryResult("ignored", None)
 
         await self._state.enqueue_notification(
@@ -123,7 +138,8 @@ class NotificationDelivery:
             await self._state.save_notification_snapshot(
                 evaluation.resource_key, evaluation.snapshot
             )
-            await self._state.advance_notification_cursor(notice.cursor)
+            if advance_cursor:
+                await self._state.advance_notification_cursor(notice.cursor)
             return DeliveryResult("undeliverable", notice.notice_id)
 
         await self._state.record_notification_attempt(
@@ -152,8 +168,229 @@ class NotificationDelivery:
         await self._state.save_notification_snapshot(
             evaluation.resource_key, evaluation.snapshot
         )
-        await self._state.advance_notification_cursor(notice.cursor)
+        if advance_cursor:
+            await self._state.advance_notification_cursor(notice.cursor)
         return DeliveryResult("sent", notice.notice_id)
+
+
+class NotificationRunner:
+    """Run the private notification stream and current-fact recovery loop."""
+
+    def __init__(
+        self,
+        config: TaskBridgeConfig,
+        *,
+        client: Any,
+        state: BridgeStateStore,
+        evaluator: NotificationEvaluator,
+        delivery: NotificationDelivery,
+        sleeper: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
+        self._config = config
+        self._client = client
+        self._state = state
+        self._evaluator = evaluator
+        self._delivery = delivery
+        self._sleeper = sleeper or asyncio.sleep
+        self._stop = asyncio.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    async def run(self) -> None:
+        failures = 0
+        while not self._stop.is_set():
+            if not await self._has_private_binding():
+                await self._wait_for_state_change()
+                failures = 0
+                continue
+            try:
+                await self._drain_pending(advance_cursor=True)
+                after = (await self._state.snapshot()).notification_cursor
+                async for change in self._client.iter_projection_changes(after=after):
+                    if self._stop.is_set():
+                        return
+                    evaluation = await self._evaluator.evaluate(change, mode="live")
+                    if evaluation is None:
+                        await self._state.advance_notification_cursor(change.cursor)
+                    else:
+                        self._require_delivery(
+                            await self._delivery.deliver(evaluation)
+                        )
+                    failures = 0
+                raise ProjectionStreamDisconnected(after)
+            except ProjectionResyncRequired:
+                try:
+                    await self.resync_current_facts()
+                    failures = 0
+                except (
+                    NotificationQueryUnavailable,
+                    NotificationDeliveryPending,
+                    ProjectionStreamDisconnected,
+                ):
+                    failures = await self._backoff(failures)
+            except (
+                NotificationQueryUnavailable,
+                NotificationDeliveryPending,
+                ProjectionStreamDisconnected,
+            ):
+                failures = await self._backoff(failures)
+
+    async def resync_current_facts(self) -> int:
+        """Re-evaluate owned resources, advancing only after the batch succeeds."""
+
+        await self._drain_pending(advance_cursor=False)
+        initial = await self._state.snapshot()
+        max_cursor = initial.notification_cursor
+        seed_cursor = max(1, initial.notification_cursor)
+
+        for binding in await self._state.list_private_planning_bindings():
+            evaluation = await self._evaluator.evaluate(
+                _synthetic_change(
+                    workspace_id=self._config.workspace_id,
+                    cursor=seed_cursor,
+                    projection_type="planning_request",
+                    resource_id=binding.resource_id,
+                ),
+                mode="resync",
+            )
+            if evaluation is None:
+                continue
+            max_cursor = max(max_cursor, evaluation.cursor)
+            self._require_delivery(
+                await self._delivery.deliver(evaluation, advance_cursor=False)
+            )
+
+        resources = (
+            await self._state.snapshot()
+        ).resource_sources.values()
+        task_bindings = sorted(
+            (
+                binding
+                for binding in resources
+                if binding.resource_kind == "task"
+                and binding.source_type == "akashic_private"
+            ),
+            key=lambda item: str(item.resource_id),
+        )
+        for binding in task_bindings:
+            evaluation = await self._evaluator.evaluate(
+                _synthetic_change(
+                    workspace_id=self._config.workspace_id,
+                    cursor=seed_cursor,
+                    projection_type="task_overview",
+                    resource_id=binding.resource_id,
+                ),
+                mode="resync",
+            )
+            if evaluation is None:
+                continue
+            max_cursor = max(max_cursor, evaluation.cursor)
+            self._require_delivery(
+                await self._delivery.deliver(evaluation, advance_cursor=False)
+            )
+
+        await self._state.advance_notification_cursor(max_cursor)
+        return max_cursor
+
+    async def _drain_pending(self, *, advance_cursor: bool) -> None:
+        while True:
+            pending = await self._state.list_pending_notifications()
+            if not pending:
+                return
+            head = pending[0]
+            evaluation = await self._evaluation_for_pending(head)
+            result = await self._delivery.deliver(
+                evaluation,
+                advance_cursor=advance_cursor,
+            )
+            self._require_delivery(result)
+
+    async def _evaluation_for_pending(
+        self, pending: PendingNotification
+    ) -> NotificationEvaluation:
+        kind, _, resource_id_value = pending.resource_key.partition(":")
+        try:
+            resource_id = UUID(resource_id_value)
+        except ValueError:
+            resource_id = UUID(int=0)
+        projection_type = (
+            "planning_request" if kind == "planning_request" else "task_overview"
+        )
+        current = await self._evaluator.evaluate(
+            _synthetic_change(
+                workspace_id=self._config.workspace_id,
+                cursor=max(1, pending.cursor),
+                projection_type=projection_type,
+                resource_id=resource_id,
+            ),
+            mode="resync",
+        )
+        snapshot = (
+            current.snapshot
+            if current is not None
+            else NotificationSnapshot(status=pending.kind)
+        )
+        notice = NotificationNotice(
+            notice_id=pending.notice_id,
+            cursor=pending.cursor,
+            resource_key=pending.resource_key,
+            source_ref=pending.source_ref,
+            kind=pending.kind,  # type: ignore[arg-type]
+            message=pending.message,
+            web_url=pending.web_url or self._config.web_base_url.__str__(),
+        )
+        return NotificationEvaluation(
+            resource_key=pending.resource_key,
+            source_ref=pending.source_ref,
+            cursor=pending.cursor,
+            snapshot=snapshot,
+            notice=notice,
+        )
+
+    async def _has_private_binding(self) -> bool:
+        return bool(await self._state.list_private_planning_bindings()) or any(
+            binding.source_type == "akashic_private"
+            and binding.resource_kind == "task"
+            for binding in (await self._state.snapshot()).resource_sources.values()
+        )
+
+    async def _wait_for_state_change(self) -> None:
+        change_task = asyncio.create_task(self._state.wait_for_change())
+        stop_task = asyncio.create_task(self._stop.wait())
+        done, pending = await asyncio.wait(
+            (change_task, stop_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        del done
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _backoff(self, failures: int) -> int:
+        delay = min(
+            self._config.notification_retry_base_seconds * (2**failures),
+            self._config.notification_retry_max_seconds,
+        )
+        await self._wait_delay(delay)
+        return failures + 1
+
+    async def _wait_delay(self, delay: float) -> None:
+        sleep_task = asyncio.create_task(self._sleeper(delay))
+        stop_task = asyncio.create_task(self._stop.wait())
+        done, pending = await asyncio.wait(
+            (sleep_task, stop_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        del done
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    @staticmethod
+    def _require_delivery(result: DeliveryResult) -> None:
+        if result.outcome in {"pending", "deferred"}:
+            raise NotificationDeliveryPending("notification_delivery_pending")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +460,7 @@ class NotificationEvaluator:
 
         status = _text(detail.get("status")) or "unknown"
         version = _non_negative_int(detail.get("version"), change.resource_version)
+        cursor = _cursor_value(detail.get("last_change_cursor"), change.cursor)
         web_url = self._planning_url(request_id)
         previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
         fact = await self._planning_fact(
@@ -248,14 +486,14 @@ class NotificationEvaluator:
             fact,
             previous=previous,
             source_ref=binding.source_ref,
-            cursor=change.cursor,
+            cursor=cursor,
             resource_key=resource_key,
             mode=mode,
         )
         return NotificationEvaluation(
             resource_key=resource_key,
             source_ref=binding.source_ref,
-            cursor=change.cursor,
+            cursor=cursor,
             snapshot=fact.snapshot,
             notice=notice,
         )
@@ -276,6 +514,7 @@ class NotificationEvaluator:
         if overview is None:
             return None
         previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
+        cursor = _cursor_value(overview.get("last_change_cursor"), change.cursor)
         fact = _task_fact(
             overview,
             task_id=task_id,
@@ -288,14 +527,14 @@ class NotificationEvaluator:
             fact,
             previous=previous,
             source_ref=binding.source_ref,
-            cursor=change.cursor,
+            cursor=cursor,
             resource_key=resource_key,
             mode=mode,
         )
         return NotificationEvaluation(
             resource_key=resource_key,
             source_ref=binding.source_ref,
-            cursor=change.cursor,
+            cursor=cursor,
             snapshot=fact.snapshot,
             notice=notice,
         )
@@ -723,3 +962,29 @@ def _uuid_value(value: object) -> UUID | None:
         return UUID(value)
     except ValueError:
         return None
+
+
+def _cursor_value(value: object, fallback: int) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return max(1, fallback)
+
+
+def _synthetic_change(
+    *,
+    workspace_id: UUID,
+    cursor: int,
+    projection_type: str,
+    resource_id: UUID,
+) -> ProjectionChange:
+    return ProjectionChange(
+        workspace_id=workspace_id,
+        cursor=max(1, cursor),
+        schema_version=1,
+        projection_type=projection_type,
+        resource_id=resource_id,
+        change_type="resync",
+        resource_version=None,
+        occurred_at=datetime.now(UTC),
+        correlation_id=UUID(int=0),
+    )

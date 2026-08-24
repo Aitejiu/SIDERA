@@ -55,6 +55,12 @@ class TaskBridgeConfig(BaseModel):
     )
     connect_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    notification_retry_base_seconds: float = Field(default=0.5, gt=0, le=30)
+    notification_retry_max_seconds: float = Field(default=15.0, ge=0.5, le=300)
+    notification_delivery_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    notification_event_limit_bytes: int = Field(
+        default=262_144, ge=4096, le=1_048_576
+    )
 
     @field_validator("control_plane_url")
     @classmethod

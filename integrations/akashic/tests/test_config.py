@@ -71,3 +71,20 @@ def test_config_rejects_extra_fields_and_invalid_timeout_bounds() -> None:
         make_config(connect_timeout_seconds=0)
     with pytest.raises(ValidationError):
         make_config(request_timeout_seconds=121)
+
+
+def test_config_exposes_bounded_notification_retry_and_stream_limits() -> None:
+    config = make_config()
+    assert config.notification_retry_base_seconds == 0.5
+    assert config.notification_retry_max_seconds == 15.0
+    assert config.notification_delivery_timeout_seconds == 15.0
+    assert config.notification_event_limit_bytes == 262_144
+
+    with pytest.raises(ValidationError):
+        make_config(notification_retry_base_seconds=0)
+    with pytest.raises(ValidationError):
+        make_config(notification_retry_max_seconds=0.4)
+    with pytest.raises(ValidationError):
+        make_config(notification_delivery_timeout_seconds=121)
+    with pytest.raises(ValidationError):
+        make_config(notification_event_limit_bytes=4095)
