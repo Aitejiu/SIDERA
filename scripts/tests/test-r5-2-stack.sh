@@ -12,8 +12,8 @@ mkdir -p "$FAKE_BIN" "$TMP/akashic"
 touch "$TMP/akashic/config.toml"
 
 make_fake_commands() {
-  printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  --version) printf "uv 0.6.0\\n"; exit 0 ;;' 'esac' 'case "$*" in' '  *alembic*heads*) printf "0015_r5_1_1_worker_runtime_binding (head)\\n" ;;' '  *uvicorn*|*sidera_control_plane.planning_worker*) while :; do sleep 1; done ;;' 'esac' > "$FAKE_BIN/uv"
-  printf '%s\n' '#!/bin/sh' 'if [ "${1:-}" = "--version" ]; then printf "11.17.0\\n"; exit 0; fi' 'case "$*" in *run*dev*) while :; do sleep 1; done ;; esac' > "$FAKE_BIN/npm"
+  printf '%s\n' '#!/bin/sh' 'if [ -n "${R5_2_GATE_LOG:-}" ]; then printf "uv %s\\n" "$*" >> "$R5_2_GATE_LOG"; fi' 'if [ "${R5_2_GATE_FAIL:-0}" = "1" ]; then' '  case "$*" in *services/control-plane/tests/unit*) exit 42 ;; esac' 'fi' 'case "${1:-}" in' '  --version) printf "uv 0.6.0\\n"; exit 0 ;;' 'esac' 'case "$*" in' '  *alembic*heads*) printf "0015_r5_1_1_worker_runtime_binding (head)\\n" ;;' '  *uvicorn*|*sidera_control_plane.planning_worker*) while :; do sleep 1; done ;;' 'esac' > "$FAKE_BIN/uv"
+  printf '%s\n' '#!/bin/sh' 'if [ -n "${R5_2_GATE_LOG:-}" ]; then printf "npm %s\\n" "$*" >> "$R5_2_GATE_LOG"; fi' 'if [ "${1:-}" = "--version" ]; then printf "11.17.0\\n"; exit 0; fi' 'case "$*" in *run*dev*) while :; do sleep 1; done ;; esac' > "$FAKE_BIN/npm"
   cat > "$FAKE_BIN/curl" <<'EOF'
 #!/bin/sh
 if [ "${R5_2_FAKE_CURL_FAIL:-0}" = "1" ]; then exit 1; fi
@@ -68,6 +68,19 @@ fail() {
 
 make_fake_commands
 write_env
+
+if gate_output=$(
+  PATH="$FAKE_BIN:/usr/bin:/bin" \
+    SIDERA_R5_2_ENV_FILE="$ENV_FILE" \
+    SIDERA_R5_2_RUNTIME_DIR="$RUNTIME_DIR" \
+    /bin/bash "$ROOT/scripts/r5-2-release-gate.sh" 2>&1
+); then
+  fail "release gate should require the real Main Agent flag"
+fi
+case "$gate_output" in
+  *'SIDERA_RUN_REAL_MAIN_AGENT=1'*) ;;
+  *) printf '%s\n' "$gate_output" >&2; fail "release gate flag error was unclear" ;;
+esac
 
 if ! output=$(run_preflight 2>&1); then
   printf '%s\n' "$output" >&2
@@ -138,6 +151,34 @@ for component in $components; do
   [ -f "$RUNTIME_DIR/pids/$component.pid" ] || fail "missing PID file for $component"
   [ -f "$RUNTIME_DIR/identity/$component.identity" ] || fail "missing identity for $component"
 done
+
+if ! gate_output=$(
+  SIDERA_RUN_REAL_MAIN_AGENT=1 \
+    SIDERA_REAL_MAIN_AGENT_PROVIDER=fake-provider \
+    SIDERA_REAL_GATE_HELPER=/usr/bin/true \
+    R5_2_GATE_LOG="$TMP/gate.log" \
+    /bin/bash "$ROOT/scripts/r5-2-release-gate.sh" 2>&1
+); then
+  printf '%s\n' "$gate_output" >&2
+  fail "release gate should pass with fake commands"
+fi
+case "$gate_output" in
+  *'r5-2 release gate: passed'*) ;;
+  *) fail "release gate did not report success" ;;
+esac
+
+if gate_output=$(
+  SIDERA_RUN_REAL_MAIN_AGENT=1 \
+    SIDERA_REAL_MAIN_AGENT_PROVIDER=fake-provider \
+    SIDERA_REAL_GATE_HELPER=/usr/bin/true \
+    R5_2_GATE_FAIL=1 \
+    R5_2_GATE_LOG="$TMP/gate-fail.log" \
+    /bin/bash "$ROOT/scripts/r5-2-release-gate.sh" 2>&1
+); then
+  fail "release gate should stop after a failed step"
+fi
+case "$gate_output" in *'control-plane unit'*) ;; *) fail "release gate did not expose failed step" ;; esac
+case "$gate_output" in *'Akashic plugin tests'*) fail "release gate continued after failure" ;; esac
 
 first_pids=''
 for component in $components; do
