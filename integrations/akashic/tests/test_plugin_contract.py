@@ -4,6 +4,7 @@ import inspect
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -44,6 +45,8 @@ class FakeContext:
         self.tool_registry = object()
         self.session_manager = None
         self.data_dir = Path("/tmp/sidera/plugin-data")
+        self.generation_id = ""
+        self._can_start_tasks: Any = None
         self.tasks: list[asyncio.Task[object]] = []
         self.task_names: list[str | None] = []
 
@@ -272,9 +275,17 @@ def test_activate_starts_one_named_supervisor_and_retire_is_read_only() -> None:
 def test_candidate_activation_defers_supervisor_until_promotion() -> None:
     async def scenario() -> None:
         context = FakeContext()
-        context.data_dir = Path(
-            "/tmp/sidera/workspace/runtime/plugin-validation/generation"
+        generation = SimpleNamespace(
+            generation_id="candidate-generation",
+            reload_tx_id="reload-transaction",
+            state="activating",
         )
+        context.generation_id = generation.generation_id
+        context._can_start_tasks = lambda: generation.state in {
+            "activating",
+            "active",
+            "candidate",
+        }
         bridge = plugin.SideraTaskBridge()
         cast(Any, bridge).context = context
         await bridge.prepare()
@@ -293,9 +304,17 @@ def test_candidate_activation_defers_supervisor_until_promotion() -> None:
 def test_promoted_runtime_starts_deferred_supervisor_on_first_tool_access() -> None:
     async def scenario() -> None:
         context = FakeContext()
-        context.data_dir = Path(
-            "/tmp/sidera/workspace/runtime/plugin-validation/generation"
+        generation = SimpleNamespace(
+            generation_id="candidate-generation",
+            reload_tx_id="reload-transaction",
+            state="candidate",
         )
+        context.generation_id = generation.generation_id
+        context._can_start_tasks = lambda: generation.state in {
+            "activating",
+            "active",
+            "candidate",
+        }
         bridge = plugin.SideraTaskBridge()
         cast(Any, bridge).context = context
         await bridge.prepare()
@@ -303,12 +322,12 @@ def test_promoted_runtime_starts_deferred_supervisor_on_first_tool_access() -> N
         bridge.activate()
         assert context.tasks == []
 
-        context.data_dir = Path(
-            "/tmp/sidera/workspace/plugin-data/sidera-task-bridge"
-        )
+        generation.state = "active"
+        context.kv_store = MemoryKV()
         bridge._toolset()
         try:
             assert len(context.tasks) == 1
+            assert cast(Any, bridge)._bound_kv_store is context.kv_store
         finally:
             bridge.retire()
             await asyncio.gather(*context.tasks)

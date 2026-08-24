@@ -179,9 +179,29 @@ class SideraTaskBridge(Plugin):
 
     def _is_validation_runtime(self) -> bool:
         data_dir = getattr(self.context, "data_dir", None)
-        if data_dir is None:
-            return False
-        return "plugin-validation" in Path(data_dir).parts
+        if data_dir is not None and "plugin-validation" in Path(data_dir).parts:
+            return True
+        return self._is_rollout_candidate()
+
+    def _is_rollout_candidate(self) -> bool:
+        """Detect the host's staged generation without changing host code."""
+
+        generation_id = str(getattr(self.context, "generation_id", "") or "")
+        task_gate = getattr(self.context, "_can_start_tasks", None)
+        closure = getattr(task_gate, "__closure__", None) or ()
+        for cell in closure:
+            try:
+                generation = cell.cell_contents
+            except ValueError:
+                continue
+            if getattr(generation, "generation_id", "") != generation_id:
+                continue
+            state = str(getattr(generation, "state", "") or "")
+            return bool(getattr(generation, "reload_tx_id", "")) and state in {
+                "activating",
+                "candidate",
+            }
+        return False
 
     @tool(name="sidera_submit_brief", risk="write", always_on=True)
     async def sidera_submit_brief(
