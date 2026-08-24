@@ -7,7 +7,9 @@ from typing import Any, cast
 from uuid import UUID
 
 import plugin
+from sidera_task_bridge.client import DispatchResult
 from sidera_task_bridge.config import TaskBridgeConfig
+from sidera_task_bridge.state import PendingNotification
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -38,6 +40,7 @@ class FakeContext:
             }
         )
         self.kv_store = MemoryKV()
+        self.tool_registry = object()
         self.session_manager = None
         self.tasks: list[asyncio.Task[object]] = []
         self.task_names: list[str | None] = []
@@ -244,7 +247,7 @@ def test_prepare_constructs_bridge_without_starting_recovery_or_network() -> Non
     asyncio.run(scenario())
 
 
-def test_activate_starts_one_named_recovery_task_and_retire_is_read_only() -> None:
+def test_activate_starts_one_named_supervisor_and_retire_is_read_only() -> None:
     async def scenario() -> None:
         context = FakeContext()
         bridge = plugin.SideraTaskBridge()
@@ -252,9 +255,90 @@ def test_activate_starts_one_named_recovery_task_and_retire_is_read_only() -> No
         await bridge.prepare()
 
         bridge.activate()
-        assert context.task_names == ["sidera-task-bridge-command-recovery"]
-        await asyncio.gather(*context.tasks)
+        assert context.task_names == ["sidera-task-bridge-supervisor"]
         bridge.retire()
+        await asyncio.gather(*context.tasks)
+        assert context.kv_store.writes == 0
+        await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
+def test_supervisor_recovers_commands_before_starting_notification_runner() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+        await bridge.prepare()
+        events: list[str] = []
+
+        async def recover() -> tuple[DispatchResult, ...]:
+            events.append("recover")
+            return ()
+
+        async def run_runner() -> None:
+            events.append("run")
+
+        bridge._dispatcher.recover_all = recover  # type: ignore[method-assign]
+        bridge._runner.run = run_runner  # type: ignore[method-assign]
+        bridge.activate()
+        await asyncio.gather(*context.tasks)
+        assert events == ["recover", "run"]
+        await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
+def test_supervisor_does_not_start_notifications_when_command_recovery_is_unavailable() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+        await bridge.prepare()
+        events: list[str] = []
+
+        async def recover() -> tuple[DispatchResult, ...]:
+            events.append("recover")
+            return (DispatchResult(status="unavailable", command_id=UUID(int=1)),)
+
+        async def run_runner() -> None:
+            events.append("run")
+
+        bridge._dispatcher.recover_all = recover  # type: ignore[method-assign]
+        bridge._runner.run = run_runner  # type: ignore[method-assign]
+        bridge.activate()
+        await asyncio.sleep(0.01)
+        assert events == ["recover"]
+        bridge.retire()
+        await asyncio.gather(*context.tasks)
+        await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
+def test_hot_reload_reads_v2_pending_state_without_clearing_it() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        context.kv_store.value = {
+            "schema_version": 2,
+            "pending_notifications": [
+                PendingNotification(
+                    notice_id="notice-1",
+                    cursor=4,
+                    resource_key="planning_request:00000000-0000-0000-0000-000000000010",
+                    source_ref="src_private",
+                    kind="planning_proposal_ready",
+                    message="方案待确认",
+                    web_url="http://127.0.0.1:4174/workspaces/ws/planning/request",
+                    created_at="2026-08-24T03:30:00Z",
+                ).model_dump(mode="json")
+            ],
+        }
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+        await bridge.prepare()
+        state = await bridge._state.snapshot()
+        assert [item.notice_id for item in state.pending_notifications] == ["notice-1"]
         assert context.kv_store.writes == 0
         await bridge.terminate()
 

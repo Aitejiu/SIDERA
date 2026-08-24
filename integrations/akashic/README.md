@@ -30,6 +30,10 @@ actor_type = "integration"
 actor_id = "akashic-task-bridge"
 connect_timeout_seconds = 2.0
 request_timeout_seconds = 15.0
+notification_retry_base_seconds = 0.5
+notification_retry_max_seconds = 15.0
+notification_delivery_timeout_seconds = 15.0
+notification_event_limit_bytes = 262144
 ```
 
 Only `127.0.0.1`, `localhost`, and IPv6 loopback URLs are accepted. URL
@@ -67,7 +71,32 @@ any retry and never creates a second business command automatically.
 
 Private-channel routing is stored only as an opaque source reference and its
 minimal host route. Web sessions use `source=sidera_web` and do not create a
-private route. Plugin retirement does not delete or rewrite this state.
+private route. Plugin retirement does not delete or rewrite this state. The
+plugin-data document is migrated explicitly from schema v1 to v2; migration
+failure is fail-closed and never replaces the original document with an empty
+state.
+
+The activated plugin owns one managed
+`sidera-task-bridge-supervisor` task. It first recovers unresolved commands and
+only then starts the notification runner. Notifications are low-frequency
+facts only: blocking clarification, Proposal ready, materialization, needs
+user, blocked, failed, milestone completion, and root completion. Worker steps,
+tool traces, runtime names, heartbeats, and token usage are never pushed
+proactively.
+
+Private notices return to the original `akashic_private` route recorded when
+the PlanningRequest was created. The route owner does not change when another
+入口 later reads or edits the resource. Delivery is at-least-once: pending
+state is written before `message_push`, only the exact `消息已发送` receipt
+settles it, and a crash after delivery may cause one bounded duplicate. Partial
+receipts, errors, timeouts, and temporary route failures remain pending;
+permanently missing routes become bounded `route_missing` audits and do not
+block later cursor positions. Cursor expiry or stream disconnect re-queries
+current Planning/Task facts and does not replay historical milestone bursts.
+
+Web-origin resources remain in the SIDERA Web attention/inbox surfaces but do
+not trigger private `message_push`. Full WorkerItem and Execution trace stays
+available from the Web control-room entry point.
 
 ## Development and release
 

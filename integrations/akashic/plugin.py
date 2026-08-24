@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Mapping
 from typing import cast
 
@@ -7,12 +8,22 @@ from agent.plugins.registry import MetadataKind, plugin_registry
 if __package__:
     from .sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
     from .sidera_task_bridge.config import TaskBridgeConfig
+    from .sidera_task_bridge.notifications import (
+        NotificationDelivery,
+        NotificationEvaluator,
+        NotificationRunner,
+    )
     from .sidera_task_bridge.source_routes import SourceContextResolver
     from .sidera_task_bridge.state import BridgeStateStore
     from .sidera_task_bridge.tools import SideraTaskTools
 else:
     from sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
     from sidera_task_bridge.config import TaskBridgeConfig
+    from sidera_task_bridge.notifications import (
+        NotificationDelivery,
+        NotificationEvaluator,
+        NotificationRunner,
+    )
     from sidera_task_bridge.source_routes import SourceContextResolver
     from sidera_task_bridge.state import BridgeStateStore
     from sidera_task_bridge.tools import SideraTaskTools
@@ -31,6 +42,10 @@ class SideraTaskBridge(Plugin):
         self._client: ControlPlaneClient | None = None
         self._dispatcher: CommandDispatcher | None = None
         self._tools: SideraTaskTools | None = None
+        self._state: BridgeStateStore | None = None
+        self._runner: NotificationRunner | None = None
+        self._supervisor_task: asyncio.Task[object] | None = None
+        self._supervisor_stop = asyncio.Event()
 
     async def prepare(self) -> None:
         config = self.context.config
@@ -39,8 +54,23 @@ class SideraTaskBridge(Plugin):
         client = ControlPlaneClient(config)
         state = BridgeStateStore(self.context.kv_store)
         dispatcher = CommandDispatcher(client, state)
+        evaluator = NotificationEvaluator(config, client=client, state=state)
+        delivery = NotificationDelivery(
+            config,
+            state=state,
+            tool_registry=self.context.tool_registry,
+        )
+        runner = NotificationRunner(
+            config,
+            client=client,
+            state=state,
+            evaluator=evaluator,
+            delivery=delivery,
+        )
         self._client = client
         self._dispatcher = dispatcher
+        self._state = state
+        self._runner = runner
         self._tools = SideraTaskTools(
             config,
             client=client,
@@ -52,28 +82,61 @@ class SideraTaskBridge(Plugin):
 
     def activate(self) -> None:
         dispatcher = self._dispatcher
-        if dispatcher is None:
+        runner = self._runner
+        if dispatcher is None or runner is None:
             raise RuntimeError("SideraTaskBridge must be prepared before activation")
-        self.context.create_task(
-            self._recover_unresolved_commands(dispatcher),
-            name="sidera-task-bridge-command-recovery",
+        if self._supervisor_task is not None:
+            return
+        self._supervisor_stop = asyncio.Event()
+        self._supervisor_task = self.context.create_task(
+            self._run_supervisor(dispatcher, runner),
+            name="sidera-task-bridge-supervisor",
         )
 
     def retire(self) -> None:
-        return None
+        self._supervisor_stop.set()
+        if self._runner is not None:
+            self._runner.stop()
 
     async def terminate(self) -> None:
+        self.retire()
+        task = self._supervisor_task
+        if task is not None and task is not asyncio.current_task():
+            await task
         client = self._client
         if client is not None:
             await client.close()
         self._client = None
         self._dispatcher = None
+        self._state = None
+        self._runner = None
+        self._supervisor_task = None
         self._tools = None
 
-    async def _recover_unresolved_commands(
-        self, dispatcher: CommandDispatcher
+    async def _run_supervisor(
+        self,
+        dispatcher: CommandDispatcher,
+        runner: NotificationRunner,
     ) -> None:
-        await dispatcher.recover_all()
+        config = self.context.config
+        if not isinstance(config, TaskBridgeConfig):
+            raise TypeError("SideraTaskBridge requires TaskBridgeConfig")
+        while not self._supervisor_stop.is_set():
+            results = await dispatcher.recover_all()
+            if any(
+                result.status in {"unavailable", "result_unknown"}
+                for result in results
+            ):
+                try:
+                    await asyncio.wait_for(
+                        self._supervisor_stop.wait(),
+                        timeout=config.notification_retry_base_seconds,
+                    )
+                except TimeoutError:
+                    pass
+                continue
+            await runner.run()
+            return
 
     def _session_metadata(self, session_key: str) -> Mapping[str, object]:
         manager = self.context.session_manager
