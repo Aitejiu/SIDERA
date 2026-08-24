@@ -54,8 +54,9 @@ EOF
 }
 
 run_preflight() {
+  local env_file=${1:-$ENV_FILE}
   PATH="$FAKE_BIN:/usr/bin:/bin" \
-    SIDERA_R5_2_ENV_FILE="$ENV_FILE" \
+    SIDERA_R5_2_ENV_FILE="$env_file" \
     SIDERA_R5_2_RUNTIME_DIR="$RUNTIME_DIR" \
     /bin/bash "$ROOT/scripts/r5-2-preflight.sh"
 }
@@ -108,6 +109,13 @@ if run_preflight >/dev/null 2>&1; then
 fi
 if [ -e /tmp/should-not-run ]; then
   fail "env parser evaluated command substitution"
+fi
+
+write_env
+sed '/^SIDERA_AKASHIC_WORKSPACE_TOKEN=/d' "$ENV_FILE" > "$TMP/missing-token.env"
+chmod 600 "$TMP/missing-token.env"
+if run_preflight "$TMP/missing-token.env" >/dev/null 2>&1; then
+  fail "missing Akashic workspace token should fail"
 fi
 
 printf 'r5-2 preflight tests passed\n'

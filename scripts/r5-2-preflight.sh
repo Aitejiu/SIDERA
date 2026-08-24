@@ -105,6 +105,7 @@ for required_key in \
   SIDERA_WEB_URL \
   SIDERA_MAIN_AGENT_GATEWAY_URL \
   SIDERA_AKASHIC_ENDPOINT \
+  SIDERA_AKASHIC_WORKSPACE_TOKEN \
   SIDERA_AKASHIC_WORKSPACE \
   SIDERA_AKASHIC_CONFIG \
   SIDERA_OPENCODE_EXECUTABLE \
@@ -242,7 +243,7 @@ port_from_url() {
 }
 
 check_port_identity() {
-  local port=$1 component pid_file pid_list pid cmd
+  local port=$1 component pid_file pid_list pid cmd expected
   if ! command -v lsof >/dev/null 2>&1; then
     return 0
   fi
@@ -256,8 +257,14 @@ check_port_identity() {
   esac
   kill -0 "$pid" >/dev/null 2>&1 || fail "SIDERA runtime PID is not alive: $component"
   cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$component" in
+    control-plane) expected='sidera_control_plane.api.app' ;;
+    main-agent-gateway) expected='sidera_main_agent_gateway.api.app' ;;
+    web) expected='run dev' ;;
+    *) expected="sidera-r5-2:$component" ;;
+  esac
   case "$cmd" in
-    *"sidera-r5-2:$component"*) ;;
+    *"sidera-r5-2:$component"*|*"$expected"*) ;;
     *) fail "SIDERA runtime PID identity is not trusted: $component" ;;
   esac
 }
