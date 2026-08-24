@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Mapping
+from pathlib import Path
 from typing import cast
 
 from agent.plugins import Plugin, tool
@@ -46,12 +47,20 @@ class SideraTaskBridge(Plugin):
         self._runner: NotificationRunner | None = None
         self._supervisor_task: asyncio.Task[object] | None = None
         self._supervisor_stop = asyncio.Event()
+        self._bound_kv_store: object | None = None
 
     async def prepare(self) -> None:
         config = self.context.config
         if not isinstance(config, TaskBridgeConfig):
             raise TypeError("SideraTaskBridge requires TaskBridgeConfig")
-        client = ControlPlaneClient(config)
+        self._client = ControlPlaneClient(config)
+        self._bind_runtime_components(config, self._client)
+
+    def _bind_runtime_components(
+        self,
+        config: TaskBridgeConfig,
+        client: ControlPlaneClient,
+    ) -> None:
         state = BridgeStateStore(self.context.kv_store)
         dispatcher = CommandDispatcher(client, state)
         evaluator = NotificationEvaluator(config, client=client, state=state)
@@ -79,13 +88,25 @@ class SideraTaskBridge(Plugin):
             source_resolver=SourceContextResolver(),
             session_metadata_provider=self._session_metadata,
         )
+        self._bound_kv_store = self.context.kv_store
 
     def activate(self) -> None:
+        self._ensure_runtime_started()
+
+    def _ensure_runtime_started(self) -> None:
+        client = self._client
+        config = self.context.config
+        if client is None or not isinstance(config, TaskBridgeConfig):
+            raise RuntimeError("SideraTaskBridge must be prepared before activation")
+        if self._is_validation_runtime():
+            return
+        if self._bound_kv_store is not self.context.kv_store:
+            self._bind_runtime_components(config, client)
         dispatcher = self._dispatcher
         runner = self._runner
         if dispatcher is None or runner is None:
             raise RuntimeError("SideraTaskBridge must be prepared before activation")
-        if self._supervisor_task is not None:
+        if self._supervisor_task is not None and not self._supervisor_task.done():
             return
         self._supervisor_stop = asyncio.Event()
         self._supervisor_task = self.context.create_task(
@@ -112,6 +133,7 @@ class SideraTaskBridge(Plugin):
         self._runner = None
         self._supervisor_task = None
         self._tools = None
+        self._bound_kv_store = None
 
     async def _run_supervisor(
         self,
@@ -150,9 +172,16 @@ class SideraTaskBridge(Plugin):
         return dict(metadata) if isinstance(metadata, dict) else {}
 
     def _toolset(self) -> SideraTaskTools:
+        self._ensure_runtime_started()
         if self._tools is None:
             raise RuntimeError("SideraTaskBridge tools are not prepared")
         return self._tools
+
+    def _is_validation_runtime(self) -> bool:
+        data_dir = getattr(self.context, "data_dir", None)
+        if data_dir is None:
+            return False
+        return "plugin-validation" in Path(data_dir).parts
 
     @tool(name="sidera_submit_brief", risk="write", always_on=True)
     async def sidera_submit_brief(

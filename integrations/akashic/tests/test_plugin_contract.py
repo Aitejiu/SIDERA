@@ -43,6 +43,7 @@ class FakeContext:
         self.kv_store = MemoryKV()
         self.tool_registry = object()
         self.session_manager = None
+        self.data_dir = Path("/tmp/sidera/plugin-data")
         self.tasks: list[asyncio.Task[object]] = []
         self.task_names: list[str | None] = []
 
@@ -264,6 +265,54 @@ def test_activate_starts_one_named_supervisor_and_retire_is_read_only() -> None:
         await asyncio.gather(*context.tasks)
         assert context.kv_store.writes == 0
         await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
+def test_candidate_activation_defers_supervisor_until_promotion() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        context.data_dir = Path(
+            "/tmp/sidera/workspace/runtime/plugin-validation/generation"
+        )
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+        await bridge.prepare()
+
+        bridge.activate()
+        try:
+            assert context.tasks == []
+        finally:
+            bridge.retire()
+            await asyncio.gather(*context.tasks)
+            await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
+def test_promoted_runtime_starts_deferred_supervisor_on_first_tool_access() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        context.data_dir = Path(
+            "/tmp/sidera/workspace/runtime/plugin-validation/generation"
+        )
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+        await bridge.prepare()
+
+        bridge.activate()
+        assert context.tasks == []
+
+        context.data_dir = Path(
+            "/tmp/sidera/workspace/plugin-data/sidera-task-bridge"
+        )
+        bridge._toolset()
+        try:
+            assert len(context.tasks) == 1
+        finally:
+            bridge.retire()
+            await asyncio.gather(*context.tasks)
+            await bridge.terminate()
 
     asyncio.run(scenario())
 
