@@ -669,7 +669,7 @@ def _submitted_brief_binding(
         request_id = UUID(request_id_value)
     except ValueError:
         return None
-    return request_id, source_type, source_ref
+    return request_id, cast(SourceType, source_type), source_ref
 
 
 @dataclass(frozen=True, slots=True)

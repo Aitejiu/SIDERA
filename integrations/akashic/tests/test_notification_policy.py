@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import pytest
@@ -95,7 +95,9 @@ def change(
     )
 
 
-async def private_state(kind: str, resource_id: UUID) -> BridgeStateStore:
+async def private_state(
+    kind: Literal["planning_request", "task"], resource_id: UUID
+) -> BridgeStateStore:
     state = BridgeStateStore(MemoryKV())
     await state.bind_resource_source(kind, resource_id, "akashic_private", "src_private")
     return state

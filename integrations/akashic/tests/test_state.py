@@ -211,6 +211,7 @@ def test_v1_state_migrates_once_and_preserves_every_legacy_field() -> None:
         assert state.settled_commands[0].error_code == "conflict"
         assert state.notification_cursor == 0
         assert state.pending_notifications == []
+        assert isinstance(kv.value, dict)
         assert kv.value["schema_version"] == 2
         assert kv.writes == 1
 

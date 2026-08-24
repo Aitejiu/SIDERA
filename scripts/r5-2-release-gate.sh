@@ -173,11 +173,11 @@ run_step 'control-plane alembic' uv run --project "$REPO_ROOT/services/control-p
 
 run_step 'Akashic plugin tests' env \
   PYTHONPATH="$REPO_ROOT/integrations/akashic:$REPO_ROOT/akashic-agent" \
-  uv run --project "$REPO_ROOT/akashic-agent" pytest \
+  uv run --project "$REPO_ROOT/integrations/akashic" pytest \
   "$REPO_ROOT/integrations/akashic/tests" -q
-run_step 'Akashic plugin ruff' uv run --project "$REPO_ROOT/akashic-agent" \
+run_step 'Akashic plugin ruff' uv run --project "$REPO_ROOT/integrations/akashic" \
   ruff check "$REPO_ROOT/integrations/akashic"
-run_step 'Akashic plugin pyright' uv run --project "$REPO_ROOT/akashic-agent" \
+run_step 'Akashic plugin pyright' uv run --project "$REPO_ROOT/integrations/akashic" \
   pyright -p "$REPO_ROOT/integrations/akashic"
 
 run_step 'Gateway tests' uv run --project "$REPO_ROOT/services/main-agent-gateway" \

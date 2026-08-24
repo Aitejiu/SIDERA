@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import inspect
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -330,13 +331,14 @@ def test_hot_reload_reads_v2_pending_state_without_clearing_it() -> None:
                     kind="planning_proposal_ready",
                     message="方案待确认",
                     web_url="http://127.0.0.1:4174/workspaces/ws/planning/request",
-                    created_at="2026-08-24T03:30:00Z",
+                    created_at=datetime(2026, 8, 24, 3, 30, tzinfo=UTC),
                 ).model_dump(mode="json")
             ],
         }
         bridge = plugin.SideraTaskBridge()
         cast(Any, bridge).context = context
         await bridge.prepare()
+        assert bridge._state is not None
         state = await bridge._state.snapshot()
         assert [item.notice_id for item in state.pending_notifications] == ["notice-1"]
         assert context.kv_store.writes == 0

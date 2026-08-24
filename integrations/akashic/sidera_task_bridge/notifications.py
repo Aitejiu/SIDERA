@@ -6,7 +6,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from .client import (
@@ -365,7 +365,10 @@ class NotificationRunner:
         for task in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(
+                *(cast(Awaitable[object], task) for task in pending),
+                return_exceptions=True,
+            )
 
     async def _backoff(self, failures: int) -> int:
         delay = min(
@@ -376,7 +379,10 @@ class NotificationRunner:
         return failures + 1
 
     async def _wait_delay(self, delay: float) -> None:
-        sleep_task = asyncio.create_task(self._sleeper(delay))
+        async def wait_for_delay() -> None:
+            await self._sleeper(delay)
+
+        sleep_task = asyncio.create_task(wait_for_delay())
         stop_task = asyncio.create_task(self._stop.wait())
         done, pending = await asyncio.wait(
             (sleep_task, stop_task), return_when=asyncio.FIRST_COMPLETED
@@ -385,7 +391,10 @@ class NotificationRunner:
         for task in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(
+                *(cast(Awaitable[object], task) for task in pending),
+                return_exceptions=True,
+            )
 
     @staticmethod
     def _require_delivery(result: DeliveryResult) -> None:
@@ -871,7 +880,7 @@ def _attention_kind(
     items: list[Mapping[str, Any]], overview: Mapping[str, Any]
 ) -> NoticeKind | None:
     values = [(_text(item.get("kind")) or "").lower() for item in items]
-    if _non_negative_int(overview.get("failed_subtask_count"), 0) > 0 or any(
+    if (_non_negative_int(overview.get("failed_subtask_count"), 0) or 0) > 0 or any(
         "fail" in value for value in values
     ):
         return "task_failed"
@@ -905,9 +914,9 @@ def _root_completed(overview: Mapping[str, Any]) -> bool:
     state = (_text(overview.get("status")) or _text(overview.get("state")) or "").lower()
     if state in {"completed", "succeeded", "complete"}:
         return True
-    total = _non_negative_int(overview.get("subtask_count"), 0)
-    completed = _non_negative_int(overview.get("completed_subtask_count"), 0)
-    failed = _non_negative_int(overview.get("failed_subtask_count"), 0)
+    total = _non_negative_int(overview.get("subtask_count"), 0) or 0
+    completed = _non_negative_int(overview.get("completed_subtask_count"), 0) or 0
+    failed = _non_negative_int(overview.get("failed_subtask_count"), 0) or 0
     return total > 0 and completed >= total and failed == 0
 
 

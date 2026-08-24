@@ -139,7 +139,9 @@ def test_exact_success_persists_pending_before_push_then_settles_and_advances() 
     async def scenario() -> None:
         state, kv, registry, delivery = await setup()
         registry.events = kv.events
-        result = await delivery.deliver(evaluation())
+        current_evaluation = evaluation()
+        assert current_evaluation.notice is not None
+        result = await delivery.deliver(current_evaluation)
 
         assert result.outcome == "sent"
         assert kv.events.index("state.set") < kv.events.index("message_push")
@@ -149,7 +151,7 @@ def test_exact_success_persists_pending_before_push_then_settles_and_advances() 
                 {
                     "target_channel": "telegram",
                     "target_chat_id": "chat-42",
-                    "message": evaluation().notice.message,
+                    "message": current_evaluation.notice.message,
                     "_outbound_metadata": {"delivery_id": "notice-1"},
                 },
                 True,
