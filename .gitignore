@@ -30,6 +30,7 @@ test-results/
 # Runtime state
 data/
 logs/
+/.sidera/
 /workspace/
 *.db
 *.db-shm
