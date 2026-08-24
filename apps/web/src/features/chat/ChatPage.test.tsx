@@ -407,6 +407,19 @@ describe("Main Agent chat workspace", () => {
     );
   });
 
+  it("shows the offline state when the Gateway health request fails", async () => {
+    useBaseHandlers();
+    server.use(
+      http.get("/main-agent/v1/health", () => HttpResponse.error()),
+    );
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat`);
+
+    expect(await screen.findByText("Main Agent 暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("Gateway offline")).toBeInTheDocument();
+    expect(screen.getByText("任务控制面仍可继续查看。")).toBeInTheDocument();
+  });
+
   it("renders a tool result and resolves its task reference in the context rail", async () => {
     const taskId = "30000000-0000-0000-0000-000000000099";
     useBaseHandlers({

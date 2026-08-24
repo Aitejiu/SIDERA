@@ -287,7 +287,7 @@ export function ChatPage() {
     }
   };
 
-  const unavailable = healthQuery.data?.provider === "unavailable";
+  const unavailable = healthQuery.isError || healthQuery.data?.provider === "unavailable";
   const pageTitle = selectedThread?.title ?? (pendingContextRef === null ? "Main Agent" : "上下文讨论");
 
   return (
