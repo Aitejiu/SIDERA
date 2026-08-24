@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { matchesProjectionQuery } from "./WorkspaceStreamProvider";
+import {
+  handleWorkspaceProjectionChange,
+  matchesProjectionQuery,
+} from "./WorkspaceStreamProvider";
+import type { NotificationOwnershipApi } from "@/features/attention/notificationOwnership";
+import type { WorkspaceNotification } from "@/features/attention/notifications";
 import type { ProjectionChange } from "@/shared/api/projectionStream";
 
 const WORKSPACE_ID = "workspace-1";
@@ -13,6 +18,7 @@ const PLANNING_REQUEST_ID = "planning-request-1";
 function change(
   projection_type: string,
   resource_id: string | null,
+  overrides: Partial<ProjectionChange> = {},
 ): ProjectionChange {
   return {
     workspace_id: WORKSPACE_ID,
@@ -20,11 +26,48 @@ function change(
     schema_version: 1,
     projection_type,
     resource_id,
-    change_type: "updated",
+    change_type: "PlanningRequestWaitingForUser",
     resource_version: 2,
     occurred_at: "2026-08-22T00:00:00Z",
     correlation_id: "correlation-1",
+    ...overrides,
   };
+}
+
+function storageWithBrowserNotifications(): Storage {
+  const values = new Map<string, string>([
+    [`sidera:browser-notifications:${WORKSPACE_ID}`, "true"],
+  ]);
+  return {
+    length: values.size,
+    clear: () => values.clear(),
+    getItem: (key: string) => values.get(key) ?? null,
+    key: (index: number) => [...values.keys()][index] ?? null,
+    removeItem: (key: string) => values.delete(key),
+    setItem: (key: string, value: string) => values.set(key, value),
+  } as Storage;
+}
+
+function collectNotices() {
+  let notices: WorkspaceNotification[] = [];
+  return {
+    get: () => notices,
+    set: (update: (current: WorkspaceNotification[]) => WorkspaceNotification[]) => {
+      notices = update(notices);
+    },
+  };
+}
+
+function ownershipApi(sourceType: string): NotificationOwnershipApi {
+  return {
+    getPlanningRequest: vi.fn(async () => ({ source_type: sourceType })),
+    listPlanningRequests: vi.fn(async () => ({ items: [], next_cursor: null })),
+    getPlanningMaterialization: vi.fn(async () => ({ root_task_id: ROOT_TASK_ID })),
+  };
+}
+
+async function flushAsyncNotifications(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 describe("WorkspaceStreamProvider projection matching", () => {
@@ -169,5 +212,114 @@ describe("WorkspaceStreamProvider projection matching", () => {
         change("workers", WORKER_ID),
       ),
     ).toBe(false);
+  });
+});
+
+describe("WorkspaceStreamProvider notification routing", () => {
+  it("keeps private changes in the tray without sending browser notifications", async () => {
+    const notices = collectNotices();
+    const enqueue = vi.fn();
+    const sendBrowserNotification = vi.fn(() => true);
+    const storage = storageWithBrowserNotifications();
+
+    handleWorkspaceProjectionChange(change("planning_request", PLANNING_REQUEST_ID), {
+      workspaceId: WORKSPACE_ID,
+      invalidationQueue: { enqueue },
+      setNotices: notices.set,
+      ownershipApi: ownershipApi("akashic_private"),
+      sendBrowserNotification,
+      storage,
+    });
+
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(notices.get()).toHaveLength(1);
+    expect(storage.getItem(`sidera:last-notified-cursor:${WORKSPACE_ID}`)).toBe("1");
+    await flushAsyncNotifications();
+    expect(sendBrowserNotification).not.toHaveBeenCalled();
+  });
+
+  it("sends a Web-origin change once and ignores an unknown owner", async () => {
+    const notices = collectNotices();
+    const enqueue = vi.fn();
+    const sendBrowserNotification = vi.fn(() => true);
+    const storage = storageWithBrowserNotifications();
+
+    handleWorkspaceProjectionChange(change("planning_request", PLANNING_REQUEST_ID), {
+      workspaceId: WORKSPACE_ID,
+      invalidationQueue: { enqueue },
+      setNotices: notices.set,
+      ownershipApi: ownershipApi("sidera_web_chat"),
+      sendBrowserNotification,
+      storage,
+    });
+    await flushAsyncNotifications();
+    expect(sendBrowserNotification).toHaveBeenCalledTimes(1);
+
+    handleWorkspaceProjectionChange(
+      change("planning_request", "planning-request-unknown", { cursor: 2 }),
+      {
+        workspaceId: WORKSPACE_ID,
+        invalidationQueue: { enqueue },
+        setNotices: notices.set,
+        ownershipApi: ownershipApi("future_channel"),
+        sendBrowserNotification,
+        storage,
+      },
+    );
+    await flushAsyncNotifications();
+    expect(sendBrowserNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let out-of-order owner lookups swallow a slower Web notice", async () => {
+    const notices = collectNotices();
+    const enqueue = vi.fn();
+    const sendBrowserNotification = vi.fn(() => true);
+    const storage = storageWithBrowserNotifications();
+    const deferreds: Array<{
+      resolve: (value: { source_type: string }) => void;
+      promise: Promise<{ source_type: string }>;
+    }> = [];
+    const api: NotificationOwnershipApi = {
+      getPlanningRequest: vi.fn(() => {
+        let resolve!: (value: { source_type: string }) => void;
+        const promise = new Promise<{ source_type: string }>((nextResolve) => {
+          resolve = nextResolve;
+        });
+        deferreds.push({ resolve, promise });
+        return promise;
+      }),
+      listPlanningRequests: vi.fn(async () => ({ items: [], next_cursor: null })),
+      getPlanningMaterialization: vi.fn(async () => ({ root_task_id: ROOT_TASK_ID })),
+    };
+
+    handleWorkspaceProjectionChange(
+      change("planning_request", "planning-request-1", { cursor: 1 }),
+      {
+        workspaceId: WORKSPACE_ID,
+        invalidationQueue: { enqueue },
+        setNotices: notices.set,
+        ownershipApi: api,
+        sendBrowserNotification,
+        storage,
+      },
+    );
+    handleWorkspaceProjectionChange(
+      change("planning_request", "planning-request-2", { cursor: 2 }),
+      {
+        workspaceId: WORKSPACE_ID,
+        invalidationQueue: { enqueue },
+        setNotices: notices.set,
+        ownershipApi: api,
+        sendBrowserNotification,
+        storage,
+      },
+    );
+
+    deferreds[1]?.resolve({ source_type: "sidera_web_chat" });
+    await flushAsyncNotifications();
+    expect(sendBrowserNotification).toHaveBeenCalledTimes(1);
+    deferreds[0]?.resolve({ source_type: "sidera_web_chat" });
+    await flushAsyncNotifications();
+    expect(sendBrowserNotification).toHaveBeenCalledTimes(2);
   });
 });

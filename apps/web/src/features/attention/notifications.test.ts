@@ -4,11 +4,15 @@ import type { ProjectionChange } from "@/shared/api/projectionStream";
 
 import {
   appendNotification,
+  browserNotificationIdsKey,
   browserNotificationsEnabled,
+  hasSentBrowserNotification,
   planningNotificationFromChange,
   planningNotificationFromRequest,
   notificationFromChange,
+  readSentBrowserNotificationIds,
   readLastNotifiedCursor,
+  recordSentBrowserNotification,
   setBrowserNotificationsEnabled,
   writeLastNotifiedCursor,
 } from "./notifications";
@@ -70,6 +74,33 @@ describe("workspace notifications", () => {
 
     expect(readLastNotifiedCursor(WORKSPACE_ID, fakeStorage)).toBe(42);
     expect(browserNotificationsEnabled(WORKSPACE_ID, fakeStorage)).toBe(true);
+  });
+
+  it("deduplicates browser notices with a bounded recent ID set", () => {
+    const storage = new Map<string, string>();
+    const fakeStorage = {
+      length: 0,
+      clear: () => storage.clear(),
+      getItem: (key: string) => storage.get(key) ?? null,
+      key: () => null,
+      removeItem: (key: string) => storage.delete(key),
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+    } as Storage;
+
+    for (let index = 0; index < 130; index += 1) {
+      recordSentBrowserNotification(WORKSPACE_ID, `notice-${index}`, fakeStorage);
+    }
+    recordSentBrowserNotification(WORKSPACE_ID, "notice-129", fakeStorage);
+
+    const ids = readSentBrowserNotificationIds(WORKSPACE_ID, fakeStorage);
+    expect(storage.has(browserNotificationIdsKey(WORKSPACE_ID))).toBe(true);
+    expect(ids).toHaveLength(128);
+    expect(ids[0]).toBe("notice-2");
+    expect(ids.at(-1)).toBe("notice-129");
+    expect(hasSentBrowserNotification(WORKSPACE_ID, "notice-1", fakeStorage)).toBe(false);
+    expect(hasSentBrowserNotification(WORKSPACE_ID, "notice-129", fakeStorage)).toBe(true);
   });
 
   it.each([

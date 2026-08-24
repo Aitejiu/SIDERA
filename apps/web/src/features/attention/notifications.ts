@@ -24,6 +24,8 @@ export interface WorkspaceNotification {
 
 const LAST_CURSOR_PREFIX = "sidera:last-notified-cursor:";
 const ENABLED_PREFIX = "sidera:browser-notifications:";
+const BROWSER_NOTIFICATION_IDS_PREFIX = "sidera:browser-notification-ids:";
+const MAX_BROWSER_NOTIFICATION_IDS = 128;
 
 export function notificationFromChange(
   workspaceId: string,
@@ -225,6 +227,61 @@ export function writeLastNotifiedCursor(
   storage?.setItem(lastNotifiedCursorKey(workspaceId), String(cursor));
 }
 
+export function browserNotificationIdsKey(workspaceId: string): string {
+  return `${BROWSER_NOTIFICATION_IDS_PREFIX}${workspaceId}`;
+}
+
+export function readSentBrowserNotificationIds(
+  workspaceId: string,
+  storage: Storage | undefined = safeStorage(),
+): string[] {
+  const raw = storage?.getItem(browserNotificationIdsKey(workspaceId));
+  if (raw === null || raw === undefined) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((value): value is string => typeof value === "string")
+      .slice(-MAX_BROWSER_NOTIFICATION_IDS);
+  } catch {
+    return [];
+  }
+}
+
+export function hasSentBrowserNotification(
+  workspaceId: string,
+  notificationId: string,
+  storage: Storage | undefined = safeStorage(),
+): boolean {
+  return readSentBrowserNotificationIds(workspaceId, storage).includes(notificationId);
+}
+
+export function recordSentBrowserNotification(
+  workspaceId: string,
+  notificationId: string,
+  storage: Storage | undefined = safeStorage(),
+): void {
+  if (storage === undefined) {
+    return;
+  }
+  const ids = readSentBrowserNotificationIds(workspaceId, storage);
+  if (ids.includes(notificationId)) {
+    return;
+  }
+  try {
+    storage.setItem(
+      browserNotificationIdsKey(workspaceId),
+      JSON.stringify([...ids, notificationId].slice(-MAX_BROWSER_NOTIFICATION_IDS)),
+    );
+  } catch {
+    // Notification delivery remains best-effort when browser storage is unavailable.
+  }
+}
+
 export function browserNotificationsEnabled(
   workspaceId: string,
   storage: Storage | undefined = safeStorage(),
@@ -247,16 +304,21 @@ export async function requestBrowserNotificationPermission(): Promise<Notificati
   return Notification.requestPermission();
 }
 
-export function sendBrowserNotification(notification: WorkspaceNotification): void {
+export function sendBrowserNotification(notification: WorkspaceNotification): boolean {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") {
-    return;
+    return false;
   }
-  const browserNotice = new Notification(notification.title, {
-    body: notification.summary,
-  });
-  browserNotice.onclick = () => {
-    window.location.assign(notification.href);
-  };
+  try {
+    const browserNotice = new Notification(notification.title, {
+      body: notification.summary,
+    });
+    browserNotice.onclick = () => {
+      window.location.assign(notification.href);
+    };
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function safeStorage(): Storage | undefined {

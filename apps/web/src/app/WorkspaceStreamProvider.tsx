@@ -19,12 +19,18 @@ import {
 import {
   appendNotification,
   browserNotificationsEnabled,
+  hasSentBrowserNotification,
   notificationFromChange,
+  recordSentBrowserNotification,
   readLastNotifiedCursor,
   sendBrowserNotification,
   writeLastNotifiedCursor,
   type WorkspaceNotification,
 } from "@/features/attention/notifications";
+import {
+  resolveNotificationOwner,
+  type NotificationOwnershipApi,
+} from "@/features/attention/notificationOwnership";
 
 interface WorkspaceStreamContextValue {
   streamState: ProjectionStreamSnapshot;
@@ -34,6 +40,63 @@ interface WorkspaceStreamContextValue {
 }
 
 const WorkspaceStreamContext = createContext<WorkspaceStreamContextValue | null>(null);
+
+interface WorkspaceStreamNotificationDependencies {
+  workspaceId: string;
+  invalidationQueue: Pick<ReturnType<typeof createInvalidationQueue>, "enqueue">;
+  setNotices: (
+    updater: (current: WorkspaceNotification[]) => WorkspaceNotification[],
+  ) => void;
+  ownershipApi?: NotificationOwnershipApi;
+  sendBrowserNotification?: (notification: WorkspaceNotification) => boolean;
+  storage?: Storage;
+}
+
+export function handleWorkspaceProjectionChange(
+  change: ProjectionChange,
+  dependencies: WorkspaceStreamNotificationDependencies,
+): void {
+  const {
+    invalidationQueue,
+    ownershipApi,
+    sendBrowserNotification: sendBrowserNotificationOverride,
+    setNotices,
+    storage,
+    workspaceId,
+  } = dependencies;
+  invalidationQueue.enqueue(change);
+  const notification = notificationFromChange(workspaceId, change);
+  if (notification === null) {
+    return;
+  }
+  if (change.cursor <= readLastNotifiedCursor(workspaceId, storage)) {
+    return;
+  }
+  writeLastNotifiedCursor(workspaceId, change.cursor, storage);
+  setNotices((current) => appendNotification(current, notification));
+
+  if (!browserNotificationsEnabled(workspaceId, storage)) {
+    return;
+  }
+  void resolveNotificationOwner(workspaceId, change, ownershipApi).then((owner) => {
+    if (
+      owner !== "web"
+      || hasSentBrowserNotification(workspaceId, notification.id, storage)
+    ) {
+      return;
+    }
+    try {
+      const sent = (sendBrowserNotificationOverride ?? sendBrowserNotification)(notification);
+      if (sent) {
+        recordSentBrowserNotification(workspaceId, notification.id, storage);
+      }
+    } catch {
+      // System notifications are best-effort and must not escape the stream callback.
+    }
+  }).catch(() => {
+    // Owner lookup failures leave the notice in the tray without guessing its source.
+  });
+}
 
 export function WorkspaceStreamProvider({
   workspaceId,
@@ -52,19 +115,11 @@ export function WorkspaceStreamProvider({
 
   const handleChange = useCallback(
     (change: ProjectionChange) => {
-      invalidationQueue.enqueue(change);
-      const notification = notificationFromChange(workspaceId, change);
-      if (notification === null) {
-        return;
-      }
-      if (change.cursor <= readLastNotifiedCursor(workspaceId)) {
-        return;
-      }
-      writeLastNotifiedCursor(workspaceId, change.cursor);
-      if (browserNotificationsEnabled(workspaceId)) {
-        sendBrowserNotification(notification);
-      }
-      setNotices((current) => appendNotification(current, notification));
+      handleWorkspaceProjectionChange(change, {
+        invalidationQueue,
+        setNotices,
+        workspaceId,
+      });
     },
     [invalidationQueue, workspaceId],
   );
