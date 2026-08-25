@@ -20,6 +20,7 @@ PROJECTION_TYPES = frozenset(
         "worker_trace",
         "planning_request",
         "work_context",
+        "context_package",
     }
 )
 
@@ -80,6 +81,27 @@ def projection_targets_for_event(
     """Map one durable domain event to the public projections it can affect."""
 
     payload = event.payload
+    if event.aggregate_type == "context_package" or event.event_type in {
+        "ContextPackageCreated",
+        "ContextPackageAcknowledged",
+        "ContextPackageMaterialized",
+        "ContextPackageRevoked",
+        "ContextPackageCorrupt",
+    }:
+        change_type = {
+            "ContextPackageCreated": "context_package_created",
+            "ContextPackageAcknowledged": "context_package_acknowledged",
+            "ContextPackageMaterialized": "context_package_materialized",
+            "ContextPackageRevoked": "context_package_revoked",
+            "ContextPackageCorrupt": "context_package_corrupt",
+        }.get(event.event_type, "context_package_updated")
+        return (
+            ProjectionInvalidationTarget(
+                "context_package",
+                _payload_uuid(payload, "package_id") or event.aggregate_id,
+                change_type,
+            ),
+        )
     if event.aggregate_type in {"work_context", "work_context_binding"}:
         change_type = {
             "WorkContextCreated": "work_context_created",

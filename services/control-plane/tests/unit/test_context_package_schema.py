@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -85,6 +85,12 @@ def test_package_hash_excludes_operational_status_materialization_and_ack() -> N
         control_plane_fact_snapshot={"planning_request_id": "different"},
     )
     assert changed_facts.package_hash != manifest.package_hash
+
+    equivalent_timezone = replace(
+        manifest,
+        expires_at=manifest.expires_at.astimezone(timezone(timedelta(hours=8))),
+    )
+    assert equivalent_timezone.package_hash == manifest.package_hash
 
     acknowledgement = ContextAcknowledgement(
         package_id=manifest.package_id,

@@ -287,6 +287,17 @@ def _resolve_event_scope(
 
 
 def _outbox_topic(event: EventData) -> str:
+    if event.aggregate_type == "context_package":
+        topics = {
+            "ContextPackageCreated": "context_package.created",
+            "ContextPackageAcknowledged": "context_package.acknowledged",
+            "ContextPackageMaterialized": "context_package.materialized",
+            "ContextPackageRevoked": "context_package.revoked",
+            "ContextPackageCorrupt": "context_package.corrupt",
+        }
+        topic = topics.get(event.event_type)
+        if topic is not None:
+            return topic
     if event.aggregate_type == "work_context":
         topics = {
             "WorkContextCreated": "work_context.created",

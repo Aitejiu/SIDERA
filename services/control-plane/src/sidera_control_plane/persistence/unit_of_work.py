@@ -9,6 +9,8 @@ from sidera_control_plane.application.ports import (
     ArtifactRepositoryPort,
     AttentionAcknowledgementRepositoryPort,
     CommandRepositoryPort,
+    ContextAssemblyRepositoryPort,
+    ContextPackageRepositoryPort,
     EventStorePort,
     EvidenceClaimRepositoryPort,
     ExecutionBindingRepositoryPort,
@@ -41,6 +43,10 @@ from sidera_control_plane.application.projection_changes import (
 )
 from sidera_control_plane.persistence.attention_repository import (
     AttentionAcknowledgementRepository,
+)
+from sidera_control_plane.persistence.context_package_repository import (
+    ContextAssemblyRepository,
+    ContextPackageRepository,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
@@ -122,6 +128,8 @@ class SqlAlchemyUnitOfWork:
     commands: CommandRepositoryPort
     events: EventStorePort
     work_contexts: WorkContextRepositoryPort
+    context_assemblies: ContextAssemblyRepositoryPort
+    context_packages: ContextPackageRepositoryPort
 
     def __init__(
         self, database: Database, *, projection_change_retention_seconds: int = 604_800
@@ -173,6 +181,8 @@ class SqlAlchemyUnitOfWork:
         self.commands = CommandRepository(self.session)
         self.events = EventRepository(self.session, self.projection_changes)
         self.work_contexts = WorkContextRepository(self.session)
+        self.context_assemblies = ContextAssemblyRepository(self.session, self.events)
+        self.context_packages = ContextPackageRepository(self.session, self.events)
         return self
 
     def __exit__(

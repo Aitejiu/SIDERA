@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import cast
@@ -31,6 +31,11 @@ class ContextPackageStatus(StrEnum):
     CORRUPT = "corrupt"
 
 
+class ContextRevocationScope(StrEnum):
+    NEW_STARTS = "new_starts"
+    ALL_MATERIALIZATION = "all_materialization"
+
+
 class ContextAssemblyStatus(StrEnum):
     QUEUED = "queued"
     ASSEMBLING = "assembling"
@@ -49,6 +54,11 @@ class ContextSelectionReason(StrEnum):
 class ContextTrustLevel(StrEnum):
     WORKSPACE_CONFIRMED = "workspace_confirmed"
     EXTERNAL_REFERENCE = "external_reference"
+
+
+class ContextMaterializationOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -231,6 +241,8 @@ class ContextPackageManifestV1:
     created_at: datetime
     materialized_at: datetime | None = None
     revoked_at: datetime | None = None
+    revocation_reason: str | None = None
+    revocation_scope: ContextRevocationScope | None = None
 
     @classmethod
     def create(
@@ -345,6 +357,21 @@ class ContextPackageManifestV1:
             _aware(self.materialized_at, "package materialized_at")
         if self.revoked_at is not None:
             _aware(self.revoked_at, "package revoked_at")
+        if self.revocation_reason is not None:
+            object.__setattr__(
+                self,
+                "revocation_reason",
+                _text(self.revocation_reason, "package revocation_reason"),
+            )
+        if self.revocation_scope is not None:
+            try:
+                object.__setattr__(
+                    self,
+                    "revocation_scope",
+                    ContextRevocationScope(self.revocation_scope),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("invalid package revocation scope") from exc
         object.__setattr__(self, "package_hash", self.compute_package_hash())
 
     def hash_document(self) -> dict[str, object]:
@@ -396,6 +423,191 @@ class ContextAcknowledgement:
         _aware(self.acknowledged_at, "acknowledged_at")
 
 
+@dataclass(frozen=True, slots=True)
+class ContextAssemblyRequest:
+    request_id: UUID
+    workspace_id: UUID
+    purpose: ContextPurpose
+    consumer_type: ContextConsumerType
+    consumer_id: UUID
+    worker_item_id: UUID | None
+    work_context_revision_id: UUID
+    context_version: int | None
+    knowledge_search_scope: Mapping[str, object]
+    knowledge_filter_refs: tuple[object, ...]
+    fact_scope_refs: tuple[object, ...]
+    budget: Mapping[str, object]
+    expires_at: datetime
+    status: ContextAssemblyStatus
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    attempt: int
+    next_attempt_at: datetime | None
+    error_code: str | None
+    request_fingerprint: str
+    idempotency_key: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        request_id: UUID,
+        workspace_id: UUID,
+        purpose: ContextPurpose,
+        consumer_type: ContextConsumerType,
+        consumer_id: UUID,
+        worker_item_id: UUID | None,
+        work_context_revision_id: UUID,
+        context_version: int | None,
+        knowledge_search_scope: Mapping[str, object],
+        knowledge_filter_refs: Sequence[object],
+        fact_scope_refs: Sequence[object],
+        budget: Mapping[str, object],
+        expires_at: datetime,
+        request_fingerprint: str,
+        idempotency_key: str,
+        created_at: datetime,
+    ) -> ContextAssemblyRequest:
+        return cls(
+            request_id=request_id,
+            workspace_id=workspace_id,
+            purpose=purpose,
+            consumer_type=consumer_type,
+            consumer_id=consumer_id,
+            worker_item_id=worker_item_id,
+            work_context_revision_id=work_context_revision_id,
+            context_version=context_version,
+            knowledge_search_scope=knowledge_search_scope,
+            knowledge_filter_refs=tuple(knowledge_filter_refs),
+            fact_scope_refs=tuple(fact_scope_refs),
+            budget=budget,
+            expires_at=expires_at,
+            status=ContextAssemblyStatus.QUEUED,
+            lease_owner=None,
+            lease_expires_at=None,
+            attempt=1,
+            next_attempt_at=None,
+            error_code=None,
+            request_fingerprint=request_fingerprint,
+            idempotency_key=idempotency_key,
+            version=1,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+    def __post_init__(self) -> None:
+        for name in (
+            "request_id",
+            "workspace_id",
+            "consumer_id",
+            "work_context_revision_id",
+        ):
+            if not isinstance(getattr(self, name), UUID):
+                raise ValidationError(f"assembly {name} must be a UUID")
+        if self.worker_item_id is not None and not isinstance(self.worker_item_id, UUID):
+            raise ValidationError("assembly worker_item_id must be a UUID")
+        try:
+            object.__setattr__(self, "purpose", ContextPurpose(self.purpose))
+            object.__setattr__(self, "consumer_type", ContextConsumerType(self.consumer_type))
+            object.__setattr__(self, "status", ContextAssemblyStatus(self.status))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("invalid assembly enum") from exc
+        if self.purpose is ContextPurpose.PLANNING_RUN:
+            if self.consumer_type is not ContextConsumerType.PLANNER:
+                raise ValidationError("planning assembly must use planner consumer")
+            if self.worker_item_id is not None or self.context_version is not None:
+                raise ValidationError("planning assembly cannot have worker fields")
+        elif self.purpose is ContextPurpose.EXECUTION:
+            if self.consumer_type is not ContextConsumerType.WORKER:
+                raise ValidationError("execution assembly must use worker consumer")
+            if self.worker_item_id is None or (self.context_version or 0) < 1:
+                raise ValidationError("execution assembly requires worker fields")
+        else:
+            raise ValidationError("invalid assembly purpose")
+        object.__setattr__(
+            self,
+            "knowledge_search_scope",
+            cast(
+                Mapping[str, object],
+                _freeze_json(self.knowledge_search_scope, "knowledge_search_scope"),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "knowledge_filter_refs",
+            tuple(_freeze_json(item, "knowledge_filter_refs") for item in self.knowledge_filter_refs),
+        )
+        object.__setattr__(
+            self,
+            "fact_scope_refs",
+            tuple(_freeze_json(item, "fact_scope_refs") for item in self.fact_scope_refs),
+        )
+        object.__setattr__(
+            self,
+            "budget",
+            cast(Mapping[str, object], _freeze_json(self.budget, "budget")),
+        )
+        _aware(self.expires_at, "assembly expires_at")
+        _aware(self.created_at, "assembly created_at")
+        _aware(self.updated_at, "assembly updated_at")
+        if self.expires_at <= self.created_at:
+            raise ValidationError("assembly expires_at must be after created_at")
+        if self.lease_expires_at is not None:
+            _aware(self.lease_expires_at, "assembly lease_expires_at")
+        if self.next_attempt_at is not None:
+            _aware(self.next_attempt_at, "assembly next_attempt_at")
+        _positive(self.attempt, "assembly attempt")
+        _positive(self.version, "assembly version")
+        object.__setattr__(
+            self,
+            "request_fingerprint",
+            _hash(self.request_fingerprint, "assembly request_fingerprint"),
+        )
+        object.__setattr__(self, "idempotency_key", _text(self.idempotency_key, "assembly idempotency_key"))
+        if self.error_code is not None:
+            object.__setattr__(self, "error_code", _text(self.error_code, "assembly error_code"))
+
+
+@dataclass(frozen=True, slots=True)
+class ContextMaterializationAudit:
+    audit_id: UUID
+    package_id: UUID
+    workspace_id: UUID
+    consumer_type: ContextConsumerType
+    consumer_id: UUID
+    context_version: int | None
+    attempt: int
+    outcome: ContextMaterializationOutcome
+    section_count: int
+    byte_count: int
+    input_token_count: int
+    failure_code: str | None
+    occurred_at: datetime
+
+    def __post_init__(self) -> None:
+        for name in ("audit_id", "package_id", "workspace_id", "consumer_id"):
+            if not isinstance(getattr(self, name), UUID):
+                raise ValidationError(f"materialization audit {name} must be a UUID")
+        try:
+            object.__setattr__(self, "consumer_type", ContextConsumerType(self.consumer_type))
+            object.__setattr__(self, "outcome", ContextMaterializationOutcome(self.outcome))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("invalid materialization audit enum") from exc
+        if self.consumer_type is ContextConsumerType.PLANNER and self.context_version is not None:
+            raise ValidationError("planner audit cannot have context_version")
+        if self.consumer_type is ContextConsumerType.WORKER and (self.context_version or 0) < 1:
+            raise ValidationError("worker audit requires context_version")
+        _positive(self.attempt, "materialization audit attempt")
+        for name in ("section_count", "byte_count", "input_token_count"):
+            _non_negative(getattr(self, name), f"materialization audit {name}")
+        if self.failure_code is not None:
+            object.__setattr__(self, "failure_code", _text(self.failure_code, "audit failure_code"))
+        _aware(self.occurred_at, "materialization audit occurred_at")
+
+
 def _sorted_knowledge_refs(
     values: Sequence[ContextPackageKnowledgeRef],
 ) -> tuple[ContextPackageKnowledgeRef, ...]:
@@ -431,5 +643,5 @@ def _package_hash_document(
         "artifact_refs": [item.to_mapping() for item in artifact_refs],
         "evidence_refs": [item.to_mapping() for item in evidence_refs],
         "budget": budget.to_mapping(),
-        "expires_at": expires_at.isoformat(),
+        "expires_at": expires_at.astimezone(UTC).isoformat(),
     }

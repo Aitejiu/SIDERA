@@ -1,7 +1,7 @@
 from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
@@ -24,6 +24,13 @@ from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
     StoredCommand,
+)
+from sidera_control_plane.domain.context_packages import (
+    ContextAcknowledgement,
+    ContextAssemblyRequest,
+    ContextMaterializationAudit,
+    ContextPackageManifestV1,
+    ContextPurpose,
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionSession
@@ -313,6 +320,138 @@ class WorkContextRepositoryPort(Protocol):
         raise NotImplementedError
 
     def archive(self, context: WorkContext, *, expected_version: int) -> None:
+        raise NotImplementedError
+
+
+class ContextAssemblyRepositoryPort(Protocol):
+    def add(self, request: ContextAssemblyRequest) -> ContextAssemblyRequest:
+        raise NotImplementedError
+
+    def get_for_consumer(
+        self,
+        purpose: ContextPurpose,
+        consumer_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ContextAssemblyRequest | None:
+        raise NotImplementedError
+
+    def claim_next(
+        self,
+        *,
+        workspace_id: UUID,
+        owner: str,
+        now: datetime,
+        lease_ttl: timedelta,
+        limit: int,
+    ) -> tuple[ContextAssemblyRequest, ...]:
+        raise NotImplementedError
+
+    def save_retry(
+        self,
+        request: ContextAssemblyRequest,
+        *,
+        owner: str,
+        expected_version: int,
+        next_attempt_at: datetime,
+        error_code: str,
+        now: datetime | None = None,
+    ) -> ContextAssemblyRequest:
+        raise NotImplementedError
+
+    def save_blocked(
+        self,
+        request: ContextAssemblyRequest,
+        *,
+        owner: str,
+        expected_version: int,
+        error_code: str,
+        now: datetime | None = None,
+    ) -> ContextAssemblyRequest:
+        raise NotImplementedError
+
+    def complete_with_package(
+        self,
+        request: ContextAssemblyRequest,
+        manifest: ContextPackageManifestV1,
+        *,
+        owner: str,
+        expected_version: int,
+        actor_type: str,
+        actor_id: str,
+        causation_id: UUID,
+        correlation_id: UUID,
+    ) -> ContextPackageManifestV1:
+        raise NotImplementedError
+
+
+class ContextPackageRepositoryPort(Protocol):
+    def get(
+        self, package_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ContextPackageManifestV1 | None:
+        raise NotImplementedError
+
+    def get_for_consumer(
+        self,
+        purpose: ContextPurpose,
+        consumer_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ContextPackageManifestV1 | None:
+        raise NotImplementedError
+
+    def add_ack(
+        self,
+        acknowledgement: ContextAcknowledgement,
+        *,
+        actor_type: str,
+        actor_id: str,
+        causation_id: UUID,
+        correlation_id: UUID,
+    ) -> ContextAcknowledgement:
+        raise NotImplementedError
+
+    def append_materialization_audit(
+        self,
+        audit: ContextMaterializationAudit,
+        *,
+        actor_type: str,
+        actor_id: str,
+        causation_id: UUID,
+        correlation_id: UUID,
+    ) -> None:
+        raise NotImplementedError
+
+    def revoke(
+        self,
+        package_id: UUID,
+        workspace_id: UUID,
+        *,
+        expected_package_hash: str,
+        reason: str,
+        scope: str,
+        now: datetime,
+        actor_type: str,
+        actor_id: str,
+        causation_id: UUID,
+        correlation_id: UUID,
+    ) -> ContextPackageManifestV1:
+        raise NotImplementedError
+
+    def mark_corrupt(
+        self,
+        package_id: UUID,
+        workspace_id: UUID,
+        *,
+        reason: str,
+        now: datetime,
+        actor_type: str,
+        actor_id: str,
+        causation_id: UUID,
+        correlation_id: UUID,
+    ) -> ContextPackageManifestV1:
         raise NotImplementedError
 
 
@@ -950,6 +1089,8 @@ class ControlPlaneUnitOfWork(Protocol):
     commands: CommandRepositoryPort
     events: EventStorePort
     work_contexts: WorkContextRepositoryPort
+    context_assemblies: ContextAssemblyRepositoryPort
+    context_packages: ContextPackageRepositoryPort
 
     def flush(self) -> None:
         raise NotImplementedError

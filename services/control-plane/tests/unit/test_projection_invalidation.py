@@ -85,6 +85,22 @@ def _event(
                 "worker_item_activity",
             },
         ),
+        (
+            "ContextPackageCreated",
+            {"context_package"},
+        ),
+        (
+            "ContextPackageAcknowledged",
+            {"context_package"},
+        ),
+        (
+            "ContextPackageRevoked",
+            {"context_package"},
+        ),
+        (
+            "ContextPackageMaterialized",
+            {"context_package"},
+        ),
     ],
 )
 def test_projection_change_targets_only_affected_resources(
@@ -94,12 +110,13 @@ def test_projection_change_targets_only_affected_resources(
 
     assert {target.projection_type for target in targets} == expected_projection_types
     assert all(target.projection_type in PROJECTION_TYPES for target in targets)
-    assert {
-        target.resource_id
-        for target in targets
-        if target.projection_type
-        in {"worker_item_workspace", "worker_item_activity"}
-    } == {WORKER_ITEM_ID}
+    if expected_projection_types & {"worker_item_workspace", "worker_item_activity"}:
+        assert {
+            target.resource_id
+            for target in targets
+            if target.projection_type
+            in {"worker_item_workspace", "worker_item_activity"}
+        } == {WORKER_ITEM_ID}
     subtask_resources = {
         target.resource_id
         for target in targets
@@ -107,7 +124,7 @@ def test_projection_change_targets_only_affected_resources(
     }
     if "subtask_workspace" in expected_projection_types:
         assert subtask_resources == {ROOT_TASK_ID}
-    else:
+    elif "subtask_workspace" in {target.projection_type for target in targets}:
         assert subtask_resources == set()
 
 
