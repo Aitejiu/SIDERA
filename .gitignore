@@ -19,6 +19,8 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+/services/knowledge-service/.coverage
+/services/knowledge-service/htmlcov/
 
 # Node.js and generated frontend output
 node_modules/
