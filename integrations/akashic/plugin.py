@@ -33,6 +33,7 @@ else:
 class SideraTaskBridge(Plugin):
     """Connect the Akashic Main Agent to the SIDERA control plane."""
 
+    # Keep the live rollout validation revision distinct without changing behavior.
     api_version = 2
     name = "sidera-task-bridge"
     version = "0.1.0"
