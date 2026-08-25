@@ -200,17 +200,17 @@ class KnowledgeRevision:
         object.__setattr__(self, "title", require_text(self.title, "title"))
         object.__setattr__(self, "summary", self.summary.strip())
         object.__setattr__(self, "tags", normalize_tags(self.tags))
-        sections = tuple(self.sections)
+        sections = tuple(sorted(self.sections, key=lambda section: section.ordinal))
         keys = [section.section_key for section in sections]
         if len(keys) != len(set(keys)):
             raise DomainValidationError("section_key must be unique in a revision")
         object.__setattr__(self, "sections", sections)
-        relations = tuple(self.relations)
+        relations = tuple(sorted(self.relations, key=lambda relation: relation.relation_key))
         relation_keys = [relation.relation_key for relation in relations]
         if len(relation_keys) != len(set(relation_keys)):
             raise DomainValidationError("relation_key must be unique in a revision")
         object.__setattr__(self, "relations", relations)
-        source_refs = tuple(self.source_refs)
+        source_refs = tuple(sorted(self.source_refs, key=str))
         if len(source_refs) != len(set(source_refs)):
             raise DomainValidationError("source refs must be unique in a revision")
         object.__setattr__(self, "source_refs", source_refs)
