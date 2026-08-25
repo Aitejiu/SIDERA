@@ -168,6 +168,20 @@ def aggregate_runtime_issues(
         for inspection in inspections
         if inspection.issue is not None
     )
+    if issues and all(
+        issue.reason_code is SchedulingBlockReason.CONTEXT_ADAPTER_UNSUPPORTED
+        for issue in issues
+    ):
+        return SchedulingIssue(
+            reason_code=SchedulingBlockReason.CONTEXT_ADAPTER_UNSUPPORTED,
+            reason_details={
+                "candidate_count": len(candidates),
+                "candidate_worker_ids": sorted(
+                    str(candidate.id) for candidate in candidates
+                ),
+            },
+            requires_operator=False,
+        )
     if not issues:
         return SchedulingIssue(
             reason_code=SchedulingBlockReason.NO_ELIGIBLE_WORKER,

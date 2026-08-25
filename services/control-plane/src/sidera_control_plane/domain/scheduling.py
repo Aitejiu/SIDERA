@@ -29,6 +29,14 @@ class SchedulingBlockReason(StrEnum):
     RUNTIME_CAPABILITY_MISMATCH = "runtime_capability_mismatch"
     ADAPTER_POLICY_REJECTED = "adapter_policy_rejected"
     CONTEXT_ASSEMBLY_BLOCKED = "context_assembly_blocked"
+    CONTEXT_ADAPTER_UNSUPPORTED = "context_adapter_unsupported"
+    CONTEXT_PACKAGE_MISSING = "context_package_missing"
+    CONTEXT_PACKAGE_PENDING = "context_package_pending"
+    CONTEXT_PACKAGE_BLOCKED = "context_package_blocked"
+    CONTEXT_PACKAGE_EXPIRED = "context_package_expired"
+    CONTEXT_PACKAGE_REVOKED = "context_package_revoked"
+    CONTEXT_PACKAGE_CORRUPT = "context_package_corrupt"
+    CONTEXT_PACKAGE_STALE = "context_package_stale"
 
 
 _SCHEDULING_REASON_LABELS = {
@@ -41,6 +49,14 @@ _SCHEDULING_REASON_LABELS = {
     "runtime_capability_mismatch": "运行能力不匹配",
     "adapter_policy_rejected": "适配器策略已过滤",
     "context_assembly_blocked": "上下文包组装被阻塞",
+    "context_adapter_unsupported": "执行节点不支持上下文包",
+    "context_package_missing": "上下文包不存在",
+    "context_package_pending": "上下文包尚未准备好",
+    "context_package_blocked": "上下文包组装失败",
+    "context_package_expired": "上下文包已过期",
+    "context_package_revoked": "上下文包已撤销",
+    "context_package_corrupt": "上下文包已损坏",
+    "context_package_stale": "上下文包与执行版本不一致",
 }
 
 

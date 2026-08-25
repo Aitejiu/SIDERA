@@ -62,6 +62,7 @@ class Execution:
     source_session_id: UUID | None = None
     adapter_preferences: tuple[str, ...] = ()
     adapter_forbidden: frozenset[str] = frozenset()
+    created_at: datetime | None = None
 
     @classmethod
     def create(

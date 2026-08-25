@@ -26,6 +26,12 @@ from sidera_control_plane.application.worker_runtime import (
     WorkerRuntimeResolver,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.context_packages import (
+    ContextAssemblyStatus,
+    ContextPackageManifestV1,
+    ContextPackageStatus,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.lease import AssignmentLease
@@ -33,7 +39,10 @@ from sidera_control_plane.domain.modules import (
     ExecutionBinding,
     WorkerAdapterCapabilityProfile,
 )
-from sidera_control_plane.domain.scheduling import SchedulingIssue
+from sidera_control_plane.domain.scheduling import (
+    SchedulingBlockReason,
+    SchedulingIssue,
+)
 from sidera_control_plane.domain.worker import Worker
 
 ACTIVE_EXECUTION_LEASE_CONSTRAINT = "uq_assignment_leases_active_execution"
@@ -60,11 +69,18 @@ class Scheduler:
         runtime_resolver: WorkerRuntimeResolver | None = None,
         scheduling_blocks: SchedulingBlockService | None = None,
         monotonic_clock: Callable[[], float] | None = None,
+        context_enforcement: bool = False,
+        context_package_cutover_at: datetime | None = None,
     ) -> None:
         if assignment_lease_seconds <= 0:
             raise ValueError("assignment_lease_seconds must be positive")
         if worker_heartbeat_timeout_seconds <= 0:
             raise ValueError("worker_heartbeat_timeout_seconds must be positive")
+        if context_package_cutover_at is not None and (
+            context_package_cutover_at.tzinfo is None
+            or context_package_cutover_at.utcoffset() is None
+        ):
+            raise ValueError("context_package_cutover_at must be timezone aware")
         self._uow_factory = uow_factory
         self._policy = policy
         self._clock = clock
@@ -73,6 +89,8 @@ class Scheduler:
         self._runtime_resolver = runtime_resolver or WorkerRuntimeResolver()
         self._scheduling_blocks = scheduling_blocks or SchedulingBlockService()
         self._monotonic_clock = monotonic_clock or time.monotonic
+        self._context_enforcement = context_enforcement
+        self._context_package_cutover_at = context_package_cutover_at
 
     def run_once(self, limit: int) -> SchedulerRunResult:
         if limit < 1:
@@ -122,6 +140,19 @@ class Scheduler:
                     return 0, 0, 0, None
                 execution = claimed[0]
                 execution_id = execution.id
+                context_package = None
+                if self._context_required(execution):
+                    context_package, context_issue = self._context_gate_issue(
+                        uow, execution, now
+                    )
+                    if context_issue is not None:
+                        return self._commit_deferred(
+                            uow=uow,
+                            execution=execution,
+                            issue=context_issue,
+                            now=now,
+                            execution_id=execution_id,
+                        )
                 candidates = uow.workers.lock_candidates(
                     workspace_id=execution.workspace_id,
                     required_capabilities=execution.capability_requirements,
@@ -144,6 +175,14 @@ class Scheduler:
                     runtime_candidates,
                     execution,
                 )
+                if context_package is not None:
+                    inspections = tuple(
+                        _apply_context_capability_gate(
+                            inspection,
+                            required_version=context_package.context_version or 0,
+                        )
+                        for inspection in inspections
+                    )
                 diagnostics = list(inspections)
                 remaining = [
                     inspection
@@ -224,6 +263,100 @@ class Scheduler:
             if execution_id is None or not _is_known_scheduler_conflict(exc):
                 raise
             return 1, 0, 1, execution_id
+
+    def _context_required(self, execution: Execution) -> bool:
+        if not self._context_enforcement:
+            return False
+        cutoff = self._context_package_cutover_at
+        if cutoff is None:
+            return True
+        created_at = execution.created_at or execution.not_before
+        return created_at >= cutoff
+
+    @staticmethod
+    def _context_gate_issue(
+        uow: ControlPlaneUnitOfWork,
+        execution: Execution,
+        now: datetime,
+    ) -> tuple[ContextPackageManifestV1 | None, SchedulingIssue | None]:
+        assembly = uow.context_assemblies.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            execution.id,
+            execution.workspace_id,
+        )
+        if assembly is None:
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_MISSING,
+                reason_details={"execution_id": str(execution.id)},
+                requires_operator=False,
+            )
+        if assembly.status is not ContextAssemblyStatus.READY:
+            if assembly.status in {
+                ContextAssemblyStatus.QUEUED,
+                ContextAssemblyStatus.ASSEMBLING,
+                ContextAssemblyStatus.RETRY_WAIT,
+            }:
+                reason_code = SchedulingBlockReason.CONTEXT_PACKAGE_PENDING
+                requires_operator = False
+            else:
+                reason_code = (
+                    SchedulingBlockReason.CONTEXT_PACKAGE_BLOCKED
+                    if assembly.status is ContextAssemblyStatus.FAILED
+                    else SchedulingBlockReason.CONTEXT_ASSEMBLY_BLOCKED
+                )
+                requires_operator = True
+            return None, SchedulingIssue(
+                reason_code=reason_code,
+                reason_details={
+                    "assembly_request_id": str(assembly.request_id),
+                    "assembly_status": assembly.status.value,
+                    "error_code": assembly.error_code,
+                },
+                requires_operator=requires_operator,
+            )
+        package = uow.context_packages.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            execution.id,
+            execution.workspace_id,
+        )
+        if package is None:
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_MISSING,
+                reason_details={
+                    "assembly_request_id": str(assembly.request_id),
+                },
+                requires_operator=True,
+            )
+        if package.status is ContextPackageStatus.REVOKED:
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_REVOKED,
+                reason_details={"package_id": str(package.package_id)},
+                requires_operator=True,
+            )
+        if package.status is ContextPackageStatus.CORRUPT:
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_CORRUPT,
+                reason_details={"package_id": str(package.package_id)},
+                requires_operator=True,
+            )
+        if package.expires_at <= now:
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_EXPIRED,
+                reason_details={"package_id": str(package.package_id)},
+                requires_operator=True,
+            )
+        if (
+            package.consumer_id != execution.id
+            or package.work_context_revision_id != assembly.work_context_revision_id
+            or package.worker_item_id != execution.worker_item_id
+            or (package.context_version or 0) < 1
+        ):
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_STALE,
+                reason_details={"package_id": str(package.package_id)},
+                requires_operator=True,
+            )
+        return package, None
 
     def _commit_assignment(
         self,
@@ -489,7 +622,34 @@ def _capability_payload(
         "stop": profile.stop.value,
         "sandbox": profile.sandbox.value,
         "stability": profile.stability.value,
+        "context_package_versions": list(profile.context_package_versions),
     }
+
+
+def _apply_context_capability_gate(
+    inspection: RuntimeCandidateInspection,
+    *,
+    required_version: int,
+) -> RuntimeCandidateInspection:
+    if inspection.resolved is None or required_version < 1:
+        return inspection
+    if required_version in inspection.resolved.capability_snapshot.context_package_versions:
+        return inspection
+    return RuntimeCandidateInspection(
+        worker=inspection.worker,
+        resolved=None,
+        issue=SchedulingIssue(
+            reason_code=SchedulingBlockReason.CONTEXT_ADAPTER_UNSUPPORTED,
+            reason_details={
+                "worker_id": str(inspection.worker.id),
+                "required_context_version": required_version,
+                "supported_context_versions": list(
+                    inspection.resolved.capability_snapshot.context_package_versions
+                ),
+            },
+            requires_operator=False,
+        ),
+    )
 
 
 def _plain_json(value: object) -> Any:

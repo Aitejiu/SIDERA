@@ -10,7 +10,9 @@ from uuid import UUID
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
+from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
+from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.ports import WorkerAdapter
 from sidera_control_plane.application.worker_gateway import (
     ConfiguredExecutionSpecFactory,
@@ -31,10 +33,17 @@ from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 class GatewayRuntime:
     gateway: GatewayAssignmentRunner
     database: Database
+    catalog: KnowledgeHttpAdapter
 
 
 def build_gateway(settings: Settings) -> GatewayRuntime:
     database = Database(settings.database_url)
+    catalog = KnowledgeHttpAdapter(
+        base_url=settings.knowledge_base_url,
+        control_plane_token=settings.knowledge_control_plane_token,
+        metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
+        materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
+    )
     try:
         workspace_manager = GitWorktreeWorkspaceManager(
             settings.workspace_root,
@@ -95,6 +104,8 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
                 settings.artifact_root,
                 max_bytes=settings.artifact_max_bytes,
             ),
+            context_materializer=ContextMaterializer(catalog),
+            context_package_cutover_at=settings.context_package_cutover_at,
             clock=lambda: datetime.now(UTC),
         )
         runner = GatewayAssignmentRunner(
@@ -105,9 +116,10 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             clock=lambda: datetime.now(UTC),
         )
     except BaseException:
+        catalog.close()
         database.dispose()
         raise
-    return GatewayRuntime(gateway=runner, database=database)
+    return GatewayRuntime(gateway=runner, database=database, catalog=catalog)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -198,6 +210,9 @@ def _dispose_runtime(runtime: object | None) -> None:
     database = getattr(runtime, "database", None)
     if database is not None:
         database.dispose()
+    catalog = getattr(runtime, "catalog", None)
+    if catalog is not None:
+        catalog.close()
 
 
 def _print_summary(claimed: int, processed: int, failed: int) -> None:

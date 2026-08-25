@@ -73,6 +73,13 @@ class ContextMaterializationMode(StrEnum):
     OWNER_AUDIT = "owner_audit"
 
 
+def context_package_reference(package_id: UUID, package_hash: str) -> str:
+    """Build the stable opaque reference carried by an ExecutionSpec."""
+    if not isinstance(package_id, UUID):
+        raise ValidationError("context package reference ID must be a UUID")
+    return f"context-package://{package_id}/{_hash(package_hash, 'package_hash')}"
+
+
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_FACT_KEY_PARTS = ("conversation", "trace", "body", "markdown", "snapshot")
 

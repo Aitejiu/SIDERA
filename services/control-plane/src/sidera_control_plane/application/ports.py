@@ -1069,6 +1069,14 @@ class WorkerAdapter(Protocol):
     def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
         raise NotImplementedError
 
+    def accept_context(
+        self,
+        materialization: ContextMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextAcknowledgement:
+        raise NotImplementedError
+
     def start_session(
         self,
         spec: ExecutionSpec,

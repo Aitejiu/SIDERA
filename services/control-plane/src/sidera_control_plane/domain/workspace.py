@@ -3,9 +3,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
+from sidera_control_plane.domain.context_packages import (
+    ContextConsumerType,
+    ContextMaterializationV1,
+    ContextPurpose,
+    context_package_reference,
+)
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 
 
@@ -65,7 +71,7 @@ class RepositoryCheckoutSpec:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionSpec:
-    schema_version: int
+    schema_version: Literal[1, 2]
     workspace_id: UUID
     task_id: UUID
     execution_id: UUID
@@ -85,10 +91,27 @@ class ExecutionSpec:
     adapter_config_version: int
     workspace_module_ref: UUID
     workspace_config_version: int
+    context_package: ContextMaterializationV1 | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version not in (1, 2):
             raise ValidationError("unsupported ExecutionSpec schema_version")
+        if self.schema_version == 1:
+            if self.context_package_ref is not None or self.context_package is not None:
+                raise ValidationError("schema v1 cannot carry context package data")
+        else:
+            if self.context_package_ref is None or self.context_package is None:
+                raise ValidationError("schema v2 requires context package data")
+            metadata = self.context_package.metadata
+            if (
+                metadata.purpose is not ContextPurpose.EXECUTION
+                or metadata.consumer_type is not ContextConsumerType.WORKER
+                or self.context_package_ref
+                != context_package_reference(metadata.package_id, metadata.package_hash)
+            ):
+                raise ValidationError(
+                    "schema v2 context package reference does not match metadata"
+                )
         if self.fencing_token < 1:
             raise ValidationError("fencing_token must be positive")
         if not self.goal.strip():

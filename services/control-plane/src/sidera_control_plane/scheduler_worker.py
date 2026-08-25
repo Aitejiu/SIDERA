@@ -29,6 +29,8 @@ def build_scheduler(settings: Settings) -> SchedulerRuntime:
             clock=lambda: datetime.now(UTC),
             assignment_lease_seconds=settings.assignment_lease_seconds,
             worker_heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds,
+            context_enforcement=True,
+            context_package_cutover_at=settings.context_package_cutover_at,
         )
     except BaseException:
         database.dispose()

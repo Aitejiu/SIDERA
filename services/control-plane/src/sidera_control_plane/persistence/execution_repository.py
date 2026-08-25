@@ -58,6 +58,7 @@ class ExecutionRepository:
                 stop_requested=execution.stop_requested,
                 source_execution_id=execution.source_execution_id,
                 source_session_id=execution.source_session_id,
+                created_at=execution.created_at,
             )
         )
 
@@ -250,4 +251,5 @@ def _to_domain_execution(row: ExecutionModel) -> Execution:
         stop_requested=row.stop_requested,
         source_execution_id=row.source_execution_id,
         source_session_id=row.source_session_id,
+        created_at=row.created_at,
     )

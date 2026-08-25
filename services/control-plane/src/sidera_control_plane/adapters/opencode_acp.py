@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import Popen
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.adapters.acp_process import (
     ACPProcessError as OpenCodeAdapterError,
@@ -27,6 +27,12 @@ from sidera_control_plane.adapters.acp_process import (
     ACPProcessTransport,
 )
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
+from sidera_control_plane.domain.context_packages import (
+    ContextAcknowledgement,
+    ContextConsumerType,
+    ContextMaterializationV1,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
     AdapterSessionHandle,
@@ -63,6 +69,7 @@ class OpenCodeACPAdapter:
         stop=StopCapability.EXACT_EXECUTION,
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.EXPERIMENTAL,
+        context_package_versions=(1,),
     )
 
     def __init__(
@@ -126,6 +133,29 @@ class OpenCodeACPAdapter:
         finally:
             transport.terminate(grace_seconds=self._stop_grace_seconds)
             transport.close()
+
+    def accept_context(
+        self,
+        materialization: ContextMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextAcknowledgement:
+        _validate_context(materialization, operation_id)
+        metadata = materialization.metadata
+        return ContextAcknowledgement(
+            package_id=metadata.package_id,
+            package_hash=metadata.package_hash,
+            consumer_type=metadata.consumer_type,
+            consumer_id=metadata.consumer_id,
+            context_version=metadata.context_version,
+            adapter_module_id=uuid5(
+                NAMESPACE_URL, "sidera.opencode.worker.context-adapter"
+            ),
+            adapter_config_version=1,
+            acknowledged_at=datetime.now(UTC),
+            schema_version=materialization.schema_version,
+            operation_id=operation_id,
+        )
 
     def start_session(
         self,
@@ -503,6 +533,25 @@ class _OpenCodeSession:
         self.prompt_busy = False
         self.stopped = False
         self.lock = threading.RLock()
+
+
+def _validate_context(
+    materialization: ContextMaterializationV1,
+    operation_id: UUID,
+) -> None:
+    if not isinstance(materialization, ContextMaterializationV1):
+        raise TypeError("materialization must be a ContextMaterializationV1")
+    if not isinstance(operation_id, UUID):
+        raise TypeError("operation_id must be a UUID")
+    if materialization.schema_version != 1:
+        raise ValueError("unsupported context materialization schema")
+    if (
+        materialization.metadata.purpose is not ContextPurpose.EXECUTION
+        or materialization.metadata.consumer_type is not ContextConsumerType.WORKER
+    ):
+        raise ValueError("worker adapter requires an execution worker context")
+    if materialization.total_byte_count > 256 * 1024:
+        raise ValueError("context materialization exceeds adapter size limit")
 
 
 def _config_text(config: Mapping[str, object], key: str, default: str) -> str:
