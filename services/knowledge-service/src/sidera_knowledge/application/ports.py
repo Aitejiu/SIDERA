@@ -15,6 +15,7 @@ from sidera_knowledge.domain.pages import (
 )
 
 if TYPE_CHECKING:
+    from sidera_knowledge.application.outbox_dispatcher import OutboxMessage
     from sidera_knowledge.application.retrieval import SearchFilters, SearchHit
 
 
@@ -95,6 +96,35 @@ class CommandRepositoryPort(Protocol):
 
 class EventRepositoryPort(Protocol):
     def append_with_outbox(self, event: EventEnvelope) -> None: ...
+
+
+class OutboxMessageStorePort(Protocol):
+    def claim_batch(
+        self,
+        *,
+        now: datetime,
+        lease_id: UUID,
+        lease_until: datetime,
+        limit: int,
+    ) -> tuple[OutboxMessage, ...]: ...
+
+    def mark_published(
+        self, *, message_id: UUID, lease_id: UUID, published_at: datetime
+    ) -> None: ...
+
+    def mark_failed(
+        self,
+        *,
+        message_id: UUID,
+        lease_id: UUID,
+        available_at: datetime,
+        error_code: str,
+        dead_lettered_at: datetime | None,
+    ) -> None: ...
+
+
+class OutboxSinkPort(Protocol):
+    def publish(self, message: OutboxMessage) -> None: ...
 
 
 class KnowledgeUnitOfWorkPort(Protocol):
