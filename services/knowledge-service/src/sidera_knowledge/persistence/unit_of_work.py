@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from sidera_knowledge.persistence.database import Database
 from sidera_knowledge.persistence.repositories import (
     PersistenceConflict,
+    SqlAlchemyCommandRepository,
+    SqlAlchemyEventRepository,
     SqlAlchemyKnowledgeCandidateRepository,
     SqlAlchemyKnowledgePageRepository,
     SqlAlchemyKnowledgeSourceRepository,
@@ -25,6 +27,8 @@ class SqlAlchemyUnitOfWork:
         self.pages: SqlAlchemyKnowledgePageRepository
         self.sources: SqlAlchemyKnowledgeSourceRepository
         self.candidates: SqlAlchemyKnowledgeCandidateRepository
+        self.commands: SqlAlchemyCommandRepository
+        self.events: SqlAlchemyEventRepository
 
     def __enter__(self) -> Self:
         self._session_context = self._database.session()
@@ -32,6 +36,8 @@ class SqlAlchemyUnitOfWork:
         self.pages = SqlAlchemyKnowledgePageRepository(self._session)
         self.sources = SqlAlchemyKnowledgeSourceRepository(self._session)
         self.candidates = SqlAlchemyKnowledgeCandidateRepository(self._session)
+        self.commands = SqlAlchemyCommandRepository(self._session)
+        self.events = SqlAlchemyEventRepository(self._session)
         self._completed = False
         return self
 

@@ -10,6 +10,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from sidera_knowledge.domain.candidates import KnowledgeCandidate
+from sidera_knowledge.domain.commands import (
+    CommandEnvelope,
+    EventEnvelope,
+    topic_for_event,
+)
 from sidera_knowledge.domain.pages import (
     KnowledgePage,
     KnowledgeRelationSnapshot,
@@ -18,6 +23,8 @@ from sidera_knowledge.domain.pages import (
     KnowledgeSource,
 )
 from sidera_knowledge.persistence.models import (
+    CommandModel,
+    EventModel,
     KnowledgeCandidateModel,
     KnowledgePageModel,
     KnowledgeRelationSnapshotModel,
@@ -25,6 +32,7 @@ from sidera_knowledge.persistence.models import (
     KnowledgeRevisionSourceModel,
     KnowledgeSectionSnapshotModel,
     KnowledgeSourceModel,
+    OutboxMessageModel,
 )
 
 
@@ -375,6 +383,88 @@ class SqlAlchemyKnowledgeCandidateRepository:
             supersedes_candidate_id=row.supersedes_candidate_id,
             status=cast(Any, row.status),
             version=row.version,
+        )
+
+
+class SqlAlchemyCommandRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def save_or_replay(self, command: CommandEnvelope) -> CommandModel:
+        existing = self._session.scalar(
+            select(CommandModel).where(
+                CommandModel.id == command.command_id,
+                CommandModel.workspace_id == command.workspace_id,
+            )
+        )
+        if existing is not None:
+            if existing.payload_hash != command.request_hash:
+                raise PersistenceConflict("idempotency_conflict")
+            return existing
+
+        row = CommandModel(
+            id=command.command_id,
+            workspace_id=command.workspace_id,
+            command_type=command.command_type,
+            actor_type=command.actor_type,
+            actor_id=command.actor_id,
+            target_type=command.target_type,
+            target_id=command.target_id,
+            payload=command.payload,
+            payload_hash=command.request_hash,
+            expected_version=command.expected_version,
+            idempotency_key=command.idempotency_key,
+            correlation_id=command.correlation_id,
+            status="pending",
+        )
+        self._session.add(row)
+        return row
+
+    def mark_applied(
+        self, command_id: UUID, workspace_id: UUID, result: dict[str, object]
+    ) -> None:
+        row = self._session.scalar(
+            select(CommandModel).where(
+                CommandModel.id == command_id,
+                CommandModel.workspace_id == workspace_id,
+            )
+        )
+        if row is None:
+            raise PersistenceNotFound("command not found in workspace")
+        row.status = "applied"
+        row.result = dict(result)
+        row.applied_at = datetime.now().astimezone()
+
+
+class SqlAlchemyEventRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def append_with_outbox(self, event: EventEnvelope) -> None:
+        self._session.add(
+            EventModel(
+                id=event.event_id,
+                workspace_id=event.workspace_id,
+                aggregate_type=event.aggregate_type,
+                aggregate_id=event.aggregate_id,
+                aggregate_version=event.aggregate_version,
+                event_type=event.event_type,
+                payload=event.payload,
+                occurred_at=event.occurred_at,
+                correlation_id=event.correlation_id,
+                causation_id=event.causation_id,
+            )
+        )
+        self._session.add(
+            OutboxMessageModel(
+                id=UUID(int=event.event_id.int ^ 1),
+                workspace_id=event.workspace_id,
+                event_id=event.event_id,
+                topic=topic_for_event(event.event_type),
+                payload=event.payload,
+                available_at=event.occurred_at,
+                publish_attempts=0,
+            )
         )
 
 

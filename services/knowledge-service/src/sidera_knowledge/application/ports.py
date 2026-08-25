@@ -39,13 +39,28 @@ class KnowledgeCandidateRepositoryPort(Protocol):
     ) -> KnowledgeCandidate | None: ...
 
 
+class CommandRepositoryPort(Protocol):
+    def save_or_replay(self, command: CommandEnvelope): ...
+
+    def mark_applied(
+        self, command_id: UUID, workspace_id: UUID, result: dict[str, object]
+    ) -> None: ...
+
+
+class EventRepositoryPort(Protocol):
+    def append_with_outbox(self, event: EventEnvelope) -> None: ...
+
+
 class KnowledgeUnitOfWorkPort(Protocol):
     pages: KnowledgePageRepositoryPort
     sources: KnowledgeSourceRepositoryPort
     candidates: KnowledgeCandidateRepositoryPort
+    commands: CommandRepositoryPort
+    events: EventRepositoryPort
 
     def commit(self) -> None: ...
 
     def rollback(self) -> None: ...
 
     def flush(self) -> None: ...
+from sidera_knowledge.domain.commands import CommandEnvelope, EventEnvelope
