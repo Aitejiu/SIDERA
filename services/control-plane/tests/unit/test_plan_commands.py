@@ -282,6 +282,7 @@ class FakeUnitOfWork:
     proposal_materializations: Any
     worker_runtime_configurations: Any
     scheduling_blocks: Any
+    work_contexts: Any
 
     def __init__(
         self,
@@ -296,6 +297,7 @@ class FakeUnitOfWork:
         self.worker_items = FakeWorkerItemRepository()
         self.worker_runtime_configurations = None
         self.scheduling_blocks = None
+        self.work_contexts = None
 
     def __enter__(self) -> Self:
         return self

@@ -148,7 +148,7 @@ def test_work_context_detail_and_revision_queries_are_cursorable(
     client: TestClient, workspace_id: UUID
 ) -> None:
     data = _create_context(client, workspace_id, "timeline")
-    context_id = UUID(data["work_context_id"])
+    context_id = UUID(str(data["work_context_id"]))
     first_detail = client.get(
         f"/api/v1/workspaces/{workspace_id}/planning-requests/"
         f"{data['planning_request_id']}/work-context"
@@ -211,7 +211,7 @@ def test_work_context_root_and_revision_routes_are_workspace_scoped(
     client: TestClient, database: Database, workspace_id: UUID
 ) -> None:
     data = _create_context(client, workspace_id, "root")
-    context_id = UUID(data["work_context_id"])
+    context_id = UUID(str(data["work_context_id"]))
     root_task_id = uuid4()
     with database.session() as session:
         session.add(

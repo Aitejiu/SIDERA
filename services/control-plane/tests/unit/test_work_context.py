@@ -11,6 +11,7 @@ from sidera_control_plane.domain.errors import (
     ValidationError,
     VersionConflict,
 )
+from sidera_control_plane.domain.planning import PlanningClarification
 from sidera_control_plane.domain.work_context import (
     AcceptedDecision,
     ClarificationDecision,
@@ -23,6 +24,10 @@ from sidera_control_plane.domain.work_context import (
     WorkContextSnapshotV1,
     WorkContextStatus,
     WorkReference,
+)
+from sidera_control_plane.work_context_backfill import (
+    WorkContextBackfillService,
+    _BackfillCandidate,
 )
 
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
@@ -164,6 +169,54 @@ def test_revision_hash_is_canonical_and_old_revision_is_immutable() -> None:
         first.objective = "mutated"  # type: ignore[misc]
 
 
+def test_backfilled_snapshot_preserves_explicit_missing_fact_codes() -> None:
+    snapshot = WorkContextSnapshotV1.create(
+        objective="Legacy context unavailable",
+        constraints=(),
+        acceptance_criteria=(),
+        requested_outputs=(),
+        clarification_decisions=(),
+        accepted_decisions=(),
+        unresolved_questions=(),
+        knowledge_refs=(),
+        artifact_refs=(),
+        evidence_refs=(),
+        checkpoint_refs=(),
+        missing_fact_codes=("plan_snapshot_missing", "proposal_missing"),
+    )
+
+    restored = WorkContextSnapshotV1.from_mapping(snapshot.to_mapping())
+
+    assert restored.missing_fact_codes == (
+        "plan_snapshot_missing",
+        "proposal_missing",
+    )
+    assert restored.content_hash == snapshot.content_hash
+
+
+def test_create_backfilled_allows_archived_or_incomplete_status() -> None:
+    context_id = uuid4()
+    planning_request_id = uuid4()
+    revision = _revision(
+        context_id=context_id,
+        planning_request_id=planning_request_id,
+        reason=WorkContextRevisionReason.LEGACY_BACKFILL,
+    )
+
+    context = WorkContext.create_backfilled(
+        work_context_id=context_id,
+        workspace_id=revision.workspace_id,
+        planning_request_id=planning_request_id,
+        root_task_id=uuid4(),
+        first_revision=revision,
+        status=WorkContextStatus.ARCHIVED,
+        created_at=NOW,
+    )
+
+    assert context.status is WorkContextStatus.ARCHIVED
+    assert context.root_task_id is not None
+
+
 def test_current_pointer_only_moves_forward_and_archived_context_cannot_revise() -> None:
     context_id = uuid4()
     planning_request_id = uuid4()
@@ -258,6 +311,38 @@ def test_legacy_incomplete_is_readable_but_requires_explicit_completion() -> Non
     )
     assert context.status is WorkContextStatus.ACTIVE
     assert context.can_create_consumer is True
+
+
+def test_backfill_preserves_answered_clarification_actor() -> None:
+    clarification = PlanningClarification.create(
+        clarification_id=uuid4(),
+        planning_request_id=uuid4(),
+        planning_run_id=uuid4(),
+        question="Which runtime?",
+        rationale="The runtime changes the plan.",
+        answer_type="text",
+        options=(),
+        blocking=True,
+        created_at=NOW,
+    ).answer_question(
+        answer="OpenCode",
+        actor="user-42",
+        brief_revision=1,
+        answered_at=NOW,
+    )
+
+    candidate = _BackfillCandidate(
+        brief=None,
+        proposal=None,
+        materialization=None,
+        plan=None,
+        task=None,
+        clarifications=(clarification,),
+        missing_fact_codes=(),
+    )
+    decisions = WorkContextBackfillService._clarification_decisions(candidate)
+
+    assert decisions[0].answered_by == "user-42"
 
 
 def test_snapshot_rejects_raw_conversation_trace_and_body_fields() -> None:

@@ -3498,6 +3498,11 @@ export interface components {
             evidence_refs: components["schemas"]["WorkContextReferenceResponse"][];
             /** Knowledge Refs */
             knowledge_refs: components["schemas"]["WorkContextKnowledgeRefResponse"][];
+            /**
+             * Missing Fact Codes
+             * @default []
+             */
+            missing_fact_codes: string[];
             /** Objective */
             objective: string;
             /** Requested Outputs */

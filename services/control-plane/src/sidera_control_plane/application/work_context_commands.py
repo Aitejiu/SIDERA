@@ -123,6 +123,7 @@ class WorkContextRevisionFactory:
         artifact_refs: Sequence[WorkReference] | None = None,
         evidence_refs: Sequence[WorkReference] | None = None,
         checkpoint_refs: Sequence[WorkReference] | None = None,
+        missing_fact_codes: Sequence[str] | None = None,
         proposal_revision_id: UUID | None = None,
         plan_snapshot_id: UUID | None = None,
         revision_id: UUID | None = None,
@@ -137,6 +138,7 @@ class WorkContextRevisionFactory:
             artifact_refs=artifact_refs,
             evidence_refs=evidence_refs,
             checkpoint_refs=checkpoint_refs,
+            missing_fact_codes=missing_fact_codes,
         )
         return WorkContextRevision.create(
             revision_id=revision_id or uuid4(),
@@ -165,6 +167,7 @@ class WorkContextRevisionFactory:
         artifact_refs: Sequence[WorkReference] | None = None,
         evidence_refs: Sequence[WorkReference] | None = None,
         checkpoint_refs: Sequence[WorkReference] | None = None,
+        missing_fact_codes: Sequence[str] | None = None,
     ) -> WorkContextSnapshotV1:
         return WorkContextSnapshotV1.create(
             objective=brief.objective,
@@ -207,6 +210,9 @@ class WorkContextRevisionFactory:
             artifact_refs=_carry(base_snapshot, "artifact_refs", artifact_refs),
             evidence_refs=_carry(base_snapshot, "evidence_refs", evidence_refs),
             checkpoint_refs=_carry(base_snapshot, "checkpoint_refs", checkpoint_refs),
+            missing_fact_codes=_carry(
+                base_snapshot, "missing_fact_codes", missing_fact_codes
+            ),
         )
 
     @staticmethod
@@ -248,6 +254,7 @@ class WorkContextRevisionFactory:
             artifact_refs=(*base_snapshot.artifact_refs, *patch.artifact_refs),
             evidence_refs=(*base_snapshot.evidence_refs, *patch.evidence_refs),
             checkpoint_refs=(*base_snapshot.checkpoint_refs, *patch.checkpoint_refs),
+            missing_fact_codes=base_snapshot.missing_fact_codes,
         )
 
     @staticmethod

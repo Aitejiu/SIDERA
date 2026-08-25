@@ -347,6 +347,7 @@ class WorkContextSnapshotV1:
     artifact_refs: tuple[WorkReference, ...]
     evidence_refs: tuple[WorkReference, ...]
     checkpoint_refs: tuple[WorkReference, ...]
+    missing_fact_codes: tuple[str, ...] = ()
     schema_version: int = 1
 
     @classmethod
@@ -364,6 +365,7 @@ class WorkContextSnapshotV1:
         artifact_refs: Sequence[WorkReference],
         evidence_refs: Sequence[WorkReference],
         checkpoint_refs: Sequence[WorkReference],
+        missing_fact_codes: Sequence[str] = (),
     ) -> WorkContextSnapshotV1:
         return cls(
             objective=objective,
@@ -377,6 +379,7 @@ class WorkContextSnapshotV1:
             artifact_refs=tuple(artifact_refs),
             evidence_refs=tuple(evidence_refs),
             checkpoint_refs=tuple(checkpoint_refs),
+            missing_fact_codes=tuple(missing_fact_codes),
         )
 
     def __post_init__(self) -> None:
@@ -419,6 +422,11 @@ class WorkContextSnapshotV1:
                 field_name,
                 _typed_tuple(getattr(self, field_name), WorkReference, field_name),
             )
+        object.__setattr__(
+            self,
+            "missing_fact_codes",
+            tuple(sorted({_required_text(item, "missing fact code") for item in self.missing_fact_codes})),
+        )
         object.__setattr__(self, "constraints", _sorted_items(self.constraints, preserve_ordinal=False))
         for field_name in (
             "acceptance_criteria",
@@ -438,7 +446,7 @@ class WorkContextSnapshotV1:
             )
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "objective": self.objective,
             "constraints": [item.to_mapping() for item in self.constraints],
@@ -452,6 +460,9 @@ class WorkContextSnapshotV1:
             "evidence_refs": [item.to_mapping() for item in self.evidence_refs],
             "checkpoint_refs": [item.to_mapping() for item in self.checkpoint_refs],
         }
+        if self.missing_fact_codes:
+            result["missing_fact_codes"] = list(self.missing_fact_codes)
+        return result
 
     def canonical_bytes(self) -> bytes:
         return _canonical_bytes(self.to_mapping())
@@ -475,6 +486,7 @@ class WorkContextSnapshotV1:
             "artifact_refs",
             "evidence_refs",
             "checkpoint_refs",
+            "missing_fact_codes",
         }
         _ensure_fields(value, allowed, "work context snapshot")
         return cls(
@@ -490,6 +502,7 @@ class WorkContextSnapshotV1:
             artifact_refs=_parse_items(value, "artifact_refs", WorkReference),
             evidence_refs=_parse_items(value, "evidence_refs", WorkReference),
             checkpoint_refs=_parse_items(value, "checkpoint_refs", WorkReference),
+            missing_fact_codes=_parse_texts(value, "missing_fact_codes"),
         )
 
 
@@ -632,6 +645,45 @@ class WorkContext:
             planning_request_id=planning_request_id,
             root_task_id=None,
             status=WorkContextStatus.LEGACY_INCOMPLETE,
+            current_revision_id=first_revision.revision_id,
+            current_revision_number=1,
+            version=1,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    @classmethod
+    def create_backfilled(
+        cls,
+        *,
+        work_context_id: UUID,
+        workspace_id: UUID,
+        planning_request_id: UUID,
+        root_task_id: UUID | None,
+        first_revision: WorkContextRevision,
+        status: WorkContextStatus,
+        created_at: datetime,
+    ) -> WorkContext:
+        _validate_first_revision(
+            first_revision,
+            work_context_id=work_context_id,
+            workspace_id=workspace_id,
+            planning_request_id=planning_request_id,
+            reason=WorkContextRevisionReason.LEGACY_BACKFILL,
+        )
+        if status not in {
+            WorkContextStatus.ACTIVE,
+            WorkContextStatus.ARCHIVED,
+            WorkContextStatus.LEGACY_INCOMPLETE,
+        }:
+            raise ValidationError("unsupported backfilled work context status")
+        timestamp = _aware(created_at, "work context created_at")
+        return cls(
+            id=work_context_id,
+            workspace_id=workspace_id,
+            planning_request_id=planning_request_id,
+            root_task_id=root_task_id,
+            status=status,
             current_revision_id=first_revision.revision_id,
             current_revision_number=1,
             version=1,
@@ -802,3 +854,10 @@ def _parse_items[T](
     if parser is None:
         raise ValidationError(f"{key} has no mapping parser")
     return tuple(cast(T, parser(_mapping(item, key))) for item in raw)
+
+
+def _parse_texts(value: Mapping[str, object], key: str) -> tuple[str, ...]:
+    raw = value.get(key, [])
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ValidationError(f"{key} must be a list")
+    return tuple(_required_text(item, "missing fact code") for item in raw)

@@ -2524,6 +2524,7 @@ class WorkContextSnapshotResponse(BaseModel):
     artifact_refs: tuple[WorkContextReferenceResponse, ...]
     evidence_refs: tuple[WorkContextReferenceResponse, ...]
     checkpoint_refs: tuple[WorkContextReferenceResponse, ...]
+    missing_fact_codes: tuple[str, ...] = ()
 
     @classmethod
     def from_snapshot(
