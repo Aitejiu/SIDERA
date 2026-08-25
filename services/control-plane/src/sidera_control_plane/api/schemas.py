@@ -12,6 +12,14 @@ from pydantic import (
 )
 
 from sidera_control_plane.application.command_queries import CommandStatusView
+from sidera_control_plane.application.context_package_queries import (
+    ContextPackageAcknowledgementView,
+    ContextPackageAssemblyView,
+    ContextPackageMaterializationAuditView,
+    ContextPackageView,
+    KnowledgeSubmissionPageView,
+    KnowledgeSubmissionView,
+)
 from sidera_control_plane.application.module_queries import ModuleSummaryView
 from sidera_control_plane.application.planning_metrics import PlanningMetricsView
 from sidera_control_plane.application.planning_queries import (
@@ -72,6 +80,8 @@ AggregateType = Literal[
     "worker_runtime_configuration",
     "module_definition",
     "module_instance",
+    "context_assembly",
+    "context_package",
 ]
 
 
@@ -233,6 +243,21 @@ class RetryBlockedPlanningRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unknown_outcome_decision: Literal["retry"]
+
+
+class RetryContextAssemblyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RevokeContextPackagePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_package_status: Literal["active", "revoked", "corrupt"]
+    expected_package_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    revocation_scope: Literal["new_starts", "all_materialization"]
+    reason: NonEmptyString
 
 
 class AcceptedDecisionPayload(BaseModel):
@@ -1268,6 +1293,12 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryBlockedPlanningRun":
             self._require_mutation_target("planning_run")
             parsed = RetryBlockedPlanningRunPayload.model_validate(self.payload)
+        elif self.command_type == "RetryContextAssembly":
+            self._require_mutation_target("context_assembly")
+            parsed = RetryContextAssemblyPayload.model_validate(self.payload)
+        elif self.command_type == "RevokeContextPackage":
+            self._require_mutation_target("context_package")
+            parsed = RevokeContextPackagePayload.model_validate(self.payload)
         elif self.command_type in {
             "ReviseWorkContext",
             "AttachKnowledgeRevision",
@@ -2632,6 +2663,434 @@ class WorkContextDetailResponse(WorkContextResponse):
             ),
             next_cursor=view.next_cursor,
         )
+
+
+class ContextPackageKnowledgeRefResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    source_ids: tuple[UUID, ...]
+    selection_reason: str
+    trust_level: str
+    ordinal: int
+
+
+class ContextPackageReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref_id: UUID
+    ref_type: str
+    ordinal: int
+
+
+class ContextPackageBudgetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: UUID
+    profile_version: int
+    max_sections: int
+    max_chars: int
+    max_input_tokens: int
+    actual_sections: int
+    actual_chars: int
+    actual_input_tokens: int
+
+
+class ContextPackageAssemblyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+    status: str
+    attempt: int
+    next_attempt_at: datetime | None
+    error_code: str | None
+    request_fingerprint: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, view: ContextPackageAssemblyView) -> "ContextPackageAssemblyResponse":
+        return cls(
+            request_id=view.request_id,
+            status=view.status,
+            attempt=view.attempt,
+            next_attempt_at=view.next_attempt_at,
+            error_code=view.error_code,
+            request_fingerprint=view.request_fingerprint,
+            version=view.version,
+            created_at=view.created_at,
+            updated_at=view.updated_at,
+        )
+
+
+class ContextPackageAcknowledgementResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    package_id: UUID
+    consumer_type: str
+    consumer_id: UUID
+    context_version: int | None
+    package_hash: str
+    adapter_module_id: UUID
+    adapter_config_version: int
+    acknowledged_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: ContextPackageAcknowledgementView
+    ) -> "ContextPackageAcknowledgementResponse":
+        return cls(
+            package_id=view.package_id,
+            consumer_type=view.consumer_type,
+            consumer_id=view.consumer_id,
+            context_version=view.context_version,
+            package_hash=view.package_hash,
+            adapter_module_id=view.adapter_module_id,
+            adapter_config_version=view.adapter_config_version,
+            acknowledged_at=view.acknowledged_at,
+        )
+
+
+class ContextPackageMaterializationAuditResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: UUID
+    package_id: UUID
+    consumer_type: str
+    consumer_id: UUID
+    context_version: int | None
+    attempt: int
+    outcome: str
+    section_count: int
+    byte_count: int
+    input_token_count: int
+    failure_code: str | None
+    occurred_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: ContextPackageMaterializationAuditView
+    ) -> "ContextPackageMaterializationAuditResponse":
+        return cls(
+            audit_id=view.audit_id,
+            package_id=view.package_id,
+            consumer_type=view.consumer_type,
+            consumer_id=view.consumer_id,
+            context_version=view.context_version,
+            attempt=view.attempt,
+            outcome=view.outcome,
+            section_count=view.section_count,
+            byte_count=view.byte_count,
+            input_token_count=view.input_token_count,
+            failure_code=view.failure_code,
+            occurred_at=view.occurred_at,
+        )
+
+
+class ContextPackageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    package_id: UUID
+    workspace_id: UUID
+    purpose: str
+    consumer_type: str
+    consumer_id: UUID
+    worker_item_id: UUID | None
+    work_context_revision_id: UUID
+    work_context_revision_number: int
+    work_context_content_hash: str
+    context_version: int | None
+    control_plane_fact_snapshot: dict[str, Any]
+    knowledge_refs: tuple[ContextPackageKnowledgeRefResponse, ...]
+    artifact_refs: tuple[ContextPackageReferenceResponse, ...]
+    evidence_refs: tuple[ContextPackageReferenceResponse, ...]
+    budget: ContextPackageBudgetResponse
+    expires_at: datetime
+    idempotency_key: str
+    package_hash: str
+    status: str
+    created_at: datetime
+    materialized_at: datetime | None
+    revoked_at: datetime | None
+    revocation_reason: str | None
+    revocation_scope: str | None
+    assembly: ContextPackageAssemblyResponse
+    acknowledgements: tuple[ContextPackageAcknowledgementResponse, ...]
+    materialization_audits: tuple[ContextPackageMaterializationAuditResponse, ...]
+
+    @classmethod
+    def from_view(cls, view: ContextPackageView) -> "ContextPackageResponse":
+        manifest = view.manifest
+        return cls(
+            package_id=manifest.package_id,
+            workspace_id=manifest.workspace_id,
+            purpose=manifest.purpose.value,
+            consumer_type=manifest.consumer_type.value,
+            consumer_id=manifest.consumer_id,
+            worker_item_id=manifest.worker_item_id,
+            work_context_revision_id=manifest.work_context_revision_id,
+            work_context_revision_number=view.work_context_revision_number,
+            work_context_content_hash=view.work_context_content_hash,
+            context_version=manifest.context_version,
+            control_plane_fact_snapshot=dict(manifest.control_plane_fact_snapshot),
+            knowledge_refs=tuple(
+                ContextPackageKnowledgeRefResponse(
+                    page_id=item.page_id,
+                    revision_id=item.revision_id,
+                    revision_hash=item.revision_hash,
+                    section_key=item.section_key,
+                    section_hash=item.section_hash,
+                    source_ids=item.source_ids,
+                    selection_reason=item.selection_reason.value,
+                    trust_level=item.trust_level.value,
+                    ordinal=item.ordinal,
+                )
+                for item in manifest.knowledge_refs
+            ),
+            artifact_refs=tuple(
+                ContextPackageReferenceResponse(
+                    ref_id=item.ref_id, ref_type=item.ref_type, ordinal=item.ordinal
+                )
+                for item in manifest.artifact_refs
+            ),
+            evidence_refs=tuple(
+                ContextPackageReferenceResponse(
+                    ref_id=item.ref_id, ref_type=item.ref_type, ordinal=item.ordinal
+                )
+                for item in manifest.evidence_refs
+            ),
+            budget=ContextPackageBudgetResponse(
+                profile_id=manifest.budget.profile_id,
+                profile_version=manifest.budget.profile_version,
+                max_sections=manifest.budget.max_sections,
+                max_chars=manifest.budget.max_chars,
+                max_input_tokens=manifest.budget.max_input_tokens,
+                actual_sections=manifest.budget.actual_sections,
+                actual_chars=manifest.budget.actual_chars,
+                actual_input_tokens=manifest.budget.actual_input_tokens,
+            ),
+            expires_at=manifest.expires_at,
+            idempotency_key=manifest.idempotency_key,
+            package_hash=manifest.package_hash,
+            status=manifest.status.value,
+            created_at=manifest.created_at,
+            materialized_at=manifest.materialized_at,
+            revoked_at=manifest.revoked_at,
+            revocation_reason=manifest.revocation_reason,
+            revocation_scope=(
+                manifest.revocation_scope.value
+                if manifest.revocation_scope is not None
+                else None
+            ),
+            assembly=ContextPackageAssemblyResponse.from_view(view.assembly),
+            acknowledgements=tuple(
+                ContextPackageAcknowledgementResponse.from_view(item)
+                for item in view.acknowledgements
+            ),
+            materialization_audits=tuple(
+                ContextPackageMaterializationAuditResponse.from_view(item)
+                for item in view.materialization_audits
+            ),
+        )
+
+
+class KnowledgeSubmissionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    submission_id: UUID
+    workspace_id: UUID
+    producer_type: str
+    producer_id: UUID
+    planning_run_id: UUID | None
+    execution_id: UUID | None
+    worker_item_id: UUID | None
+    task_id: UUID | None
+    subtask_task_id: UUID | None
+    proposal_hash: str
+    status: str
+    attempt: int
+    knowledge_command_id: UUID | None
+    terminal_candidate_id: UUID | None
+    candidate_deep_link: str | None
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, view: KnowledgeSubmissionView) -> "KnowledgeSubmissionResponse":
+        return cls(
+            submission_id=view.submission_id,
+            workspace_id=view.workspace_id,
+            producer_type=view.producer_type,
+            producer_id=view.producer_id,
+            planning_run_id=view.planning_run_id,
+            execution_id=view.execution_id,
+            worker_item_id=view.worker_item_id,
+            task_id=view.task_id,
+            subtask_task_id=view.subtask_task_id,
+            proposal_hash=view.proposal_hash,
+            status=view.status,
+            attempt=view.attempt,
+            knowledge_command_id=view.knowledge_command_id,
+            terminal_candidate_id=view.terminal_candidate_id,
+            candidate_deep_link=view.candidate_deep_link,
+            error_code=view.error_code,
+            created_at=view.created_at,
+            updated_at=view.updated_at,
+        )
+
+
+class KnowledgeSubmissionPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: tuple[KnowledgeSubmissionResponse, ...]
+    next_cursor: str | None
+
+    @classmethod
+    def from_view(cls, view: KnowledgeSubmissionPageView) -> "KnowledgeSubmissionPageResponse":
+        return cls(
+            items=tuple(KnowledgeSubmissionResponse.from_view(item) for item in view.items),
+            next_cursor=view.next_cursor,
+        )
+
+
+class MaterializationMetadataResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    package_id: UUID
+    package_hash: str
+    purpose: str
+    consumer_type: str
+    consumer_id: UUID
+    context_version: int | None
+    expires_at: datetime
+
+
+class MaterializationTextItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    text: str
+    ordinal: int
+
+
+class MaterializationSystemConstraintsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str
+    constraints: tuple[MaterializationTextItemResponse, ...]
+    acceptance_criteria: tuple[MaterializationTextItemResponse, ...]
+
+
+class MaterializationClarificationDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    question: str
+    answer: str
+    answered_by: str
+    ordinal: int
+
+
+class MaterializationAcceptedDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    statement: str
+    source: str
+    ordinal: int
+
+
+class MaterializationUnresolvedQuestionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    question: str
+    blocking: bool
+    ordinal: int
+
+
+class MaterializationWorkContextResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision_id: UUID
+    revision_number: int
+    content_hash: str
+    snapshot_schema_version: int
+    requested_outputs: tuple[MaterializationTextItemResponse, ...]
+    clarification_decisions: tuple[MaterializationClarificationDecisionResponse, ...]
+    accepted_decisions: tuple[MaterializationAcceptedDecisionResponse, ...]
+    unresolved_questions: tuple[MaterializationUnresolvedQuestionResponse, ...]
+    checkpoint_refs: tuple[ContextPackageReferenceResponse, ...]
+    missing_fact_codes: tuple[str, ...] = ()
+
+
+class MaterializedContextSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: UUID
+    workspace_id: UUID
+    source_type: str
+    label: str
+    uri: str | None
+    workspace_relative_path: str | None
+    git_revision: str | None
+    digest: str | None
+    metadata: dict[str, Any]
+    availability: str
+    safe_reason_code: str | None
+    last_checked_at: datetime | None
+    version: int
+
+
+class MaterializationKnowledgeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ordinal: int
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    body_markdown: str
+    sources: tuple[MaterializedContextSourceResponse, ...]
+    trust: str
+    section_byte_count: int
+
+
+class MaterializedContextRefResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    ref_id: UUID
+    ref_type: str
+    ordinal: int
+
+
+class ContextMaterializationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    metadata: MaterializationMetadataResponse
+    system_constraints: MaterializationSystemConstraintsResponse
+    work_context: MaterializationWorkContextResponse
+    control_plane_facts: dict[str, Any]
+    project_knowledge: tuple[MaterializationKnowledgeResponse, ...]
+    artifact_and_evidence_refs: tuple[MaterializedContextRefResponse, ...]
+    total_byte_count: int
+    input_token_count: int
+
+    @classmethod
+    def from_materialization(cls, materialization: Any) -> "ContextMaterializationResponse":
+        payload = materialization.to_mapping()
+        payload["total_byte_count"] = materialization.total_byte_count
+        payload["input_token_count"] = materialization.input_token_count
+        return cls.model_validate(payload)
 
 
 class PlanningProfilePageResponse(CursorPageResponse):

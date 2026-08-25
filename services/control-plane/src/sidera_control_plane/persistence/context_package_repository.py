@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -91,6 +92,62 @@ class ContextAssemblyRepository:
             statement = statement.with_for_update()
         row = self._session.scalar(statement)
         return _to_assembly_request(row) if row is not None else None
+
+    def get_for_update(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> ContextAssemblyRequest | None:
+        row = self._session.scalar(
+            select(ContextAssemblyRequestModel)
+            .where(
+                ContextAssemblyRequestModel.id == request_id,
+                ContextAssemblyRequestModel.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        return _to_assembly_request(row) if row is not None else None
+
+    def reset_for_retry(
+        self,
+        request: ContextAssemblyRequest,
+        *,
+        expected_version: int,
+        now: datetime,
+    ) -> ContextAssemblyRequest:
+        if request.status not in {
+            ContextAssemblyStatus.BLOCKED,
+            ContextAssemblyStatus.RETRY_WAIT,
+        }:
+            raise ValidationError("only blocked or retry_wait context assemblies can be retried")
+        result = self._session.execute(
+            update(ContextAssemblyRequestModel)
+            .where(
+                ContextAssemblyRequestModel.id == request.request_id,
+                ContextAssemblyRequestModel.workspace_id == request.workspace_id,
+                ContextAssemblyRequestModel.version == expected_version,
+                ContextAssemblyRequestModel.status.in_(
+                    (
+                        ContextAssemblyStatus.BLOCKED.value,
+                        ContextAssemblyStatus.RETRY_WAIT.value,
+                    )
+                ),
+            )
+            .values(
+                status=ContextAssemblyStatus.QUEUED.value,
+                lease_owner=None,
+                lease_expires_at=None,
+                next_attempt_at=now,
+                error_code=None,
+                version=expected_version + 1,
+                updated_at=now,
+            )
+        )
+        if not isinstance(result, CursorResult) or result.rowcount != 1:
+            raise VersionConflict(expected_version, self._current_version(request))
+        self._session.flush()
+        updated = self.get_for_update(request.request_id, request.workspace_id)
+        if updated is None:
+            raise ValidationError("context assembly disappeared after retry")
+        return updated
 
     def claim_next(
         self,
@@ -608,11 +665,13 @@ class ContextPackageRepository:
             causation_id=causation_id,
             correlation_id=correlation_id,
         )
-        self._session.flush()
-        stored = self.get(package_id, workspace_id)
-        if stored is None:
-            raise ValidationError("context package disappeared after revoke")
-        return stored
+        return replace(
+            package,
+            status=ContextPackageStatus.REVOKED,
+            revoked_at=now,
+            revocation_reason=reason,
+            revocation_scope=normalized_scope,
+        )
 
     def mark_corrupt(
         self,

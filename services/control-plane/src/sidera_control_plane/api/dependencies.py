@@ -4,12 +4,17 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
 )
 from sidera_control_plane.application.command_queries import CommandQueryService
 from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.context_package_queries import (
+    ContextPackageCommandHandler,
+    ContextPackageQueryService,
+)
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
     ExecutionInputCommandHandler,
@@ -56,6 +61,9 @@ from sidera_control_plane.persistence.artifact_content_store import (
 )
 from sidera_control_plane.persistence.command_query_store import (
     SqlAlchemyCommandQueryStore,
+)
+from sidera_control_plane.persistence.context_package_query_store import (
+    SqlAlchemyContextPackageQueryStore,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.planning_query_store import (
@@ -136,6 +144,11 @@ def get_command_service(
                 local_actor_id=settings.local_actor_id,
                 clock=lambda: datetime.now(UTC),
             ),
+            ContextPackageCommandHandler(
+                local_actor_type=settings.local_actor_type,
+                local_actor_id=settings.local_actor_id,
+                clock=lambda: datetime.now(UTC),
+            ),
         ),
     )
 
@@ -166,6 +179,27 @@ def get_work_context_query_service(
     )
 
     return WorkContextQueryService(SqlAlchemyWorkContextQueryStore(database))
+
+
+def get_context_package_query_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ContextPackageQueryService:
+    def catalog_factory() -> KnowledgeHttpAdapter:
+        return KnowledgeHttpAdapter(
+            base_url=settings.knowledge_base_url,
+            control_plane_token=settings.knowledge_control_plane_token,
+            metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
+            materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
+        )
+
+    return ContextPackageQueryService(
+        SqlAlchemyContextPackageQueryStore(database),
+        catalog_factory=catalog_factory,
+        actor_type=settings.local_actor_type,
+        actor_id=settings.local_actor_id,
+        clock=lambda: datetime.now(UTC),
+    )
 
 
 def get_planning_metrics_service(

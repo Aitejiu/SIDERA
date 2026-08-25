@@ -498,6 +498,20 @@ class ContextAssemblyRepositoryPort(Protocol):
     ) -> ContextAssemblyRequest | None:
         raise NotImplementedError
 
+    def get_for_update(
+        self, request_id: UUID, workspace_id: UUID
+    ) -> ContextAssemblyRequest | None:
+        raise NotImplementedError
+
+    def reset_for_retry(
+        self,
+        request: ContextAssemblyRequest,
+        *,
+        expected_version: int,
+        now: datetime,
+    ) -> ContextAssemblyRequest:
+        raise NotImplementedError
+
     def claim_next(
         self,
         *,

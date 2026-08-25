@@ -23,7 +23,9 @@ from sidera_control_plane.api.schemas import (
     RejectPlanningProposalPayload,
     RequestProposalRevisionPayload,
     RetryBlockedPlanningRunPayload,
+    RetryContextAssemblyPayload,
     ReviseWorkContextPayload,
+    RevokeContextPackagePayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
 )
@@ -42,6 +44,8 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("ReviseWorkContext", ReviseWorkContextPayload),
     ("AttachKnowledgeRevision", AttachKnowledgeRevisionPayload),
     ("ArchiveWorkContext", ArchiveWorkContextPayload),
+    ("RetryContextAssembly", RetryContextAssemblyPayload),
+    ("RevokeContextPackage", RevokeContextPackagePayload),
 )
 
 _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (

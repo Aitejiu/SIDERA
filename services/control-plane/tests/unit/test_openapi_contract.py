@@ -28,6 +28,13 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/planning-requests/{planning_request_id}/work-context",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/work-context",
     "/api/v1/workspaces/{workspace_id}/work-contexts/{work_context_id}/revisions/{revision_id}",
+    "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}",
+    "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/context-package",
+    "/api/v1/workspaces/{workspace_id}/executions/{execution_id}/context-package",
+    "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/knowledge-submissions",
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/knowledge-submissions",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions",
+    "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}/materialize",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -43,6 +50,16 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/planning-requests/{planning_request_id}/work-context": "WorkContextDetailResponse",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/work-context": "WorkContextDetailResponse",
     "/api/v1/workspaces/{workspace_id}/work-contexts/{work_context_id}/revisions/{revision_id}": "WorkContextRevisionResponse",
+    "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}": "ContextPackageResponse",
+    "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/context-package": "ContextPackageResponse",
+    "/api/v1/workspaces/{workspace_id}/executions/{execution_id}/context-package": "ContextPackageResponse",
+    "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
+}
+
+EXPECTED_TYPED_POST_RESPONSES = {
+    "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}/materialize": "ContextMaterializationResponse",
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
@@ -62,6 +79,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "SetModuleLifecycle": "SetModuleLifecyclePayload",
     "PinExecutionWorker": "PinExecutionWorkerPayload",
     "ClearExecutionWorkerPin": "ClearExecutionWorkerPinPayload",
+    "RetryContextAssembly": "RetryContextAssemblyPayload",
+    "RevokeContextPackage": "RevokeContextPackagePayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {
@@ -89,6 +108,13 @@ EXPECTED_WORK_CONTEXT_RESPONSE_SCHEMAS = {
     "WorkContextSnapshotResponse",
 }
 
+EXPECTED_CONTEXT_PACKAGE_RESPONSE_SCHEMAS = {
+    "ContextPackageResponse",
+    "KnowledgeSubmissionPageResponse",
+    "KnowledgeSubmissionResponse",
+    "ContextMaterializationResponse",
+}
+
 
 def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) -> None:
     output = tmp_path / "nested" / "openapi.json"
@@ -107,6 +133,13 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         response_schema = first["paths"][path]["get"]["responses"]["200"]["content"][
             "application/json"
         ]["schema"]
+        assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
+        assert schema_name in first["components"]["schemas"]
+
+    for path, schema_name in EXPECTED_TYPED_POST_RESPONSES.items():
+        response_schema = first["paths"][path]["post"]["responses"]["200"][
+            "content"
+        ]["application/json"]["schema"]
         assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
         assert schema_name in first["components"]["schemas"]
 
@@ -160,6 +193,7 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         == "array"
     )
     assert EXPECTED_WORK_CONTEXT_RESPONSE_SCHEMAS <= schemas.keys()
+    assert EXPECTED_CONTEXT_PACKAGE_RESPONSE_SCHEMAS <= schemas.keys()
 
     command_request = schemas["CommandRequest"]
     assert command_request["properties"]["payload"] == {

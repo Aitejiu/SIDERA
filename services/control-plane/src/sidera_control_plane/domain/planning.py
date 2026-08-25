@@ -505,6 +505,21 @@ class PlanningRun:
         self.finished_at = _aware(now, "run finished_at")
         self.version += 1
 
+    def retry_after_context_block(self, *, now: datetime) -> None:
+        if self.status is not PlanningRunStatus.BLOCKED:
+            raise InvalidTransition("only a blocked planning run can retry context assembly")
+        if not (self.error_code or "").startswith("context_"):
+            raise InvalidTransition("planning run is not blocked by context assembly")
+        self.status = PlanningRunStatus.QUEUED
+        self.finished_at = None
+        self.error_code = None
+        self.error_message = None
+        self.diagnostic_artifact_ref = None
+        self.lease_id = None
+        self.fencing_token = 0
+        self.queued_at = _aware(now, "run queued_at")
+        self.version += 1
+
     def _assert_running_fence(self, *, lease_id: UUID, fencing_token: int) -> None:
         if self.status is not PlanningRunStatus.RUNNING:
             raise InvalidTransition("only a running planning run can finish")
@@ -890,6 +905,14 @@ class PlanningRequest:
             new_run_id=new_run_id,
             now=now,
         )
+
+    def retry_context_assembly(self, run_id: UUID, *, now: datetime) -> None:
+        if self.status is not PlanningRequestStatus.FAILED:
+            raise InvalidTransition("only a failed planning request can retry context assembly")
+        run = self.run(run_id)
+        run.retry_after_context_block(now=now)
+        self.status = PlanningRequestStatus.PLANNING
+        self._touch(now)
 
     def mark_conflicted(self, *, now: datetime) -> None:
         if self.status is not PlanningRequestStatus.PROPOSAL_READY:

@@ -548,6 +548,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Context Package */
+        get: operations["get_context_package"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}/materialize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Materialize Context Package */
+        post: operations["materialize_context_package_owner_audit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/executions/{execution_id}/context-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Execution Context Package */
+        get: operations["get_execution_context_package"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/planning-metrics": {
         parameters: {
             query?: never;
@@ -718,6 +769,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/context-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Planning Run Context Package */
+        get: operations["get_planning_run_context_package"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/knowledge-submissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Planning Run Knowledge Submissions */
+        get: operations["list_planning_run_knowledge_submissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projection-changes": {
         parameters: {
             query?: never;
@@ -786,6 +871,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/knowledge-submissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Task Knowledge Submissions */
+        get: operations["list_task_knowledge_submissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/work-contexts/{work_context_id}/revisions/{revision_id}": {
         parameters: {
             query?: never;
@@ -812,6 +914,23 @@ export interface paths {
         };
         /** List Worker Item Activity */
         get: operations["list_worker_item_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Worker Item Knowledge Submissions */
+        get: operations["list_worker_item_knowledge_submissions"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1038,7 +1157,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package";
             /**
              * Workspace Id
              * Format: uuid
@@ -1112,6 +1231,262 @@ export interface components {
             proposal_content_hash: string;
             /** Proposal Revision */
             proposal_revision: number;
+        };
+        /** ContextMaterializationResponse */
+        ContextMaterializationResponse: {
+            /** Artifact And Evidence Refs */
+            artifact_and_evidence_refs: components["schemas"]["MaterializedContextRefResponse"][];
+            /** Control Plane Facts */
+            control_plane_facts: {
+                [key: string]: unknown;
+            };
+            /** Input Token Count */
+            input_token_count: number;
+            metadata: components["schemas"]["MaterializationMetadataResponse"];
+            /** Project Knowledge */
+            project_knowledge: components["schemas"]["MaterializationKnowledgeResponse"][];
+            /** Schema Version */
+            schema_version: number;
+            system_constraints: components["schemas"]["MaterializationSystemConstraintsResponse"];
+            /** Total Byte Count */
+            total_byte_count: number;
+            work_context: components["schemas"]["MaterializationWorkContextResponse"];
+        };
+        /** ContextPackageAcknowledgementResponse */
+        ContextPackageAcknowledgementResponse: {
+            /**
+             * Acknowledged At
+             * Format: date-time
+             */
+            acknowledged_at: string;
+            /** Adapter Config Version */
+            adapter_config_version: number;
+            /**
+             * Adapter Module Id
+             * Format: uuid
+             */
+            adapter_module_id: string;
+            /**
+             * Consumer Id
+             * Format: uuid
+             */
+            consumer_id: string;
+            /** Consumer Type */
+            consumer_type: string;
+            /** Context Version */
+            context_version: number | null;
+            /** Package Hash */
+            package_hash: string;
+            /**
+             * Package Id
+             * Format: uuid
+             */
+            package_id: string;
+        };
+        /** ContextPackageAssemblyResponse */
+        ContextPackageAssemblyResponse: {
+            /** Attempt */
+            attempt: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Code */
+            error_code: string | null;
+            /** Next Attempt At */
+            next_attempt_at: string | null;
+            /** Request Fingerprint */
+            request_fingerprint: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /** Status */
+            status: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+        };
+        /** ContextPackageBudgetResponse */
+        ContextPackageBudgetResponse: {
+            /** Actual Chars */
+            actual_chars: number;
+            /** Actual Input Tokens */
+            actual_input_tokens: number;
+            /** Actual Sections */
+            actual_sections: number;
+            /** Max Chars */
+            max_chars: number;
+            /** Max Input Tokens */
+            max_input_tokens: number;
+            /** Max Sections */
+            max_sections: number;
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
+            /** Profile Version */
+            profile_version: number;
+        };
+        /** ContextPackageKnowledgeRefResponse */
+        ContextPackageKnowledgeRefResponse: {
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Page Id
+             * Format: uuid
+             */
+            page_id: string;
+            /** Revision Hash */
+            revision_hash: string;
+            /**
+             * Revision Id
+             * Format: uuid
+             */
+            revision_id: string;
+            /** Section Hash */
+            section_hash: string;
+            /** Section Key */
+            section_key: string;
+            /** Selection Reason */
+            selection_reason: string;
+            /** Source Ids */
+            source_ids: string[];
+            /** Trust Level */
+            trust_level: string;
+        };
+        /** ContextPackageMaterializationAuditResponse */
+        ContextPackageMaterializationAuditResponse: {
+            /** Attempt */
+            attempt: number;
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /** Byte Count */
+            byte_count: number;
+            /**
+             * Consumer Id
+             * Format: uuid
+             */
+            consumer_id: string;
+            /** Consumer Type */
+            consumer_type: string;
+            /** Context Version */
+            context_version: number | null;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Input Token Count */
+            input_token_count: number;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Outcome */
+            outcome: string;
+            /**
+             * Package Id
+             * Format: uuid
+             */
+            package_id: string;
+            /** Section Count */
+            section_count: number;
+        };
+        /** ContextPackageReferenceResponse */
+        ContextPackageReferenceResponse: {
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Ref Id
+             * Format: uuid
+             */
+            ref_id: string;
+            /** Ref Type */
+            ref_type: string;
+        };
+        /** ContextPackageResponse */
+        ContextPackageResponse: {
+            /** Acknowledgements */
+            acknowledgements: components["schemas"]["ContextPackageAcknowledgementResponse"][];
+            /** Artifact Refs */
+            artifact_refs: components["schemas"]["ContextPackageReferenceResponse"][];
+            assembly: components["schemas"]["ContextPackageAssemblyResponse"];
+            budget: components["schemas"]["ContextPackageBudgetResponse"];
+            /**
+             * Consumer Id
+             * Format: uuid
+             */
+            consumer_id: string;
+            /** Consumer Type */
+            consumer_type: string;
+            /** Context Version */
+            context_version: number | null;
+            /** Control Plane Fact Snapshot */
+            control_plane_fact_snapshot: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["ContextPackageReferenceResponse"][];
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Knowledge Refs */
+            knowledge_refs: components["schemas"]["ContextPackageKnowledgeRefResponse"][];
+            /** Materialization Audits */
+            materialization_audits: components["schemas"]["ContextPackageMaterializationAuditResponse"][];
+            /** Materialized At */
+            materialized_at: string | null;
+            /** Package Hash */
+            package_hash: string;
+            /**
+             * Package Id
+             * Format: uuid
+             */
+            package_id: string;
+            /** Purpose */
+            purpose: string;
+            /** Revocation Reason */
+            revocation_reason: string | null;
+            /** Revocation Scope */
+            revocation_scope: string | null;
+            /** Revoked At */
+            revoked_at: string | null;
+            /** Status */
+            status: string;
+            /** Work Context Content Hash */
+            work_context_content_hash: string;
+            /**
+             * Work Context Revision Id
+             * Format: uuid
+             */
+            work_context_revision_id: string;
+            /** Work Context Revision Number */
+            work_context_revision_number: number;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** DependencyResponse */
         DependencyResponse: {
@@ -1685,6 +2060,67 @@ export interface components {
             /** Source Ids */
             source_ids?: string[];
         };
+        /** KnowledgeSubmissionPageResponse */
+        KnowledgeSubmissionPageResponse: {
+            /** Items */
+            items: components["schemas"]["KnowledgeSubmissionResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** KnowledgeSubmissionResponse */
+        KnowledgeSubmissionResponse: {
+            /** Attempt */
+            attempt: number;
+            /** Candidate Deep Link */
+            candidate_deep_link: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Code */
+            error_code: string | null;
+            /** Execution Id */
+            execution_id: string | null;
+            /** Knowledge Command Id */
+            knowledge_command_id: string | null;
+            /** Planning Run Id */
+            planning_run_id: string | null;
+            /**
+             * Producer Id
+             * Format: uuid
+             */
+            producer_id: string;
+            /** Producer Type */
+            producer_type: string;
+            /** Proposal Hash */
+            proposal_hash: string;
+            /** Status */
+            status: string;
+            /**
+             * Submission Id
+             * Format: uuid
+             */
+            submission_id: string;
+            /** Subtask Task Id */
+            subtask_task_id: string | null;
+            /** Task Id */
+            task_id: string | null;
+            /** Terminal Candidate Id */
+            terminal_candidate_id: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
         /** LeaseResponse */
         LeaseResponse: {
             /** Assignment Reason */
@@ -1726,6 +2162,194 @@ export interface components {
              * Format: uuid
              */
             worker_id: string;
+        };
+        /** MaterializationAcceptedDecisionResponse */
+        MaterializationAcceptedDecisionResponse: {
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Source */
+            source: string;
+            /** Statement */
+            statement: string;
+        };
+        /** MaterializationClarificationDecisionResponse */
+        MaterializationClarificationDecisionResponse: {
+            /** Answer */
+            answer: string;
+            /** Answered By */
+            answered_by: string;
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Question */
+            question: string;
+        };
+        /** MaterializationKnowledgeResponse */
+        MaterializationKnowledgeResponse: {
+            /** Body Markdown */
+            body_markdown: string;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Page Id
+             * Format: uuid
+             */
+            page_id: string;
+            /** Revision Hash */
+            revision_hash: string;
+            /**
+             * Revision Id
+             * Format: uuid
+             */
+            revision_id: string;
+            /** Section Byte Count */
+            section_byte_count: number;
+            /** Section Hash */
+            section_hash: string;
+            /** Section Key */
+            section_key: string;
+            /** Sources */
+            sources: components["schemas"]["MaterializedContextSourceResponse"][];
+            /** Trust */
+            trust: string;
+        };
+        /** MaterializationMetadataResponse */
+        MaterializationMetadataResponse: {
+            /**
+             * Consumer Id
+             * Format: uuid
+             */
+            consumer_id: string;
+            /** Consumer Type */
+            consumer_type: string;
+            /** Context Version */
+            context_version: number | null;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Package Hash */
+            package_hash: string;
+            /**
+             * Package Id
+             * Format: uuid
+             */
+            package_id: string;
+            /** Purpose */
+            purpose: string;
+        };
+        /** MaterializationSystemConstraintsResponse */
+        MaterializationSystemConstraintsResponse: {
+            /** Acceptance Criteria */
+            acceptance_criteria: components["schemas"]["MaterializationTextItemResponse"][];
+            /** Constraints */
+            constraints: components["schemas"]["MaterializationTextItemResponse"][];
+            /** Objective */
+            objective: string;
+        };
+        /** MaterializationTextItemResponse */
+        MaterializationTextItemResponse: {
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Text */
+            text: string;
+        };
+        /** MaterializationUnresolvedQuestionResponse */
+        MaterializationUnresolvedQuestionResponse: {
+            /** Blocking */
+            blocking: boolean;
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Question */
+            question: string;
+        };
+        /** MaterializationWorkContextResponse */
+        MaterializationWorkContextResponse: {
+            /** Accepted Decisions */
+            accepted_decisions: components["schemas"]["MaterializationAcceptedDecisionResponse"][];
+            /** Checkpoint Refs */
+            checkpoint_refs: components["schemas"]["ContextPackageReferenceResponse"][];
+            /** Clarification Decisions */
+            clarification_decisions: components["schemas"]["MaterializationClarificationDecisionResponse"][];
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Missing Fact Codes
+             * @default []
+             */
+            missing_fact_codes: string[];
+            /** Requested Outputs */
+            requested_outputs: components["schemas"]["MaterializationTextItemResponse"][];
+            /**
+             * Revision Id
+             * Format: uuid
+             */
+            revision_id: string;
+            /** Revision Number */
+            revision_number: number;
+            /** Snapshot Schema Version */
+            snapshot_schema_version: number;
+            /** Unresolved Questions */
+            unresolved_questions: components["schemas"]["MaterializationUnresolvedQuestionResponse"][];
+        };
+        /** MaterializedContextRefResponse */
+        MaterializedContextRefResponse: {
+            /** Category */
+            category: string;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Ref Id
+             * Format: uuid
+             */
+            ref_id: string;
+            /** Ref Type */
+            ref_type: string;
+        };
+        /** MaterializedContextSourceResponse */
+        MaterializedContextSourceResponse: {
+            /** Availability */
+            availability: string;
+            /** Digest */
+            digest: string | null;
+            /** Git Revision */
+            git_revision: string | null;
+            /** Label */
+            label: string;
+            /** Last Checked At */
+            last_checked_at: string | null;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Safe Reason Code */
+            safe_reason_code: string | null;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /** Source Type */
+            source_type: string;
+            /** Uri */
+            uri: string | null;
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+            /** Workspace Relative Path */
+            workspace_relative_path: string | null;
         };
         /** MilestoneResponse */
         MilestoneResponse: {
@@ -2494,6 +3118,11 @@ export interface components {
              */
             unknown_outcome_decision: "retry";
         };
+        /** RetryContextAssemblyPayload */
+        RetryContextAssemblyPayload: {
+            /** Request Fingerprint */
+            request_fingerprint: string;
+        };
         /** ReviseWorkContextPayload */
         ReviseWorkContextPayload: {
             /** Base Content Hash */
@@ -2506,6 +3135,23 @@ export interface components {
              * @enum {string}
              */
             reason: "replanned" | "user_intervention";
+        };
+        /** RevokeContextPackagePayload */
+        RevokeContextPackagePayload: {
+            /** Expected Package Hash */
+            expected_package_hash: string;
+            /**
+             * Expected Package Status
+             * @enum {string}
+             */
+            expected_package_status: "active" | "revoked" | "corrupt";
+            /** Reason */
+            reason: string;
+            /**
+             * Revocation Scope
+             * @enum {string}
+             */
+            revocation_scope: "new_starts" | "all_materialization";
         };
         /** RuntimeDurationMetricsResponse */
         RuntimeDurationMetricsResponse: {
@@ -5276,6 +5922,102 @@ export interface operations {
             };
         };
     };
+    get_context_package: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                package_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContextPackageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    materialize_context_package_owner_audit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                package_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContextMaterializationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_execution_context_package: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContextPackageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_planning_metrics_api_v1_workspaces__workspace_id__planning_metrics_get: {
         parameters: {
             query?: never;
@@ -5606,6 +6348,73 @@ export interface operations {
             };
         };
     };
+    get_planning_run_context_package: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContextPackageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_planning_run_knowledge_submissions: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeSubmissionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     projection_changes_api_v1_workspaces__workspace_id__projection_changes_get: {
         parameters: {
             query?: {
@@ -5739,6 +6548,41 @@ export interface operations {
             };
         };
     };
+    list_task_knowledge_submissions: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeSubmissionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_work_context_revision_api_v1_workspaces__workspace_id__work_contexts__work_context_id__revisions__revision_id__get: {
         parameters: {
             query?: never;
@@ -5794,6 +6638,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkerItemActivityPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_worker_item_knowledge_submissions: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeSubmissionPageResponse"];
                 };
             };
             /** @description Validation Error */
