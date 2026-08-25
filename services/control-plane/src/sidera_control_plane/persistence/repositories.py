@@ -295,6 +295,11 @@ def _outbox_topic(event: EventData) -> str:
         topic = topics.get(event.event_type)
         if topic is not None:
             return topic
+    if (
+        event.aggregate_type == "work_context_binding"
+        and event.event_type == "WorkContextBoundToTask"
+    ):
+        return "work_context.bound_to_task"
     return f"{event.aggregate_type}.{event.event_type}"
 
 

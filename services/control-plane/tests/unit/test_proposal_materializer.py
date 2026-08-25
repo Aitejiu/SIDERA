@@ -9,6 +9,9 @@ from sidera_control_plane.application.ports import (
     WorkerItemPlacement,
 )
 from sidera_control_plane.application.proposal_materializer import ProposalMaterializer
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution_requests import (
@@ -58,6 +61,11 @@ from sidera_control_plane.domain.plans import (
     SubtaskDependency,
     WorkerItemDependency,
     WorkItemKind,
+)
+from sidera_control_plane.domain.work_context import (
+    WorkContext,
+    WorkContextRevision,
+    WorkContextRevisionReason,
 )
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -131,6 +139,65 @@ class FakeRequestRepository:
         self.saved.append((request, previous_version))
 
 
+class FakeWorkContextRepository:
+    def __init__(self, request: PlanningRequest) -> None:
+        initial_revision = WorkContextRevisionFactory().create(
+            work_context_id=uuid4(),
+            workspace_id=request.workspace_id,
+            brief=request.briefs[0],
+            revision_number=1,
+            reason=WorkContextRevisionReason.REQUEST_CREATED,
+            actor=request.actor,
+            created_at=request.created_at,
+        )
+        self.context = WorkContext.create(
+            work_context_id=initial_revision.work_context_id,
+            workspace_id=request.workspace_id,
+            planning_request_id=request.id,
+            first_revision=initial_revision,
+            created_at=request.created_at,
+        )
+        self.revisions: dict[UUID, WorkContextRevision] = {
+            initial_revision.revision_id: initial_revision
+        }
+        self.bound: list[tuple[WorkContextRevision, UUID, int]] = []
+
+    def get_by_planning_request(
+        self, planning_request_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkContext | None:
+        if (
+            self.context.planning_request_id == planning_request_id
+            and self.context.workspace_id == workspace_id
+        ):
+            return self.context
+        return None
+
+    def get_revision(
+        self, revision_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkContextRevision | None:
+        revision = self.revisions.get(revision_id)
+        if revision is None or revision.workspace_id != workspace_id:
+            return None
+        return revision
+
+    def bind_root_task(
+        self,
+        context: WorkContext,
+        root_task_id: UUID,
+        revision: WorkContextRevision,
+        *,
+        expected_version: int,
+    ) -> None:
+        context.bind_root_task_with_revision(
+            root_task_id,
+            revision,
+            expected_version=expected_version,
+            now=NOW,
+        )
+        self.revisions[revision.revision_id] = revision
+        self.bound.append((revision, root_task_id, expected_version))
+
+
 class FakeMaterializationRepository:
     def __init__(self) -> None:
         self.added = []
@@ -159,12 +226,13 @@ class FakeEventRepository:
 
 
 class FakeUnitOfWork:
-    def __init__(self) -> None:
+    def __init__(self, request: PlanningRequest) -> None:
         self.tasks = FakeTaskRepository()
         self.plans = FakePlanRepository()
         self.worker_items = FakeWorkerItemRepository()
         self.execution_requests = FakeExecutionRequestRepository()
         self.planning_requests = FakeRequestRepository()
+        self.work_contexts = FakeWorkContextRepository(request)
         self.proposal_materializations = FakeMaterializationRepository()
         self.events = FakeEventRepository()
 
@@ -485,7 +553,7 @@ def test_materializes_tasks_plan_worker_items_requests_and_mapping() -> None:
     stored_profile, request, proposal = proposal_fixture()
     command = envelope(request)
     command.payload["proposal_content_hash"] = proposal.content_hash
-    uow = FakeUnitOfWork()
+    uow = FakeUnitOfWork(request)
 
     result = ProposalMaterializer().materialize(
         cast(ControlPlaneUnitOfWork, uow),
@@ -546,13 +614,29 @@ def test_materializes_tasks_plan_worker_items_requests_and_mapping() -> None:
         f"/workspaces/{WORKSPACE_ID}/tasks/{result.materialization.root_task_id}"
     )
     assert uow.planning_requests.saved[0][1] == 4
+    assert uow.work_contexts.context.root_task_id == result.materialization.root_task_id
+    assert uow.work_contexts.context.current_revision_number == 2
+    context_revision = uow.work_contexts.revisions[
+        uow.work_contexts.context.current_revision_id
+    ]
+    assert context_revision.reason is WorkContextRevisionReason.PROPOSAL_CONFIRMED
+    assert context_revision.proposal_revision_id == proposal.id
+    assert context_revision.plan_snapshot_id == result.materialization.plan_snapshot_id
+    assert any(
+        item.key == "proposal:understanding"
+        for item in context_revision.snapshot.accepted_decisions
+    )
+    assert [event.event_type for event in uow.events.events[-2:]] == [
+        "WorkContextRevised",
+        "WorkContextBoundToTask",
+    ]
 
 
 def test_dependency_expansion_deduplicates_edges_and_preserves_informational_edges() -> None:
     stored_profile, request, proposal = proposal_fixture()
     command = envelope(request)
     command.payload["proposal_content_hash"] = proposal.content_hash
-    uow = FakeUnitOfWork()
+    uow = FakeUnitOfWork(request)
 
     ProposalMaterializer().materialize(
         cast(ControlPlaneUnitOfWork, uow),
@@ -588,7 +672,7 @@ def test_materializer_does_not_create_executions_or_call_scheduler() -> None:
     stored_profile, request, proposal = proposal_fixture()
     command = envelope(request)
     command.payload["proposal_content_hash"] = proposal.content_hash
-    uow = FakeUnitOfWork()
+    uow = FakeUnitOfWork(request)
 
     result = ProposalMaterializer().materialize(
         cast(ControlPlaneUnitOfWork, uow),

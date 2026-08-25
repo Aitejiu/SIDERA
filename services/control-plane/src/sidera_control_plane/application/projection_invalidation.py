@@ -80,15 +80,16 @@ def projection_targets_for_event(
     """Map one durable domain event to the public projections it can affect."""
 
     payload = event.payload
-    if event.aggregate_type == "work_context":
+    if event.aggregate_type in {"work_context", "work_context_binding"}:
         change_type = {
             "WorkContextCreated": "work_context_created",
             "WorkContextRevised": "work_context_revised",
+            "WorkContextBoundToTask": "work_context_bound_to_task",
         }.get(event.event_type, "work_context_updated")
         return (
             ProjectionInvalidationTarget(
                 "work_context",
-                event.aggregate_id,
+                _payload_uuid(payload, "work_context_id") or event.aggregate_id,
                 change_type,
             ),
         )

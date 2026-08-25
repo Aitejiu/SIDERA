@@ -124,3 +124,29 @@ def test_work_context_events_invalidate_the_work_context_projection(
             change_type=change_type,
         ),
     )
+
+
+def test_work_context_binding_event_invalidates_the_work_context_projection() -> None:
+    event = EventData(
+        id=UUID("41000000-0000-0000-0000-000000000003"),
+        workspace_id=WORKSPACE_ID,
+        aggregate_type="work_context_binding",
+        aggregate_id=WORK_CONTEXT_ID,
+        aggregate_version=1,
+        event_type="WorkContextBoundToTask",
+        payload={
+            "work_context_id": str(WORK_CONTEXT_ID),
+            "planning_request_id": str(REQUEST_ID),
+            "root_task_id": str(UUID("33000000-0000-0000-0000-000000000002")),
+        },
+        actor_type="test",
+        actor_id="projection-test",
+        causation_id=UUID("51000000-0000-0000-0000-000000000003"),
+        correlation_id=UUID("61000000-0000-0000-0000-000000000003"),
+    )
+
+    targets = projection_targets_for_event(event)
+
+    assert targets[0].projection_type == "work_context"
+    assert targets[0].resource_id == WORK_CONTEXT_ID
+    assert targets[0].change_type == "work_context_bound_to_task"

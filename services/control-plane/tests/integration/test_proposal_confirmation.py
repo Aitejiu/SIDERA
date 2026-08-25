@@ -11,10 +11,14 @@ from sqlalchemy import func, select, update
 
 from sidera_control_plane.adapters.fake_planner import _proposal_payload
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+)
 from sidera_control_plane.application.worker_item_materializer import (
     WorkerItemMaterializer,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.errors import VersionConflict
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
     IdempotencyCapability,
@@ -40,15 +44,26 @@ from sidera_control_plane.domain.planning_proposals import (
     ProposalRevision,
 )
 from sidera_control_plane.domain.plans import PlanValidationError, TaskPlanSnapshot
+from sidera_control_plane.domain.work_context import (
+    WorkContext,
+    WorkContextRevisionReason,
+)
 from sidera_control_plane.persistence.models import (
+    EventModel,
     ExecutionModel,
     ExecutionRequestModel,
+    OutboxMessageModel,
     PlanningProfileModel,
     PlanSnapshotModel,
     ProposalMaterializationModel,
     TaskModel,
+    WorkContextModel,
+    WorkContextRevisionModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
+)
+from sidera_control_plane.persistence.work_context_repository import (
+    WorkContextRepository,
 )
 
 pytestmark = pytest.mark.integration
@@ -163,6 +178,25 @@ def seed_proposal(uow_factory, workspace_id: UUID) -> tuple[UUID, UUID, str, UUI
         uow.modules.add_instance(instance)
         uow.planning_profiles.add(stored_profile)
         uow.planning_requests.add(request)
+        context_revision = WorkContextRevisionFactory().create(
+            work_context_id=uuid4(),
+            workspace_id=workspace_id,
+            brief=request.briefs[0],
+            revision_number=1,
+            reason=WorkContextRevisionReason.REQUEST_CREATED,
+            actor="operator",
+            created_at=NOW,
+        )
+        uow.work_contexts.add(
+            WorkContext.create(
+                work_context_id=context_revision.work_context_id,
+                workspace_id=workspace_id,
+                planning_request_id=request.id,
+                first_revision=context_revision,
+                created_at=NOW,
+            ),
+            context_revision,
+        )
 
     with uow_factory() as uow:
         request = uow.planning_requests.get(request.id, workspace_id, for_update=True)
@@ -281,6 +315,53 @@ def test_confirm_planning_proposal_materializes_atomic_task_first_graph(
         )
         assert materialization is not None
         assert materialization.proposal_revision_id == proposal_id
+        context = session.scalar(
+            select(WorkContextModel).where(
+                WorkContextModel.planning_request_id == request_id
+            )
+        )
+        assert context is not None
+        assert context.root_task_id == root_task_id
+        assert context.current_revision_number == 2
+        revisions = session.scalars(
+            select(WorkContextRevisionModel)
+            .where(WorkContextRevisionModel.work_context_id == context.id)
+            .order_by(WorkContextRevisionModel.revision_number.asc())
+        ).all()
+        assert len(revisions) == 2
+        assert revisions[1].reason == "proposal_confirmed"
+        assert revisions[1].brief_planning_request_id == request_id
+        assert revisions[1].brief_revision == 1
+        assert revisions[1].proposal_revision_id == proposal_id
+        assert revisions[1].plan_snapshot_id == materialization.plan_snapshot_id
+        assert "decision_summary" not in revisions[1].snapshot
+        assert "worker_items" not in revisions[1].snapshot
+        assert any(
+            item["key"] == "proposal:understanding"
+            for item in revisions[1].snapshot["accepted_decisions"]
+        )
+        context_events = session.scalars(
+            select(EventModel).where(
+                EventModel.aggregate_type == "work_context",
+                EventModel.aggregate_id == context.id,
+            )
+        ).all()
+        binding_events = session.scalars(
+            select(EventModel).where(
+                EventModel.aggregate_type == "work_context_binding",
+                EventModel.aggregate_id == context.id,
+            )
+        ).all()
+        context_outbox = session.scalars(select(OutboxMessageModel)).all()
+        assert [event.event_type for event in context_events] == ["WorkContextRevised"]
+        assert [event.event_type for event in binding_events] == [
+            "WorkContextBoundToTask"
+        ]
+        assert {
+            row.topic
+            for row in context_outbox
+            if row.payload["aggregate_id"] == str(context.id)
+        } == {"work_context.revised", "work_context.bound_to_task"}
 
     with uow_factory() as uow:
         planning_request = uow.planning_requests.get(request_id, workspace_id)
@@ -595,6 +676,64 @@ def test_second_worker_item_failure_rolls_back_partial_materialization(
     assert response.json()["error"]["code"] == "validation_error"
     with database.session() as session:
         _assert_no_materialization_rows(session)
+
+
+def test_work_context_binding_conflict_rolls_back_partial_materialization(
+    client: TestClient,
+    database,
+    workspace_id: UUID,
+    uow_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id, profile_id, content_hash, _proposal_id = seed_proposal(
+        uow_factory, workspace_id
+    )
+
+    def fail_binding(
+        self,
+        context,
+        root_task_id,
+        revision,
+        *,
+        expected_version: int,
+    ) -> None:
+        del self, context, root_task_id, revision
+        raise VersionConflict(expected_version, expected_version + 1)
+
+    monkeypatch.setattr(WorkContextRepository, "bind_root_task", fail_binding)
+
+    response = client.post(
+        "/api/v1/commands",
+        json=command(
+            workspace_id,
+            request_id,
+            profile_id,
+            content_hash,
+            idempotency_key="confirm-context-conflict",
+        ),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "version_conflict"
+    with database.session() as session:
+        _assert_no_materialization_rows(session)
+        context = session.scalar(
+            select(WorkContextModel).where(
+                WorkContextModel.planning_request_id == request_id
+            )
+        )
+        assert context is not None
+        assert context.root_task_id is None
+        assert context.current_revision_number == 1
+        assert context.version == 1
+        assert (
+            session.scalar(
+                select(func.count()).select_from(WorkContextRevisionModel).where(
+                    WorkContextRevisionModel.work_context_id == context.id
+                )
+            )
+            == 1
+        )
 
 
 def test_concurrent_distinct_confirmations_create_one_materialization(

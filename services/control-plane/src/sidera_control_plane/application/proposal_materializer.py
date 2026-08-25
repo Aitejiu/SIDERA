@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+    work_context_bound_event,
+    work_context_event,
+)
 from sidera_control_plane.application.worker_item_materializer import (
     MaterializedPlan,
     WorkerItemMaterializer,
@@ -38,6 +44,7 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
 )
 from sidera_control_plane.domain.task import Task
+from sidera_control_plane.domain.work_context import WorkContextRevisionReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +65,7 @@ class ProposalMaterializer:
 
     def __init__(self, worker_item_materializer: WorkerItemMaterializer | None = None) -> None:
         self._worker_item_materializer = worker_item_materializer or WorkerItemMaterializer()
+        self._work_context_factory = WorkContextRevisionFactory()
 
     def materialize(
         self,
@@ -94,6 +102,28 @@ class ProposalMaterializer:
         if request.status is not PlanningRequestStatus.PROPOSAL_READY:
             raise InvalidTransition("only a proposal-ready request can materialize")
         profile.assert_user_selectable()
+        work_context = uow.work_contexts.get_by_planning_request(
+            request.id, request.workspace_id, for_update=True
+        )
+        if work_context is None:
+            raise NotFound("work context not found")
+        current_context_revision = uow.work_contexts.get_revision(
+            work_context.current_revision_id,
+            request.workspace_id,
+        )
+        if current_context_revision is None:
+            raise NotFound("work context current revision not found")
+        previous_context_version = work_context.version
+        brief = next(
+            (
+                candidate
+                for candidate in request.briefs
+                if candidate.revision == proposal.brief_revision
+            ),
+            None,
+        )
+        if brief is None:
+            raise ValidationError("proposal brief revision is not available")
 
         root_task_id = uuid4()
         root_task = Task.create(
@@ -189,6 +219,32 @@ class ProposalMaterializer:
         )
         uow.planning_requests.save(request, previous_request_version)
         uow.proposal_materializations.add(materialization)
+        proposal_decisions = self._work_context_factory.accepted_proposal_decisions(
+            proposal,
+            ordinal_offset=len(current_context_revision.snapshot.accepted_decisions),
+        )
+        context_revision = self._work_context_factory.create(
+            work_context_id=work_context.id,
+            workspace_id=request.workspace_id,
+            brief=brief,
+            revision_number=work_context.current_revision_number + 1,
+            reason=WorkContextRevisionReason.PROPOSAL_CONFIRMED,
+            actor=envelope.actor_id,
+            created_at=now,
+            base_snapshot=current_context_revision.snapshot,
+            accepted_decisions=(
+                *current_context_revision.snapshot.accepted_decisions,
+                *proposal_decisions,
+            ),
+            proposal_revision_id=proposal.id,
+            plan_snapshot_id=materialized_plan.snapshot.id,
+        )
+        uow.work_contexts.bind_root_task(
+            work_context,
+            root_task.id,
+            context_revision,
+            expected_version=previous_context_version,
+        )
 
         events = self._events(
             envelope=envelope,
@@ -199,6 +255,21 @@ class ProposalMaterializer:
             materialized_plan=materialized_plan,
             execution_requests=execution_requests,
             materialization=materialization,
+        )
+        events = (
+            *events,
+            work_context_event(
+                envelope,
+                context=work_context,
+                revision=context_revision,
+                event_type="WorkContextRevised",
+            ),
+            work_context_bound_event(
+                envelope,
+                context=work_context,
+                revision=context_revision,
+                root_task_id=root_task.id,
+            ),
         )
         for event in events:
             uow.events.append_with_outbox(event)

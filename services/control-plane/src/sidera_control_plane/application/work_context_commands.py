@@ -12,6 +12,7 @@ from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
     PlanningClarification,
 )
+from sidera_control_plane.domain.planning_proposals import ProposalRevision
 from sidera_control_plane.domain.work_context import (
     AcceptedDecision,
     ClarificationDecision,
@@ -157,6 +158,49 @@ class WorkContextRevisionFactory:
             )
         return tuple(decisions)
 
+    @staticmethod
+    def accepted_proposal_decisions(
+        proposal: ProposalRevision,
+        *,
+        ordinal_offset: int = 0,
+    ) -> tuple[AcceptedDecision, ...]:
+        """Project proposal decisions and outputs into typed context facts."""
+
+        summary = proposal.payload.decision_summary
+        source = f"proposal:{proposal.id}"
+        statements: list[tuple[str, str]] = [
+            ("proposal:understanding", summary.understanding),
+        ]
+        statements.extend(
+            (f"proposal:assumption:{ordinal:04d}", assumption)
+            for ordinal, assumption in enumerate(summary.assumptions)
+        )
+        statements.extend(
+            (f"proposal:scope_include:{ordinal:04d}", scope)
+            for ordinal, scope in enumerate(summary.scope_includes)
+        )
+        statements.extend(
+            (f"proposal:scope_exclude:{ordinal:04d}", scope)
+            for ordinal, scope in enumerate(summary.scope_excludes)
+        )
+        statements.extend(
+            (
+                f"proposal:output:{item.key}:{ordinal:04d}",
+                f"{item.key}: {output}",
+            )
+            for item in proposal.payload.subtasks
+            for ordinal, output in enumerate(item.expected_outputs)
+        )
+        return tuple(
+            AcceptedDecision(
+                key=key,
+                statement=statement,
+                source=source,
+                ordinal=ordinal_offset + ordinal,
+            )
+            for ordinal, (key, statement) in enumerate(statements)
+        )
+
 
 def work_context_event(
     envelope: CommandEnvelope,
@@ -187,6 +231,42 @@ def work_context_event(
         aggregate_version=context.version,
         event_type=event_type,
         payload=payload,
+        actor_type=envelope.actor_type,
+        actor_id=envelope.actor_id,
+        causation_id=envelope.id,
+        correlation_id=envelope.correlation_id,
+    )
+
+
+def work_context_bound_event(
+    envelope: CommandEnvelope,
+    *,
+    context: WorkContext,
+    revision: WorkContextRevision,
+    root_task_id: UUID,
+) -> EventData:
+    """Publish binding as a separate one-shot sub-aggregate event.
+
+    The event store reserves one aggregate version per event. The revision and
+    binding are committed together, but the binding notification therefore
+    uses its own aggregate identity while retaining the WorkContext ID.
+    """
+
+    return EventData(
+        id=uuid4(),
+        workspace_id=envelope.workspace_id,
+        aggregate_type="work_context_binding",
+        aggregate_id=context.id,
+        aggregate_version=1,
+        event_type="WorkContextBoundToTask",
+        payload={
+            "work_context_id": str(context.id),
+            "planning_request_id": str(context.planning_request_id),
+            "root_task_id": str(root_task_id),
+            "revision_id": str(revision.revision_id),
+            "revision_number": revision.revision_number,
+            "context_version": context.version,
+        },
         actor_type=envelope.actor_type,
         actor_id=envelope.actor_id,
         causation_id=envelope.id,
