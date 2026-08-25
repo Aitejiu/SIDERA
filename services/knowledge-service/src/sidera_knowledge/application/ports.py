@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from sidera_knowledge.domain.candidates import (
@@ -13,6 +13,9 @@ from sidera_knowledge.domain.pages import (
     KnowledgeRevision,
     KnowledgeSource,
 )
+
+if TYPE_CHECKING:
+    from sidera_knowledge.application.retrieval import SearchFilters, SearchHit
 
 
 class KnowledgePageRepositoryPort(Protocol):
@@ -106,4 +109,14 @@ class KnowledgeUnitOfWorkPort(Protocol):
     def rollback(self) -> None: ...
 
     def flush(self) -> None: ...
+
+
+class RetrievalAdapter(Protocol):
+    def search(
+        self,
+        workspace_id: UUID,
+        query: str,
+        filters: SearchFilters,
+        limit: int = 20,
+    ) -> tuple[SearchHit, ...]: ...
 from sidera_knowledge.domain.commands import CommandEnvelope, EventEnvelope

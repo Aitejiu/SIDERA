@@ -23,6 +23,37 @@ class RevisionDiffError(DomainValidationError):
     """Raised when two revisions cannot be compared safely."""
 
 
+class KnowledgeMaterializationError(DomainValidationError):
+    """Raised when an exact knowledge section reference cannot be materialized."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+MATERIALIZATION_MAX_SECTIONS = 32
+MATERIALIZATION_MAX_SECTION_BYTES = 128 * 1024
+MATERIALIZATION_MAX_TOTAL_BYTES = 256 * 1024
+
+
+@dataclass(frozen=True)
+class KnowledgeSectionRef:
+    ordinal: int
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    source_ids: tuple[UUID, ...]
+
+    def __post_init__(self) -> None:
+        if self.ordinal < 0:
+            raise KnowledgeMaterializationError(
+                "source_invalid", "section ordinal must be nonnegative"
+            )
+        object.__setattr__(self, "source_ids", tuple(self.source_ids))
+
+
 @dataclass(frozen=True)
 class SectionView:
     section_key: str
@@ -68,6 +99,32 @@ class SourceView:
     safe_reason_code: str | None
     last_checked_at: datetime | None
     version: int
+
+
+@dataclass(frozen=True)
+class MaterializedKnowledgeSection:
+    ordinal: int
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    body_markdown: str
+    sources: tuple[SourceView, ...]
+    trust: str
+    section_byte_count: int
+
+
+@dataclass(frozen=True)
+class KnowledgeMaterialization:
+    sections: tuple[MaterializedKnowledgeSection, ...]
+    total_byte_count: int
+
+
+# Short aliases keep the exact-ref contract easy to discover for adapters.
+ExactSectionRef = KnowledgeSectionRef
+MaterializedSection = MaterializedKnowledgeSection
+MaterializationResult = KnowledgeMaterialization
 
 
 @dataclass(frozen=True)
@@ -257,6 +314,12 @@ class KnowledgeQueryStore(Protocol):
     def get_revision(
         self, workspace_id: UUID, page_id: UUID, revision_id: UUID
     ) -> RevisionDetail | None: ...
+
+    def materialize_sections(
+        self,
+        workspace_id: UUID,
+        refs: tuple[KnowledgeSectionRef, ...],
+    ) -> KnowledgeMaterialization: ...
 
     def list_candidates(
         self,
@@ -457,6 +520,13 @@ class KnowledgeQueryService:
         self, workspace_id: UUID, page_id: UUID, revision_id: UUID
     ) -> RevisionDetail | None:
         return self._store.get_revision(workspace_id, page_id, revision_id)
+
+    def materialize_sections(
+        self,
+        workspace_id: UUID,
+        refs: tuple[KnowledgeSectionRef, ...],
+    ) -> KnowledgeMaterialization:
+        return self._store.materialize_sections(workspace_id, refs)
 
     def list_candidates(
         self,

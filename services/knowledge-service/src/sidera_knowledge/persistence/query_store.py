@@ -6,13 +6,20 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, case, exists, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from sidera_knowledge.application.knowledge_queries import (
+    MATERIALIZATION_MAX_SECTION_BYTES,
+    MATERIALIZATION_MAX_SECTIONS,
+    MATERIALIZATION_MAX_TOTAL_BYTES,
     CandidateDetail,
     CandidateList,
     CandidateSummary,
+    KnowledgeMaterialization,
+    KnowledgeMaterializationError,
+    KnowledgeSectionRef,
+    MaterializedKnowledgeSection,
     PageDetail,
     PageList,
     PageSummary,
@@ -29,6 +36,12 @@ from sidera_knowledge.application.knowledge_queries import (
     encode_page_cursor,
     encode_source_cursor,
 )
+from sidera_knowledge.application.retrieval import (
+    SearchFilters,
+    SearchHit,
+    validate_search_request,
+)
+from sidera_knowledge.domain.common import canonical_json_bytes, sha256_hex
 from sidera_knowledge.domain.pages import (
     KnowledgeRelationSnapshot,
     KnowledgeSectionSnapshot,
@@ -393,6 +406,194 @@ class SqlAlchemyKnowledgeQueryStore:
             )
             return _revision_detail(session, row) if row is not None else None
 
+    def materialize_sections(
+        self,
+        workspace_id: UUID,
+        refs: tuple[KnowledgeSectionRef, ...],
+    ) -> KnowledgeMaterialization:
+        if len(refs) > MATERIALIZATION_MAX_SECTIONS:
+            raise KnowledgeMaterializationError(
+                "content_limit_exceeded",
+                "materialization cannot contain more than 32 sections",
+            )
+        if len({ref.ordinal for ref in refs}) != len(refs):
+            raise KnowledgeMaterializationError(
+                "source_invalid", "section ordinals must be unique"
+            )
+        identities = {
+            (ref.page_id, ref.revision_id, ref.section_key) for ref in refs
+        }
+        if len(identities) != len(refs):
+            raise KnowledgeMaterializationError(
+                "source_invalid", "section references must be unique"
+            )
+        if not refs:
+            return KnowledgeMaterialization(sections=(), total_byte_count=0)
+
+        for ref in refs:
+            if ref.source_ids != tuple(sorted(ref.source_ids, key=str)):
+                raise KnowledgeMaterializationError(
+                    "source_invalid", "source_ids must use stable sorted order"
+                )
+
+        with self._database.session() as session:
+            # Materialization is a bounded read; keep a database-side ceiling even
+            # when the caller's HTTP timeout is misconfigured.
+            session.execute(text("SET LOCAL statement_timeout = '30000ms'"))
+            conditions = tuple(
+                and_(
+                    KnowledgeRevisionModel.id == ref.revision_id,
+                    KnowledgeRevisionModel.page_id == ref.page_id,
+                    KnowledgeSectionSnapshotModel.revision_id == ref.revision_id,
+                    KnowledgeSectionSnapshotModel.section_key == ref.section_key,
+                )
+                for ref in refs
+            )
+            rows = session.execute(
+                select(
+                    KnowledgeRevisionModel,
+                    KnowledgePageModel,
+                    KnowledgeSectionSnapshotModel,
+                )
+                .join(
+                    KnowledgePageModel,
+                    and_(
+                        KnowledgePageModel.id == KnowledgeRevisionModel.page_id,
+                        KnowledgePageModel.workspace_id
+                        == KnowledgeRevisionModel.workspace_id,
+                    ),
+                )
+                .join(
+                    KnowledgeSectionSnapshotModel,
+                    and_(
+                        KnowledgeSectionSnapshotModel.revision_id
+                        == KnowledgeRevisionModel.id,
+                        KnowledgeSectionSnapshotModel.workspace_id
+                        == KnowledgeRevisionModel.workspace_id,
+                    ),
+                )
+                .where(
+                    KnowledgeRevisionModel.workspace_id == workspace_id,
+                    KnowledgePageModel.workspace_id == workspace_id,
+                    KnowledgeSectionSnapshotModel.workspace_id == workspace_id,
+                    or_(*conditions),
+                )
+            ).all()
+            rows_by_identity = {
+                (revision.page_id, revision.id, section.section_key): (
+                    revision,
+                    page,
+                    section,
+                )
+                for revision, page, section in rows
+            }
+            if len(rows_by_identity) != len(refs):
+                raise KnowledgeMaterializationError(
+                    "not_found", "one or more exact knowledge references were not found"
+                )
+
+            revision_ids = tuple({ref.revision_id for ref in refs})
+            source_rows = session.execute(
+                select(KnowledgeRevisionSourceModel, KnowledgeSourceModel)
+                .outerjoin(
+                    KnowledgeSourceModel,
+                    and_(
+                        KnowledgeSourceModel.id
+                        == KnowledgeRevisionSourceModel.source_id,
+                        KnowledgeSourceModel.workspace_id
+                        == KnowledgeRevisionSourceModel.workspace_id,
+                    ),
+                )
+                .where(
+                    KnowledgeRevisionSourceModel.workspace_id == workspace_id,
+                    KnowledgeRevisionSourceModel.revision_id.in_(revision_ids),
+                )
+                .order_by(
+                    KnowledgeRevisionSourceModel.revision_id,
+                    KnowledgeRevisionSourceModel.ordinal,
+                )
+            ).all()
+            sources_by_revision: dict[UUID, list[SourceView]] = {}
+            for link, source in source_rows:
+                if source is None:
+                    raise KnowledgeMaterializationError(
+                        "source_invalid", "a revision source is unavailable"
+                    )
+                sources_by_revision.setdefault(link.revision_id, []).append(
+                    _source_view(source)
+                )
+
+            materialized: list[MaterializedKnowledgeSection] = []
+            total_byte_count = 0
+            for ref in refs:
+                revision, _, section = rows_by_identity[
+                    (ref.page_id, ref.revision_id, ref.section_key)
+                ]
+                revision_hash = sha256_hex(canonical_json_bytes(revision.snapshot))
+                if revision_hash != revision.content_hash or ref.revision_hash != revision_hash:
+                    raise KnowledgeMaterializationError(
+                        "hash_mismatch", "revision hash does not match the exact snapshot"
+                    )
+
+                section_snapshot = KnowledgeSectionSnapshot(
+                    section_key=section.section_key,
+                    heading=section.heading,
+                    summary=section.summary,
+                    body_markdown=section.body_markdown,
+                    ordinal=section.ordinal,
+                )
+                section_byte_count = len(section.body_markdown.encode("utf-8"))
+                if (
+                    section_byte_count != section.content_byte_count
+                    or section_snapshot.section_hash != section.section_hash
+                    or ref.section_hash != section.section_hash
+                ):
+                    raise KnowledgeMaterializationError(
+                        "hash_mismatch", "section hash does not match the exact snapshot"
+                    )
+                if section_byte_count > MATERIALIZATION_MAX_SECTION_BYTES:
+                    raise KnowledgeMaterializationError(
+                        "content_limit_exceeded",
+                        "a materialized section exceeds the byte limit",
+                    )
+                total_byte_count += section_byte_count
+                if total_byte_count > MATERIALIZATION_MAX_TOTAL_BYTES:
+                    raise KnowledgeMaterializationError(
+                        "content_limit_exceeded",
+                        "materialization exceeds the total byte limit",
+                    )
+
+                sources = tuple(sources_by_revision.get(revision.id, ()))
+                source_ids = tuple(source.source_id for source in sources)
+                if source_ids != ref.source_ids:
+                    raise KnowledgeMaterializationError(
+                        "source_invalid", "source_ids do not match the revision manifest"
+                    )
+                trust = (
+                    "external_reference"
+                    if any(source.source_type == "external_url" for source in sources)
+                    else "workspace_confirmed"
+                )
+                materialized.append(
+                    MaterializedKnowledgeSection(
+                        ordinal=ref.ordinal,
+                        page_id=revision.page_id,
+                        revision_id=revision.id,
+                        revision_hash=revision_hash,
+                        section_key=section.section_key,
+                        section_hash=section.section_hash,
+                        body_markdown=section.body_markdown,
+                        sources=sources,
+                        trust=trust,
+                        section_byte_count=section_byte_count,
+                    )
+                )
+
+            return KnowledgeMaterialization(
+                sections=tuple(sorted(materialized, key=lambda item: item.ordinal)),
+                total_byte_count=total_byte_count,
+            )
+
     @staticmethod
     def _source_filter(
         candidate_id: Any,
@@ -621,3 +822,181 @@ class SqlAlchemyKnowledgeQueryStore:
                     else None
                 ),
             )
+
+
+class PostgresRetrievalAdapter:
+    """PostgreSQL FTS adapter that returns bounded metadata-only search hits."""
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def search(
+        self,
+        workspace_id: UUID,
+        query: str,
+        filters: SearchFilters,
+        limit: int = 20,
+    ) -> tuple[SearchHit, ...]:
+        validate_search_request(query, filters, limit)
+        normalized_query = query.strip()
+
+        with self._database.session() as session:
+            if normalized_query:
+                ts_query = func.websearch_to_tsquery("simple", normalized_query)
+                matches_query = KnowledgeRevisionModel.search_vector.op("@@")(
+                    ts_query
+                )
+                title_match = func.to_tsvector(
+                    "simple", KnowledgeRevisionModel.title
+                ).op("@@")(ts_query)
+                rank = (
+                    func.ts_rank_cd(
+                        KnowledgeRevisionModel.search_vector,
+                        ts_query,
+                    )
+                    + case((title_match, 1.0), else_=0.0)
+                ).label("rank")
+            else:
+                matches_query = literal(True)
+                rank = literal(0.0).label("rank")
+
+            statement = (
+                select(
+                    KnowledgeRevisionModel,
+                    KnowledgePageModel,
+                    KnowledgeSectionSnapshotModel,
+                    rank,
+                )
+                .join(
+                    KnowledgePageModel,
+                    and_(
+                        KnowledgePageModel.id == KnowledgeRevisionModel.page_id,
+                        KnowledgePageModel.workspace_id
+                        == KnowledgeRevisionModel.workspace_id,
+                    ),
+                )
+                .join(
+                    KnowledgeSectionSnapshotModel,
+                    and_(
+                        KnowledgeSectionSnapshotModel.revision_id
+                        == KnowledgeRevisionModel.id,
+                        KnowledgeSectionSnapshotModel.workspace_id
+                        == KnowledgeRevisionModel.workspace_id,
+                    ),
+                )
+                .where(
+                    KnowledgeRevisionModel.workspace_id == workspace_id,
+                    KnowledgePageModel.workspace_id == workspace_id,
+                    KnowledgePageModel.current_revision_id
+                    == KnowledgeRevisionModel.id,
+                    matches_query,
+                )
+            )
+            if filters.status is not None:
+                statement = statement.where(
+                    KnowledgePageModel.status == filters.status
+                )
+            if filters.tags:
+                statement = statement.where(
+                    KnowledgeRevisionModel.tags.contains(list(filters.tags))
+                )
+            if filters.source_types:
+                statement = statement.where(
+                    exists(
+                        select(1)
+                        .select_from(KnowledgeRevisionSourceModel)
+                        .join(
+                            KnowledgeSourceModel,
+                            and_(
+                                KnowledgeSourceModel.id
+                                == KnowledgeRevisionSourceModel.source_id,
+                                KnowledgeSourceModel.workspace_id
+                                == KnowledgeRevisionSourceModel.workspace_id,
+                            ),
+                        )
+                        .where(
+                            KnowledgeRevisionSourceModel.revision_id
+                            == KnowledgeRevisionModel.id,
+                            KnowledgeRevisionSourceModel.workspace_id == workspace_id,
+                            KnowledgeSourceModel.source_type.in_(filters.source_types),
+                        )
+                    )
+                )
+
+            rows = session.execute(
+                statement.order_by(
+                    rank.desc(),
+                    KnowledgeRevisionModel.title,
+                    KnowledgePageModel.id,
+                    KnowledgeSectionSnapshotModel.ordinal,
+                    KnowledgeSectionSnapshotModel.section_key,
+                ).limit(limit)
+            ).all()
+            if not rows:
+                return ()
+
+            revision_ids = tuple({revision.id for revision, _, _, _ in rows})
+            source_rows = session.execute(
+                select(
+                    KnowledgeRevisionSourceModel.revision_id,
+                    KnowledgeSourceModel.id,
+                    KnowledgeSourceModel.source_type,
+                    KnowledgeSourceModel.availability,
+                )
+                .join(
+                    KnowledgeSourceModel,
+                    and_(
+                        KnowledgeSourceModel.id
+                        == KnowledgeRevisionSourceModel.source_id,
+                        KnowledgeSourceModel.workspace_id
+                        == KnowledgeRevisionSourceModel.workspace_id,
+                    ),
+                )
+                .where(
+                    KnowledgeRevisionSourceModel.workspace_id == workspace_id,
+                    KnowledgeRevisionSourceModel.revision_id.in_(revision_ids),
+                )
+                .order_by(
+                    KnowledgeRevisionSourceModel.revision_id,
+                    KnowledgeRevisionSourceModel.ordinal,
+                )
+            ).all()
+
+            sources_by_revision: dict[UUID, list[tuple[UUID, str, str]]] = {}
+            for revision_id, source_id, source_type, availability in source_rows:
+                sources_by_revision.setdefault(revision_id, []).append(
+                    (source_id, source_type, availability)
+                )
+
+            hits: list[SearchHit] = []
+            for revision, page, section, row_rank in rows:
+                sources = sources_by_revision.get(revision.id, [])
+                source_ids = tuple(item[0] for item in sources)
+                source_types = tuple(item[1] for item in sources)
+                source_availability = tuple(item[2] for item in sources)
+                trust = (
+                    "external_reference"
+                    if "external_url" in source_types
+                    else "workspace_confirmed"
+                )
+                hits.append(
+                    SearchHit(
+                        page_id=page.id,
+                        revision_id=revision.id,
+                        section_key=section.section_key,
+                        revision_number=revision.revision_number,
+                        revision_hash=revision.content_hash,
+                        section_hash=section.section_hash,
+                        title=revision.title,
+                        summary=revision.summary,
+                        tags=tuple(revision.tags),
+                        source_ids=source_ids,
+                        source_types=source_types,
+                        source_availability=source_availability,
+                        trust=trust,
+                        section_byte_count=section.content_byte_count,
+                        rank=float(row_rank or 0.0),
+                        rank_explanation="weighted title/tags > summary > section body",
+                    )
+                )
+            return tuple(hits)
