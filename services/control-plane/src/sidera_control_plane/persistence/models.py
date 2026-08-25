@@ -2595,6 +2595,10 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
             "request_fingerprint ~ '^[0-9a-f]{64}$'",
             name="ck_context_assembly_requests_fingerprint",
         ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_context_assembly_requests_version",
+        ),
         ForeignKeyConstraint(
             ["workspace_id"],
             ["workspaces.id"],
