@@ -10,6 +10,7 @@ from sidera_control_plane.domain.events import EventData
 
 WORKSPACE_ID = UUID("21000000-0000-0000-0000-000000000001")
 REQUEST_ID = UUID("31000000-0000-0000-0000-000000000001")
+WORK_CONTEXT_ID = UUID("32000000-0000-0000-0000-000000000001")
 
 
 def _event(event_type: str, *, aggregate_type: str = "planning_request") -> EventData:
@@ -81,3 +82,45 @@ def test_planning_run_events_scope_to_request_from_payload() -> None:
 
 def test_planning_projection_type_is_public() -> None:
     assert "planning_request" in PROJECTION_TYPES
+
+
+@pytest.mark.parametrize(
+    ("event_type", "change_type"),
+    [
+        ("WorkContextCreated", "work_context_created"),
+        ("WorkContextRevised", "work_context_revised"),
+    ],
+)
+def test_work_context_events_invalidate_the_work_context_projection(
+    event_type: str, change_type: str
+) -> None:
+    event = EventData(
+        id=UUID("41000000-0000-0000-0000-000000000002"),
+        workspace_id=WORKSPACE_ID,
+        aggregate_type="work_context",
+        aggregate_id=WORK_CONTEXT_ID,
+        aggregate_version=2,
+        event_type=event_type,
+        payload={
+            "planning_request_id": str(REQUEST_ID),
+            "revision_id": str(UUID("33000000-0000-0000-0000-000000000001")),
+            "revision_number": 2,
+            "reason": "clarification_accepted",
+            "content_hash": "a" * 64,
+        },
+        actor_type="test",
+        actor_id="projection-test",
+        causation_id=UUID("51000000-0000-0000-0000-000000000002"),
+        correlation_id=UUID("61000000-0000-0000-0000-000000000002"),
+    )
+
+    targets = projection_targets_for_event(event)
+
+    assert "work_context" in PROJECTION_TYPES
+    assert targets == (
+        type(targets[0])(
+            projection_type="work_context",
+            resource_id=WORK_CONTEXT_ID,
+            change_type=change_type,
+        ),
+    )

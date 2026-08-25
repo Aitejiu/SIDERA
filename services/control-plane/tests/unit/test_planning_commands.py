@@ -6,6 +6,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import OperatorRequired, ValidationError
 from sidera_control_plane.domain.events import EventData
@@ -34,6 +37,11 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningProfileStatus,
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
+)
+from sidera_control_plane.domain.work_context import (
+    WorkContext,
+    WorkContextRevision,
+    WorkContextRevisionReason,
 )
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -258,6 +266,67 @@ class RecordRepository:
         self.saved_clarifications.append((clarification, previous_version))
 
 
+class WorkContextRepository:
+    def __init__(self, request: PlanningRequest | None = None) -> None:
+        self.context: WorkContext | None = None
+        self.revisions: dict[UUID, WorkContextRevision] = {}
+        self.added: list[tuple[WorkContext, WorkContextRevision]] = []
+        self.appended: list[tuple[WorkContextRevision, int]] = []
+        if request is not None:
+            revision = WorkContextRevisionFactory().create(
+                work_context_id=uuid4(),
+                workspace_id=request.workspace_id,
+                brief=request.briefs[0],
+                revision_number=1,
+                reason=WorkContextRevisionReason.REQUEST_CREATED,
+                actor=request.actor,
+                created_at=request.created_at,
+            )
+            self.context = WorkContext.create(
+                work_context_id=revision.work_context_id,
+                workspace_id=request.workspace_id,
+                planning_request_id=request.id,
+                first_revision=revision,
+                created_at=request.created_at,
+            )
+            self.revisions[revision.revision_id] = revision
+
+    def add(self, context: WorkContext, first_revision: WorkContextRevision) -> None:
+        self.context = context
+        self.revisions[first_revision.revision_id] = first_revision
+        self.added.append((context, first_revision))
+
+    def get_by_planning_request(
+        self, planning_request_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkContext | None:
+        if self.context is None:
+            return None
+        if (
+            self.context.planning_request_id == planning_request_id
+            and self.context.workspace_id == workspace_id
+        ):
+            return self.context
+        return None
+
+    def get_revision(
+        self, revision_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkContextRevision | None:
+        revision = self.revisions.get(revision_id)
+        if revision is None or revision.workspace_id != workspace_id:
+            return None
+        return revision
+
+    def append_revision(
+        self,
+        context: WorkContext,
+        revision: WorkContextRevision,
+        *,
+        expected_version: int,
+    ) -> None:
+        self.revisions[revision.revision_id] = revision
+        self.appended.append((revision, expected_version))
+
+
 class EventRepository:
     def __init__(self) -> None:
         self.events: list[EventData] = []
@@ -289,6 +358,7 @@ def unit(
         planning_runs=RunRepository(stored_request),
         planning_leases=LeaseRepository(),
         planning_records=RecordRepository(current_proposal),
+        work_contexts=WorkContextRepository(stored_request),
         proposal_materializations=SimpleNamespace(),
         execution_requests=SimpleNamespace(),
         events=EventRepository(),

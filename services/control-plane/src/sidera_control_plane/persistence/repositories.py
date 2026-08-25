@@ -224,7 +224,7 @@ class EventRepository:
             OutboxMessageModel(
                 id=uuid4(),
                 event_id=event.id,
-                topic=f"{event.aggregate_type}.{event.event_type}",
+                topic=_outbox_topic(event),
                 payload={
                     "event_id": str(event.id),
                     "workspace_id": str(event.workspace_id),
@@ -284,6 +284,18 @@ def _resolve_event_scope(
     if root_task_id is None and event.aggregate_type == "task":
         root_task_id = event.aggregate_id
     return worker_item_id, root_task_id
+
+
+def _outbox_topic(event: EventData) -> str:
+    if event.aggregate_type == "work_context":
+        topics = {
+            "WorkContextCreated": "work_context.created",
+            "WorkContextRevised": "work_context.revised",
+        }
+        topic = topics.get(event.event_type)
+        if topic is not None:
+            return topic
+    return f"{event.aggregate_type}.{event.event_type}"
 
 
 def _payload_uuid(payload: dict[str, object], key: str) -> UUID | None:

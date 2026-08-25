@@ -19,6 +19,7 @@ PROJECTION_TYPES = frozenset(
         "worker_item_activity",
         "worker_trace",
         "planning_request",
+        "work_context",
     }
 )
 
@@ -79,6 +80,18 @@ def projection_targets_for_event(
     """Map one durable domain event to the public projections it can affect."""
 
     payload = event.payload
+    if event.aggregate_type == "work_context":
+        change_type = {
+            "WorkContextCreated": "work_context_created",
+            "WorkContextRevised": "work_context_revised",
+        }.get(event.event_type, "work_context_updated")
+        return (
+            ProjectionInvalidationTarget(
+                "work_context",
+                event.aggregate_id,
+                change_type,
+            ),
+        )
     planning_change_type = _planning_change_type(event.event_type)
     if event.aggregate_type == "planning_request":
         return (

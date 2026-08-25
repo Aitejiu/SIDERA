@@ -7,6 +7,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+)
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
@@ -33,6 +36,10 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
 )
+from sidera_control_plane.domain.work_context import (
+    WorkContext,
+    WorkContextRevisionReason,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ExecutionRequestModel,
@@ -41,6 +48,8 @@ from sidera_control_plane.persistence.models import (
     PlanningRunModel,
     PlanSnapshotModel,
     TaskModel,
+    WorkContextModel,
+    WorkContextRevisionModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -167,6 +176,25 @@ def _seed_waiting_request(
             now=NOW,
         )
         uow.planning_requests.add(request)
+        context_revision = WorkContextRevisionFactory().create(
+            work_context_id=uuid4(),
+            workspace_id=workspace_id,
+            brief=request.briefs[0],
+            revision_number=1,
+            reason=WorkContextRevisionReason.REQUEST_CREATED,
+            actor="operator",
+            created_at=NOW,
+        )
+        uow.work_contexts.add(
+            WorkContext.create(
+                work_context_id=context_revision.work_context_id,
+                workspace_id=workspace_id,
+                planning_request_id=request.id,
+                first_revision=context_revision,
+                created_at=NOW,
+            ),
+            context_revision,
+        )
 
     with SqlAlchemyUnitOfWork(database) as uow:
         request = uow.planning_requests.get(request_id, workspace_id, for_update=True)
@@ -423,27 +451,35 @@ def test_answer_planning_clarification_persists_new_brief_and_queued_run(
         database, workspace_id
     )
 
+    answer_command = _command(
+        workspace_id,
+        "AnswerPlanningClarification",
+        "planning_request",
+        {
+            "answers": [
+                {"clarification_id": str(clarification_id), "answer": "fake"}
+            ]
+        },
+        idempotency_key="planning-answer-integration",
+        target_id=request_id,
+        expected_version=expected_version,
+    )
     response = client.post(
         "/api/v1/commands",
-        json=_command(
-            workspace_id,
-            "AnswerPlanningClarification",
-            "planning_request",
-            {
-                "answers": [
-                    {"clarification_id": str(clarification_id), "answer": "fake"}
-                ]
-            },
-            idempotency_key="planning-answer-integration",
-            target_id=request_id,
-            expected_version=expected_version,
-        ),
+        json=answer_command,
     )
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"]["brief_revision"] == 2
     assert body["data"]["planning_request_id"] == str(request_id)
+
+    replay = client.post(
+        "/api/v1/commands",
+        json={**answer_command, "correlation_id": str(uuid4())},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == body
 
     with database.session() as session:
         briefs = session.scalars(
@@ -461,12 +497,30 @@ def test_answer_planning_clarification_persists_new_brief_and_queued_run(
                 PlanningClarificationModel.id == clarification_id
             )
         )
+        context = session.scalar(
+            select(WorkContextModel).where(
+                WorkContextModel.planning_request_id == request_id
+            )
+        )
+        revisions = session.scalars(
+            select(WorkContextRevisionModel)
+            .where(WorkContextRevisionModel.work_context_id == context.id)
+            .order_by(WorkContextRevisionModel.revision_number.asc())
+        ).all() if context is not None else []
         assert len(briefs) == 2
         assert len(runs) == 2
         assert clarification is not None
         assert clarification.answer == "fake"
         assert clarification.answer_brief_revision == 2
         assert any(run.status == "queued" and run.attempt == 2 for run in runs)
+        assert context is not None
+        assert context.current_revision_number == 2
+        assert len(revisions) == 2
+        assert revisions[0].reason == "request_created"
+        assert revisions[1].reason == "clarification_accepted"
+        assert revisions[0].content_hash != revisions[1].content_hash
+        assert revisions[0].snapshot["clarification_decisions"] == []
+        assert revisions[1].snapshot["clarification_decisions"][0]["answer"] == "fake"
 
 
 def test_stale_answer_returns_actionable_planning_conflict(

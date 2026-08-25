@@ -162,7 +162,7 @@ def test_concurrent_exact_submit_replays_one_terminal_result(
     assert _command_counts(database, workspace_id, command_id) == {
         "commands": 1,
         "planning_requests": 1,
-        "events_for_command": 1,
+        "events_for_command": 2,
     }
 
 
@@ -200,5 +200,5 @@ def test_concurrent_changed_submit_conflicts_without_duplicate_request(
     assert _command_counts(database, workspace_id, command_id) == {
         "commands": 1,
         "planning_requests": 1,
-        "events_for_command": 1,
+        "events_for_command": 2,
     }

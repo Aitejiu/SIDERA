@@ -9,6 +9,10 @@ from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.proposal_materializer import (
     ProposalMaterializer,
 )
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+    work_context_event,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     OperatorRequired,
@@ -41,6 +45,10 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
 )
+from sidera_control_plane.domain.work_context import (
+    WorkContext,
+    WorkContextRevisionReason,
+)
 
 
 class PlanningCommandHandler:
@@ -65,11 +73,13 @@ class PlanningCommandHandler:
         local_actor_id: str,
         clock: Callable[[], datetime] | None = None,
         materializer: ProposalMaterializer | None = None,
+        work_context_factory: WorkContextRevisionFactory | None = None,
     ) -> None:
         self._local_actor_type = local_actor_type
         self._local_actor_id = local_actor_id
         self._clock = clock or (lambda: datetime.now(UTC))
         self._materializer = materializer or ProposalMaterializer()
+        self._work_context_factory = work_context_factory or WorkContextRevisionFactory()
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -307,7 +317,30 @@ class PlanningCommandHandler:
             run_id=uuid4(),
             now=self._clock(),
         )
+        work_context_revision = self._work_context_factory.create(
+            work_context_id=uuid4(),
+            workspace_id=envelope.workspace_id,
+            brief=request.briefs[0],
+            revision_number=1,
+            reason=WorkContextRevisionReason.REQUEST_CREATED,
+            actor=envelope.actor_id,
+            created_at=request.created_at,
+        )
+        work_context = WorkContext.create(
+            work_context_id=work_context_revision.work_context_id,
+            workspace_id=envelope.workspace_id,
+            planning_request_id=request.id,
+            first_revision=work_context_revision,
+            created_at=request.created_at,
+        )
         uow.planning_requests.add(request)
+        uow.work_contexts.add(work_context, work_context_revision)
+        context_event = work_context_event(
+            envelope,
+            context=work_context,
+            revision=work_context_revision,
+            event_type="WorkContextCreated",
+        )
         event = _event(
             envelope,
             aggregate_type="planning_request",
@@ -319,20 +352,25 @@ class PlanningCommandHandler:
                 "planning_profile_version": profile.version,
                 "brief_revision": request.current_brief_revision,
                 "planning_run_id": str(request.current_run_id),
+                "work_context_id": str(work_context.id),
                 "source_type": request.source_type,
                 "source_ref": request.source_ref,
             },
         )
+        uow.events.append_with_outbox(context_event)
         uow.events.append_with_outbox(event)
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
             aggregate_version=request.version,
-            event_ids=(event.id,),
+            event_ids=(context_event.id, event.id),
             data={
                 "planning_request_id": str(request.id),
                 "planning_run_id": str(request.current_run_id),
                 "brief_revision": request.current_brief_revision,
+                "work_context_id": str(work_context.id),
+                "work_context_revision": work_context.current_revision_number,
+                "work_context_content_hash": work_context_revision.content_hash,
             },
         )
 
@@ -427,6 +465,18 @@ class PlanningCommandHandler:
         if set(answers) != set(pending):
             raise ValidationError("all pending clarifications must be answered together")
 
+        work_context = uow.work_contexts.get_by_planning_request(
+            request.id, envelope.workspace_id, for_update=True
+        )
+        if work_context is None:
+            raise NotFound("work context not found")
+        current_context_revision = uow.work_contexts.get_revision(
+            work_context.current_revision_id,
+            envelope.workspace_id,
+        )
+        if current_context_revision is None:
+            raise NotFound("work context current revision not found")
+
         current_brief = _current_brief(request)
         feedback = _clarification_feedback(answers)
         brief = _next_brief(
@@ -449,12 +499,49 @@ class PlanningCommandHandler:
             actor=envelope.actor_id,
             now=brief.created_at,
         )
+        previous_context_version = work_context.version
+        new_decisions = self._work_context_factory.clarification_decisions(
+            tuple(pending.values()),
+            answers,
+            actor=envelope.actor_id,
+            ordinal_offset=len(current_context_revision.snapshot.clarification_decisions),
+        )
+        context_revision = self._work_context_factory.create(
+            work_context_id=work_context.id,
+            workspace_id=envelope.workspace_id,
+            brief=brief,
+            revision_number=work_context.current_revision_number + 1,
+            reason=WorkContextRevisionReason.CLARIFICATION_ACCEPTED,
+            actor=envelope.actor_id,
+            created_at=brief.created_at,
+            base_snapshot=current_context_revision.snapshot,
+            clarification_decisions=(
+                *current_context_revision.snapshot.clarification_decisions,
+                *new_decisions,
+            ),
+        )
+        work_context.append_revision(
+            context_revision,
+            expected_version=previous_context_version,
+            now=brief.created_at,
+        )
         self._persist_appended_revision(
             uow,
             request,
             brief=brief,
             previous_request_version=previous_request_version,
             previous_clarification_versions=previous_clarification_versions,
+        )
+        uow.work_contexts.append_revision(
+            work_context,
+            context_revision,
+            expected_version=previous_context_version,
+        )
+        context_event = work_context_event(
+            envelope,
+            context=work_context,
+            revision=context_revision,
+            event_type="WorkContextRevised",
         )
         event = _event(
             envelope,
@@ -468,16 +555,20 @@ class PlanningCommandHandler:
                 "planning_run_id": str(request.current_run_id),
             },
         )
+        uow.events.append_with_outbox(context_event)
         uow.events.append_with_outbox(event)
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
             aggregate_version=request.version,
-            event_ids=(event.id,),
+            event_ids=(context_event.id, event.id),
             data={
                 "planning_request_id": str(request.id),
                 "planning_run_id": str(request.current_run_id),
                 "brief_revision": brief.revision,
+                "work_context_id": str(work_context.id),
+                "work_context_revision": context_revision.revision_number,
+                "work_context_content_hash": context_revision.content_hash,
             },
         )
 
