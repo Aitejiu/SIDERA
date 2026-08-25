@@ -170,6 +170,13 @@ class PlanningPage[T]:
     next_cursor: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningRequestPage:
+    items: tuple[PlanningRequestSummaryView, ...]
+    next_cursor: str | None
+    last_change_cursor: int
+
+
 class PlanningQueryStore(Protocol):
     def list_profiles(
         self, workspace_id: UUID, *, limit: int, cursor: str | None
@@ -184,7 +191,7 @@ class PlanningQueryStore(Protocol):
         status: str | None,
         closed_status: bool | None,
         requires_attention: bool,
-    ) -> PlanningPage[PlanningRequestSummaryView]: ...
+    ) -> PlanningRequestPage: ...
 
     def get_request_detail(
         self, workspace_id: UUID, request_id: UUID
@@ -230,7 +237,7 @@ class PlanningQueryService:
         status: str | None,
         closed_status: bool | None,
         requires_attention: bool,
-    ) -> PlanningPage[PlanningRequestSummaryView]:
+    ) -> PlanningRequestPage:
         _validate_limit(limit)
         return self._store.list_requests(
             workspace_id,

@@ -50,7 +50,9 @@ def test_planning_queries_return_safe_request_views(
     assert "policy" not in profiles.json()["items"][0]
 
     assert requests.status_code == 200, requests.text
-    list_item = requests.json()["items"][0]
+    requests_body = requests.json()
+    assert requests_body["last_change_cursor"] == detail.json()["last_change_cursor"]
+    list_item = requests_body["items"][0]
     assert list_item["id"] == str(request_id)
     assert list_item["requires_attention"] is True
     assert list_item["source_type"] == source_type

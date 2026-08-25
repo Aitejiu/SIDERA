@@ -61,6 +61,7 @@ def list_planning_requests(
     return PlanningRequestPageResponse(
         items=tuple(PlanningRequestSummaryResponse.from_view(item) for item in page.items),
         next_cursor=page.next_cursor,
+        last_change_cursor=page.last_change_cursor,
     )
 
 

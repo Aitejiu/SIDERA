@@ -2132,6 +2132,8 @@ export interface components {
         PlanningRequestPageResponse: {
             /** Items */
             items: components["schemas"]["PlanningRequestSummaryResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
             /** Next Cursor */
             next_cursor: string | null;
         };

@@ -2,11 +2,22 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
 
 import { InboxPage } from "./WorkspacePages";
+
+const { seedSnapshotCursor } = vi.hoisted(() => ({
+  seedSnapshotCursor: vi.fn(),
+}));
+
+vi.mock("@/app/WorkspaceStreamProvider", () => ({
+  useWorkspaceStreamOptional: () => ({
+    seedSnapshotCursor,
+    notices: [],
+  }),
+}));
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const REQUEST_ID = "30000000-0000-0000-0000-000000000001";
@@ -14,6 +25,7 @@ const REQUEST_ID = "30000000-0000-0000-0000-000000000001";
 describe("InboxPage", () => {
   beforeEach(() => {
     server.resetHandlers();
+    seedSnapshotCursor.mockClear();
   });
 
   it("restores pending planning facts from the attention list after a fresh open", async () => {
@@ -39,6 +51,7 @@ describe("InboxPage", () => {
             created_at: "2026-08-23T07:00:00Z",
           }],
           next_cursor: null,
+          last_change_cursor: 42,
         });
       }),
     );
@@ -59,5 +72,6 @@ describe("InboxPage", () => {
       "href",
       `/workspaces/${WORKSPACE_ID}/planning/${REQUEST_ID}`,
     );
+    expect(seedSnapshotCursor).toHaveBeenCalledWith(42);
   });
 });

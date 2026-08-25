@@ -29,6 +29,7 @@ from sidera_control_plane.application.planning_queries import (
     PlanningProfileView,
     PlanningProposalView,
     PlanningRequestDetailView,
+    PlanningRequestPage,
     PlanningRequestSummaryView,
     PlanningRunView,
     PlanningUsageView,
@@ -120,7 +121,7 @@ class SqlAlchemyPlanningQueryStore:
         status: str | None,
         closed_status: bool | None,
         requires_attention: bool,
-    ) -> PlanningPage[PlanningRequestSummaryView]:
+    ) -> PlanningRequestPage:
         with self._database.session() as session:
             filters = [PlanningRequestModel.workspace_id == workspace_id]
             if status is not None:
@@ -142,6 +143,9 @@ class SqlAlchemyPlanningQueryStore:
             request_ids = tuple(row.id for row in rows[:limit])
             profile_keys = _profile_keys(session, workspace_id, rows[:limit])
             current_runs = _current_runs(session, workspace_id, request_ids)
+            last_change_cursor = ProjectionChangeRepository(session).latest_cursor(
+                workspace_id
+            )
 
         page_rows = rows[:limit]
         next_cursor = (
@@ -149,7 +153,7 @@ class SqlAlchemyPlanningQueryStore:
             if len(rows) > limit
             else None
         )
-        return PlanningPage(
+        return PlanningRequestPage(
             items=tuple(
                 _request_summary_view(
                     row,
@@ -159,6 +163,7 @@ class SqlAlchemyPlanningQueryStore:
                 for row in page_rows
             ),
             next_cursor=next_cursor,
+            last_change_cursor=last_change_cursor,
         )
 
     def get_request_detail(

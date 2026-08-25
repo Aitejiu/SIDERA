@@ -2342,6 +2342,7 @@ class PlanningProfilePageResponse(CursorPageResponse):
 
 class PlanningRequestPageResponse(CursorPageResponse):
     items: tuple[PlanningRequestSummaryResponse, ...]
+    last_change_cursor: int
 
 
 class PlanningBriefPageResponse(BaseModel):

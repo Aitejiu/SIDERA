@@ -9,7 +9,7 @@ import {
   Radio,
   Sparkles,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
@@ -39,6 +39,12 @@ export function InboxPage() {
     queryFn: ({ signal }) => listPlanningRequests(workspaceId, { requiresAttention: true, signal }),
     enabled: workspaceId.length > 0,
   });
+  useEffect(() => {
+    const cursor = planningAttentionQuery.data?.last_change_cursor;
+    if (stream !== null && cursor !== undefined) {
+      stream.seedSnapshotCursor(cursor);
+    }
+  }, [planningAttentionQuery.data?.last_change_cursor, stream]);
   const notices = useMemo(
     () => mergeNotifications(
       stream?.notices ?? [],
