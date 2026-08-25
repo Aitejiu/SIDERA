@@ -7,12 +7,19 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from math import ceil
 from types import MappingProxyType
 from typing import cast
 from uuid import UUID
 
 from sidera_control_plane.domain.errors import ValidationError
-from sidera_control_plane.domain.work_context import WorkReference
+from sidera_control_plane.domain.work_context import (
+    AcceptedDecision,
+    ClarificationDecision,
+    ContextTextItem,
+    UnresolvedQuestion,
+    WorkReference,
+)
 
 
 class ContextPurpose(StrEnum):
@@ -59,6 +66,11 @@ class ContextTrustLevel(StrEnum):
 class ContextMaterializationOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class ContextMaterializationMode(StrEnum):
+    CONSUMER_START = "consumer_start"
+    OWNER_AUDIT = "owner_audit"
 
 
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -134,6 +146,334 @@ def _canonical_bytes(value: Mapping[str, object]) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValidationError("context package cannot be canonicalized") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ContextMetadata:
+    package_id: UUID
+    package_hash: str
+    purpose: ContextPurpose
+    consumer_type: ContextConsumerType
+    consumer_id: UUID
+    context_version: int | None
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.package_id, UUID) or not isinstance(self.consumer_id, UUID):
+            raise ValidationError("materialization package/consumer IDs must be UUIDs")
+        object.__setattr__(self, "package_hash", _hash(self.package_hash, "package_hash"))
+        try:
+            object.__setattr__(self, "purpose", ContextPurpose(self.purpose))
+            object.__setattr__(self, "consumer_type", ContextConsumerType(self.consumer_type))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("invalid materialization metadata enum") from exc
+        if self.consumer_type is ContextConsumerType.PLANNER and self.context_version is not None:
+            raise ValidationError("planner materialization cannot have context_version")
+        if self.consumer_type is ContextConsumerType.WORKER:
+            _positive(self.context_version or 0, "worker materialization context_version")
+        _aware(self.expires_at, "materialization expires_at")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "package_id": str(self.package_id),
+            "package_hash": self.package_hash,
+            "purpose": self.purpose.value,
+            "consumer_type": self.consumer_type.value,
+            "consumer_id": str(self.consumer_id),
+            "context_version": self.context_version,
+            "expires_at": self.expires_at.astimezone(UTC).isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SystemConstraintSection:
+    objective: str
+    constraints: tuple[ContextTextItem, ...]
+    acceptance_criteria: tuple[ContextTextItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "objective", _text(self.objective, "system objective"))
+        if any(not isinstance(item, ContextTextItem) for item in self.constraints):
+            raise ValidationError("system constraints must be typed")
+        if any(not isinstance(item, ContextTextItem) for item in self.acceptance_criteria):
+            raise ValidationError("system acceptance criteria must be typed")
+        object.__setattr__(self, "constraints", tuple(self.constraints))
+        object.__setattr__(self, "acceptance_criteria", tuple(self.acceptance_criteria))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "objective": self.objective,
+            "constraints": [item.to_mapping() for item in self.constraints],
+            "acceptance_criteria": [item.to_mapping() for item in self.acceptance_criteria],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkContextSection:
+    revision_id: UUID
+    revision_number: int
+    content_hash: str
+    snapshot_schema_version: int
+    requested_outputs: tuple[ContextTextItem, ...]
+    clarification_decisions: tuple[ClarificationDecision, ...]
+    accepted_decisions: tuple[AcceptedDecision, ...]
+    unresolved_questions: tuple[UnresolvedQuestion, ...]
+    checkpoint_refs: tuple[WorkReference, ...]
+    missing_fact_codes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.revision_id, UUID):
+            raise ValidationError("work context materialization revision_id must be a UUID")
+        _positive(self.revision_number, "work context materialization revision_number")
+        object.__setattr__(self, "content_hash", _hash(self.content_hash, "work context content_hash"))
+        _positive(self.snapshot_schema_version, "work context snapshot_schema_version")
+        typed_fields = {
+            "requested_outputs": ContextTextItem,
+            "clarification_decisions": ClarificationDecision,
+            "accepted_decisions": AcceptedDecision,
+            "unresolved_questions": UnresolvedQuestion,
+            "checkpoint_refs": WorkReference,
+        }
+        for field_name, item_type in typed_fields.items():
+            values = getattr(self, field_name)
+            if any(not isinstance(item, item_type) for item in values):
+                raise ValidationError(f"work context {field_name} must be typed")
+            object.__setattr__(self, field_name, tuple(values))
+        object.__setattr__(
+            self,
+            "missing_fact_codes",
+            tuple(sorted(_text(item, "missing fact code") for item in self.missing_fact_codes)),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "revision_id": str(self.revision_id),
+            "revision_number": self.revision_number,
+            "content_hash": self.content_hash,
+            "snapshot_schema_version": self.snapshot_schema_version,
+            "requested_outputs": [item.to_mapping() for item in self.requested_outputs],
+            "clarification_decisions": [
+                item.to_mapping() for item in self.clarification_decisions
+            ],
+            "accepted_decisions": [item.to_mapping() for item in self.accepted_decisions],
+            "unresolved_questions": [item.to_mapping() for item in self.unresolved_questions],
+            "checkpoint_refs": [item.to_mapping() for item in self.checkpoint_refs],
+            "missing_fact_codes": list(self.missing_fact_codes),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPlaneFactSection:
+    facts: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "facts",
+            cast(Mapping[str, object], _freeze_json(self.facts, "materialization facts")),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"facts": _plain_json(self.facts)}
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedContextSource:
+    source_id: UUID
+    workspace_id: UUID
+    source_type: str
+    label: str
+    uri: str | None
+    workspace_relative_path: str | None
+    git_revision: str | None
+    digest: str | None
+    metadata: Mapping[str, object]
+    availability: str
+    safe_reason_code: str | None
+    last_checked_at: datetime | None
+    version: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_id, UUID) or not isinstance(self.workspace_id, UUID):
+            raise ValidationError("materialized source IDs must be UUIDs")
+        object.__setattr__(self, "source_type", _text(self.source_type, "source_type"))
+        object.__setattr__(self, "label", _text(self.label, "source label"))
+        object.__setattr__(
+            self,
+            "metadata",
+            cast(Mapping[str, object], _freeze_json(self.metadata, "source metadata")),
+        )
+        object.__setattr__(self, "availability", _text(self.availability, "source availability"))
+        _positive(self.version, "source version")
+        if self.last_checked_at is not None:
+            _aware(self.last_checked_at, "source last_checked_at")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "source_id": str(self.source_id),
+            "workspace_id": str(self.workspace_id),
+            "source_type": self.source_type,
+            "label": self.label,
+            "uri": self.uri,
+            "workspace_relative_path": self.workspace_relative_path,
+            "git_revision": self.git_revision,
+            "digest": self.digest,
+            "metadata": _plain_json(self.metadata),
+            "availability": self.availability,
+            "safe_reason_code": self.safe_reason_code,
+            "last_checked_at": (
+                self.last_checked_at.astimezone(UTC).isoformat()
+                if self.last_checked_at is not None
+                else None
+            ),
+            "version": self.version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectKnowledgeSection:
+    ordinal: int
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    body_markdown: str
+    sources: tuple[MaterializedContextSource, ...]
+    trust_level: ContextTrustLevel
+    section_byte_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.page_id, UUID) or not isinstance(self.revision_id, UUID):
+            raise ValidationError("project knowledge IDs must be UUIDs")
+        if not isinstance(self.ordinal, int) or isinstance(self.ordinal, bool) or self.ordinal < 0:
+            raise ValidationError("project knowledge ordinal must be non-negative")
+        object.__setattr__(self, "revision_hash", _hash(self.revision_hash, "knowledge revision_hash"))
+        object.__setattr__(self, "section_hash", _hash(self.section_hash, "knowledge section_hash"))
+        object.__setattr__(self, "section_key", _text(self.section_key, "knowledge section_key"))
+        if not isinstance(self.body_markdown, str):
+            raise ValidationError("knowledge body_markdown must be text")
+        if any(not isinstance(item, MaterializedContextSource) for item in self.sources):
+            raise ValidationError("knowledge sources must be typed")
+        object.__setattr__(self, "sources", tuple(self.sources))
+        try:
+            object.__setattr__(self, "trust_level", ContextTrustLevel(self.trust_level))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("invalid knowledge trust level") from exc
+        _non_negative(self.section_byte_count, "knowledge section_byte_count")
+        if len(self.body_markdown.encode("utf-8")) != self.section_byte_count:
+            raise ValidationError("knowledge body byte count mismatch")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "ordinal": self.ordinal,
+            "page_id": str(self.page_id),
+            "revision_id": str(self.revision_id),
+            "revision_hash": self.revision_hash,
+            "section_key": self.section_key,
+            "section_hash": self.section_hash,
+            "body_markdown": self.body_markdown,
+            "sources": [item.to_mapping() for item in self.sources],
+            "trust": self.trust_level.value,
+            "section_byte_count": self.section_byte_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TypedContextRef:
+    category: str
+    ref_id: UUID
+    ref_type: str
+    ordinal: int
+
+    def __post_init__(self) -> None:
+        if self.category not in {"artifact", "evidence"}:
+            raise ValidationError("context ref category must be artifact or evidence")
+        if not isinstance(self.ref_id, UUID):
+            raise ValidationError("context ref ID must be a UUID")
+        object.__setattr__(self, "ref_type", _text(self.ref_type, "context ref type"))
+        if not isinstance(self.ordinal, int) or isinstance(self.ordinal, bool) or self.ordinal < 0:
+            raise ValidationError("context ref ordinal must be non-negative")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "category": self.category,
+            "ref_id": str(self.ref_id),
+            "ref_type": self.ref_type,
+            "ordinal": self.ordinal,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextMaterializationV1:
+    metadata: ContextMetadata
+    system_constraints: SystemConstraintSection
+    work_context: WorkContextSection
+    control_plane_facts: ControlPlaneFactSection
+    project_knowledge: tuple[ProjectKnowledgeSection, ...]
+    artifact_and_evidence_refs: tuple[TypedContextRef, ...]
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _positive(self.schema_version, "materialization schema_version")
+        if self.schema_version != 1:
+            raise ValidationError("unsupported context materialization schema_version")
+        for field_name, item_type in (
+            ("metadata", ContextMetadata),
+            ("system_constraints", SystemConstraintSection),
+            ("work_context", WorkContextSection),
+            ("control_plane_facts", ControlPlaneFactSection),
+        ):
+            if not isinstance(getattr(self, field_name), item_type):
+                raise ValidationError(f"materialization {field_name} must be typed")
+        if any(not isinstance(item, ProjectKnowledgeSection) for item in self.project_knowledge):
+            raise ValidationError("materialization project knowledge must be typed")
+        if len({item.ordinal for item in self.project_knowledge}) != len(self.project_knowledge):
+            raise ValidationError("materialization project knowledge ordinals must be unique")
+        object.__setattr__(
+            self,
+            "project_knowledge",
+            tuple(sorted(self.project_knowledge, key=lambda item: item.ordinal)),
+        )
+        if any(not isinstance(item, TypedContextRef) for item in self.artifact_and_evidence_refs):
+            raise ValidationError("materialization artifact/evidence refs must be typed")
+        object.__setattr__(
+            self,
+            "artifact_and_evidence_refs",
+            tuple(self.artifact_and_evidence_refs),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "metadata": self.metadata.to_mapping(),
+            "system_constraints": self.system_constraints.to_mapping(),
+            "work_context": self.work_context.to_mapping(),
+            "control_plane_facts": self.control_plane_facts.to_mapping(),
+            "project_knowledge": [item.to_mapping() for item in self.project_knowledge],
+            "artifact_and_evidence_refs": [
+                item.to_mapping() for item in self.artifact_and_evidence_refs
+            ],
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_bytes(self.to_mapping())
+
+    @property
+    def total_byte_count(self) -> int:
+        return len(self.canonical_bytes())
+
+    @property
+    def input_token_count(self) -> int:
+        return ceil(self.total_byte_count / 4)
+
+    @property
+    def knowledge_byte_count(self) -> int:
+        return sum(item.section_byte_count for item in self.project_knowledge)
+
+    @property
+    def knowledge_input_token_count(self) -> int:
+        return sum(ceil(item.section_byte_count / 4) for item in self.project_knowledge)
 
 
 @dataclass(frozen=True, slots=True)
