@@ -107,6 +107,9 @@ def create_app(settings: KnowledgeSettings | None = None) -> FastAPI:
             "schema_head": resolved_settings.alembic_head,
         }
 
+    from sidera_knowledge.api.openapi_contract import customize_openapi
+
+    app.openapi_schema = customize_openapi(app.openapi())
     return app
 
 

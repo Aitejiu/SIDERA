@@ -27,7 +27,22 @@ uv run --project services/knowledge-service uvicorn \
   sidera_knowledge.api.app:app --host 127.0.0.1 --port 8020
 ```
 
-The first foundation endpoints are:
+The service exposes the versioned Knowledge API under `/api/v1`. Its deterministic
+OpenAPI contract is exported for the Web client with:
+
+```bash
+uv run --project services/knowledge-service python -m sidera_knowledge.api.openapi_contract \
+  --output apps/web/knowledge-openapi.json
+npm --prefix apps/web run knowledge-api:generate
+```
+
+The generated Knowledge types live in `apps/web/src/shared/api/knowledge-schema.d.ts`
+and are kept separate from the Control Plane schema. The public endpoints include
+candidate commands, page/revision queries, search, diff, command status, and the
+Control Plane-only exact materialization route. Error responses use the fixed
+`{"error":{"code","message","details"}}` envelope.
+
+The health endpoints are:
 
 ```text
 GET http://127.0.0.1:8020/health/live
@@ -43,5 +58,5 @@ postgresql+psycopg://sidera@127.0.0.1:55432/sidera_knowledge_test
 The database URL is supplied through `SIDERA_KNOWLEDGE_DATABASE_URL`. No production
 credentials belong in this repository.
 
-R5.3.0 currently exposes only health and readiness. Knowledge commands, queries, review,
-FTS search, and ContextPackage integration are delivered by the following R5.3 stages.
+R5.3.1 adds Knowledge commands, queries, review, FTS search, and exact materialization.
+ContextPackage integration remains a later controlled integration stage.

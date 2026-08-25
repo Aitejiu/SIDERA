@@ -1,0 +1,2366 @@
+{
+  "components": {
+    "schemas": {
+      "ActorRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "local_owner",
+              "main_agent",
+              "control_plane"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id"
+        ],
+        "title": "ActorRequest",
+        "type": "object"
+      },
+      "ArchiveCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRequest"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ArchiveKnowledgePage",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "idempotency_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ArchivePagePayload"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_type": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Target Type",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "workspace_id",
+          "target_type",
+          "actor",
+          "idempotency_key",
+          "correlation_id",
+          "command_type",
+          "payload"
+        ],
+        "title": "ArchiveCommandRequest",
+        "type": "object"
+      },
+      "ArchivePagePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_page_version": {
+            "minimum": 1.0,
+            "title": "Expected Page Version",
+            "type": "integer"
+          },
+          "page_id": {
+            "format": "uuid",
+            "title": "Page Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "page_id",
+          "expected_page_version"
+        ],
+        "title": "ArchivePagePayload",
+        "type": "object"
+      },
+      "ErrorBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "KnowledgeSectionRefRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "ordinal": {
+            "minimum": 0.0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "page_id": {
+            "format": "uuid",
+            "title": "Page Id",
+            "type": "string"
+          },
+          "revision_hash": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Revision Hash",
+            "type": "string"
+          },
+          "revision_id": {
+            "format": "uuid",
+            "title": "Revision Id",
+            "type": "string"
+          },
+          "section_hash": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Section Hash",
+            "type": "string"
+          },
+          "section_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Section Key",
+            "type": "string"
+          },
+          "source_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 128,
+            "title": "Source Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ordinal",
+          "page_id",
+          "revision_id",
+          "revision_hash",
+          "section_key",
+          "section_hash"
+        ],
+        "title": "KnowledgeSectionRefRequest",
+        "type": "object"
+      },
+      "MaterializeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSectionRefRequest"
+            },
+            "maxItems": 32,
+            "title": "Sections",
+            "type": "array"
+          }
+        },
+        "title": "MaterializeRequest",
+        "type": "object"
+      },
+      "ProvenancePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
+          },
+          "evidence_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Id"
+          },
+          "execution_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Id"
+          },
+          "producer_id": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Id"
+          },
+          "producer_type": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Type"
+          },
+          "subtask_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtask Id"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "worker_item_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Item Id"
+          }
+        },
+        "title": "ProvenancePayload",
+        "type": "object"
+      },
+      "RelationPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "relation_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Relation Key",
+            "type": "string"
+          },
+          "relation_kind": {
+            "enum": [
+              "relates_to",
+              "depends_on",
+              "supersedes",
+              "derived_from",
+              "implements"
+            ],
+            "title": "Relation Kind",
+            "type": "string"
+          },
+          "target_page_id": {
+            "format": "uuid",
+            "title": "Target Page Id",
+            "type": "string"
+          },
+          "target_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Revision Id"
+          }
+        },
+        "required": [
+          "relation_key",
+          "relation_kind",
+          "target_page_id"
+        ],
+        "title": "RelationPayload",
+        "type": "object"
+      },
+      "ReviewCandidatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "format": "uuid",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "accept",
+              "reject",
+              "request_changes"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "expected_candidate_version": {
+            "minimum": 1.0,
+            "title": "Expected Candidate Version",
+            "type": "integer"
+          },
+          "observed_candidate_hash": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Observed Candidate Hash",
+            "type": "string"
+          },
+          "observed_target_revision_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Target Revision Hash"
+          },
+          "observed_target_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Target Revision Id"
+          },
+          "reason": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "decision",
+          "reason",
+          "observed_candidate_hash",
+          "expected_candidate_version"
+        ],
+        "title": "ReviewCandidatePayload",
+        "type": "object"
+      },
+      "ReviewCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRequest"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ReviewKnowledgeCandidate",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "idempotency_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ReviewCandidatePayload"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_type": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Target Type",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "workspace_id",
+          "target_type",
+          "actor",
+          "idempotency_key",
+          "correlation_id",
+          "command_type",
+          "payload"
+        ],
+        "title": "ReviewCommandRequest",
+        "type": "object"
+      },
+      "SectionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "body_markdown": {
+            "contentMediaType": "text/markdown",
+            "maxLength": 131072,
+            "minLength": 1,
+            "title": "Body Markdown",
+            "type": "string"
+          },
+          "heading": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Heading",
+            "type": "string"
+          },
+          "ordinal": {
+            "minimum": 0.0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "section_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Section Key",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "maxLength": 16384,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section_key",
+          "heading",
+          "body_markdown",
+          "ordinal"
+        ],
+        "title": "SectionPayload",
+        "type": "object"
+      },
+      "SourcePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "git_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Revision"
+          },
+          "label": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "source_type": {
+            "enum": [
+              "manual",
+              "markdown_file",
+              "task",
+              "artifact",
+              "evidence",
+              "external_url"
+            ],
+            "title": "Source Type",
+            "type": "string"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uri"
+          },
+          "workspace_relative_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Relative Path"
+          }
+        },
+        "required": [
+          "source_type",
+          "label"
+        ],
+        "title": "SourcePayload",
+        "type": "object"
+      },
+      "SubmitCandidatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "format": "uuid",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "candidate_schema_version": {
+            "const": 1,
+            "title": "Candidate Schema Version",
+            "type": "integer"
+          },
+          "expected_revision_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision Hash"
+          },
+          "expected_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision Id"
+          },
+          "operation": {
+            "enum": [
+              "create_page",
+              "revise_page"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ProvenancePayload"
+          },
+          "relations": {
+            "items": {
+              "$ref": "#/components/schemas/RelationPayload"
+            },
+            "maxItems": 128,
+            "title": "Relations",
+            "type": "array"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SectionPayload"
+            },
+            "maxItems": 128,
+            "minItems": 1,
+            "title": "Sections",
+            "type": "array"
+          },
+          "slug": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Slug",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourcePayload"
+            },
+            "maxItems": 128,
+            "title": "Sources",
+            "type": "array"
+          },
+          "summary": {
+            "default": "",
+            "maxLength": 65536,
+            "title": "Summary",
+            "type": "string"
+          },
+          "supersedes_candidate_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Candidate Id"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Tags",
+            "type": "array"
+          },
+          "target_page_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Page Id"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_schema_version",
+          "candidate_id",
+          "operation",
+          "title",
+          "slug",
+          "sections"
+        ],
+        "title": "SubmitCandidatePayload",
+        "type": "object"
+      },
+      "SubmitCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRequest"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "SubmitKnowledgeCandidate",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "idempotency_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SubmitCandidatePayload"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_type": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Target Type",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "workspace_id",
+          "target_type",
+          "actor",
+          "idempotency_key",
+          "correlation_id",
+          "command_type",
+          "payload"
+        ],
+        "title": "SubmitCommandRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WithdrawCandidatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "format": "uuid",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "expected_candidate_version": {
+            "minimum": 1.0,
+            "title": "Expected Candidate Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "expected_candidate_version"
+        ],
+        "title": "WithdrawCandidatePayload",
+        "type": "object"
+      },
+      "WithdrawCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRequest"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "WithdrawKnowledgeCandidate",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "idempotency_key": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WithdrawCandidatePayload"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_type": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Target Type",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "workspace_id",
+          "target_type",
+          "actor",
+          "idempotency_key",
+          "correlation_id",
+          "command_type",
+          "payload"
+        ],
+        "title": "WithdrawCommandRequest",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "ControlPlaneBearer": {
+        "bearerFormat": "opaque",
+        "description": "Control Plane capability token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "LocalOwnerBearer": {
+        "bearerFormat": "opaque",
+        "description": "Loopback local owner capability token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "MainAgentBearer": {
+        "bearerFormat": "opaque",
+        "description": "Main Agent capability token.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "SIDERA Knowledge Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/commands": {
+      "post": {
+        "operationId": "knowledge_execute_command",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "discriminator": {
+                  "mapping": {
+                    "ArchiveKnowledgePage": "#/components/schemas/ArchiveCommandRequest",
+                    "ReviewKnowledgeCandidate": "#/components/schemas/ReviewCommandRequest",
+                    "SubmitKnowledgeCandidate": "#/components/schemas/SubmitCommandRequest",
+                    "WithdrawKnowledgeCandidate": "#/components/schemas/WithdrawCommandRequest"
+                  },
+                  "propertyName": "command_type"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SubmitCommandRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ReviewCommandRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WithdrawCommandRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ArchiveCommandRequest"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The command or exact materialization conflicts with current state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          },
+          {
+            "ControlPlaneBearer": []
+          }
+        ],
+        "summary": "Execute Command",
+        "tags": [
+          "commands"
+        ]
+      }
+    },
+    "/api/v1/internal/workspaces/{workspace_id}/materialize": {
+      "post": {
+        "operationId": "knowledge_materialize_sections",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaterializeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The command or exact materialization conflicts with current state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "ControlPlaneBearer": []
+          }
+        ],
+        "summary": "Materialize",
+        "tags": [
+          "internal"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/commands/{command_id}": {
+      "get": {
+        "operationId": "knowledge_get_command_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Command Status Api V1 Workspaces  Workspace Id  Commands  Command Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          },
+          {
+            "ControlPlaneBearer": []
+          }
+        ],
+        "summary": "Get Command Status",
+        "tags": [
+          "commands"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/candidates": {
+      "get": {
+        "operationId": "knowledge_list_candidates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_task_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Task Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_subtask_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Subtask Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_worker_item_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Worker Item Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_execution_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Execution Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_artifact_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Artifact Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_evidence_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Evidence Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Candidates Api V1 Workspaces  Workspace Id  Knowledge Candidates Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          }
+        ],
+        "summary": "List Candidates",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/candidates/{candidate_id}": {
+      "get": {
+        "operationId": "knowledge_get_candidate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "candidate_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Candidate Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Candidate Api V1 Workspaces  Workspace Id  Knowledge Candidates  Candidate Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The workspace-scoped resource was not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          }
+        ],
+        "summary": "Get Candidate",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/pages": {
+      "get": {
+        "operationId": "knowledge_list_pages",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Archived",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Pages Api V1 Workspaces  Workspace Id  Knowledge Pages Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          }
+        ],
+        "summary": "List Pages",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/pages/{page_id}": {
+      "get": {
+        "operationId": "knowledge_get_page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Page Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Page Api V1 Workspaces  Workspace Id  Knowledge Pages  Page Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The workspace-scoped resource was not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          }
+        ],
+        "summary": "Get Page",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/pages/{page_id}/diff": {
+      "get": {
+        "operationId": "knowledge_diff_revisions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Page Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from_revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "From Revision Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "To Revision Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_diff_lines",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Max Diff Lines",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_diff_chars",
+            "required": false,
+            "schema": {
+              "default": 32000,
+              "maximum": 256000,
+              "minimum": 1,
+              "title": "Max Diff Chars",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Diff Revisions Api V1 Workspaces  Workspace Id  Knowledge Pages  Page Id  Diff Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The workspace-scoped resource was not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          }
+        ],
+        "summary": "Diff Revisions",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/pages/{page_id}/revisions/{revision_id}": {
+      "get": {
+        "operationId": "knowledge_get_revision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Page Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Revision Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Revision Api V1 Workspaces  Workspace Id  Knowledge Pages  Page Id  Revisions  Revision Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The workspace-scoped resource was not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          }
+        ],
+        "summary": "Get Revision",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/search": {
+      "get": {
+        "operationId": "knowledge_search",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tags"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_types",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Types"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "active",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Search Knowledge Api V1 Workspaces  Workspace Id  Knowledge Search Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          },
+          {
+            "ControlPlaneBearer": []
+          }
+        ],
+        "summary": "Search Knowledge",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/knowledge/sources": {
+      "get": {
+        "operationId": "knowledge_list_sources",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "availability",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Availability"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Sources Api V1 Workspaces  Workspace Id  Knowledge Sources Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Capability token is missing or forbidden."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request or domain payload is invalid."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The service or database is temporarily unavailable."
+          }
+        },
+        "security": [
+          {
+            "LocalOwnerBearer": []
+          },
+          {
+            "MainAgentBearer": []
+          },
+          {
+            "ControlPlaneBearer": []
+          }
+        ],
+        "summary": "List Sources",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    }
+  },
+  "x-sidera-contract": "knowledge-api-v1"
+}

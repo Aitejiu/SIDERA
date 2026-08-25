@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "api:generate": "openapi-typescript openapi.json -o src/shared/api/schema.d.ts"
+    "api:generate": "openapi-typescript openapi.json -o src/shared/api/schema.d.ts",
+    "knowledge-api:generate": "openapi-typescript knowledge-openapi.json -o src/shared/api/knowledge-schema.d.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "5.101.4",

@@ -21,7 +21,11 @@ class SectionPayload(StrictModel):
     section_key: str = Field(min_length=1, max_length=255)
     heading: str = Field(min_length=1, max_length=500)
     summary: str = Field(default="", max_length=16_384)
-    body_markdown: str = Field(min_length=1, max_length=131_072)
+    body_markdown: str = Field(
+        min_length=1,
+        max_length=131_072,
+        json_schema_extra={"contentMediaType": "text/markdown"},
+    )
     ordinal: int = Field(ge=0)
 
 
