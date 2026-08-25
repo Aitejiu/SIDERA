@@ -199,9 +199,10 @@ class RunnerRegistry:
         tool_name: str,
         payload: dict[str, object],
         *,
+        internal_arguments: dict[str, object] | None = None,
         raise_errors: bool,
     ) -> str:
-        del tool_name, raise_errors
+        del tool_name, internal_arguments, raise_errors
         self.calls.append(payload)
         return self.receipt
 

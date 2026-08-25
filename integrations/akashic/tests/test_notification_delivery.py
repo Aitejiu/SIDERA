@@ -38,7 +38,9 @@ class MemoryKV:
 class FakeRegistry:
     def __init__(self, result: object = "消息已发送") -> None:
         self.result = result
-        self.calls: list[tuple[str, dict[str, object], bool]] = []
+        self.calls: list[
+            tuple[str, dict[str, object], dict[str, object], bool]
+        ] = []
         self.events: list[str] = []
         self.error: Exception | None = None
         self.wait_forever = False
@@ -48,10 +50,13 @@ class FakeRegistry:
         tool_name: str,
         payload: dict[str, object],
         *,
+        internal_arguments: dict[str, object] | None = None,
         raise_errors: bool,
     ) -> object:
         self.events.append("message_push")
-        self.calls.append((tool_name, payload, raise_errors))
+        self.calls.append(
+            (tool_name, payload, dict(internal_arguments or {}), raise_errors)
+        )
         if self.error is not None:
             raise self.error
         if self.wait_forever:
@@ -152,7 +157,13 @@ def test_exact_success_persists_pending_before_push_then_settles_and_advances() 
                     "target_channel": "telegram",
                     "target_chat_id": "chat-42",
                     "message": current_evaluation.notice.message,
-                    "_outbound_metadata": {"delivery_id": "notice-1"},
+                },
+                {
+                    "_commit_role": "passive",
+                    "_outbound_metadata": {
+                        "delivery_id": "notice-1",
+                        "_channel_commit_role": "passive",
+                    },
                 },
                 True,
             )
@@ -227,8 +238,11 @@ def test_only_pending_queue_head_can_call_message_push() -> None:
 
         assert first.outcome == "pending"
         assert second.outcome == "deferred"
-        assert [call[1]["_outbound_metadata"] for call in registry.calls] == [
-            {"delivery_id": "notice-1"}
+        assert [call[2]["_outbound_metadata"] for call in registry.calls] == [
+            {
+                "delivery_id": "notice-1",
+                "_channel_commit_role": "passive",
+            }
         ]
         assert [item.notice_id for item in await state.list_pending_notifications()] == [
             "notice-1",

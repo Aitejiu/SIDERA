@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +37,8 @@ type NoticeKind = Literal[
     "task_completed",
 ]
 type NotificationMode = Literal["live", "resync"]
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationQueryUnavailable(RuntimeError):
@@ -153,13 +156,25 @@ class NotificationDelivery:
                         "target_channel": route.channel,
                         "target_chat_id": route.chat_id,
                         "message": notice.message,
-                        "_outbound_metadata": {"delivery_id": notice.notice_id},
+                    },
+                    internal_arguments={
+                        "_commit_role": "passive",
+                        "_outbound_metadata": {
+                            "delivery_id": notice.notice_id,
+                            "_channel_commit_role": "passive",
+                        },
                     },
                     raise_errors=True,
                 ),
                 timeout=self._timeout_seconds,
             )
-        except Exception:  # noqa: BLE001 - external delivery failures retain pending
+        except Exception as exc:  # noqa: BLE001 - external delivery failures retain pending
+            logger.warning(
+                "通知出站失败 notice=%s error_type=%s error=%s",
+                notice.notice_id,
+                type(exc).__name__,
+                str(exc)[:240],
+            )
             return DeliveryResult("pending", notice.notice_id)
         if receipt != "消息已发送":
             return DeliveryResult("pending", notice.notice_id)
