@@ -7,6 +7,9 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.context_requests import (
+    build_execution_context_assembly_request,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import InvalidTransition
@@ -30,6 +33,8 @@ from sidera_control_plane.domain.planning import (
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import TERMINAL_TASK_STATUSES, Task, TaskStatus
+from sidera_control_plane.domain.work_context import WorkContextRevision
+from sidera_control_plane.domain.worker_item import WorkerItem
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,8 @@ class _ActivationContext:
     planning_request: PlanningRequest
     snapshot: TaskPlanSnapshot
     task: Task
+    work_context_revision: WorkContextRevision
+    worker_item: WorkerItem
 
 
 class ActivationReconciler:
@@ -60,12 +67,16 @@ class ActivationReconciler:
         uow_factory: Callable[[], ControlPlaneUnitOfWork],
         owner_id: str = "activation-reconciler",
         clock: Callable[[], datetime] | None = None,
+        execution_context_ttl_seconds: int = 7_200,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
+        if execution_context_ttl_seconds < 1:
+            raise ValueError("execution_context_ttl_seconds must be positive")
         self._uow_factory = uow_factory
         self._owner_id = owner_id.strip()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._execution_context_ttl_seconds = execution_context_ttl_seconds
 
     def run_once(self, limit: int) -> ActivationReconcileResult:
         if limit < 1:
@@ -243,6 +254,16 @@ class ActivationReconciler:
             )
 
         uow.executions.add(execution)
+        uow.context_assemblies.add(
+            build_execution_context_assembly_request(
+                execution=execution,
+                execution_request=request,
+                worker_item=context.worker_item,
+                work_context_revision=context.work_context_revision,
+                ttl_seconds=self._execution_context_ttl_seconds,
+                created_at=now,
+            )
+        )
         uow.flush()
         request.materialize(
             execution_lineage_id=execution.lineage_id,
@@ -316,7 +337,28 @@ class ActivationReconciler:
             return None, "subtask_missing"
         if task.status in TERMINAL_TASK_STATUSES:
             return None, "task_terminal"
-        return _ActivationContext(planning_request, snapshot, task), None
+        worker_item = uow.worker_items.get(
+            request.worker_item_id, request.workspace_id, for_update=True
+        )
+        if worker_item is None:
+            return None, "worker_item_missing"
+        work_context = uow.work_contexts.get_by_planning_request(
+            request.planning_request_id, request.workspace_id
+        )
+        if work_context is None:
+            return None, "work_context_missing"
+        work_context_revision = uow.work_contexts.get_revision(
+            work_context.current_revision_id, request.workspace_id
+        )
+        if work_context_revision is None:
+            return None, "work_context_revision_missing"
+        return _ActivationContext(
+            planning_request,
+            snapshot,
+            task,
+            work_context_revision,
+            worker_item,
+        ), None
 
     @staticmethod
     def _request_matches_current_plan(

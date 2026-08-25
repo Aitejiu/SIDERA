@@ -463,7 +463,7 @@ class ContextAssemblyRepositoryPort(Protocol):
     def claim_next(
         self,
         *,
-        workspace_id: UUID,
+        workspace_id: UUID | None = None,
         owner: str,
         now: datetime,
         lease_ttl: timedelta,

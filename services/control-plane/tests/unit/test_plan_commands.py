@@ -283,6 +283,8 @@ class FakeUnitOfWork:
     worker_runtime_configurations: Any
     scheduling_blocks: Any
     work_contexts: Any
+    context_assemblies: Any
+    context_packages: Any
 
     def __init__(
         self,
@@ -298,6 +300,8 @@ class FakeUnitOfWork:
         self.worker_runtime_configurations = None
         self.scheduling_blocks = None
         self.work_contexts = None
+        self.context_assemblies = None
+        self.context_packages = None
 
     def __enter__(self) -> Self:
         return self

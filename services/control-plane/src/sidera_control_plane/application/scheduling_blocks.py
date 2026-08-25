@@ -26,6 +26,7 @@ _SAFE_DETAIL_KEYS = frozenset(
         "candidate_count",
         "candidate_issue_counts",
         "candidate_worker_ids",
+        "context_assembly_request_id",
         "expected",
         "field",
         "forbidden_worker_ids",

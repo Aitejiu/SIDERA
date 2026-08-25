@@ -7,13 +7,19 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from test_context_package_worker import EmptyCatalog
 from test_proposal_confirmation import command, seed_proposal
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.config import Settings
+from sidera_control_plane.context_package_worker import ContextPackageWorker
+from sidera_control_plane.persistence.context_package_repository import (
+    ContextAssemblyRepository,
+)
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
+    ContextAssemblyRequestModel,
     EvidenceClaimModel,
     ExecutionModel,
     ExecutionRequestDependencyModel,
@@ -83,12 +89,61 @@ def test_root_ready_request_creates_execution_and_marks_subtask_ready(
         assert request is not None
         assert request.status == "materialized"
         assert request.execution_lineage_id == execution.lineage_id
+        context_request = session.scalar(
+            select(ContextAssemblyRequestModel).where(
+                ContextAssemblyRequestModel.consumer_id == execution.id
+            )
+        )
+        assert context_request is not None
+        assert context_request.purpose == "execution"
+        assert context_request.status == "queued"
+        assert context_request.context_version == execution.version
         task = session.get(TaskModel, request.subtask_task_id)
         assert task is not None
         assert task.status == "ready"
 
+    package_result = ContextPackageWorker(
+        uow_factory=uow_factory,
+        catalog=EmptyCatalog(),
+        owner_id="context-worker:activation-test",
+        clock=lambda: NOW,
+    ).run_once(limit=1)
+    assert package_result.claimed == 1
+    assert package_result.ready == 1
+    assert package_result.failed == 0
+
     repeated = _reconciler(database, uow_factory).run_once(limit=10)
     assert repeated == type(result)(0, 0, 0, 0, 0, ())
+
+
+def test_context_assembly_creation_rolls_back_execution_materialization(
+    client: TestClient,
+    database,
+    workspace_id: UUID,
+    uow_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _materialize_plan(client, uow_factory, workspace_id)
+
+    def fail_add(self, request) -> None:
+        del self, request
+        raise RuntimeError("context assembly insert failed")
+
+    monkeypatch.setattr(ContextAssemblyRepository, "add", fail_add)
+
+    result = _reconciler(database, uow_factory).run_once(limit=10)
+
+    assert result.examined == 1
+    assert result.materialized == 0
+    assert result.failed == 1
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ExecutionModel)) == 0
+        assert session.scalar(
+            select(func.count()).select_from(ContextAssemblyRequestModel)
+        ) == 0
+        request = session.scalar(select(ExecutionRequestModel))
+        assert request is not None
+        assert request.status == "ready"
 
 
 def test_hard_dependency_waits_for_lineage_artifact_and_candidate_evidence(

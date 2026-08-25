@@ -47,6 +47,7 @@ def build_activation_worker(settings: Settings) -> ActivationWorkerRuntime:
             ),
             owner_id=f"activation-reconciler:{settings.local_actor_id}",
             clock=lambda: datetime.now(UTC),
+            execution_context_ttl_seconds=settings.execution_context_ttl_seconds,
         )
         return ActivationWorkerRuntime(
             worker=ActivationWorker(reconciler), database=database

@@ -10,6 +10,7 @@ from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
+from sidera_control_plane.domain.context_packages import ContextAssemblyRequest
 from sidera_control_plane.domain.errors import OperatorRequired, ValidationError
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
@@ -323,8 +324,19 @@ class WorkContextRepository:
         *,
         expected_version: int,
     ) -> None:
+        context.current_revision_id = revision.revision_id
+        context.current_revision_number = revision.revision_number
         self.revisions[revision.revision_id] = revision
         self.appended.append((revision, expected_version))
+
+
+class ContextAssemblyRepository:
+    def __init__(self) -> None:
+        self.added: list[ContextAssemblyRequest] = []
+
+    def add(self, request: ContextAssemblyRequest) -> ContextAssemblyRequest:
+        self.added.append(request)
+        return request
 
 
 class EventRepository:
@@ -361,6 +373,7 @@ def unit(
         work_contexts=WorkContextRepository(stored_request),
         proposal_materializations=SimpleNamespace(),
         execution_requests=SimpleNamespace(),
+        context_assemblies=ContextAssemblyRepository(),
         events=EventRepository(),
         projection_changes=ProjectionPublisher(),
     )

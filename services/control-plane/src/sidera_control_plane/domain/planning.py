@@ -418,6 +418,22 @@ class PlanningRun:
         self.status = PlanningRunStatus.RUNNING
         self.version += 1
 
+    def block_before_start(
+        self,
+        *,
+        error_code: str,
+        error_message: str,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRunStatus.QUEUED:
+            raise InvalidTransition("only a queued planning run can block before start")
+        self._record_error(
+            error_code=error_code,
+            error_message=error_message,
+            diagnostic_artifact_ref=None,
+        )
+        self._finish(PlanningRunStatus.BLOCKED, now=now)
+
     def succeed(
         self,
         *,
@@ -834,6 +850,29 @@ class PlanningRequest:
             error_message=error_message,
             now=now,
             diagnostic_artifact_ref=diagnostic_artifact_ref,
+        )
+        self.status = PlanningRequestStatus.FAILED
+        self._touch(now)
+
+    def block_queued_run(
+        self,
+        *,
+        run_id: UUID,
+        error_code: str,
+        error_message: str,
+        now: datetime,
+    ) -> None:
+        if self.status in {
+            PlanningRequestStatus.MATERIALIZED,
+            PlanningRequestStatus.REJECTED,
+            PlanningRequestStatus.CANCELLED,
+        }:
+            raise InvalidTransition("terminal planning request cannot block")
+        run = self.run(run_id)
+        run.block_before_start(
+            error_code=error_code,
+            error_message=error_message,
+            now=now,
         )
         self.status = PlanningRequestStatus.FAILED
         self._touch(now)

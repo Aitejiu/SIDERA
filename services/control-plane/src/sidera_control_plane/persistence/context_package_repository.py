@@ -95,7 +95,7 @@ class ContextAssemblyRepository:
     def claim_next(
         self,
         *,
-        workspace_id: UUID,
+        workspace_id: UUID | None = None,
         owner: str,
         now: datetime,
         lease_ttl: timedelta,
@@ -109,30 +109,31 @@ class ContextAssemblyRepository:
             raise ValidationError("context assembly claim limit must be positive")
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValidationError("context assembly claim time must be timezone aware")
+        claimable = or_(
+            and_(
+                ContextAssemblyRequestModel.status.in_(
+                    (
+                        ContextAssemblyStatus.QUEUED.value,
+                        ContextAssemblyStatus.RETRY_WAIT.value,
+                    )
+                ),
+                or_(
+                    ContextAssemblyRequestModel.next_attempt_at.is_(None),
+                    ContextAssemblyRequestModel.next_attempt_at <= now,
+                ),
+            ),
+            and_(
+                ContextAssemblyRequestModel.status
+                == ContextAssemblyStatus.ASSEMBLING.value,
+                ContextAssemblyRequestModel.lease_expires_at <= now,
+            ),
+        )
+        filters = [claimable]
+        if workspace_id is not None:
+            filters.insert(0, ContextAssemblyRequestModel.workspace_id == workspace_id)
         rows = self._session.scalars(
             select(ContextAssemblyRequestModel)
-            .where(
-                ContextAssemblyRequestModel.workspace_id == workspace_id,
-                or_(
-                    and_(
-                        ContextAssemblyRequestModel.status.in_(
-                            (
-                                ContextAssemblyStatus.QUEUED.value,
-                                ContextAssemblyStatus.RETRY_WAIT.value,
-                            )
-                        ),
-                        or_(
-                            ContextAssemblyRequestModel.next_attempt_at.is_(None),
-                            ContextAssemblyRequestModel.next_attempt_at <= now,
-                        ),
-                    ),
-                    and_(
-                        ContextAssemblyRequestModel.status
-                        == ContextAssemblyStatus.ASSEMBLING.value,
-                        ContextAssemblyRequestModel.lease_expires_at <= now,
-                    ),
-                ),
-            )
+            .where(*filters)
             .order_by(
                 ContextAssemblyRequestModel.created_at.asc(),
                 ContextAssemblyRequestModel.id.asc(),

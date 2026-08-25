@@ -4,6 +4,9 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.context_requests import (
+    build_planning_context_assembly_request,
+)
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.proposal_materializer import (
@@ -47,6 +50,7 @@ from sidera_control_plane.domain.planning_profiles import (
 )
 from sidera_control_plane.domain.work_context import (
     WorkContext,
+    WorkContextRevision,
     WorkContextRevisionReason,
 )
 
@@ -74,10 +78,14 @@ class PlanningCommandHandler:
         clock: Callable[[], datetime] | None = None,
         materializer: ProposalMaterializer | None = None,
         work_context_factory: WorkContextRevisionFactory | None = None,
+        planning_context_ttl_seconds: int = 1_800,
     ) -> None:
+        if planning_context_ttl_seconds < 1:
+            raise ValueError("planning_context_ttl_seconds must be positive")
         self._local_actor_type = local_actor_type
         self._local_actor_id = local_actor_id
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._planning_context_ttl_seconds = planning_context_ttl_seconds
         self._materializer = materializer or ProposalMaterializer()
         self._work_context_factory = work_context_factory or WorkContextRevisionFactory()
 
@@ -335,6 +343,15 @@ class PlanningCommandHandler:
         )
         uow.planning_requests.add(request)
         uow.work_contexts.add(work_context, work_context_revision)
+        uow.context_assemblies.add(
+            build_planning_context_assembly_request(
+                run=request.runs[-1],
+                brief=request.briefs[-1],
+                work_context_revision=work_context_revision,
+                ttl_seconds=self._planning_context_ttl_seconds,
+                created_at=request.created_at,
+            )
+        )
         context_event = work_context_event(
             envelope,
             context=work_context,
@@ -531,11 +548,9 @@ class PlanningCommandHandler:
             brief=brief,
             previous_request_version=previous_request_version,
             previous_clarification_versions=previous_clarification_versions,
-        )
-        uow.work_contexts.append_revision(
-            work_context,
-            context_revision,
-            expected_version=previous_context_version,
+            work_context=work_context,
+            work_context_revision=context_revision,
+            previous_context_version=previous_context_version,
         )
         context_event = work_context_event(
             envelope,
@@ -767,6 +782,9 @@ class PlanningCommandHandler:
         request.retry_blocked(new_run_id=uuid4(), now=self._clock())
         new_run = request.runs[-1]
         uow.planning_runs.add(new_run)
+        self._add_planning_context_assembly(
+            uow, request, run=new_run, brief=request.briefs[-1]
+        )
         uow.planning_requests.save(request, previous_request_version)
         event = _event(
             envelope,
@@ -854,9 +872,30 @@ class PlanningCommandHandler:
         brief: PlanningBriefRevision,
         previous_request_version: int,
         previous_clarification_versions: Mapping[UUID, int] | None = None,
+        work_context: WorkContext | None = None,
+        work_context_revision: WorkContextRevision | None = None,
+        previous_context_version: int | None = None,
     ) -> None:
         uow.planning_records.add_brief(brief)
-        uow.planning_runs.add(request.runs[-1])
+        if work_context is not None:
+            if work_context_revision is None or previous_context_version is None:
+                raise ValidationError(
+                    "WorkContext revision persistence requires revision and version"
+                )
+            uow.work_contexts.append_revision(
+                work_context,
+                work_context_revision,
+                expected_version=previous_context_version,
+            )
+        run = request.runs[-1]
+        uow.planning_runs.add(run)
+        self._add_planning_context_assembly(
+            uow,
+            request,
+            run=run,
+            brief=brief,
+            work_context_revision=work_context_revision,
+        )
         uow.planning_requests.save(request, previous_request_version)
         previous_clarification_versions = previous_clarification_versions or {}
         for clarification in request.clarifications:
@@ -865,6 +904,39 @@ class PlanningCommandHandler:
                 uow.planning_records.save_clarification(
                     clarification, previous_version
                 )
+
+    def _add_planning_context_assembly(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        *,
+        run: PlanningRun,
+        brief: PlanningBriefRevision,
+        work_context_revision: WorkContextRevision | None = None,
+    ) -> None:
+        revision = work_context_revision
+        if revision is None:
+            context = uow.work_contexts.get_by_planning_request(
+                request.id, request.workspace_id
+            )
+            if context is None:
+                raise NotFound("work context not found for planning context assembly")
+            revision = uow.work_contexts.get_revision(
+                context.current_revision_id, request.workspace_id
+            )
+            if revision is None:
+                raise NotFound(
+                    "work context revision not found for planning context assembly"
+                )
+        uow.context_assemblies.add(
+            build_planning_context_assembly_request(
+                run=run,
+                brief=brief,
+                work_context_revision=revision,
+                ttl_seconds=self._planning_context_ttl_seconds,
+                created_at=run.queued_at,
+            )
+        )
 
     def _persist_run_changes(
         self,

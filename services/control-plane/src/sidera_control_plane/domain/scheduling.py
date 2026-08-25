@@ -28,6 +28,7 @@ class SchedulingBlockReason(StrEnum):
     WORKSPACE_MODULE_UNAVAILABLE = "workspace_module_unavailable"
     RUNTIME_CAPABILITY_MISMATCH = "runtime_capability_mismatch"
     ADAPTER_POLICY_REJECTED = "adapter_policy_rejected"
+    CONTEXT_ASSEMBLY_BLOCKED = "context_assembly_blocked"
 
 
 _SCHEDULING_REASON_LABELS = {
@@ -39,6 +40,7 @@ _SCHEDULING_REASON_LABELS = {
     "workspace_module_unavailable": "工作区提供器不可用",
     "runtime_capability_mismatch": "运行能力不匹配",
     "adapter_policy_rejected": "适配器策略已过滤",
+    "context_assembly_blocked": "上下文包组装被阻塞",
 }
 
 

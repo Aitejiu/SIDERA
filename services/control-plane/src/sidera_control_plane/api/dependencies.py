@@ -119,6 +119,7 @@ def get_command_service(
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
                 clock=lambda: datetime.now(UTC),
+                planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
             ),
             WorkContextCommandHandler(
                 local_actor_type=settings.local_actor_type,

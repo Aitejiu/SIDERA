@@ -40,8 +40,12 @@ from sidera_control_plane.domain.work_context import (
     WorkContext,
     WorkContextRevisionReason,
 )
+from sidera_control_plane.persistence.context_package_repository import (
+    ContextAssemblyRepository,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ContextAssemblyRequestModel,
     ExecutionRequestModel,
     PlanningBriefRevisionModel,
     PlanningClarificationModel,
@@ -440,6 +444,11 @@ def test_planning_commands_persist_one_request_lifecycle_without_task_materializ
         assert session.scalar(select(func.count()).select_from(TaskModel)) == 0
         assert session.scalar(select(func.count()).select_from(PlanSnapshotModel)) == 0
         assert session.scalar(select(func.count()).select_from(ExecutionRequestModel)) == 0
+        assembly = session.scalar(select(ContextAssemblyRequestModel))
+        assert assembly is not None
+        assert assembly.purpose == "planning_run"
+        assert assembly.status == "queued"
+        assert assembly.idempotency_key.startswith("context:planning-run:")
 
 
 def test_answer_planning_clarification_persists_new_brief_and_queued_run(
@@ -521,6 +530,53 @@ def test_answer_planning_clarification_persists_new_brief_and_queued_run(
         assert revisions[0].content_hash != revisions[1].content_hash
         assert revisions[0].snapshot["clarification_decisions"] == []
         assert revisions[1].snapshot["clarification_decisions"][0]["answer"] == "fake"
+
+
+def test_clarification_context_assembly_failure_rolls_back_new_run(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id, clarification_id, expected_version = _seed_waiting_request(
+        database, workspace_id
+    )
+
+    def fail_add(self, request) -> None:
+        del self, request
+        raise RuntimeError("context assembly insert failed")
+
+    monkeypatch.setattr(ContextAssemblyRepository, "add", fail_add)
+
+    with pytest.raises(RuntimeError, match="context assembly insert failed"):
+        client.post(
+            "/api/v1/commands",
+            json=_command(
+                workspace_id,
+                "AnswerPlanningClarification",
+                "planning_request",
+                {
+                    "answers": [
+                        {"clarification_id": str(clarification_id), "answer": "fake"}
+                    ]
+                },
+                idempotency_key="planning-answer-assembly-failure",
+                target_id=request_id,
+                expected_version=expected_version,
+            ),
+        )
+
+    with database.session() as session:
+        assert session.scalar(
+            select(func.count()).select_from(PlanningBriefRevisionModel)
+        ) == 1
+        assert session.scalar(select(func.count()).select_from(PlanningRunModel)) == 1
+        assert session.scalar(
+            select(func.count()).select_from(WorkContextRevisionModel)
+        ) == 1
+        assert session.scalar(
+            select(func.count()).select_from(ContextAssemblyRequestModel)
+        ) == 0
 
 
 def test_stale_answer_returns_actionable_planning_conflict(
