@@ -17,11 +17,31 @@ uv run --project services/knowledge-service ruff check services/knowledge-servic
 uv run --project services/knowledge-service pyright services/knowledge-service/src services/knowledge-service/tests
 ```
 
+Apply the independent schema before starting the service:
+
+```bash
+export SIDERA_KNOWLEDGE_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_knowledge_test"
+uv run --project services/knowledge-service alembic \
+  -c services/knowledge-service/alembic.ini upgrade head
+uv run --project services/knowledge-service uvicorn \
+  sidera_knowledge.api.app:app --host 127.0.0.1 --port 8020
+```
+
+The first foundation endpoints are:
+
+```text
+GET http://127.0.0.1:8020/health/live
+GET http://127.0.0.1:8020/health/ready
+```
+
 The service uses an independent local database URL, for example:
 
 ```text
 postgresql+psycopg://sidera@127.0.0.1:55432/sidera_knowledge_test
 ```
 
-The database URL is supplied through `SIDERA_KNOWLEDGE_DATABASE_URL` once the service
-configuration is implemented. No production credentials belong in this repository.
+The database URL is supplied through `SIDERA_KNOWLEDGE_DATABASE_URL`. No production
+credentials belong in this repository.
+
+R5.3.0 currently exposes only health and readiness. Knowledge commands, queries, review,
+FTS search, and ContextPackage integration are delivered by the following R5.3 stages.
