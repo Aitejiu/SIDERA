@@ -28,6 +28,9 @@ from sidera_control_plane.api.task_first_queries import (
     router as task_first_queries_router,
 )
 from sidera_control_plane.api.task_queries import router as task_queries_router
+from sidera_control_plane.api.work_context_queries import (
+    router as work_context_queries_router,
+)
 from sidera_control_plane.api.worker_item_queries import (
     router as worker_item_queries_router,
 )
@@ -80,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(module_queries_router)
     app.include_router(worker_item_queries_router)
     app.include_router(worker_trace_queries_router)
+    app.include_router(work_context_queries_router)
     app.include_router(execution_queries_router)
     app.include_router(gateway_queries_router)
     app.include_router(artifact_content_router)

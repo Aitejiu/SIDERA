@@ -35,6 +35,9 @@ from sidera_control_plane.application.task_queries import TaskQueryService
 from sidera_control_plane.application.work_context_commands import (
     WorkContextCommandHandler,
 )
+from sidera_control_plane.application.work_context_queries import (
+    WorkContextQueryService,
+)
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
 from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.worker_trace_queries import (
@@ -142,6 +145,16 @@ def get_planning_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> PlanningQueryService:
     return PlanningQueryService(SqlAlchemyPlanningQueryStore(database))
+
+
+def get_work_context_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> WorkContextQueryService:
+    from sidera_control_plane.persistence.work_context_query_store import (
+        SqlAlchemyWorkContextQueryStore,
+    )
+
+    return WorkContextQueryService(SqlAlchemyWorkContextQueryStore(database))
 
 
 def get_planning_metrics_service(

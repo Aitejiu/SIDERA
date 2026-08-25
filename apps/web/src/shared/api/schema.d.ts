@@ -599,6 +599,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{planning_request_id}/work-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Work Context By Planning Request */
+        get: operations["get_work_context_by_planning_request_api_v1_workspaces__workspace_id__planning_requests__planning_request_id__work_context_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}": {
         parameters: {
             query?: never;
@@ -752,6 +769,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/work-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Work Context By Root Task */
+        get: operations["get_work_context_by_root_task_api_v1_workspaces__workspace_id__tasks__root_task_id__work_context_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/work-contexts/{work_context_id}/revisions/{revision_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Work Context Revision */
+        get: operations["get_work_context_revision_api_v1_workspaces__workspace_id__work_contexts__work_context_id__revisions__revision_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity": {
         parameters: {
             query?: never;
@@ -807,6 +858,17 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AcceptedDecisionPayload */
+        AcceptedDecisionPayload: {
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Source */
+            source: string;
+            /** Statement */
+            statement: string;
+        };
         /** ActorRequest */
         ActorRequest: {
             /** Id */
@@ -825,6 +887,13 @@ export interface components {
         AnswerPlanningClarificationPayload: {
             /** Answers */
             answers: components["schemas"]["PlanningClarificationAnswerPayload"][];
+        };
+        /** ArchiveWorkContextPayload */
+        ArchiveWorkContextPayload: {
+            /** Current Content Hash */
+            current_content_hash: string;
+            /** Current Revision */
+            current_revision: number;
         };
         /** ArtifactContentDescriptorResponse */
         ArtifactContentDescriptorResponse: {
@@ -916,6 +985,12 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
+        /** AttachKnowledgeRevisionPayload */
+        AttachKnowledgeRevisionPayload: {
+            knowledge_ref: components["schemas"]["KnowledgeRevisionRefPayload"];
+            /** Selection Reason */
+            selection_reason: string;
+        };
         /** CancelPlanningRequestPayload */
         CancelPlanningRequestPayload: Record<string, never>;
         /** CheckpointSummaryProjectionResponse */
@@ -963,7 +1038,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "worker_runtime_configuration" | "module_definition" | "module_instance";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance";
             /**
              * Workspace Id
              * Format: uuid
@@ -1586,6 +1661,29 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** KnowledgeRevisionRefPayload */
+        KnowledgeRevisionRefPayload: {
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Page Id
+             * Format: uuid
+             */
+            page_id: string;
+            /** Revision Hash */
+            revision_hash: string;
+            /**
+             * Revision Id
+             * Format: uuid
+             */
+            revision_id: string;
+            /** Section Hash */
+            section_hash: string;
+            /** Section Key */
+            section_key: string;
+            /** Source Ids */
+            source_ids?: string[];
         };
         /** LeaseResponse */
         LeaseResponse: {
@@ -2396,6 +2494,19 @@ export interface components {
              */
             unknown_outcome_decision: "retry";
         };
+        /** ReviseWorkContextPayload */
+        ReviseWorkContextPayload: {
+            /** Base Content Hash */
+            base_content_hash: string;
+            /** Base Revision */
+            base_revision: number;
+            patch: components["schemas"]["WorkContextSemanticPatchPayload"];
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "replanned" | "user_intervention";
+        };
         /** RuntimeDurationMetricsResponse */
         RuntimeDurationMetricsResponse: {
             /** Average Seconds */
@@ -3111,6 +3222,17 @@ export interface components {
             /** Output Tokens */
             output_tokens: number | null;
         };
+        /** UnresolvedQuestionPayload */
+        UnresolvedQuestionPayload: {
+            /** Blocking */
+            blocking: boolean;
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Question */
+            question: string;
+        };
         /** UsageSummaryProjectionResponse */
         UsageSummaryProjectionResponse: {
             /** Cached Tokens */
@@ -3135,6 +3257,276 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** WorkContextAcceptedDecisionResponse */
+        WorkContextAcceptedDecisionResponse: {
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Source */
+            source: string;
+            /** Statement */
+            statement: string;
+        };
+        /** WorkContextClarificationDecisionResponse */
+        WorkContextClarificationDecisionResponse: {
+            /** Answer */
+            answer: string;
+            /** Answered By */
+            answered_by: string;
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Question */
+            question: string;
+        };
+        /** WorkContextDetailResponse */
+        WorkContextDetailResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            current_revision: components["schemas"]["WorkContextRevisionResponse"];
+            /**
+             * Current Revision Id
+             * Format: uuid
+             */
+            current_revision_id: string;
+            /** Current Revision Number */
+            current_revision_number: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Next Cursor */
+            next_cursor: string | null;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /** Root Task Id */
+            root_task_id: string | null;
+            /** Status */
+            status: string;
+            /** Timeline */
+            timeline: components["schemas"]["WorkContextRevisionSummaryResponse"][];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** WorkContextKnowledgeRefResponse */
+        WorkContextKnowledgeRefResponse: {
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Page Id
+             * Format: uuid
+             */
+            page_id: string;
+            /** Revision Hash */
+            revision_hash: string;
+            /**
+             * Revision Id
+             * Format: uuid
+             */
+            revision_id: string;
+            /** Section Hash */
+            section_hash: string;
+            /** Section Key */
+            section_key: string;
+            /** Source Ids */
+            source_ids: string[];
+        };
+        /** WorkContextReferenceResponse */
+        WorkContextReferenceResponse: {
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Ref Id
+             * Format: uuid
+             */
+            ref_id: string;
+            /** Ref Type */
+            ref_type: string;
+        };
+        /** WorkContextRevisionResponse */
+        WorkContextRevisionResponse: {
+            /**
+             * Brief Planning Request Id
+             * Format: uuid
+             */
+            brief_planning_request_id: string;
+            /** Brief Revision */
+            brief_revision: number;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Plan Snapshot Id */
+            plan_snapshot_id: string | null;
+            /** Proposal Revision Id */
+            proposal_revision_id: string | null;
+            /** Reason */
+            reason: string;
+            /** Revision Number */
+            revision_number: number;
+            snapshot: components["schemas"]["WorkContextSnapshotResponse"];
+            /**
+             * Work Context Id
+             * Format: uuid
+             */
+            work_context_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** WorkContextRevisionSummaryResponse */
+        WorkContextRevisionSummaryResponse: {
+            /**
+             * Brief Planning Request Id
+             * Format: uuid
+             */
+            brief_planning_request_id: string;
+            /** Brief Revision */
+            brief_revision: number;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Plan Snapshot Id */
+            plan_snapshot_id: string | null;
+            /** Proposal Revision Id */
+            proposal_revision_id: string | null;
+            /** Reason */
+            reason: string;
+            /** Revision Number */
+            revision_number: number;
+            /**
+             * Work Context Id
+             * Format: uuid
+             */
+            work_context_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** WorkContextSemanticPatchPayload */
+        WorkContextSemanticPatchPayload: {
+            /**
+             * Acceptance Criteria
+             * @default null
+             */
+            acceptance_criteria: string[] | null;
+            /** Accepted Decisions */
+            accepted_decisions?: components["schemas"]["AcceptedDecisionPayload"][];
+            /** Artifact Refs */
+            artifact_refs?: components["schemas"]["WorkReferencePayload"][];
+            /** Checkpoint Refs */
+            checkpoint_refs?: components["schemas"]["WorkReferencePayload"][];
+            /**
+             * Constraints
+             * @default null
+             */
+            constraints: string[] | null;
+            /** Evidence Refs */
+            evidence_refs?: components["schemas"]["WorkReferencePayload"][];
+            /**
+             * Objective
+             * @default null
+             */
+            objective: string | null;
+            /**
+             * Requested Outputs
+             * @default null
+             */
+            requested_outputs: string[] | null;
+            /** Unresolved Questions */
+            unresolved_questions?: components["schemas"]["UnresolvedQuestionPayload"][];
+        };
+        /** WorkContextSnapshotResponse */
+        WorkContextSnapshotResponse: {
+            /** Acceptance Criteria */
+            acceptance_criteria: components["schemas"]["WorkContextTextItemResponse"][];
+            /** Accepted Decisions */
+            accepted_decisions: components["schemas"]["WorkContextAcceptedDecisionResponse"][];
+            /** Artifact Refs */
+            artifact_refs: components["schemas"]["WorkContextReferenceResponse"][];
+            /** Checkpoint Refs */
+            checkpoint_refs: components["schemas"]["WorkContextReferenceResponse"][];
+            /** Clarification Decisions */
+            clarification_decisions: components["schemas"]["WorkContextClarificationDecisionResponse"][];
+            /** Constraints */
+            constraints: components["schemas"]["WorkContextTextItemResponse"][];
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["WorkContextReferenceResponse"][];
+            /** Knowledge Refs */
+            knowledge_refs: components["schemas"]["WorkContextKnowledgeRefResponse"][];
+            /** Objective */
+            objective: string;
+            /** Requested Outputs */
+            requested_outputs: components["schemas"]["WorkContextTextItemResponse"][];
+            /** Schema Version */
+            schema_version: number;
+            /** Unresolved Questions */
+            unresolved_questions: components["schemas"]["WorkContextUnresolvedQuestionResponse"][];
+        };
+        /** WorkContextTextItemResponse */
+        WorkContextTextItemResponse: {
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Text */
+            text: string;
+        };
+        /** WorkContextUnresolvedQuestionResponse */
+        WorkContextUnresolvedQuestionResponse: {
+            /** Blocking */
+            blocking: boolean;
+            /** Key */
+            key: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Question */
+            question: string;
+        };
         /** WorkItemResponse */
         WorkItemResponse: {
             /** Acceptance Refs */
@@ -3157,6 +3549,18 @@ export interface components {
             title: string;
             /** Worker Slot Key */
             worker_slot_key: string | null;
+        };
+        /** WorkReferencePayload */
+        WorkReferencePayload: {
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Ref Id
+             * Format: uuid
+             */
+            ref_id: string;
+            /** Ref Type */
+            ref_type: string;
         };
         /** WorkerActivityProjectionResponse */
         WorkerActivityProjectionResponse: {
@@ -4969,6 +5373,41 @@ export interface operations {
             };
         };
     };
+    get_work_context_by_planning_request_api_v1_workspaces__workspace_id__planning_requests__planning_request_id__work_context_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                planning_request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkContextDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_planning_request_api_v1_workspaces__workspace_id__planning_requests__request_id__get: {
         parameters: {
             query?: never;
@@ -5247,6 +5686,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskConsoleOverviewProjectionResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_work_context_by_root_task_api_v1_workspaces__workspace_id__tasks__root_task_id__work_context_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkContextDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_work_context_revision_api_v1_workspaces__workspace_id__work_contexts__work_context_id__revisions__revision_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                work_context_id: string;
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkContextRevisionResponse"];
                 };
             };
             /** @description Validation Error */

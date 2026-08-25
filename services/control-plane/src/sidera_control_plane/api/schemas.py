@@ -48,8 +48,14 @@ from sidera_control_plane.application.task_queries import (
     TaskView,
     TimelineItem,
 )
+from sidera_control_plane.application.work_context_queries import (
+    WorkContextDetailView,
+    WorkContextRevisionSummaryView,
+    WorkContextRevisionView,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 InputText = Annotated[str, StringConstraints(min_length=1)]
@@ -2444,6 +2450,186 @@ class PlanningMaterializationResponse(BaseModel):
             deep_link=view.deep_link,
             confirmed_by=view.confirmed_by,
             created_at=view.created_at,
+        )
+
+
+class WorkContextTextItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    text: str
+    ordinal: int
+
+
+class WorkContextClarificationDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    question: str
+    answer: str
+    answered_by: str
+    ordinal: int
+
+
+class WorkContextAcceptedDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    statement: str
+    source: str
+    ordinal: int
+
+
+class WorkContextUnresolvedQuestionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    question: str
+    blocking: bool
+    ordinal: int
+
+
+class WorkContextKnowledgeRefResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    source_ids: tuple[UUID, ...]
+    ordinal: int
+
+
+class WorkContextReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref_id: UUID
+    ref_type: str
+    ordinal: int
+
+
+class WorkContextSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    objective: str
+    constraints: tuple[WorkContextTextItemResponse, ...]
+    acceptance_criteria: tuple[WorkContextTextItemResponse, ...]
+    requested_outputs: tuple[WorkContextTextItemResponse, ...]
+    clarification_decisions: tuple[WorkContextClarificationDecisionResponse, ...]
+    accepted_decisions: tuple[WorkContextAcceptedDecisionResponse, ...]
+    unresolved_questions: tuple[WorkContextUnresolvedQuestionResponse, ...]
+    knowledge_refs: tuple[WorkContextKnowledgeRefResponse, ...]
+    artifact_refs: tuple[WorkContextReferenceResponse, ...]
+    evidence_refs: tuple[WorkContextReferenceResponse, ...]
+    checkpoint_refs: tuple[WorkContextReferenceResponse, ...]
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot: WorkContextSnapshotV1
+    ) -> "WorkContextSnapshotResponse":
+        return cls.model_validate(snapshot.to_mapping())
+
+
+class WorkContextRevisionSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    work_context_id: UUID
+    workspace_id: UUID
+    revision_number: int
+    brief_planning_request_id: UUID
+    brief_revision: int
+    proposal_revision_id: UUID | None
+    plan_snapshot_id: UUID | None
+    reason: str
+    content_hash: str
+    created_by: str
+    created_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: WorkContextRevisionSummaryView
+    ) -> "WorkContextRevisionSummaryResponse":
+        return cls(
+            id=view.id,
+            work_context_id=view.work_context_id,
+            workspace_id=view.workspace_id,
+            revision_number=view.revision_number,
+            brief_planning_request_id=view.brief_planning_request_id,
+            brief_revision=view.brief_revision,
+            proposal_revision_id=view.proposal_revision_id,
+            plan_snapshot_id=view.plan_snapshot_id,
+            reason=view.reason,
+            content_hash=view.content_hash,
+            created_by=view.created_by,
+            created_at=view.created_at,
+        )
+
+
+class WorkContextRevisionResponse(WorkContextRevisionSummaryResponse):
+    snapshot: WorkContextSnapshotResponse
+
+    @classmethod
+    def from_revision_view(
+        cls, view: WorkContextRevisionView
+    ) -> "WorkContextRevisionResponse":
+        summary = WorkContextRevisionSummaryResponse.from_view(view)
+        return cls(
+            **summary.model_dump(),
+            snapshot=WorkContextSnapshotResponse.from_snapshot(view.snapshot),
+        )
+
+
+class WorkContextResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    planning_request_id: UUID
+    root_task_id: UUID | None
+    status: str
+    current_revision_id: UUID
+    current_revision_number: int
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, view: WorkContextDetailView) -> "WorkContextResponse":
+        return cls(
+            id=view.id,
+            workspace_id=view.workspace_id,
+            planning_request_id=view.planning_request_id,
+            root_task_id=view.root_task_id,
+            status=view.status,
+            current_revision_id=view.current_revision_id,
+            current_revision_number=view.current_revision_number,
+            version=view.version,
+            created_at=view.created_at,
+            updated_at=view.updated_at,
+        )
+
+
+class WorkContextDetailResponse(WorkContextResponse):
+    current_revision: WorkContextRevisionResponse
+    timeline: tuple[WorkContextRevisionSummaryResponse, ...]
+    next_cursor: str | None
+
+    @classmethod
+    def from_view(cls, view: WorkContextDetailView) -> "WorkContextDetailResponse":
+        summary = WorkContextResponse.from_view(view)
+        return cls(
+            **summary.model_dump(),
+            current_revision=WorkContextRevisionResponse.from_revision_view(
+                view.current_revision
+            ),
+            timeline=tuple(
+                WorkContextRevisionSummaryResponse.from_view(item)
+                for item in view.timeline
+            ),
+            next_cursor=view.next_cursor,
         )
 
 
