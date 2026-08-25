@@ -95,6 +95,7 @@ def test_expired_lease_redelivers_same_message_id_and_event_id(
     assert second[0].message_id == first[0].message_id
     assert second[0].event_id == event.event_id
     assert second[0].attempt == 2
+    assert second[0].lease_id is not None
 
     store.mark_published(
         message_id=second[0].message_id,
