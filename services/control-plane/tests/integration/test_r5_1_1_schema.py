@@ -179,11 +179,11 @@ def test_r5_1_1_schema_adds_policy_arrays_and_resource_versions(
         )
 
 
-def test_r5_1_1_schema_is_cleanly_upgradeable_after_downgrade(
+def test_r5_1_1_schema_remains_present_after_r5_3_upgrade(
     database: Database,
 ) -> None:
     with database.engine.connect() as connection:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        assert version == "0015_r5_1_1_worker_runtime_binding"
+        assert version == "0016_r5_3_work_context_packages"

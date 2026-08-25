@@ -2370,3 +2370,736 @@ class ExecutionRequestDependencyModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class WorkContextModel(TimestampMixin, Base):
+    __tablename__ = "work_contexts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'archived', 'legacy_incomplete')",
+            name="ck_work_contexts_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_work_contexts_version"),
+        CheckConstraint(
+            "current_revision_number >= 1",
+            name="ck_work_contexts_current_revision_number",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_work_contexts_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_request_id", "workspace_id"],
+            ["planning_requests.id", "planning_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_work_contexts_planning_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_work_contexts_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["current_revision_id"],
+            ["work_context_revisions.id"],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_work_contexts_current_revision",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_work_contexts_identity"),
+        UniqueConstraint(
+            "planning_request_id",
+            "workspace_id",
+            name="uq_work_contexts_planning_request",
+        ),
+        Index(
+            "uq_work_contexts_root_task",
+            "root_task_id",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("root_task_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_work_contexts_workspace_status",
+            "workspace_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    current_revision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    current_revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkContextRevisionModel(Base):
+    __tablename__ = "work_context_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "revision_number >= 1",
+            name="ck_work_context_revisions_revision_number",
+        ),
+        CheckConstraint(
+            "brief_revision >= 1",
+            name="ck_work_context_revisions_brief_revision",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(snapshot) = 'object'",
+            name="ck_work_context_revisions_snapshot_object",
+        ),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_work_context_revisions_content_hash",
+        ),
+        CheckConstraint(
+            "reason IN ('request_created', 'clarification_accepted', "
+            "'proposal_confirmed', 'user_intervention', 'replanned', "
+            "'knowledge_attached', 'legacy_backfill')",
+            name="ck_work_context_revisions_reason",
+        ),
+        ForeignKeyConstraint(
+            ["work_context_id", "workspace_id"],
+            ["work_contexts.id", "work_contexts.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_work_context_revisions_context_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["brief_planning_request_id", "workspace_id", "brief_revision"],
+            [
+                "planning_brief_revisions.planning_request_id",
+                "planning_brief_revisions.workspace_id",
+                "planning_brief_revisions.revision",
+            ],
+            ondelete="RESTRICT",
+            name="fk_work_context_revisions_brief",
+        ),
+        ForeignKeyConstraint(
+            ["proposal_revision_id", "workspace_id"],
+            [
+                "planning_proposal_revisions.id",
+                "planning_proposal_revisions.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_work_context_revisions_proposal",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_work_context_revisions_plan_snapshot",
+        ),
+        UniqueConstraint(
+            "work_context_id",
+            "revision_number",
+            name="uq_work_context_revisions_context_revision",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_work_context_revisions_identity"),
+        Index(
+            "ix_work_context_revisions_workspace_context_number",
+            "workspace_id",
+            "work_context_id",
+            "revision_number",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    work_context_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    brief_planning_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    brief_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    proposal_revision_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    plan_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ContextAssemblyRequestModel(TimestampMixin, Base):
+    __tablename__ = "context_assembly_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('planning_run', 'execution')",
+            name="ck_context_assembly_requests_purpose",
+        ),
+        CheckConstraint(
+            "consumer_type IN ('planner', 'worker')",
+            name="ck_context_assembly_requests_consumer_type",
+        ),
+        CheckConstraint(
+            "(purpose = 'planning_run' AND consumer_type = 'planner' AND "
+            "worker_item_id IS NULL AND context_version IS NULL) OR "
+            "(purpose = 'execution' AND consumer_type = 'worker' AND "
+            "worker_item_id IS NOT NULL AND context_version >= 1)",
+            name="ck_context_assembly_requests_consumer_fields",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'assembling', 'ready', 'blocked', 'retry_wait', 'failed')",
+            name="ck_context_assembly_requests_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(knowledge_search_scope) = 'object'",
+            name="ck_context_assembly_requests_search_scope_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(knowledge_filter_refs) = 'array'",
+            name="ck_context_assembly_requests_filter_refs_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(fact_scope_refs) = 'array'",
+            name="ck_context_assembly_requests_fact_scope_refs_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(budget) = 'object'",
+            name="ck_context_assembly_requests_budget_object",
+        ),
+        CheckConstraint(
+            "attempt >= 1",
+            name="ck_context_assembly_requests_attempt",
+        ),
+        CheckConstraint(
+            "request_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_context_assembly_requests_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_context_assembly_requests_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_assembly_requests_worker_item",
+        ),
+        ForeignKeyConstraint(
+            ["work_context_revision_id", "workspace_id"],
+            ["work_context_revisions.id", "work_context_revisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_assembly_requests_context_revision",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_context_assembly_requests_identity"),
+        UniqueConstraint(
+            "purpose",
+            "consumer_id",
+            name="uq_context_assembly_requests_purpose_consumer",
+        ),
+        Index(
+            "ix_context_assembly_requests_claimable",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    work_context_revision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    context_version: Mapped[int | None] = mapped_column(Integer)
+    knowledge_search_scope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    knowledge_filter_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    fact_scope_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ContextPackageModel(TimestampMixin, Base):
+    __tablename__ = "context_packages"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('planning_run', 'execution')",
+            name="ck_context_packages_purpose",
+        ),
+        CheckConstraint(
+            "consumer_type IN ('planner', 'worker')",
+            name="ck_context_packages_consumer_type",
+        ),
+        CheckConstraint(
+            "(purpose = 'planning_run' AND consumer_type = 'planner' AND "
+            "worker_item_id IS NULL AND context_version IS NULL) OR "
+            "(purpose = 'execution' AND consumer_type = 'worker' AND "
+            "worker_item_id IS NOT NULL AND context_version >= 1)",
+            name="ck_context_packages_consumer_fields",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(control_plane_fact_snapshot) = 'object'",
+            name="ck_context_packages_fact_snapshot_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(artifact_refs) = 'array' AND "
+            "jsonb_typeof(evidence_refs) = 'array'",
+            name="ck_context_packages_refs_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(budget) = 'object'",
+            name="ck_context_packages_budget_object",
+        ),
+        CheckConstraint(
+            "package_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_context_packages_manifest_hash",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'revoked', 'corrupt')",
+            name="ck_context_packages_status",
+        ),
+        CheckConstraint(
+            "revocation_scope IS NULL OR revocation_scope IN ('new_starts', 'all_materialization')",
+            name="ck_context_packages_revocation_scope",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_context_packages_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["assembly_request_id", "workspace_id"],
+            [
+                "context_assembly_requests.id",
+                "context_assembly_requests.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_context_packages_assembly_request",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_packages_worker_item",
+        ),
+        ForeignKeyConstraint(
+            ["work_context_revision_id", "workspace_id"],
+            ["work_context_revisions.id", "work_context_revisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_packages_context_revision",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_context_packages_identity"),
+        UniqueConstraint(
+            "assembly_request_id",
+            name="uq_context_packages_assembly_request",
+        ),
+        UniqueConstraint(
+            "purpose",
+            "consumer_id",
+            name="uq_context_packages_purpose_consumer",
+        ),
+        Index(
+            "ix_context_packages_workspace_status_expiry",
+            "workspace_id",
+            "status",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    assembly_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    work_context_revision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    context_version: Mapped[int | None] = mapped_column(Integer)
+    control_plane_fact_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    artifact_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revocation_reason: Mapped[str | None] = mapped_column(String(100))
+    revocation_scope: Mapped[str | None] = mapped_column(String(32))
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    materialized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ContextPackageKnowledgeRefModel(Base):
+    __tablename__ = "context_package_knowledge_refs"
+    __table_args__ = (
+        CheckConstraint(
+            "ordinal >= 0",
+            name="ck_context_package_knowledge_refs_ordinal",
+        ),
+        CheckConstraint(
+            "revision_hash ~ '^[0-9a-f]{64}$' AND section_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_context_package_knowledge_refs_hashes",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(source_ids) = 'array'",
+            name="ck_context_package_knowledge_refs_source_ids_array",
+        ),
+        CheckConstraint(
+            "selection_reason IN ('explicit', 'work_context', 'retrieval')",
+            name="ck_context_package_knowledge_refs_selection_reason",
+        ),
+        CheckConstraint(
+            "trust_level IN ('workspace_confirmed', 'external_reference')",
+            name="ck_context_package_knowledge_refs_trust_level",
+        ),
+        ForeignKeyConstraint(
+            ["package_id"],
+            ["context_packages.id"],
+            ondelete="RESTRICT",
+            name="fk_context_package_knowledge_refs_package",
+        ),
+        PrimaryKeyConstraint("package_id", "ordinal"),
+    )
+
+    package_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    revision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    revision_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    section_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    section_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    selection_reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    trust_level: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class ContextPackageAcknowledgementModel(Base):
+    __tablename__ = "context_package_acknowledgements"
+    __table_args__ = (
+        CheckConstraint(
+            "consumer_type IN ('planner', 'worker')",
+            name="ck_context_package_acknowledgements_consumer_type",
+        ),
+        CheckConstraint(
+            "(consumer_type = 'planner' AND context_version IS NULL) OR "
+            "(consumer_type = 'worker' AND context_version >= 1)",
+            name="ck_context_package_acknowledgements_context_version",
+        ),
+        CheckConstraint(
+            "acknowledged_package_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_context_package_acknowledgements_package_hash",
+        ),
+        CheckConstraint(
+            "adapter_config_version >= 1",
+            name="ck_context_package_acknowledgements_adapter_version",
+        ),
+        ForeignKeyConstraint(
+            ["package_id", "workspace_id"],
+            ["context_packages.id", "context_packages.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_package_acknowledgements_package",
+        ),
+        ForeignKeyConstraint(
+            ["adapter_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_package_acknowledgements_adapter_module",
+        ),
+        PrimaryKeyConstraint("package_id", "consumer_type", "consumer_id"),
+    )
+
+    package_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    consumer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    context_version: Mapped[int | None] = mapped_column(Integer)
+    acknowledged_package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    adapter_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    adapter_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    acknowledged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ContextPackageMaterializationAuditModel(Base):
+    __tablename__ = "context_package_materialization_audits"
+    __table_args__ = (
+        CheckConstraint(
+            "consumer_type IN ('planner', 'worker')",
+            name="ck_context_package_materialization_audits_consumer_type",
+        ),
+        CheckConstraint(
+            "(consumer_type = 'planner' AND context_version IS NULL) OR "
+            "(consumer_type = 'worker' AND context_version >= 1)",
+            name="ck_context_package_materialization_audits_context_version",
+        ),
+        CheckConstraint(
+            "attempt >= 1",
+            name="ck_context_package_materialization_audits_attempt",
+        ),
+        CheckConstraint(
+            "outcome IN ('succeeded', 'failed')",
+            name="ck_context_package_materialization_audits_outcome",
+        ),
+        CheckConstraint(
+            "section_count >= 0 AND byte_count >= 0 AND input_token_count >= 0",
+            name="ck_context_package_materialization_audits_counts",
+        ),
+        ForeignKeyConstraint(
+            ["package_id", "workspace_id"],
+            ["context_packages.id", "context_packages.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_context_package_materialization_audits_package",
+        ),
+        UniqueConstraint(
+            "package_id",
+            "consumer_type",
+            "consumer_id",
+            "attempt",
+            name="uq_context_package_materialization_audits_attempt",
+        ),
+        Index(
+            "ix_context_package_materialization_audits_package_occurred",
+            "package_id",
+            "occurred_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    package_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    consumer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumer_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    context_version: Mapped[int | None] = mapped_column(Integer)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    section_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    failure_code: Mapped[str | None] = mapped_column(String(100))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class KnowledgeCandidateSubmissionModel(TimestampMixin, Base):
+    __tablename__ = "knowledge_candidate_submissions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('waiting_for_task', 'queued', 'submitting', 'retry_wait', "
+            "'submitted', 'rejected', 'discarded')",
+            name="ck_knowledge_candidate_submissions_status",
+        ),
+        CheckConstraint(
+            "proposal_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_knowledge_candidate_submissions_proposal_hash",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(artifact_refs) = 'array'",
+            name="ck_knowledge_candidate_submissions_artifacts_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence_refs) = 'array'",
+            name="ck_knowledge_candidate_submissions_evidence_array",
+        ),
+        CheckConstraint(
+            "content_bytes >= 0",
+            name="ck_knowledge_candidate_submissions_content_bytes",
+        ),
+        CheckConstraint(
+            "attempt >= 1",
+            name="ck_knowledge_candidate_submissions_attempt",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_knowledge_candidate_submissions_version",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["planning_run_id", "workspace_id"],
+            ["planning_runs.id", "planning_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_planning_run",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_execution",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_worker_item",
+        ),
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_task",
+        ),
+        ForeignKeyConstraint(
+            ["subtask_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_subtask_task",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_command_id"],
+            ["commands.id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_candidate_submissions_command",
+        ),
+        UniqueConstraint(
+            "producer_type",
+            "producer_id",
+            "proposal_hash",
+            name="uq_knowledge_candidate_submissions_producer_hash",
+        ),
+        Index(
+            "ix_knowledge_candidate_submissions_claimable",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_knowledge_candidate_submissions_workspace_producer",
+            "workspace_id",
+            "producer_type",
+            "producer_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    producer_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    producer_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    planning_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    execution_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    worker_item_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    task_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    subtask_task_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    artifact_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    proposal_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_ref: Mapped[str] = mapped_column(String(1000), nullable=False)
+    content_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    knowledge_command_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_candidate_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
