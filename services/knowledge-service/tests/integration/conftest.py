@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine
+
+from sidera_knowledge.persistence.database import Database
 
 KNOWLEDGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -21,9 +22,9 @@ def database_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def database(database_url: str) -> Iterator[Engine]:
+def database(database_url: str) -> Iterator[Database]:
     config = Config(str(KNOWLEDGE_ROOT / "alembic.ini"))
     command.upgrade(config, "head")
-    engine = create_engine(database_url, pool_pre_ping=True)
-    yield engine
-    engine.dispose()
+    database = Database(database_url)
+    yield database
+    database.dispose()

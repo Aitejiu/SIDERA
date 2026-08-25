@@ -23,7 +23,7 @@ EXPECTED_TABLES = {
 
 
 def test_foundation_migration_creates_only_knowledge_tables(database) -> None:
-    inspector = inspect(database)
+    inspector = inspect(database.engine)
     tables = set(inspector.get_table_names())
     assert EXPECTED_TABLES <= tables
     assert "tasks" not in tables
@@ -31,7 +31,7 @@ def test_foundation_migration_creates_only_knowledge_tables(database) -> None:
 
 
 def test_database_constraints_and_indexes_are_installed(database) -> None:
-    inspector = inspect(database)
+    inspector = inspect(database.engine)
     revisions = {item["name"] for item in inspector.get_indexes("knowledge_revisions")}
     assert "ix_knowledge_revisions_search_vector_gin" in revisions
 
@@ -61,7 +61,7 @@ def test_search_vector_is_stored_generated_and_uses_weighted_snapshot_fields(
           and pg_attribute.attname = 'search_vector'
         """
     )
-    with database.connect() as connection:
+    with database.engine.connect() as connection:
         expression = connection.execute(query).scalar_one()
 
     lowered = expression.lower()
