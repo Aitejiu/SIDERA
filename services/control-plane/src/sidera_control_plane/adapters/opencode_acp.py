@@ -26,6 +26,9 @@ from sidera_control_plane.adapters.acp_process import (
 from sidera_control_plane.adapters.acp_process import (
     ACPProcessTransport,
 )
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+)
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -403,6 +406,16 @@ class OpenCodeACPAdapter:
                     content=diff,
                 ),
             )
+
+    def collect_knowledge_candidates(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> tuple[KnowledgeCandidateProposalV1, ...]:
+        del handle
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        # ACP currently exposes no bounded structured candidate channel. Keeping
+        # this hook explicit lets a future adapter add one without changing the gateway.
+        return ()
 
     def active_processes(self) -> tuple[Popen[Any], ...]:
         with self._lock:

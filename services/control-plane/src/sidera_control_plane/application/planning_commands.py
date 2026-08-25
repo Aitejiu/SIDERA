@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -8,6 +8,9 @@ from sidera_control_plane.application.context_requests import (
     build_planning_context_assembly_request,
 )
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateSubmissionService,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.proposal_materializer import (
     ProposalMaterializer,
@@ -79,6 +82,7 @@ class PlanningCommandHandler:
         materializer: ProposalMaterializer | None = None,
         work_context_factory: WorkContextRevisionFactory | None = None,
         planning_context_ttl_seconds: int = 1_800,
+        candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
     ) -> None:
         if planning_context_ttl_seconds < 1:
             raise ValueError("planning_context_ttl_seconds must be positive")
@@ -88,6 +92,7 @@ class PlanningCommandHandler:
         self._planning_context_ttl_seconds = planning_context_ttl_seconds
         self._materializer = materializer or ProposalMaterializer()
         self._work_context_factory = work_context_factory or WorkContextRevisionFactory()
+        self._candidate_submission_service = candidate_submission_service
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -418,6 +423,13 @@ class PlanningCommandHandler:
             }
         }
         now = self._clock()
+        self._discard_planner_candidates(
+            uow,
+            request,
+            planning_run_ids=(run.id for run in request.runs),
+            envelope=envelope,
+            now=now,
+        )
         request.cancel(now=now)
         uow.planning_requests.save(request, previous_request_version)
         for run in request.runs:
@@ -508,12 +520,20 @@ class PlanningCommandHandler:
         previous_clarification_versions = {
             item.id: item.version for item in request.clarifications
         }
+        previous_run_id = request.current_run_id
         request.answer_clarifications(
             run_id=request.current_run_id,
             answers=answers,
             brief=brief,
             new_run_id=uuid4(),
             actor=envelope.actor_id,
+            now=brief.created_at,
+        )
+        self._discard_planner_candidates(
+            uow,
+            request,
+            planning_run_ids=(previous_run_id,),
+            envelope=envelope,
             now=brief.created_at,
         )
         previous_context_version = work_context.version
@@ -604,6 +624,7 @@ class PlanningCommandHandler:
             now=now,
         )
         previous_request_version = request.version
+        previous_run_id = request.current_run_id
         request.request_revision(
             expected_proposal_revision=_positive_int(
                 envelope.payload, "current_proposal_revision"
@@ -617,6 +638,13 @@ class PlanningCommandHandler:
             brief=brief,
             new_run_id=uuid4(),
             actor=envelope.actor_id,
+            now=now,
+        )
+        self._discard_planner_candidates(
+            uow,
+            request,
+            planning_run_ids=(previous_run_id,),
+            envelope=envelope,
             now=now,
         )
         self._persist_appended_revision(
@@ -662,10 +690,26 @@ class PlanningCommandHandler:
     ) -> CommandResult:
         request = self._request_for_mutation(uow, envelope)
         self._assert_current_proposal(uow, request, envelope.payload)
+        proposal = uow.planning_records.get_current_proposal(
+            request.id, request.workspace_id
+        )
+        if proposal is None:
+            raise NotFound("current planning proposal not found")
         reason = _required_string(envelope.payload, "reason")
         previous_request_version = request.version
         previous_run_versions = _active_run_versions(request)
         request.reject(now=self._clock())
+        if self._candidate_submission_service is not None:
+            self._candidate_submission_service.discard_planner_submissions(
+                uow,
+                workspace_id=request.workspace_id,
+                planning_run_id=proposal.planning_run_id,
+                now=self._clock(),
+                correlation_id=envelope.correlation_id,
+                actor_id=envelope.actor_id,
+                causation_id=envelope.id,
+                actor_type=envelope.actor_type,
+            )
         uow.planning_requests.save(request, previous_request_version)
         self._persist_run_changes(uow, request, previous_run_versions)
         event = _event(
@@ -731,6 +775,18 @@ class PlanningCommandHandler:
             now=self._clock(),
         )
         materialization = result.materialization
+        if self._candidate_submission_service is not None:
+            self._candidate_submission_service.activate_planner_submissions(
+                uow,
+                workspace_id=request.workspace_id,
+                planning_run_id=proposal.planning_run_id,
+                root_task_id=materialization.root_task_id,
+                now=self._clock(),
+                correlation_id=envelope.correlation_id,
+                actor_id=envelope.actor_id,
+                causation_id=envelope.id,
+                actor_type=envelope.actor_type,
+            )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -826,6 +882,33 @@ class PlanningCommandHandler:
         if request.version != envelope.expected_version:
             raise _planning_conflict(request)
         return request
+
+    def _discard_planner_candidates(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        *,
+        planning_run_ids: Iterable[UUID],
+        envelope: CommandEnvelope,
+        now: datetime,
+    ) -> None:
+        if self._candidate_submission_service is None:
+            return
+        seen: set[UUID] = set()
+        for planning_run_id in planning_run_ids:
+            if planning_run_id in seen:
+                continue
+            seen.add(planning_run_id)
+            self._candidate_submission_service.discard_planner_submissions(
+                uow,
+                workspace_id=request.workspace_id,
+                planning_run_id=planning_run_id,
+                now=now,
+                correlation_id=envelope.correlation_id,
+                actor_id=envelope.actor_id,
+                causation_id=envelope.id,
+                actor_type=envelope.actor_type,
+            )
 
     def _run_for_mutation(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope

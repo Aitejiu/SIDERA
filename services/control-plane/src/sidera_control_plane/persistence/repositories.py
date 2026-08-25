@@ -312,6 +312,14 @@ def _outbox_topic(event: EventData) -> str:
         and event.event_type == "WorkContextBoundToTask"
     ):
         return "work_context.bound_to_task"
+    if event.aggregate_type == "knowledge_candidate_submission":
+        topics = {
+            "KnowledgeCandidateSubmissionQueued": "knowledge_candidate_submission.queued",
+            "KnowledgeCandidateSubmissionUpdated": "knowledge_candidate_submission.updated",
+        }
+        topic = topics.get(event.event_type)
+        if topic is not None:
+            return topic
     return f"{event.aggregate_type}.{event.event_type}"
 
 

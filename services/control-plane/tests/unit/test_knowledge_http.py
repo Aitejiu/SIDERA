@@ -240,6 +240,68 @@ def test_http_adapter_search_revision_and_materialize_forward_typed_requests() -
     assert "body_markdown" not in materialize_request.content.decode()
 
 
+def test_http_adapter_submits_candidate_and_queries_deterministic_command_status() -> None:
+    command_id = UUID("70000000-0000-0000-0000-000000000007")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "applied",
+                    "command_id": str(command_id),
+                    "result": {"candidate_id": str(PAGE_ID), "status": "pending"},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "command_id": str(command_id),
+                "workspace_id": str(WORKSPACE_ID),
+                "status": "pending",
+                "result": None,
+                "error_code": None,
+            },
+        )
+
+    adapter, client = _adapter(handler)
+    try:
+        payload = {
+            "candidate_schema_version": 1,
+            "candidate_id": str(PAGE_ID),
+            "operation": "create_page",
+            "title": "Candidate",
+            "slug": "candidate",
+            "sections": [],
+        }
+        applied = adapter.submit_candidate(
+            WORKSPACE_ID,
+            command_id,
+            "candidate-idempotency-key",
+            payload,
+            correlation_id=CORRELATION_ID,
+            caller_request_id=CALLER_REQUEST_ID,
+        )
+        pending = adapter.get_command_status(
+            WORKSPACE_ID,
+            command_id,
+            correlation_id=CORRELATION_ID,
+            caller_request_id=CALLER_REQUEST_ID,
+        )
+    finally:
+        client.close()
+
+    assert applied.status == "applied"
+    assert applied.result == {"candidate_id": str(PAGE_ID), "status": "pending"}
+    assert pending.status == "pending"
+    assert len(seen) == 2
+    assert seen[0].url.path == "/api/v1/commands"
+    assert seen[1].url.path.endswith(f"/commands/{command_id}")
+    assert "candidate-idempotency-key" in seen[0].content.decode()
+
+
 @pytest.mark.parametrize(
     "status,expected_code,temporary",
     [

@@ -4,6 +4,9 @@ from datetime import UTC, datetime
 from threading import RLock
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+)
 from sidera_control_plane.domain.artifacts import ArtifactCandidate
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -53,9 +56,16 @@ class FakeWorkerAdapter:
         self,
         *,
         artifacts: tuple[ArtifactCandidate, ...] = (),
+        knowledge_candidates: tuple[KnowledgeCandidateProposalV1, ...] = (),
         failures: Mapping[str, str] | None = None,
     ) -> None:
         self._artifacts = tuple(artifacts)
+        if any(
+            not isinstance(item, KnowledgeCandidateProposalV1)
+            for item in knowledge_candidates
+        ):
+            raise TypeError("knowledge_candidates must be typed proposals")
+        self._knowledge_candidates = tuple(knowledge_candidates)
         self._failures = dict(failures or {})
         self._sessions: dict[str, _FakeSession] = {}
         self._lock = RLock()
@@ -225,6 +235,15 @@ class FakeWorkerAdapter:
         self._maybe_fail("collect_artifacts")
         self._session(handle)
         return self._artifacts
+
+    def collect_knowledge_candidates(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> tuple[KnowledgeCandidateProposalV1, ...]:
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        self._maybe_fail("collect_knowledge_candidates")
+        self._session(handle)
+        return self._knowledge_candidates
 
     def release_boundary(self, handle: AdapterSessionHandle) -> None:
         """Make the current prompt safe for the next queued input."""

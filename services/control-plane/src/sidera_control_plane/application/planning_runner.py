@@ -17,6 +17,12 @@ from sidera_control_plane.application.context_materialization import (
     ContextMaterializer,
     build_materialization_audit,
 )
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    CandidateProposalSpoolError,
+    KnowledgeCandidateProposalV1,
+    KnowledgeCandidateSubmissionService,
+    KnowledgeCandidateSubmissionStatus,
+)
 from sidera_control_plane.application.planner_runtime import (
     CapabilityCatalogEntry,
     CapabilityCatalogSnapshot,
@@ -352,6 +358,7 @@ class PlanningRunner:
         clock: Callable[[], datetime] | None = None,
         context_materializer: ContextMaterializer | None = None,
         context_package_cutover_at: datetime | None = None,
+        candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
@@ -377,6 +384,7 @@ class PlanningRunner:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._context_materializer = context_materializer
         self._context_package_cutover_at = context_package_cutover_at
+        self._candidate_submission_service = candidate_submission_service
 
     def run_once(self, limit: int = 10) -> PlanningBatchResult:
         if limit <= 0:
@@ -991,7 +999,13 @@ class PlanningRunner:
     ) -> PlanningRunOutcome:
         if isinstance(result, PlannerProposalResult):
             try:
-                return self._persist_proposal(item, result.proposal, result.usage)
+                return self._persist_proposal(
+                    item,
+                    result.proposal,
+                    result.usage,
+                    result.knowledge_candidates,
+                    result.knowledge_candidate_diagnostics,
+                )
             except (DomainError, ValueError, TypeError):
                 return self._persist_failure(
                     item,
@@ -1040,6 +1054,8 @@ class PlanningRunner:
         item: _ClaimedRun,
         adapter_proposal: ProposalRevision,
         usage: PlanningUsage,
+        knowledge_candidates: tuple[KnowledgeCandidateProposalV1, ...] = (),
+        knowledge_candidate_diagnostics: tuple[str, ...] = (),
     ) -> PlanningRunOutcome:
         now = self._clock()
         with self._uow_factory() as uow:
@@ -1104,6 +1120,38 @@ class PlanningRunner:
                     "content_hash": proposal.content_hash,
                 },
             )
+            if self._candidate_submission_service is not None:
+                for candidate in knowledge_candidates:
+                    try:
+                        with uow.savepoint():
+                            self._candidate_submission_service.queue_in_uow(
+                                uow,
+                                workspace_id=request.workspace_id,
+                                producer_type="planner",
+                                producer_id=run.id,
+                                proposal=candidate,
+                                status=KnowledgeCandidateSubmissionStatus.WAITING_FOR_TASK,
+                                now=now,
+                                correlation_id=request.correlation_id,
+                                planning_run_id=run.id,
+                                actor_id=self._owner_id,
+                            )
+                    except (CandidateProposalSpoolError, DomainError, TypeError, ValueError):
+                        logger.warning(
+                            "planner knowledge candidate was not queued",
+                            extra={
+                                "planning_run_id": str(run.id),
+                                "proposal_hash": candidate.proposal_hash,
+                            },
+                        )
+            for diagnostic in knowledge_candidate_diagnostics:
+                logger.warning(
+                    "planner knowledge candidate diagnostic",
+                    extra={
+                        "planning_run_id": str(run.id),
+                        "diagnostic": diagnostic,
+                    },
+                )
             _ = (run_event, proposal_event)
         return PlanningRunOutcome(
             run_id=item.run_id,

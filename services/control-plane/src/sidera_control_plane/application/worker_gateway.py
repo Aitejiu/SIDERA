@@ -3,7 +3,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.artifact_content import (
@@ -20,6 +20,11 @@ from sidera_control_plane.application.event_ingestor import (
     ArtifactRegistry,
     EventIngestionReport,
     SessionEventIngestor,
+)
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+    KnowledgeCandidateSubmissionService,
+    KnowledgeCandidateSubmissionStatus,
 )
 from sidera_control_plane.application.outbox_dispatcher import (
     OutboxMessage,
@@ -333,6 +338,7 @@ class WorkerGateway:
         artifact_content_store: ArtifactContentWriter | None = None,
         context_materializer: ContextMaterializer | None = None,
         context_package_cutover_at: datetime | None = None,
+        candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
@@ -355,6 +361,7 @@ class WorkerGateway:
             raise ValueError("context_package_cutover_at must be timezone aware")
         self._context_materializer = context_materializer
         self._context_package_cutover_at = context_package_cutover_at
+        self._candidate_submission_service = candidate_submission_service
 
     def handle(
         self, message: OutboxMessage
@@ -1212,7 +1219,92 @@ class WorkerGateway:
             producer=context.adapter_instance.instance_name,
             environment_ref=context.workspace_instance.instance_name,
         )
+        self._queue_knowledge_candidates(
+            adapter=adapter,
+            handle=handle,
+            context=context,
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            session_id=session_id,
+        )
         return GatewaySessionSyncResult(event_report, artifact_report)
+
+    def _queue_knowledge_candidates(
+        self,
+        *,
+        adapter: WorkerAdapter,
+        handle: AdapterSessionHandle,
+        context: _AssignmentContext,
+        workspace_id: UUID,
+        execution_id: UUID,
+        session_id: UUID,
+    ) -> None:
+        service = self._candidate_submission_service
+        collect = cast(
+            Callable[..., tuple[KnowledgeCandidateProposalV1, ...]] | None,
+            getattr(adapter, "collect_knowledge_candidates", None),
+        )
+        if service is None or not callable(collect):
+            return
+        try:
+            proposals = tuple(
+                collect(
+                    handle,
+                    operation_id=uuid5(
+                        NAMESPACE_URL,
+                        f"sidera.gateway.collect_knowledge_candidates:{session_id}",
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "worker knowledge candidate collection failed",
+                extra={
+                    "workspace_id": str(workspace_id),
+                    "execution_id": str(execution_id),
+                    "session_id": str(session_id),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        for proposal in proposals:
+            try:
+                with self._uow_factory() as uow:
+                    root_task_id = context.task.id
+                    if context.execution.worker_item_id is not None:
+                        worker_item = uow.worker_items.get(
+                            context.execution.worker_item_id, workspace_id
+                        )
+                        if worker_item is not None:
+                            root_task_id = worker_item.root_task_id
+                    service.queue_in_uow(
+                        uow,
+                        workspace_id=workspace_id,
+                        producer_type="worker",
+                        producer_id=execution_id,
+                        proposal=proposal,
+                        status=KnowledgeCandidateSubmissionStatus.QUEUED,
+                        now=self._clock(),
+                        correlation_id=uuid5(
+                            NAMESPACE_URL,
+                            f"sidera.gateway.knowledge_candidate:{session_id}:{proposal.proposal_hash}",
+                        ),
+                        execution_id=execution_id,
+                        worker_item_id=context.execution.worker_item_id,
+                        task_id=root_task_id,
+                        subtask_task_id=context.task.id,
+                        actor_id="gateway",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "worker knowledge candidate proposal was ignored",
+                    extra={
+                        "workspace_id": str(workspace_id),
+                        "execution_id": str(execution_id),
+                        "session_id": str(session_id),
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
     def _prepare_artifact_candidates(
         self,

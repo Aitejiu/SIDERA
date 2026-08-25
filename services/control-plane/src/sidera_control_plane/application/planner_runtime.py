@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+)
 from sidera_control_plane.domain.context_packages import ContextMaterializationV1
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
@@ -234,6 +237,20 @@ def _context_references(
 class PlannerProposalResult:
     proposal: ProposalRevision
     usage: PlanningUsage = field(default_factory=PlanningUsage.zero)
+    knowledge_candidates: tuple[KnowledgeCandidateProposalV1, ...] = ()
+    knowledge_candidate_diagnostics: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        candidates = tuple(self.knowledge_candidates)
+        if any(
+            not isinstance(item, KnowledgeCandidateProposalV1) for item in candidates
+        ):
+            raise TypeError("planner knowledge candidates must be typed")
+        object.__setattr__(self, "knowledge_candidates", candidates)
+        diagnostics = tuple(self.knowledge_candidate_diagnostics)
+        if any(not isinstance(item, str) or not item.strip() for item in diagnostics):
+            raise TypeError("planner knowledge candidate diagnostics must be text")
+        object.__setattr__(self, "knowledge_candidate_diagnostics", diagnostics)
 
 
 @dataclass(frozen=True, slots=True)

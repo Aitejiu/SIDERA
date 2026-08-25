@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import httpx
@@ -13,7 +13,9 @@ from sidera_control_plane.application.ports import (
     ExactRevisionSection,
     ExactSectionBody,
     ExactSectionRef,
+    KnowledgeCandidateCatalogPort,
     KnowledgeCatalogPort,
+    KnowledgeCommandStatus,
     KnowledgeSourceMetadata,
     SearchHit,
 )
@@ -134,6 +136,14 @@ class _MaterializationResponse(_StrictModel):
     total_byte_count: int = Field(ge=0)
 
 
+class _CommandResponse(_StrictModel):
+    command_id: UUID
+    workspace_id: UUID | None = None
+    status: str
+    result: dict[str, object] | None = None
+    error_code: str | None = None
+
+
 class _ErrorBody(_StrictModel):
     code: str
     message: str
@@ -144,7 +154,7 @@ class _ErrorResponse(_StrictModel):
     error: _ErrorBody
 
 
-class KnowledgeHttpAdapter(KnowledgeCatalogPort):
+class KnowledgeHttpAdapter(KnowledgeCatalogPort, KnowledgeCandidateCatalogPort):
     """HTTP implementation of the control-plane Knowledge catalog port."""
 
     def __init__(
@@ -352,6 +362,82 @@ class KnowledgeHttpAdapter(KnowledgeCatalogPort):
                 )
             )
         return tuple(sorted(result, key=lambda item: item.ordinal))
+
+    def submit_candidate(
+        self,
+        workspace_id: UUID,
+        command_id: UUID,
+        idempotency_key: str,
+        candidate_payload: Mapping[str, object],
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> KnowledgeCommandStatus:
+        response = self._request(
+            "POST",
+            "/api/v1/commands",
+            json={
+                "command_id": str(command_id),
+                "workspace_id": str(workspace_id),
+                "target_type": "knowledge_candidate",
+                "target_id": candidate_payload.get("candidate_id"),
+                "actor": {"type": "control_plane", "id": "sidera-candidate-worker"},
+                "expected_version": None,
+                "idempotency_key": idempotency_key,
+                "correlation_id": str(correlation_id),
+                "command_type": "SubmitKnowledgeCandidate",
+                "payload": dict(candidate_payload),
+            },
+            timeout=self._metadata_timeout_seconds,
+            correlation_id=correlation_id,
+            caller_request_id=caller_request_id,
+        )
+        document = self._parse(response, _CommandResponse)
+        return self._command_status(document, workspace_id)
+
+    def get_command_status(
+        self,
+        workspace_id: UUID,
+        command_id: UUID,
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> KnowledgeCommandStatus:
+        response = self._request(
+            "GET",
+            f"/api/v1/workspaces/{workspace_id}/commands/{command_id}",
+            timeout=self._metadata_timeout_seconds,
+            correlation_id=correlation_id,
+            caller_request_id=caller_request_id,
+        )
+        document = self._parse(response, _CommandResponse)
+        return self._command_status(document, workspace_id)
+
+    @staticmethod
+    def _command_status(
+        document: _CommandResponse, workspace_id: UUID
+    ) -> KnowledgeCommandStatus:
+        if document.workspace_id is not None and document.workspace_id != workspace_id:
+            raise KnowledgeAdapterError(
+                "workspace_mismatch",
+                "Knowledge command scope does not match the request",
+                temporary=False,
+            )
+        if document.status not in {"pending", "applied", "rejected"}:
+            raise KnowledgeAdapterError(
+                "protocol_error",
+                "Knowledge service returned an invalid command status",
+                temporary=False,
+            )
+        return KnowledgeCommandStatus(
+            command_id=document.command_id,
+            workspace_id=workspace_id,
+            status=cast(
+                Literal["pending", "applied", "rejected"], document.status
+            ),
+            result=document.result,
+            error_code=document.error_code,
+        )
 
     def _request(
         self,

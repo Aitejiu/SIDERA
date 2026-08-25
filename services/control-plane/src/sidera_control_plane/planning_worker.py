@@ -19,6 +19,10 @@ from sidera_control_plane.adapters.fake_planner import (
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.adapters.opencode_planner import OpenCodePlannerAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    FileCandidateProposalSpool,
+    KnowledgeCandidateSubmissionService,
+)
 from sidera_control_plane.application.planning_reconciler import (
     PlanningReconciler,
     PlanningReconcileResult,
@@ -136,6 +140,12 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         temp_root=settings.planning_temp_root,
     )
     try:
+        candidate_submission_service = KnowledgeCandidateSubmissionService(
+            FileCandidateProposalSpool(
+                settings.knowledge_candidate_spool_dir,
+                quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
+            )
+        )
         uow_factory = lambda: SqlAlchemyUnitOfWork(
             database,
             projection_change_retention_seconds=settings.projection_change_retention_seconds,
@@ -151,6 +161,7 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             clock=lambda: datetime.now(UTC),
             context_materializer=ContextMaterializer(catalog),
             context_package_cutover_at=settings.context_package_cutover_at,
+            candidate_submission_service=candidate_submission_service,
         )
         reconciler = PlanningReconciler(
             uow_factory=uow_factory,

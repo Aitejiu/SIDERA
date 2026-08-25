@@ -14,6 +14,10 @@ from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
     ExecutionInputCommandHandler,
 )
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    FileCandidateProposalSpool,
+    KnowledgeCandidateSubmissionService,
+)
 from sidera_control_plane.application.module_queries import ModuleQueryService
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
@@ -120,6 +124,12 @@ def get_command_service(
                 local_actor_id=settings.local_actor_id,
                 clock=lambda: datetime.now(UTC),
                 planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
+                candidate_submission_service=KnowledgeCandidateSubmissionService(
+                    FileCandidateProposalSpool(
+                        settings.knowledge_candidate_spool_dir,
+                        quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
+                    )
+                ),
             ),
             WorkContextCommandHandler(
                 local_actor_type=settings.local_actor_type,

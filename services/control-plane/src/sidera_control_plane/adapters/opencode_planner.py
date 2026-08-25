@@ -18,6 +18,9 @@ from sidera_control_plane.adapters.acp_process import (
     ACPProcessError,
     ACPProcessTransport,
 )
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+)
 from sidera_control_plane.application.planner_runtime import (
     PlannerClarificationResult,
     PlannerExplicitFailure,
@@ -48,6 +51,8 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
     ProposalRevision,
 )
+
+_MAX_KNOWLEDGE_CANDIDATES = 16
 
 
 class OpenCodePlannerError(RuntimeError):
@@ -422,7 +427,13 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         "verification-only subtasks or WorkerItems beyond the brief. Proposal "
         "confirmation is handled by SIDERA outside the payload; set "
         "impact_policy.manual_gate to false and never use it to represent "
-        "Proposal confirmation. Every expected_artifact_refs value must use one "
+        "Proposal confirmation. Optional knowledge_candidates are reference "
+        "candidates only; they are not published or reviewed automatically. Each "
+        "candidate uses schema_version 1, operation create_page or revise_page, "
+        "title, slug, summary, tags, sections, source_suggestions, artifact_refs, "
+        "evidence_refs, relations, and optional target/revision fields. Do not put "
+        "workspace_id, task_id, actor_id, or review_decision in a candidate. Every "
+        "expected_artifact_refs value must use one "
         "of these exact references: artifact_type:diff, artifact_type:log, "
         "artifact_type:report, artifact_type:screenshot, artifact_type:build, "
         "or artifact_type:external; do not invent artifact types. "
@@ -536,6 +547,33 @@ def _proposal_shape_hint() -> dict[str, object]:
             "runtime_seconds": 0,
             "context_bytes": 0,
         },
+        "knowledge_candidates": [
+            {
+                "schema_version": 1,
+                "operation": "create_page",
+                "target_page_id": None,
+                "expected_revision_id": None,
+                "expected_revision_hash": None,
+                "title": "candidate title",
+                "slug": "candidate-slug",
+                "summary": "candidate summary",
+                "tags": ["project"],
+                "sections": [
+                    {
+                        "section_key": "body",
+                        "heading": "Body",
+                        "summary": "section summary",
+                        "body_markdown": "candidate reference content",
+                        "ordinal": 0,
+                    }
+                ],
+                "source_suggestions": [],
+                "artifact_refs": [],
+                "evidence_refs": [],
+                "relations": [],
+                "supersedes_candidate_id": None,
+            }
+        ],
     }
 
 
@@ -561,7 +599,10 @@ def _parse_result(
         result_type = value.get("result_type")
         usage = _parse_usage(value.get("usage"))
         if result_type == "proposal":
-            _strict_keys(value, {"result_type", "proposal", "usage"})
+            _strict_keys(
+                value,
+                {"result_type", "proposal", "usage", "knowledge_candidates"},
+            )
             raw_payload = value.get("proposal")
             if not isinstance(raw_payload, Mapping):
                 raise ValueError("proposal must be an object")
@@ -579,7 +620,28 @@ def _parse_result(
                 profile_snapshot=planner_input.profile_snapshot,
                 created_at=datetime.now(UTC),
             )
-            return PlannerProposalResult(proposal=proposal, usage=usage)
+            raw_candidates = value.get("knowledge_candidates", [])
+            candidates: list[KnowledgeCandidateProposalV1] = []
+            diagnostics: list[str] = []
+            if not isinstance(raw_candidates, list):
+                diagnostics.append("knowledge_candidates_not_a_list")
+                raw_candidates = []
+            for index, item in enumerate(raw_candidates[:_MAX_KNOWLEDGE_CANDIDATES]):
+                if not isinstance(item, Mapping):
+                    diagnostics.append(f"knowledge_candidate_{index}_not_an_object")
+                    continue
+                try:
+                    candidates.append(KnowledgeCandidateProposalV1.from_mapping(item))
+                except (TypeError, ValueError):
+                    diagnostics.append(f"knowledge_candidate_{index}_invalid")
+            if len(raw_candidates) > _MAX_KNOWLEDGE_CANDIDATES:
+                diagnostics.append("knowledge_candidates_limit_exceeded")
+            return PlannerProposalResult(
+                proposal=proposal,
+                usage=usage,
+                knowledge_candidates=tuple(candidates),
+                knowledge_candidate_diagnostics=tuple(diagnostics),
+            )
         if result_type == "clarification":
             raw_items = _clarification_items(value)
             if not isinstance(raw_items, list) or not raw_items:

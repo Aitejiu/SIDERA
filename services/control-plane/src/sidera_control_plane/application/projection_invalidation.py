@@ -21,6 +21,7 @@ PROJECTION_TYPES = frozenset(
         "planning_request",
         "work_context",
         "context_package",
+        "knowledge_candidate_submission",
     }
 )
 
@@ -116,6 +117,39 @@ def projection_targets_for_event(
                 change_type,
             ),
         )
+    if event.aggregate_type == "knowledge_candidate_submission":
+        targets = [
+            ProjectionInvalidationTarget(
+                "knowledge_candidate_submission",
+                event.aggregate_id,
+                "knowledge_candidate_submission_updated",
+            )
+        ]
+        task_id = _payload_uuid(payload, "task_id")
+        subtask_task_id = _payload_uuid(payload, "subtask_task_id")
+        worker_item_id = _payload_uuid(payload, "worker_item_id")
+        execution_id = _payload_uuid(payload, "execution_id")
+        if task_id is not None:
+            targets.extend(
+                (
+                    ProjectionInvalidationTarget("task_overview", task_id),
+                    ProjectionInvalidationTarget("task_graph", task_id),
+                )
+            )
+        if subtask_task_id is not None:
+            targets.append(
+                ProjectionInvalidationTarget("subtask_workspace", subtask_task_id)
+            )
+        if worker_item_id is not None:
+            targets.extend(
+                (
+                    ProjectionInvalidationTarget("worker_item_workspace", worker_item_id),
+                    ProjectionInvalidationTarget("worker_item_activity", worker_item_id),
+                )
+            )
+        if execution_id is not None:
+            targets.append(ProjectionInvalidationTarget("executions", execution_id))
+        return tuple(targets)
     planning_change_type = _planning_change_type(event.event_type)
     if event.aggregate_type == "planning_request":
         return (

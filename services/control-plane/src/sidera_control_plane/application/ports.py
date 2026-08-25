@@ -3,9 +3,13 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import TracebackType
-from typing import Protocol, Self
+from typing import Literal, Protocol, Self
 from uuid import UUID
 
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+    KnowledgeCandidateSubmission,
+)
 from sidera_control_plane.application.planner_runtime import (
     PlannerInput,
     PlannerResult,
@@ -410,6 +414,15 @@ class ExactSectionBody:
     section_byte_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class KnowledgeCommandStatus:
+    command_id: UUID
+    workspace_id: UUID
+    status: Literal["pending", "applied", "rejected"]
+    result: Mapping[str, object] | None
+    error_code: str | None
+
+
 class KnowledgeCatalogPort(Protocol):
     def search(
         self,
@@ -444,6 +457,30 @@ class KnowledgeCatalogPort(Protocol):
         correlation_id: UUID,
         caller_request_id: UUID,
     ) -> tuple[ExactSectionBody, ...]:
+        raise NotImplementedError
+
+
+class KnowledgeCandidateCatalogPort(Protocol):
+    def submit_candidate(
+        self,
+        workspace_id: UUID,
+        command_id: UUID,
+        idempotency_key: str,
+        candidate_payload: Mapping[str, object],
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> KnowledgeCommandStatus:
+        raise NotImplementedError
+
+    def get_command_status(
+        self,
+        workspace_id: UUID,
+        command_id: UUID,
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> KnowledgeCommandStatus:
         raise NotImplementedError
 
 
@@ -576,6 +613,58 @@ class ContextPackageRepositoryPort(Protocol):
         causation_id: UUID,
         correlation_id: UUID,
     ) -> ContextPackageManifestV1:
+        raise NotImplementedError
+
+
+class KnowledgeCandidateSubmissionRepositoryPort(Protocol):
+    def add(self, submission: KnowledgeCandidateSubmission) -> None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        submission_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> KnowledgeCandidateSubmission | None:
+        raise NotImplementedError
+
+    def find_by_producer_hash(
+        self,
+        workspace_id: UUID,
+        producer_type: str,
+        producer_id: UUID,
+        proposal_hash: str,
+        *,
+        for_update: bool = False,
+    ) -> KnowledgeCandidateSubmission | None:
+        raise NotImplementedError
+
+    def claim_next(
+        self,
+        *,
+        owner: str,
+        now: datetime,
+        lease_ttl: timedelta,
+        limit: int,
+        workspace_id: UUID | None = None,
+    ) -> tuple[KnowledgeCandidateSubmission, ...]:
+        raise NotImplementedError
+
+    def save(self, submission: KnowledgeCandidateSubmission, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def list_for_producer(
+        self, workspace_id: UUID, producer_type: str, producer_id: UUID
+    ) -> tuple[KnowledgeCandidateSubmission, ...]:
+        raise NotImplementedError
+
+    def list_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        producer_types: Collection[str] = (),
+    ) -> tuple[KnowledgeCandidateSubmission, ...]:
         raise NotImplementedError
 
 
@@ -1109,6 +1198,11 @@ class WorkerAdapter(Protocol):
     ) -> tuple[ArtifactCandidate, ...]:
         raise NotImplementedError
 
+    def collect_knowledge_candidates(
+        self, handle: AdapterSessionHandle, *, operation_id: UUID
+    ) -> tuple[KnowledgeCandidateProposalV1, ...]:
+        raise NotImplementedError
+
 
 class PlannerAdapter(Protocol):
     def probe(self, config: Mapping[str, object]) -> PlannerAdapterCapabilityProfile:
@@ -1231,6 +1325,7 @@ class ControlPlaneUnitOfWork(Protocol):
     work_contexts: WorkContextRepositoryPort
     context_assemblies: ContextAssemblyRepositoryPort
     context_packages: ContextPackageRepositoryPort
+    knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
 
     def flush(self) -> None:
         raise NotImplementedError

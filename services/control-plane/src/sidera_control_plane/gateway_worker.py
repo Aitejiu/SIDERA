@@ -13,6 +13,10 @@ from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceMana
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    FileCandidateProposalSpool,
+    KnowledgeCandidateSubmissionService,
+)
 from sidera_control_plane.application.ports import WorkerAdapter
 from sidera_control_plane.application.worker_gateway import (
     ConfiguredExecutionSpecFactory,
@@ -106,6 +110,12 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             ),
             context_materializer=ContextMaterializer(catalog),
             context_package_cutover_at=settings.context_package_cutover_at,
+            candidate_submission_service=KnowledgeCandidateSubmissionService(
+                FileCandidateProposalSpool(
+                    settings.knowledge_candidate_spool_dir,
+                    quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
+                )
+            ),
             clock=lambda: datetime.now(UTC),
         )
         runner = GatewayAssignmentRunner(

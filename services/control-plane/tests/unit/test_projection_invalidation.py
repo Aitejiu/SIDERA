@@ -150,6 +150,33 @@ def test_projection_targets_use_workspace_scope_when_identity_is_unavailable() -
     assert all(target.resource_id is None for target in targets)
 
 
+def test_candidate_submission_invalidates_its_related_resources() -> None:
+    targets = projection_targets_for_event(
+        _event(
+            "KnowledgeCandidateSubmissionQueued",
+            aggregate_type="knowledge_candidate_submission",
+            payload={
+                "task_id": str(ROOT_TASK_ID),
+                "subtask_task_id": str(ROOT_TASK_ID),
+                "worker_item_id": str(WORKER_ITEM_ID),
+                "execution_id": str(EXECUTION_ID),
+            },
+        )
+    )
+
+    assert {
+        target.projection_type for target in targets
+    } == {
+        "knowledge_candidate_submission",
+        "task_overview",
+        "task_graph",
+        "subtask_workspace",
+        "worker_item_workspace",
+        "worker_item_activity",
+        "executions",
+    }
+
+
 @pytest.mark.parametrize(
     ("event_type", "aggregate_type", "aggregate_id", "payload", "expected"),
     [

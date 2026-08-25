@@ -19,6 +19,7 @@ from sidera_control_plane.application.ports import (
     ExecutionRepositoryPort,
     ExecutionRequestRepositoryPort,
     GatewayOperationRepositoryPort,
+    KnowledgeCandidateSubmissionRepositoryPort,
     LeaseStorePort,
     ModuleRepositoryPort,
     PlanningLeaseRepositoryPort,
@@ -59,6 +60,9 @@ from sidera_control_plane.persistence.gateway_repository import (
     ExecutionEventRepository,
     ExecutionInputRepository,
     GatewayOperationRepository,
+)
+from sidera_control_plane.persistence.knowledge_candidate_submission_repository import (
+    KnowledgeCandidateSubmissionRepository,
 )
 from sidera_control_plane.persistence.lease_store import LeaseStore
 from sidera_control_plane.persistence.module_repository import (
@@ -130,6 +134,7 @@ class SqlAlchemyUnitOfWork:
     work_contexts: WorkContextRepositoryPort
     context_assemblies: ContextAssemblyRepositoryPort
     context_packages: ContextPackageRepositoryPort
+    knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
 
     def __init__(
         self, database: Database, *, projection_change_retention_seconds: int = 604_800
@@ -183,6 +188,9 @@ class SqlAlchemyUnitOfWork:
         self.work_contexts = WorkContextRepository(self.session)
         self.context_assemblies = ContextAssemblyRepository(self.session, self.events)
         self.context_packages = ContextPackageRepository(self.session, self.events)
+        self.knowledge_candidate_submissions = KnowledgeCandidateSubmissionRepository(
+            self.session
+        )
         return self
 
     def __exit__(
