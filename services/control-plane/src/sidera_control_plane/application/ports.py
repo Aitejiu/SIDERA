@@ -1,4 +1,4 @@
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -320,6 +320,129 @@ class WorkContextRepositoryPort(Protocol):
         raise NotImplementedError
 
     def archive(self, context: WorkContext, *, expected_version: int) -> None:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class SearchHit:
+    page_id: UUID
+    revision_id: UUID
+    section_key: str
+    revision_number: int
+    revision_hash: str
+    section_hash: str
+    title: str
+    summary: str
+    tags: tuple[str, ...]
+    source_ids: tuple[UUID, ...]
+    source_types: tuple[str, ...]
+    source_availability: tuple[str, ...]
+    trust: str
+    section_byte_count: int
+    rank: float
+    rank_explanation: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExactSectionRef:
+    ordinal: int
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    source_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSourceMetadata:
+    source_id: UUID
+    workspace_id: UUID
+    source_type: str
+    label: str
+    uri: str | None
+    workspace_relative_path: str | None
+    git_revision: str | None
+    digest: str | None
+    metadata: Mapping[str, object]
+    availability: str
+    safe_reason_code: str | None
+    last_checked_at: datetime | None
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExactRevisionSection:
+    section_key: str
+    heading: str
+    summary: str
+    ordinal: int
+    section_hash: str
+    content_byte_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExactRevisionManifest:
+    workspace_id: UUID
+    page_id: UUID
+    revision_id: UUID
+    revision_number: int
+    revision_hash: str
+    title: str
+    summary: str
+    tags: tuple[str, ...]
+    source_ids: tuple[UUID, ...]
+    sections: tuple[ExactRevisionSection, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExactSectionBody:
+    ordinal: int
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: str
+    section_key: str
+    section_hash: str
+    body_markdown: str
+    sources: tuple[KnowledgeSourceMetadata, ...]
+    trust: str
+    section_byte_count: int
+
+
+class KnowledgeCatalogPort(Protocol):
+    def search(
+        self,
+        workspace_id: UUID,
+        query: str,
+        *,
+        tags: Sequence[str] = (),
+        source_types: Sequence[str] = (),
+        status: str | None = "active",
+        limit: int = 20,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> tuple[SearchHit, ...]:
+        raise NotImplementedError
+
+    def get_revision_manifest(
+        self,
+        workspace_id: UUID,
+        page_id: UUID,
+        revision_id: UUID,
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> ExactRevisionManifest:
+        raise NotImplementedError
+
+    def materialize(
+        self,
+        workspace_id: UUID,
+        sections: Sequence[ExactSectionRef],
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> tuple[ExactSectionBody, ...]:
         raise NotImplementedError
 
 
