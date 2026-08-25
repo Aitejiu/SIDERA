@@ -32,6 +32,9 @@ from sidera_control_plane.application.task_console_queries import (
 )
 from sidera_control_plane.application.task_first_queries import TaskFirstQueryService
 from sidera_control_plane.application.task_queries import TaskQueryService
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextCommandHandler,
+)
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
 from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.worker_trace_queries import (
@@ -110,6 +113,11 @@ def get_command_service(
             ),
             ExecutionInputCommandHandler(lambda: datetime.now(UTC)),
             PlanningCommandHandler(
+                local_actor_type=settings.local_actor_type,
+                local_actor_id=settings.local_actor_id,
+                clock=lambda: datetime.now(UTC),
+            ),
+            WorkContextCommandHandler(
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
                 clock=lambda: datetime.now(UTC),

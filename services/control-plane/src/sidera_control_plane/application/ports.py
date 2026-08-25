@@ -312,6 +312,9 @@ class WorkContextRepositoryPort(Protocol):
     ) -> None:
         raise NotImplementedError
 
+    def archive(self, context: WorkContext, *, expected_version: int) -> None:
+        raise NotImplementedError
+
 
 class ProposalMaterializationRepositoryPort(Protocol):
     def add(self, materialization: ProposalMaterialization) -> None:

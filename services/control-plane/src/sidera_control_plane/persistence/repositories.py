@@ -291,6 +291,7 @@ def _outbox_topic(event: EventData) -> str:
         topics = {
             "WorkContextCreated": "work_context.created",
             "WorkContextRevised": "work_context.revised",
+            "WorkContextArchived": "work_context.archived",
         }
         topic = topics.get(event.event_type)
         if topic is not None:

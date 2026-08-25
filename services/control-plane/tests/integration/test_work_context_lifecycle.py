@@ -249,3 +249,268 @@ def test_work_context_insert_failure_rolls_back_planning_records_and_events(
         _submit(client, workspace_id, profile_id, "rollback")
 
     assert _counts(database) == before
+
+
+def test_revise_work_context_appends_typed_patch_and_replays_without_new_revision(
+    client: TestClient, database: Database, workspace_id: UUID
+) -> None:
+    profile_id = _profile_id(client, workspace_id, "revise")
+    submitted = _submit(client, workspace_id, profile_id, "revise")
+    data = submitted.json()["data"]
+    context_id = UUID(data["work_context_id"])
+    revision_hash = data["work_context_content_hash"]
+    request = _command(
+        workspace_id,
+        "ReviseWorkContext",
+        {
+            "base_revision": 1,
+            "base_content_hash": revision_hash,
+            "reason": "user_intervention",
+            "patch": {
+                "objective": "Refine the implementation objective",
+                "constraints": ["No raw chat", "Keep the audit trail"],
+                "acceptance_criteria": ["The revised context is queryable"],
+                "requested_outputs": ["context manifest", "revision summary"],
+                "accepted_decisions": [
+                    {
+                        "key": "decision:operator-scope",
+                        "statement": "Keep the scope inside the control plane",
+                        "source": "operator",
+                        "ordinal": 0,
+                    }
+                ],
+                "unresolved_questions": [
+                    {
+                        "key": "question:package-budget",
+                        "question": "What is the package budget?",
+                        "blocking": False,
+                        "ordinal": 0,
+                    }
+                ],
+                "artifact_refs": [
+                    {
+                        "ref_id": str(uuid4()),
+                        "ref_type": "design_note",
+                        "ordinal": 0,
+                    }
+                ],
+            },
+        },
+        idempotency_key="context-revise-once",
+        target_type="work_context",
+        target_id=context_id,
+        expected_version=1,
+    )
+
+    first = client.post("/api/v1/commands", json=request)
+    assert first.status_code == 200, first.text
+    replay = client.post("/api/v1/commands", json=request)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
+
+    with database.session() as session:
+        context = session.get(WorkContextModel, context_id)
+        revisions = session.scalars(
+            select(WorkContextRevisionModel)
+            .where(WorkContextRevisionModel.work_context_id == context_id)
+            .order_by(WorkContextRevisionModel.revision_number)
+        ).all()
+        events = session.scalars(
+            select(EventModel)
+            .where(
+                EventModel.aggregate_type == "work_context",
+                EventModel.aggregate_id == context_id,
+            )
+            .order_by(EventModel.aggregate_version)
+        ).all()
+
+    assert context is not None
+    assert context.current_revision_number == 2
+    assert context.version == 2
+    assert len(revisions) == 2
+    assert revisions[0].snapshot["objective"] == "Persist an immutable work context"
+    assert revisions[1].snapshot["objective"] == "Refine the implementation objective"
+    assert revisions[1].reason == "user_intervention"
+    assert revisions[1].snapshot["accepted_decisions"][-1]["key"] == (
+        "decision:operator-scope"
+    )
+    assert revisions[1].snapshot["unresolved_questions"][0]["key"] == (
+        "question:package-budget"
+    )
+    assert [event.event_type for event in events] == [
+        "WorkContextCreated",
+        "WorkContextRevised",
+    ]
+
+
+def test_revise_work_context_rejects_stale_base_without_mutating_context(
+    client: TestClient, database: Database, workspace_id: UUID
+) -> None:
+    profile_id = _profile_id(client, workspace_id, "base-mismatch")
+    submitted = _submit(client, workspace_id, profile_id, "base-mismatch")
+    data = submitted.json()["data"]
+    context_id = UUID(data["work_context_id"])
+
+    response = client.post(
+        "/api/v1/commands",
+        json=_command(
+            workspace_id,
+            "ReviseWorkContext",
+            {
+                "base_revision": 1,
+                "base_content_hash": "f" * 64,
+                "reason": "replanned",
+                "patch": {"objective": "Should not apply"},
+            },
+            idempotency_key="context-base-mismatch",
+            target_type="work_context",
+            target_id=context_id,
+            expected_version=1,
+        ),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "work_context_base_mismatch"
+    with database.session() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(WorkContextRevisionModel).where(
+                    WorkContextRevisionModel.work_context_id == context_id
+                )
+            )
+            == 1
+        )
+
+
+def test_attach_knowledge_revision_appends_exact_ref_without_cross_database_lookup(
+    client: TestClient, database: Database, workspace_id: UUID
+) -> None:
+    profile_id = _profile_id(client, workspace_id, "knowledge")
+    submitted = _submit(client, workspace_id, profile_id, "knowledge")
+    data = submitted.json()["data"]
+    context_id = UUID(data["work_context_id"])
+    page_id = uuid4()
+    revision_id = uuid4()
+
+    response = client.post(
+        "/api/v1/commands",
+        json=_command(
+            workspace_id,
+            "AttachKnowledgeRevision",
+            {
+                "selection_reason": "operator selected the exact section",
+                "knowledge_ref": {
+                    "page_id": str(page_id),
+                    "revision_id": str(revision_id),
+                    "revision_hash": "a" * 64,
+                    "section_key": "api-contract",
+                    "section_hash": "b" * 64,
+                    "source_ids": [str(uuid4())],
+                    "ordinal": 0,
+                },
+            },
+            idempotency_key="context-knowledge-attach",
+            target_type="work_context",
+            target_id=context_id,
+            expected_version=1,
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    with database.session() as session:
+        revision = session.scalar(
+            select(WorkContextRevisionModel).where(
+                WorkContextRevisionModel.work_context_id == context_id,
+                WorkContextRevisionModel.revision_number == 2,
+            )
+        )
+
+    assert revision is not None
+    assert revision.reason == "knowledge_attached"
+    assert revision.snapshot["knowledge_refs"][0] == {
+        "page_id": str(page_id),
+        "revision_id": str(revision_id),
+        "revision_hash": "a" * 64,
+        "section_key": "api-contract",
+        "section_hash": "b" * 64,
+        "source_ids": revision.snapshot["knowledge_refs"][0]["source_ids"],
+        "ordinal": 0,
+    }
+    assert revision.snapshot["accepted_decisions"][-1]["key"].startswith(
+        "knowledge:selection:"
+    )
+
+
+def test_archive_work_context_requires_terminal_state_and_is_idempotent(
+    client: TestClient, database: Database, workspace_id: UUID
+) -> None:
+    profile_id = _profile_id(client, workspace_id, "archive")
+    submitted = _submit(client, workspace_id, profile_id, "archive")
+    data = submitted.json()["data"]
+    context_id = UUID(data["work_context_id"])
+    revision_hash = data["work_context_content_hash"]
+
+    not_archivable = client.post(
+        "/api/v1/commands",
+        json=_command(
+            workspace_id,
+            "ArchiveWorkContext",
+            {"current_revision": 1, "current_content_hash": revision_hash},
+            idempotency_key="context-archive-too-early",
+            target_type="work_context",
+            target_id=context_id,
+            expected_version=1,
+        ),
+    )
+    assert not_archivable.status_code == 409, not_archivable.text
+    assert not_archivable.json()["error"]["code"] == "work_context_not_archivable"
+
+    request_id = UUID(data["planning_request_id"])
+    cancelled = client.post(
+        "/api/v1/commands",
+        json=_command(
+            workspace_id,
+            "CancelPlanningRequest",
+            {},
+            idempotency_key="context-cancel-before-archive",
+            target_type="planning_request",
+            target_id=request_id,
+            expected_version=1,
+        ),
+    )
+    assert cancelled.status_code == 200, cancelled.text
+
+    archive = _command(
+        workspace_id,
+        "ArchiveWorkContext",
+        {"current_revision": 1, "current_content_hash": revision_hash},
+        idempotency_key="context-archive-once",
+        target_type="work_context",
+        target_id=context_id,
+        expected_version=1,
+    )
+    first = client.post("/api/v1/commands", json=archive)
+    assert first.status_code == 200, first.text
+    replay = client.post("/api/v1/commands", json=archive)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
+
+    with database.session() as session:
+        context = session.get(WorkContextModel, context_id)
+        events = session.scalars(
+            select(EventModel).where(
+                EventModel.aggregate_type == "work_context",
+                EventModel.aggregate_id == context_id,
+            )
+        ).all()
+        outbox = session.scalars(select(OutboxMessageModel)).all()
+
+    assert context is not None
+    assert context.status == "archived"
+    assert context.version == 2
+    assert events[-1].event_type == "WorkContextArchived"
+    assert "work_context.archived" in {
+        row.topic
+        for row in outbox
+        if row.payload["aggregate_id"] == str(context_id)
+    }

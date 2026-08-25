@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.schemas import (
     AnswerPlanningClarificationPayload,
+    ArchiveWorkContextPayload,
+    AttachKnowledgeRevisionPayload,
     CancelPlanningRequestPayload,
     ClearExecutionWorkerPinPayload,
     ConfigureWorkerRuntimePayload,
@@ -21,6 +23,7 @@ from sidera_control_plane.api.schemas import (
     RejectPlanningProposalPayload,
     RequestProposalRevisionPayload,
     RetryBlockedPlanningRunPayload,
+    ReviseWorkContextPayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
 )
@@ -36,6 +39,9 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RejectPlanningProposal", RejectPlanningProposalPayload),
     ("RetryBlockedPlanningRun", RetryBlockedPlanningRunPayload),
     ("ConfirmPlanningProposal", ConfirmPlanningProposalPayload),
+    ("ReviseWorkContext", ReviseWorkContextPayload),
+    ("AttachKnowledgeRevision", AttachKnowledgeRevisionPayload),
+    ("ArchiveWorkContext", ArchiveWorkContextPayload),
 )
 
 _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (

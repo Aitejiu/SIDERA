@@ -3,10 +3,13 @@ from uuid import uuid4
 
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
+    WorkContextSemanticPatch,
 )
 from sidera_control_plane.domain.planning import PlanningBriefRevision
 from sidera_control_plane.domain.work_context import (
+    AcceptedDecision,
     ClarificationDecision,
+    UnresolvedQuestion,
     WorkContextRevisionReason,
 )
 
@@ -53,6 +56,45 @@ def test_revision_factory_builds_typed_snapshot_without_raw_source_ref() -> None
     assert revision.created_by == "envelope-actor"
     assert "source_ref" not in revision.snapshot.to_mapping()
     assert "conversation:ignored-by-context" not in revision.snapshot.canonical_bytes().decode()
+
+
+def test_semantic_patch_replaces_declared_text_and_appends_typed_facts() -> None:
+    brief = _brief()
+    base = WorkContextRevisionFactory().create(
+        work_context_id=uuid4(),
+        workspace_id=uuid4(),
+        brief=brief,
+        revision_number=1,
+        reason=WorkContextRevisionReason.REQUEST_CREATED,
+        actor="operator",
+        created_at=NOW,
+    ).snapshot
+    decision = {
+        "key": "decision:scope",
+        "statement": "Keep the scope inside the control plane",
+        "source": "operator",
+        "ordinal": 0,
+    }
+    question = {
+        "key": "question:budget",
+        "question": "What is the budget?",
+        "blocking": False,
+        "ordinal": 0,
+    }
+
+    patched = WorkContextRevisionFactory.snapshot_from_semantic_patch(
+        base,
+        WorkContextSemanticPatch(
+            constraints=("Only typed context",),
+            accepted_decisions=(AcceptedDecision.from_mapping(decision),),
+            unresolved_questions=(UnresolvedQuestion.from_mapping(question),),
+        ),
+    )
+
+    assert [item.text for item in patched.constraints] == ["Only typed context"]
+    assert patched.accepted_decisions[-1].key == "decision:scope"
+    assert patched.unresolved_questions[-1].key == "question:budget"
+    assert patched.content_hash != base.content_hash
 
 
 def test_revision_factory_appends_typed_clarification_decisions_to_a_new_snapshot() -> None:

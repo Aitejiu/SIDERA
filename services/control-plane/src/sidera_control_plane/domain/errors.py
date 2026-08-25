@@ -40,6 +40,30 @@ class VersionConflict(DomainError):
         self.actual = actual
 
 
+class WorkContextNotFound(DomainError):
+    code = "work_context_not_found"
+
+
+class WorkContextArchived(DomainError):
+    code = "work_context_archived"
+
+
+class WorkContextNotArchivable(DomainError):
+    code = "work_context_not_archivable"
+
+
+class WorkContextVersionConflict(VersionConflict):
+    code = "work_context_version_conflict"
+
+
+class WorkContextBaseMismatch(DomainError):
+    code = "work_context_base_mismatch"
+
+
+class KnowledgeRefInvalid(DomainError):
+    code = "knowledge_ref_invalid"
+
+
 class PlanningConflict(DomainError):
     code = "planning_conflict"
 

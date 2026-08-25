@@ -138,6 +138,10 @@ class WorkContextRepository:
         self._save_context(context, expected_version)
         self._session.flush()
 
+    def archive(self, context: WorkContext, *, expected_version: int) -> None:
+        self._save_context(context, expected_version)
+        self._session.flush()
+
     def _save_context(self, context: WorkContext, expected_version: int) -> None:
         result = self._session.execute(
             update(WorkContextModel)

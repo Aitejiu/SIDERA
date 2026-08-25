@@ -62,6 +62,7 @@ AggregateType = Literal[
     "workspace",
     "planning_request",
     "planning_run",
+    "work_context",
     "worker_runtime_configuration",
     "module_definition",
     "module_instance",
@@ -226,6 +227,104 @@ class RetryBlockedPlanningRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unknown_outcome_decision: Literal["retry"]
+
+
+class AcceptedDecisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: NonEmptyString
+    statement: NonEmptyString
+    source: NonEmptyString
+    ordinal: int = Field(ge=0)
+
+
+class UnresolvedQuestionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: NonEmptyString
+    question: NonEmptyString
+    blocking: bool
+    ordinal: int = Field(ge=0)
+
+
+class WorkReferencePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref_id: UUID
+    ref_type: NonEmptyString
+    ordinal: int = Field(ge=0)
+
+
+class KnowledgeRevisionRefPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_id: UUID
+    revision_id: UUID
+    revision_hash: NonEmptyString
+    section_key: NonEmptyString
+    section_hash: NonEmptyString
+    source_ids: tuple[UUID, ...] = Field(default_factory=tuple)
+    ordinal: int = Field(ge=0)
+
+
+class WorkContextSemanticPatchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: NonEmptyString | None = None
+    constraints: tuple[NonEmptyString, ...] | None = None
+    acceptance_criteria: tuple[NonEmptyString, ...] | None = None
+    requested_outputs: tuple[NonEmptyString, ...] | None = None
+    accepted_decisions: tuple[AcceptedDecisionPayload, ...] = Field(
+        default_factory=tuple
+    )
+    unresolved_questions: tuple[UnresolvedQuestionPayload, ...] = Field(
+        default_factory=tuple
+    )
+    artifact_refs: tuple[WorkReferencePayload, ...] = Field(default_factory=tuple)
+    evidence_refs: tuple[WorkReferencePayload, ...] = Field(default_factory=tuple)
+    checkpoint_refs: tuple[WorkReferencePayload, ...] = Field(default_factory=tuple)
+
+    @model_validator(mode="after")
+    def require_change(self) -> "WorkContextSemanticPatchPayload":
+        if not any(
+            value is not None and value != ()
+            for value in (
+                self.objective,
+                self.constraints,
+                self.acceptance_criteria,
+                self.requested_outputs,
+                self.accepted_decisions,
+                self.unresolved_questions,
+                self.artifact_refs,
+                self.evidence_refs,
+                self.checkpoint_refs,
+            )
+        ):
+            raise ValueError("semantic patch must contain at least one change")
+        return self
+
+
+class ReviseWorkContextPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_revision: int = Field(ge=1)
+    base_content_hash: NonEmptyString
+    reason: Literal["replanned", "user_intervention"]
+    patch: WorkContextSemanticPatchPayload
+
+
+class AttachKnowledgeRevisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_ref: KnowledgeRevisionRefPayload
+    selection_reason: NonEmptyString
+
+
+class ArchiveWorkContextPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_revision: int = Field(ge=1)
+    current_content_hash: NonEmptyString
 
 
 class AcknowledgeAttentionItemPayload(BaseModel):
@@ -1163,6 +1262,18 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryBlockedPlanningRun":
             self._require_mutation_target("planning_run")
             parsed = RetryBlockedPlanningRunPayload.model_validate(self.payload)
+        elif self.command_type in {
+            "ReviseWorkContext",
+            "AttachKnowledgeRevision",
+            "ArchiveWorkContext",
+        }:
+            self._require_mutation_target("work_context")
+            payload_types = {
+                "ReviseWorkContext": ReviseWorkContextPayload,
+                "AttachKnowledgeRevision": AttachKnowledgeRevisionPayload,
+                "ArchiveWorkContext": ArchiveWorkContextPayload,
+            }
+            parsed = payload_types[self.command_type].model_validate(self.payload)
         elif self.command_type == "PublishPlanSnapshot":
             self._require_mutation_target("task")
             parsed = PublishPlanSnapshotPayload.model_validate(self.payload)

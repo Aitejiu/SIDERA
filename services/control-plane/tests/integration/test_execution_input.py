@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
@@ -26,12 +26,14 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     CommandModel,
+    ContextPackageModel,
     ExecutionInputModel,
     ExecutionModel,
     ExecutionSessionModel,
     OutboxMessageModel,
     PlanSnapshotModel,
     TaskModel,
+    WorkContextRevisionModel,
     WorkerItemModel,
     WorkerModel,
 )
@@ -310,6 +312,13 @@ def test_input_command_persists_queue_outbox_and_client_replay(
 ) -> None:
     ids = _seed_session(database, workspace_id)
     service = _service(database)
+    with database.session() as db_session:
+        before_context_hashes = tuple(
+            db_session.scalars(select(WorkContextRevisionModel.content_hash)).all()
+        )
+        before_package_count = db_session.scalar(
+            select(func.count()).select_from(ContextPackageModel)
+        ) or 0
     envelope = _envelope(
         workspace_id,
         ids["session_id"],
@@ -332,6 +341,13 @@ def test_input_command_persists_queue_outbox_and_client_replay(
             OutboxMessageModel.topic == "execution_input.ExecutionInputAccepted"
         ).count() == 1
         assert db_session.query(CommandModel).count() == 1
+        assert tuple(
+            db_session.scalars(select(WorkContextRevisionModel.content_hash)).all()
+        ) == before_context_hashes
+        assert (
+            db_session.scalar(select(func.count()).select_from(ContextPackageModel))
+            or 0
+        ) == before_package_count
 
 
 def test_input_commands_enforce_one_pending_and_allow_update_cancel(

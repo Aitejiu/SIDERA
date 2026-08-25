@@ -84,6 +84,7 @@ def projection_targets_for_event(
         change_type = {
             "WorkContextCreated": "work_context_created",
             "WorkContextRevised": "work_context_revised",
+            "WorkContextArchived": "work_context_archived",
             "WorkContextBoundToTask": "work_context_bound_to_task",
         }.get(event.event_type, "work_context_updated")
         return (
