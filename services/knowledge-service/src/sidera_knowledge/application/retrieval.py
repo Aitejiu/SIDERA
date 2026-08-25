@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from sidera_knowledge.application.ports import RetrievalAdapter
+from sidera_knowledge.domain.common import DomainValidationError
 
 
-class RetrievalQueryError(ValueError):
+class RetrievalQueryError(DomainValidationError):
     """Raised when a search request cannot be safely evaluated."""
 
 

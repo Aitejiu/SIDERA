@@ -16,6 +16,7 @@ from sidera_knowledge.application.knowledge_queries import (
     CandidateDetail,
     CandidateList,
     CandidateSummary,
+    CommandStatusView,
     KnowledgeMaterialization,
     KnowledgeMaterializationError,
     KnowledgeSectionRef,
@@ -48,6 +49,7 @@ from sidera_knowledge.domain.pages import (
 )
 from sidera_knowledge.persistence.database import Database
 from sidera_knowledge.persistence.models import (
+    CommandModel,
     KnowledgeCandidateModel,
     KnowledgeCandidateSourceModel,
     KnowledgePageModel,
@@ -405,6 +407,32 @@ class SqlAlchemyKnowledgeQueryStore:
                 )
             )
             return _revision_detail(session, row) if row is not None else None
+
+    def get_command_status(
+        self, workspace_id: UUID, command_id: UUID
+    ) -> CommandStatusView:
+        with self._database.session() as session:
+            row = session.scalar(
+                select(CommandModel).where(
+                    CommandModel.id == command_id,
+                    CommandModel.workspace_id == workspace_id,
+                )
+            )
+            if row is None:
+                return CommandStatusView(
+                    command_id=command_id,
+                    workspace_id=workspace_id,
+                    status="pending",
+                    result=None,
+                    error_code=None,
+                )
+            return CommandStatusView(
+                command_id=row.id,
+                workspace_id=row.workspace_id,
+                status=row.status,
+                result=(dict(row.result or {}) if row.status == "applied" else None),
+                error_code=row.error_code if row.status == "rejected" else None,
+            )
 
     def materialize_sections(
         self,

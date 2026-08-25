@@ -299,6 +299,15 @@ class SourceList:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class CommandStatusView:
+    command_id: UUID
+    workspace_id: UUID
+    status: str
+    result: dict[str, object] | None
+    error_code: str | None
+
+
 class KnowledgeQueryStore(Protocol):
     def list_pages(
         self,
@@ -320,6 +329,10 @@ class KnowledgeQueryStore(Protocol):
         workspace_id: UUID,
         refs: tuple[KnowledgeSectionRef, ...],
     ) -> KnowledgeMaterialization: ...
+
+    def get_command_status(
+        self, workspace_id: UUID, command_id: UUID
+    ) -> CommandStatusView: ...
 
     def list_candidates(
         self,
@@ -521,12 +534,32 @@ class KnowledgeQueryService:
     ) -> RevisionDetail | None:
         return self._store.get_revision(workspace_id, page_id, revision_id)
 
+    @staticmethod
+    def diff(
+        before: RevisionDetail,
+        after: RevisionDetail,
+        *,
+        max_diff_lines: int = 500,
+        max_diff_chars: int = 32_000,
+    ) -> RevisionDiff:
+        return diff_revisions(
+            before,
+            after,
+            max_diff_lines=max_diff_lines,
+            max_diff_chars=max_diff_chars,
+        )
+
     def materialize_sections(
         self,
         workspace_id: UUID,
         refs: tuple[KnowledgeSectionRef, ...],
     ) -> KnowledgeMaterialization:
         return self._store.materialize_sections(workspace_id, refs)
+
+    def get_command_status(
+        self, workspace_id: UUID, command_id: UUID
+    ) -> CommandStatusView:
+        return self._store.get_command_status(workspace_id, command_id)
 
     def list_candidates(
         self,
