@@ -61,6 +61,7 @@ from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.domain.scheduling import SchedulingBlock
 from sidera_control_plane.domain.task import Task
+from sidera_control_plane.domain.work_context import WorkContext, WorkContextRevision
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
@@ -237,6 +238,7 @@ class PlanningRecordRepositoryPort(Protocol):
     ) -> ProposalRevision | None:
         raise NotImplementedError
 
+
     def add_clarification(self, clarification: PlanningClarification) -> None:
         raise NotImplementedError
 
@@ -247,6 +249,66 @@ class PlanningRecordRepositoryPort(Protocol):
 
     def save_clarification(
         self, clarification: PlanningClarification, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+
+class WorkContextRepositoryPort(Protocol):
+    def get(
+        self,
+        work_context_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> WorkContext | None:
+        raise NotImplementedError
+
+    def get_by_planning_request(
+        self,
+        planning_request_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> WorkContext | None:
+        raise NotImplementedError
+
+    def get_by_root_task(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> WorkContext | None:
+        raise NotImplementedError
+
+    def get_revision(
+        self,
+        revision_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> WorkContextRevision | None:
+        raise NotImplementedError
+
+    def add(self, context: WorkContext, first_revision: WorkContextRevision) -> None:
+        raise NotImplementedError
+
+    def append_revision(
+        self,
+        context: WorkContext,
+        revision: WorkContextRevision,
+        *,
+        expected_version: int,
+    ) -> None:
+        raise NotImplementedError
+
+    def bind_root_task(
+        self,
+        context: WorkContext,
+        root_task_id: UUID,
+        revision: WorkContextRevision,
+        *,
+        expected_version: int,
     ) -> None:
         raise NotImplementedError
 
@@ -884,6 +946,7 @@ class ControlPlaneUnitOfWork(Protocol):
     execution_inputs: ExecutionInputRepositoryPort
     commands: CommandRepositoryPort
     events: EventStorePort
+    work_contexts: WorkContextRepositoryPort
 
     def flush(self) -> None:
         raise NotImplementedError

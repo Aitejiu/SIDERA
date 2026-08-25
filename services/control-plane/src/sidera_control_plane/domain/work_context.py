@@ -674,6 +674,30 @@ class WorkContext:
         self.version += 1
         self.updated_at = _aware(now, "work context updated_at")
 
+    def bind_root_task_with_revision(
+        self,
+        root_task_id: UUID,
+        revision: WorkContextRevision,
+        *,
+        expected_version: int,
+        now: datetime,
+    ) -> None:
+        if self.status is not WorkContextStatus.ACTIVE:
+            raise InvalidTransition(
+                "only an active work context can bind a revised root task"
+            )
+        if not isinstance(root_task_id, UUID):
+            raise ValidationError("root_task_id must be a UUID")
+        self._check_version(expected_version)
+        self._validate_revision_for_append(revision)
+        if self.root_task_id is not None and self.root_task_id != root_task_id:
+            raise ValidationError("work context is already bound to another root task")
+        self.root_task_id = root_task_id
+        self.current_revision_id = revision.revision_id
+        self.current_revision_number = revision.revision_number
+        self.version += 1
+        self.updated_at = _aware(now, "work context updated_at")
+
     def archive(self, *, expected_version: int, now: datetime) -> None:
         if self.status is WorkContextStatus.ARCHIVED:
             return
@@ -688,16 +712,19 @@ class WorkContext:
         self, revision: WorkContextRevision, *, expected_version: int, now: datetime
     ) -> None:
         self._check_version(expected_version)
+        self._validate_revision_for_append(revision)
+        self.current_revision_id = revision.revision_id
+        self.current_revision_number = revision.revision_number
+        self.version += 1
+        self.updated_at = _aware(now, "work context updated_at")
+
+    def _validate_revision_for_append(self, revision: WorkContextRevision) -> None:
         if revision.work_context_id != self.id or revision.workspace_id != self.workspace_id:
             raise ValidationError("work context revision belongs to another context")
         if revision.brief_planning_request_id != self.planning_request_id:
             raise ValidationError("brief planning request does not match work context")
         if revision.revision_number != self.current_revision_number + 1:
             raise ValidationError("work context revision number must advance by one")
-        self.current_revision_id = revision.revision_id
-        self.current_revision_number = revision.revision_number
-        self.version += 1
-        self.updated_at = _aware(now, "work context updated_at")
 
     def _check_version(self, expected_version: int) -> None:
         if expected_version != self.version:

@@ -6,7 +6,7 @@ from uuid import UUID
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -14,11 +14,6 @@ from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     AttentionAcknowledgementModel,
     CommandModel,
-    ContextAssemblyRequestModel,
-    ContextPackageAcknowledgementModel,
-    ContextPackageKnowledgeRefModel,
-    ContextPackageMaterializationAuditModel,
-    ContextPackageModel,
     EventModel,
     EvidenceClaimModel,
     ExecutionBindingModel,
@@ -30,7 +25,6 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     ExecutionWorkspaceModel,
     GatewayOperationModel,
-    KnowledgeCandidateSubmissionModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
@@ -47,8 +41,6 @@ from sidera_control_plane.persistence.models import (
     ProposalMaterializationModel,
     SchedulingBlockModel,
     TaskModel,
-    WorkContextModel,
-    WorkContextRevisionModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
@@ -104,6 +96,20 @@ def clean_database(database: Database) -> Iterator[None]:
 def _clear_database(database: Database) -> None:
     with database.session() as session:
         session.execute(
+            text(
+                "TRUNCATE TABLE "
+                "context_package_materialization_audits, "
+                "context_package_acknowledgements, "
+                "context_package_knowledge_refs, "
+                "knowledge_candidate_submissions, "
+                "context_packages, "
+                "context_assembly_requests, "
+                "work_context_revisions, "
+                "work_contexts "
+                "CASCADE"
+            )
+        )
+        session.execute(
             update(PlanningRequestModel).values(
                 current_brief_revision=None,
                 current_proposal_revision=None,
@@ -119,14 +125,6 @@ def _clear_database(database: Database) -> None:
             )
         )
         for model in (
-            ContextPackageMaterializationAuditModel,
-            ContextPackageAcknowledgementModel,
-            ContextPackageKnowledgeRefModel,
-            KnowledgeCandidateSubmissionModel,
-            ContextPackageModel,
-            ContextAssemblyRequestModel,
-            WorkContextRevisionModel,
-            WorkContextModel,
             ProjectionChangeModel,
             AttentionAcknowledgementModel,
             WorkspaceProjectionCursorModel,

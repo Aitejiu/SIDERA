@@ -30,6 +30,7 @@ from sidera_control_plane.application.ports import (
     SchedulingBlockRepositoryPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
+    WorkContextRepositoryPort,
     WorkerItemRepositoryPort,
     WorkerRepositoryPort,
     WorkerRuntimeConfigurationRepositoryPort,
@@ -79,6 +80,9 @@ from sidera_control_plane.persistence.scheduling_block_repository import (
     SqlAlchemySchedulingBlockRepository,
 )
 from sidera_control_plane.persistence.session_repository import SessionRepository
+from sidera_control_plane.persistence.work_context_repository import (
+    WorkContextRepository,
+)
 from sidera_control_plane.persistence.worker_item_repository import WorkerItemRepository
 from sidera_control_plane.persistence.worker_repository import WorkerRepository
 from sidera_control_plane.persistence.worker_runtime_repository import (
@@ -117,6 +121,7 @@ class SqlAlchemyUnitOfWork:
     execution_inputs: ExecutionInputRepositoryPort
     commands: CommandRepositoryPort
     events: EventStorePort
+    work_contexts: WorkContextRepositoryPort
 
     def __init__(
         self, database: Database, *, projection_change_retention_seconds: int = 604_800
@@ -167,6 +172,7 @@ class SqlAlchemyUnitOfWork:
         self.execution_inputs = ExecutionInputRepository(self.session)
         self.commands = CommandRepository(self.session)
         self.events = EventRepository(self.session, self.projection_changes)
+        self.work_contexts = WorkContextRepository(self.session)
         return self
 
     def __exit__(
