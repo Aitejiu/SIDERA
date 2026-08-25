@@ -1,3 +1,4 @@
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -151,6 +152,19 @@ def test_planner_profile_normalizes_schema_versions_and_requires_context() -> No
             interface_version=profile.interface_version,
             proposal_schema_versions=profile.proposal_schema_versions,
         )
+
+
+def test_context_package_versions_are_optional_and_normalized() -> None:
+    worker = replace(worker_capabilities(), context_package_versions=(2, 1, 2))
+    planner = replace(planner_capabilities(), context_package_versions=(2, 1, 2))
+
+    assert worker.context_package_versions == (1, 2)
+    assert planner.context_package_versions == (1, 2)
+    assert worker_capabilities().context_package_versions == ()
+    assert planner_capabilities().context_package_versions == ()
+
+    with pytest.raises(ValidationError, match="context_package_versions"):
+        replace(worker_capabilities(), context_package_versions=(0,))
 
 
 def test_module_type_alias_is_stored_as_canonical_value() -> None:

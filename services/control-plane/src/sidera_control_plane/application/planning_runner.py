@@ -3,15 +3,20 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import SecretStr
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.context_materialization import (
+    ContextMaterializationError,
+    ContextMaterializer,
+    build_materialization_audit,
+)
 from sidera_control_plane.application.planner_runtime import (
     CapabilityCatalogEntry,
     CapabilityCatalogSnapshot,
@@ -36,6 +41,16 @@ from sidera_control_plane.application.secret_resolution import (
     SecretResolver,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.context_packages import (
+    ContextAcknowledgement,
+    ContextAssemblyStatus,
+    ContextMaterializationMode,
+    ContextMaterializationOutcome,
+    ContextMaterializationV1,
+    ContextPackageManifestV1,
+    ContextPackageStatus,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.errors import (
     DomainError,
     StaleFencingToken,
@@ -68,6 +83,7 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     ProposalRevision,
 )
+from sidera_control_plane.domain.work_context import WorkContextRevision
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +92,14 @@ class PlanningAdapterUnavailable(Exception):
     def __init__(self, code: str, *, blocked: bool) -> None:
         super().__init__(code)
         self.code = code
+        self.blocked = blocked
+
+
+class ContextGateError(Exception):
+    def __init__(self, code: str, message: str, *, blocked: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
         self.blocked = blocked
 
 
@@ -200,6 +224,17 @@ class _ClaimedRun:
     correlation_id: UUID
     definition: ModuleDefinition | None
     instance: ModuleInstance | None
+    context_package: ContextPackageManifestV1 | None = None
+    context_revision: WorkContextRevision | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaimBatch:
+    items: tuple[_ClaimedRun, ...]
+    preblocked: tuple[PlanningRunOutcome, ...]
+
+
+ContextClaimGate = tuple[ContextPackageManifestV1, WorkContextRevision] | str
 
 
 class PlanningLeaseKeeper:
@@ -315,6 +350,8 @@ class PlanningRunner:
         max_diagnostic_bytes: int = 4096,
         planner_temp_root: Path = Path(".sidera/planning"),
         clock: Callable[[], datetime] | None = None,
+        context_materializer: ContextMaterializer | None = None,
+        context_package_cutover_at: datetime | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
@@ -322,6 +359,14 @@ class PlanningRunner:
             raise ValueError("planning runner limits must be positive")
         if lease_renew_interval_seconds >= lease_ttl_seconds / 2:
             raise ValueError("lease renewal interval must be less than half the TTL")
+        if (
+            context_package_cutover_at is not None
+            and (
+                context_package_cutover_at.tzinfo is None
+                or context_package_cutover_at.utcoffset() is None
+            )
+        ):
+            raise ValueError("context_package_cutover_at must be timezone aware")
         self._uow_factory = uow_factory
         self._adapter_factory = adapter_factory
         self._owner_id = owner_id
@@ -330,13 +375,15 @@ class PlanningRunner:
         self._max_diagnostic_bytes = max_diagnostic_bytes
         self._planner_temp_root = planner_temp_root
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._context_materializer = context_materializer
+        self._context_package_cutover_at = context_package_cutover_at
 
     def run_once(self, limit: int = 10) -> PlanningBatchResult:
         if limit <= 0:
             raise ValueError("planning runner limit must be positive")
-        claimed = self._claim(limit)
-        outcomes: list[PlanningRunOutcome] = []
-        for item in claimed:
+        claim_batch = self._claim(limit)
+        outcomes: list[PlanningRunOutcome] = list(claim_batch.preblocked)
+        for item in claim_batch.items:
             started_at = self._clock()
             try:
                 outcome = self._execute(item)
@@ -364,7 +411,7 @@ class PlanningRunner:
             outcomes.append(outcome)
             self._log_outcome(item, outcome, started_at)
         return PlanningBatchResult(
-            claimed=len(claimed),
+            claimed=len(claim_batch.items) + len(claim_batch.preblocked),
             succeeded=sum(
                 outcome.status is PlanningRunStatus.SUCCEEDED
                 for outcome in outcomes
@@ -383,9 +430,10 @@ class PlanningRunner:
             outcomes=tuple(outcomes),
         )
 
-    def _claim(self, limit: int) -> tuple[_ClaimedRun, ...]:
+    def _claim(self, limit: int) -> _ClaimBatch:
         now = self._clock()
         claimed: list[_ClaimedRun] = []
+        preblocked: list[PlanningRunOutcome] = []
         with self._uow_factory() as uow:
             for queued_run in uow.planning_runs.claim_queued(now=now, limit=limit):
                 request = uow.planning_requests.get(
@@ -396,6 +444,47 @@ class PlanningRunner:
                 if request is None:
                     continue
                 request_run = request.run(queued_run.id)
+                context_package: ContextPackageManifestV1 | None = None
+                context_revision: WorkContextRevision | None = None
+                if self._context_materializer is not None and not self._legacy_run(
+                    request_run.queued_at
+                ):
+                    gate = self._context_claim_gate(
+                        uow, request_run, now=now
+                    )
+                    if gate == "wait":
+                        continue
+                    if isinstance(gate, str):
+                        previous_request_version = request.version
+                        previous_run_version = request_run.version
+                        request.block_queued_run(
+                            run_id=request_run.id,
+                            error_code=gate,
+                            error_message="planner context is not eligible for a new start",
+                            now=now,
+                        )
+                        uow.planning_runs.save(request_run, previous_run_version)
+                        uow.planning_requests.save(request, previous_request_version)
+                        self._record_event(
+                            uow,
+                            request=request,
+                            event_type="PlanningRunContextBlocked",
+                            payload={
+                                "planning_run_id": str(request_run.id),
+                                "error_code": gate,
+                                "status": request_run.status.value,
+                            },
+                        )
+                        preblocked.append(
+                            PlanningRunOutcome(
+                                run_id=request_run.id,
+                                status=request_run.status,
+                                attempt=request_run.attempt,
+                                code=gate,
+                            )
+                        )
+                        continue
+                    context_package, context_revision = gate
                 previous_request_version = request.version
                 previous_run_version = request_run.version
                 lease = PlanningRunLease(
@@ -455,9 +544,60 @@ class PlanningRunner:
                         correlation_id=request.correlation_id,
                         definition=definition,
                         instance=instance,
+                        context_package=context_package,
+                        context_revision=context_revision,
                     )
                 )
-        return tuple(claimed)
+        return _ClaimBatch(items=tuple(claimed), preblocked=tuple(preblocked))
+
+    def _legacy_run(self, queued_at: datetime) -> bool:
+        return (
+            self._context_package_cutover_at is not None
+            and queued_at < self._context_package_cutover_at
+        )
+
+    @staticmethod
+    def _context_claim_gate(
+        uow: ControlPlaneUnitOfWork,
+        run: PlanningRun,
+        *,
+        now: datetime,
+    ) -> ContextClaimGate:
+        if 1 not in run.capability_snapshot.context_package_versions:
+            return "context_adapter_unsupported"
+        assembly = uow.context_assemblies.get_for_consumer(
+            ContextPurpose.PLANNING_RUN,
+            run.id,
+            run.workspace_id,
+        )
+        if assembly is None:
+            return "wait"
+        if assembly.status is not ContextAssemblyStatus.READY:
+            if assembly.status in {
+                ContextAssemblyStatus.QUEUED,
+                ContextAssemblyStatus.ASSEMBLING,
+                ContextAssemblyStatus.RETRY_WAIT,
+            }:
+                return "wait"
+            return "context_assembly_blocked"
+        package = uow.context_packages.get_for_consumer(
+            ContextPurpose.PLANNING_RUN,
+            run.id,
+            run.workspace_id,
+        )
+        if package is None:
+            return "wait"
+        if package.status is not ContextPackageStatus.ACTIVE:
+            return "context_package_unavailable"
+        if package.expires_at <= now:
+            return "context_package_expired"
+        revision = uow.work_contexts.get_revision(
+            package.work_context_revision_id,
+            run.workspace_id,
+        )
+        if revision is None:
+            return "context_reference_not_found"
+        return package, revision
 
     def _execute(self, item: _ClaimedRun) -> PlanningRunOutcome:
         try:
@@ -484,6 +624,53 @@ class PlanningRunner:
             )
 
         now = self._clock()
+        context_materialization = None
+        if self._context_materializer is not None and item.context_package is not None:
+            try:
+                context_materialization = self._prepare_context(
+                    item,
+                    adapter,
+                    now=now,
+                )
+            except ContextMaterializationError as exc:
+                try:
+                    self._record_context_materialization_failure(item, exc, now=now)
+                except Exception:
+                    logger.exception(
+                        "failed to persist planner context materialization failure",
+                        extra={"planning_run_id": str(item.run_id)},
+                    )
+                return self._persist_failure(
+                    item,
+                    PlannerExplicitFailure(
+                        code=exc.code,
+                        safe_message="planner context could not be materialized",
+                        retryable=exc.temporary,
+                        unknown_outcome=False,
+                    ),
+                    blocked=exc.corrupt or not exc.temporary,
+                )
+            except ContextGateError as exc:
+                return self._persist_failure(
+                    item,
+                    PlannerExplicitFailure(
+                        code=exc.code,
+                        safe_message=exc.message,
+                        retryable=not exc.blocked,
+                        unknown_outcome=False,
+                    ),
+                    blocked=exc.blocked,
+                )
+            except Exception:  # noqa: BLE001
+                return self._persist_failure(
+                    item,
+                    PlannerExplicitFailure(
+                        code="context_gate_error",
+                        safe_message="planner context gate failed before model call",
+                        retryable=True,
+                        unknown_outcome=False,
+                    ),
+                )
         planner_input = PlannerInputAssembler().assemble(
             brief=item.brief,
             profile_snapshot=item.profile_snapshot,
@@ -498,6 +685,7 @@ class PlanningRunner:
                 ContextReference(ref=ref, safe_summary=None)
                 for ref in item.brief.context_refs
             ),
+            context_materialization=context_materialization,
         )
         deadline = now + timedelta(
             seconds=item.profile_snapshot.budget.max_runtime_seconds
@@ -557,6 +745,244 @@ class PlanningRunner:
                 unknown_outcome=False,
             )
         return self._persist_result(item, result)
+
+    def _prepare_context(
+        self,
+        item: _ClaimedRun,
+        adapter: PlannerAdapter,
+        *,
+        now: datetime,
+    ) -> ContextMaterializationV1 | None:
+        if self._context_materializer is None or item.context_package is None:
+            return None
+        if item.context_revision is None:
+            raise ContextGateError(
+                "context_reference_not_found",
+                "planner work context revision is unavailable",
+                blocked=True,
+            )
+        materialization = self._context_materializer.materialize(
+            item.context_package,
+            item.context_revision,
+            mode=ContextMaterializationMode.CONSUMER_START,
+            workspace_id=item.workspace_id,
+            consumer_id=item.run_id,
+            purpose=ContextPurpose.PLANNING_RUN,
+            context_version=item.context_package.context_version,
+            expected_package_hash=item.context_package.package_hash,
+            now=now,
+            correlation_id=item.correlation_id,
+            caller_request_id=item.request_id,
+        )
+        accept_context = getattr(adapter, "accept_context", None)
+        if not callable(accept_context):
+            raise ContextGateError(
+                "context_adapter_unsupported",
+                "planner adapter does not accept context packages",
+                blocked=True,
+            )
+        try:
+            acknowledgement = accept_context(
+                materialization,
+                operation_id=item.operation_id,
+            )
+        except ContextGateError:
+            raise
+        except Exception as exc:
+            raise ContextGateError(
+                "context_adapter_rejected",
+                "planner adapter rejected the context package",
+                blocked=True,
+            ) from exc
+        if not isinstance(acknowledgement, ContextAcknowledgement):
+            raise ContextGateError(
+                "context_acknowledgement_mismatch",
+                "planner adapter returned an invalid context acknowledgement",
+                blocked=True,
+            )
+        self._validate_context_acknowledgement(
+            acknowledgement,
+            materialization=materialization,
+            operation_id=item.operation_id,
+        )
+        try:
+            self._persist_context_acceptance(
+                item,
+                materialization=materialization,
+                acknowledgement=acknowledgement,
+                now=now,
+            )
+        except Exception as exc:
+            raise ContextGateError(
+                "context_acknowledgement_persistence_failed",
+                "planner context acknowledgement could not be persisted",
+                blocked=False,
+            ) from exc
+        return materialization
+
+    @staticmethod
+    def _validate_context_acknowledgement(
+        acknowledgement: ContextAcknowledgement,
+        *,
+        materialization: ContextMaterializationV1,
+        operation_id: UUID,
+    ) -> None:
+        metadata = materialization.metadata
+        if (
+            acknowledgement.package_id != metadata.package_id
+            or acknowledgement.package_hash != metadata.package_hash
+            or acknowledgement.consumer_type != metadata.consumer_type
+            or acknowledgement.consumer_id != metadata.consumer_id
+            or acknowledgement.context_version != metadata.context_version
+            or acknowledgement.schema_version != materialization.schema_version
+            or acknowledgement.operation_id != operation_id
+        ):
+            raise ContextGateError(
+                "context_acknowledgement_mismatch",
+                "planner adapter acknowledgement does not match the context package",
+                blocked=True,
+            )
+
+    def _persist_context_acceptance(
+        self,
+        item: _ClaimedRun,
+        *,
+        materialization: ContextMaterializationV1,
+        acknowledgement: ContextAcknowledgement,
+        now: datetime,
+    ) -> None:
+        package = item.context_package
+        if package is None:
+            raise ContextGateError(
+                "context_reference_not_found",
+                "planner context package is unavailable",
+                blocked=True,
+            )
+        durable_ack = replace(
+            acknowledgement,
+            adapter_module_id=item.profile_snapshot.planner_module_instance_id,
+            adapter_config_version=item.profile_snapshot.planner_module_config_version,
+        )
+        command = self._context_command(item, action="acknowledge")
+        audit = build_materialization_audit(
+            package,
+            attempt=item.attempt,
+            outcome=ContextMaterializationOutcome.SUCCEEDED,
+            occurred_at=now,
+            materialization=materialization,
+            audit_id=uuid5(
+                NAMESPACE_URL,
+                f"sidera:planner-context-audit:{item.run_id}:{item.attempt}",
+            ),
+        )
+        with self._uow_factory() as uow:
+            if uow.commands.find_by_id(item.workspace_id, command.id) is None:
+                uow.commands.record_applied(
+                    command,
+                    hash_request(command),
+                    CommandResult(
+                        command_id=command.id,
+                        aggregate_id=package.package_id,
+                        aggregate_version=1,
+                        event_ids=(),
+                        data={
+                            "planning_run_id": str(item.run_id),
+                            "package_id": str(package.package_id),
+                        },
+                    ),
+                )
+            uow.context_packages.add_ack(
+                durable_ack,
+                actor_type="system",
+                actor_id=self._owner_id,
+                causation_id=command.id,
+                correlation_id=item.correlation_id,
+            )
+            uow.context_packages.append_materialization_audit(
+                audit,
+                actor_type="system",
+                actor_id=self._owner_id,
+                causation_id=command.id,
+                correlation_id=item.correlation_id,
+            )
+
+    def _record_context_materialization_failure(
+        self,
+        item: _ClaimedRun,
+        error: ContextMaterializationError,
+        *,
+        now: datetime,
+    ) -> None:
+        package = item.context_package
+        if package is None:
+            return
+        command = self._context_command(item, action="materialize-failure")
+        audit = build_materialization_audit(
+            package,
+            attempt=item.attempt,
+            outcome=ContextMaterializationOutcome.FAILED,
+            occurred_at=now,
+            failure_code=error.code,
+            audit_id=uuid5(
+                NAMESPACE_URL,
+                f"sidera:planner-context-failure:{item.run_id}:{item.attempt}",
+            ),
+        )
+        with self._uow_factory() as uow:
+            if uow.commands.find_by_id(item.workspace_id, command.id) is None:
+                uow.commands.record_applied(
+                    command,
+                    hash_request(command),
+                    CommandResult(
+                        command_id=command.id,
+                        aggregate_id=package.package_id,
+                        aggregate_version=1,
+                        event_ids=(),
+                        data={"failure_code": error.code},
+                    ),
+                )
+            if error.corrupt:
+                uow.context_packages.mark_corrupt(
+                    package.package_id,
+                    item.workspace_id,
+                    reason=error.code,
+                    now=now,
+                    actor_type="system",
+                    actor_id=self._owner_id,
+                    causation_id=command.id,
+                    correlation_id=item.correlation_id,
+                )
+            uow.context_packages.append_materialization_audit(
+                audit,
+                actor_type="system",
+                actor_id=self._owner_id,
+                causation_id=command.id,
+                correlation_id=item.correlation_id,
+            )
+
+    def _context_command(self, item: _ClaimedRun, *, action: str) -> CommandEnvelope:
+        package_id = item.context_package.package_id if item.context_package else item.run_id
+        command_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera:planner-context:{action}:{item.run_id}:{item.attempt}",
+        )
+        return CommandEnvelope(
+            id=command_id,
+            workspace_id=item.workspace_id,
+            command_type="PlanningContextGate",
+            target_type="context_package",
+            actor_type="system",
+            actor_id=self._owner_id,
+            target_id=package_id,
+            payload={
+                "planning_run_id": str(item.run_id),
+                "package_id": str(package_id),
+                "action": action,
+            },
+            expected_version=None,
+            idempotency_key=f"planner-context:{action}:{item.run_id}:attempt:{item.attempt}",
+            correlation_id=item.correlation_id,
+        )
 
     def _persist_result(
         self,

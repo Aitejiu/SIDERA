@@ -459,6 +459,12 @@ class ContextPackageRepository:
                 "consumer_type": acknowledgement.consumer_type.value,
                 "consumer_id": str(acknowledgement.consumer_id),
                 "context_version": acknowledgement.context_version,
+                "schema_version": acknowledgement.schema_version,
+                "operation_id": (
+                    str(acknowledgement.operation_id)
+                    if acknowledgement.operation_id is not None
+                    else None
+                ),
                 "adapter_module_instance_id": str(acknowledgement.adapter_module_id),
                 "adapter_config_version": acknowledgement.adapter_config_version,
             },
@@ -482,6 +488,22 @@ class ContextPackageRepository:
         package = self.get(audit.package_id, audit.workspace_id, for_update=True)
         if package is None:
             raise ValidationError("context package not found for materialization audit")
+        existing = self._session.scalar(
+            select(ContextPackageMaterializationAuditModel).where(
+                ContextPackageMaterializationAuditModel.package_id == audit.package_id,
+                ContextPackageMaterializationAuditModel.consumer_type
+                == audit.consumer_type.value,
+                ContextPackageMaterializationAuditModel.consumer_id == audit.consumer_id,
+                ContextPackageMaterializationAuditModel.attempt == audit.attempt,
+            )
+        )
+        if existing is not None:
+            if (
+                existing.outcome != audit.outcome.value
+                or existing.failure_code != audit.failure_code
+            ):
+                raise ValidationError("context materialization audit conflicts")
+            return
         self._session.add(
             ContextPackageMaterializationAuditModel(
                 id=audit.audit_id,

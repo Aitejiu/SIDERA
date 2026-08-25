@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from sidera_control_plane.domain.context_packages import ContextMaterializationV1
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
     PlanningClarification,
@@ -137,6 +138,7 @@ class PlannerInput:
     capability_catalog: CapabilityCatalogSnapshot
     policy_constraints: PlannerPolicyConstraints
     context_refs: tuple[ContextReference, ...]
+    context_materialization: ContextMaterializationV1 | None = None
 
     def __post_init__(self) -> None:
         if not self.interface_version.strip():
@@ -147,7 +149,16 @@ class PlannerInput:
             raise ValueError("planner input brief revision does not match brief")
         if self.brief.planning_request_id != self.planning_request_id:
             raise ValueError("planner input request id does not match brief")
-        object.__setattr__(self, "context_refs", tuple(self.context_refs))
+        if self.context_materialization is not None:
+            if not isinstance(self.context_materialization, ContextMaterializationV1):
+                raise TypeError("planner context_materialization must be typed")
+            object.__setattr__(
+                self,
+                "context_refs",
+                _context_references(self.context_materialization),
+            )
+        else:
+            object.__setattr__(self, "context_refs", tuple(self.context_refs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,11 +185,13 @@ class PlannerInputAssembler:
         planning_request_id: UUID,
         planning_run_id: UUID,
         context_refs: Sequence[ContextReference] = (),
+        context_materialization: ContextMaterializationV1 | None = None,
     ) -> PlannerInput:
-        normalized_refs = tuple(context_refs)
-        brief_refs = set(brief.context_refs)
-        if any(item.ref not in brief_refs for item in normalized_refs):
-            raise ValueError("planner context reference is not present in the brief")
+        normalized_refs = () if context_materialization is not None else tuple(context_refs)
+        if context_materialization is None:
+            brief_refs = set(brief.context_refs)
+            if any(item.ref not in brief_refs for item in normalized_refs):
+                raise ValueError("planner context reference is not present in the brief")
         return PlannerInput(
             interface_version=profile_snapshot.planner_interface_version,
             proposal_schema_version=profile_snapshot.proposal_schema_version,
@@ -191,7 +204,30 @@ class PlannerInputAssembler:
             capability_catalog=capability_catalog,
             policy_constraints=policy_constraints,
             context_refs=normalized_refs,
+            context_materialization=context_materialization,
         )
+
+
+def _context_references(
+    materialization: ContextMaterializationV1,
+) -> tuple[ContextReference, ...]:
+    references: list[ContextReference] = [
+        ContextReference(
+            ref=(
+                f"knowledge:{item.page_id}:{item.revision_id}:{item.section_key}"
+            ),
+            safe_summary=f"reference data section: {item.section_key}",
+        )
+        for item in materialization.project_knowledge
+    ]
+    references.extend(
+        ContextReference(
+            ref=f"{item.category}:{item.ref_id}",
+            safe_summary=f"typed {item.category} reference: {item.ref_type}",
+        )
+        for item in materialization.artifact_and_evidence_refs
+    )
+    return tuple(references)
 
 
 @dataclass(frozen=True, slots=True)

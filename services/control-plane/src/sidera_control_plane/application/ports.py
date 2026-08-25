@@ -29,6 +29,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextAssemblyRequest,
     ContextMaterializationAudit,
+    ContextMaterializationV1,
     ContextPackageManifestV1,
     ContextPurpose,
 )
@@ -1103,6 +1104,14 @@ class WorkerAdapter(Protocol):
 
 class PlannerAdapter(Protocol):
     def probe(self, config: Mapping[str, object]) -> PlannerAdapterCapabilityProfile:
+        raise NotImplementedError
+
+    def accept_context(
+        self,
+        materialization: ContextMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextAcknowledgement:
         raise NotImplementedError
 
     def plan(

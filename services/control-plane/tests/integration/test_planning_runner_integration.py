@@ -135,6 +135,12 @@ class CountingAdapter:
     def probe(self, config):
         return self._delegate.probe(config)
 
+    def accept_context(self, materialization, *, operation_id):
+        return self._delegate.accept_context(
+            materialization,
+            operation_id=operation_id,
+        )
+
     def plan(self, planner_input, control):
         with self._lock:
             self.calls += 1

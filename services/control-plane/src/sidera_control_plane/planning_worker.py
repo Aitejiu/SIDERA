@@ -16,7 +16,9 @@ from sidera_control_plane.adapters.fake_planner import (
     FakePlannerConfig,
     FakeScenario,
 )
+from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.adapters.opencode_planner import OpenCodePlannerAdapter
+from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.planning_reconciler import (
     PlanningReconciler,
     PlanningReconcileResult,
@@ -71,10 +73,17 @@ class PlanningWorker:
 class PlanningWorkerRuntime:
     worker: PlanningWorker
     database: Database
+    catalog: KnowledgeHttpAdapter
 
 
 def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
     database = Database(settings.database_url)
+    catalog = KnowledgeHttpAdapter(
+        base_url=settings.knowledge_base_url,
+        control_plane_token=settings.knowledge_control_plane_token,
+        metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
+        materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
+    )
 
     def fake_builder(
         config: Mapping[str, object], _secrets: tuple[SecretStr, ...]
@@ -140,6 +149,8 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             max_diagnostic_bytes=settings.planning_max_diagnostic_bytes,
             planner_temp_root=settings.planning_temp_root,
             clock=lambda: datetime.now(UTC),
+            context_materializer=ContextMaterializer(catalog),
+            context_package_cutover_at=settings.context_package_cutover_at,
         )
         reconciler = PlanningReconciler(
             uow_factory=uow_factory,
@@ -149,8 +160,10 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         return PlanningWorkerRuntime(
             worker=PlanningWorker(reconciler=reconciler, runner=runner),
             database=database,
+            catalog=catalog,
         )
     except BaseException:
+        catalog.close()
         database.dispose()
         raise
 
@@ -191,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         if runtime is not None:
+            runtime.catalog.close()
             runtime.database.dispose()
 
 

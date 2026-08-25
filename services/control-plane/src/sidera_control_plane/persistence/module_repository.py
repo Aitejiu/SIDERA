@@ -310,6 +310,7 @@ def capability_profile_to_payload(
             "stop": profile.stop.value,
             "sandbox": profile.sandbox.value,
             "stability": profile.stability.value,
+            "context_package_versions": list(profile.context_package_versions),
         }
     if isinstance(profile, WorkspaceProviderCapabilityProfile):
         return {
@@ -328,6 +329,7 @@ def capability_profile_to_payload(
         "stability": profile.stability.value,
         "interface_version": profile.interface_version,
         "proposal_schema_versions": list(profile.proposal_schema_versions),
+        "context_package_versions": list(profile.context_package_versions),
     }
 
 
@@ -350,10 +352,11 @@ def capability_profile_from_payload(
             stop=_enum_capability(payload, "stop", StopCapability),
             sandbox=_enum_capability(payload, "sandbox", SandboxCapability),
             stability=_enum_capability(payload, "stability", StabilityLevel),
+            context_package_versions=_version_tuple_capability(payload),
         )
 
     if canonical_type == WORKSPACE_PROVIDER_MODULE_TYPE:
-        if set(payload).issubset(_WORKER_FIELDS) and set(payload) == _WORKER_FIELDS:
+        if frozenset(payload) in {_LEGACY_WORKER_FIELDS, _WORKER_FIELDS}:
             legacy = capability_profile_from_payload(
                 WORKER_ADAPTER_MODULE_TYPE, payload
             )
@@ -394,6 +397,7 @@ def capability_profile_from_payload(
         stability=_enum_capability(payload, "stability", StabilityLevel),
         interface_version=_required_string(payload, "interface_version"),
         proposal_schema_versions=tuple(proposal_versions),
+        context_package_versions=_version_tuple_capability(payload),
     )
 
 
@@ -451,6 +455,17 @@ def _to_domain_binding(row: ExecutionBindingModel) -> ExecutionBinding:
 
 
 _WORKER_FIELDS = frozenset(
+    {
+        "input",
+        "idempotency",
+        "resume",
+        "stop",
+        "sandbox",
+        "stability",
+        "context_package_versions",
+    }
+)
+_LEGACY_WORKER_FIELDS = frozenset(
     {"input", "idempotency", "resume", "stop", "sandbox", "stability"}
 )
 _WORKSPACE_FIELDS = frozenset({"isolation", "writable", "git_worktree", "stability"})
@@ -465,6 +480,7 @@ _PLANNER_FIELDS = frozenset(
         "stability",
         "interface_version",
         "proposal_schema_versions",
+        "context_package_versions",
     }
 )
 
@@ -509,3 +525,19 @@ def _positive_int_capability(payload: Mapping[str, object], name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValidationError(f"capability field {name!r} must be positive")
     return value
+
+
+def _version_tuple_capability(payload: Mapping[str, object]) -> tuple[int, ...]:
+    value = payload.get("context_package_versions", ())
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(
+            "capability field 'context_package_versions' must be an array"
+        )
+    if any(
+        not isinstance(version, int) or isinstance(version, bool) or version < 1
+        for version in value
+    ):
+        raise ValidationError(
+            "capability field 'context_package_versions' must contain positive integers"
+        )
+    return tuple(sorted(set(value)))

@@ -844,6 +844,7 @@ def _capability_to_mapping(
         "stability": capability.stability.value,
         "interface_version": capability.interface_version,
         "proposal_schema_versions": list(capability.proposal_schema_versions),
+        "context_package_versions": list(capability.context_package_versions),
     }
 
 
@@ -860,6 +861,11 @@ def _capability_from_mapping(
         stability=_string(value, "stability"),  # type: ignore[arg-type]
         interface_version=_string(value, "interface_version"),
         proposal_schema_versions=tuple(_ints(value, "proposal_schema_versions")),
+        context_package_versions=tuple(
+            _ints(value, "context_package_versions")
+            if "context_package_versions" in value
+            else ()
+        ),
     )
 
 

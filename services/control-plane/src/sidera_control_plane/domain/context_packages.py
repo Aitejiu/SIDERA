@@ -744,12 +744,16 @@ class ContextAcknowledgement:
     adapter_module_id: UUID
     adapter_config_version: int
     acknowledged_at: datetime
+    schema_version: int = 1
+    operation_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.package_id, UUID) or not isinstance(self.consumer_id, UUID):
             raise ValidationError("ack package/consumer IDs must be UUIDs")
         if not isinstance(self.adapter_module_id, UUID):
             raise ValidationError("ack adapter_module_id must be a UUID")
+        if self.operation_id is not None and not isinstance(self.operation_id, UUID):
+            raise ValidationError("ack operation_id must be a UUID")
         _hash(self.package_hash, "package_hash")
         try:
             object.__setattr__(self, "consumer_type", ContextConsumerType(self.consumer_type))
@@ -760,6 +764,7 @@ class ContextAcknowledgement:
         if self.consumer_type is ContextConsumerType.WORKER:
             _positive(self.context_version or 0, "worker acknowledgement context_version")
         _positive(self.adapter_config_version, "adapter_config_version")
+        _positive(self.schema_version, "ack schema_version")
         _aware(self.acknowledged_at, "acknowledged_at")
 
 

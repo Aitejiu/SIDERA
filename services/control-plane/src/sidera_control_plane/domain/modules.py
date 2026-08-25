@@ -85,6 +85,7 @@ class WorkerAdapterCapabilityProfile:
     stop: StopCapability
     sandbox: SandboxCapability
     stability: StabilityLevel
+    context_package_versions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -118,6 +119,13 @@ class WorkerAdapterCapabilityProfile:
             self,
             "stability",
             _enum_value(self.stability, StabilityLevel, "stability level"),
+        )
+        object.__setattr__(
+            self,
+            "context_package_versions",
+            _positive_version_tuple(
+                self.context_package_versions, "context_package_versions"
+            ),
         )
 
 
@@ -156,6 +164,7 @@ class PlannerAdapterCapabilityProfile:
     stability: StabilityLevel
     interface_version: str
     proposal_schema_versions: tuple[int, ...]
+    context_package_versions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -223,6 +232,13 @@ class PlannerAdapterCapabilityProfile:
             self,
             "proposal_schema_versions",
             tuple(sorted(set(self.proposal_schema_versions))),
+        )
+        object.__setattr__(
+            self,
+            "context_package_versions",
+            _positive_version_tuple(
+                self.context_package_versions, "context_package_versions"
+            ),
         )
 
 
@@ -417,3 +433,14 @@ def _enum_value(value: Any, enum_type: type[StrEnum], label: str) -> StrEnum:
 def _require_text(value: str, name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{name} is required")
+
+
+def _positive_version_tuple(value: tuple[int, ...], name: str) -> tuple[int, ...]:
+    if not isinstance(value, tuple):
+        raise ValidationError(f"{name} must be a tuple")
+    if any(
+        not isinstance(version, int) or isinstance(version, bool) or version < 1
+        for version in value
+    ):
+        raise ValidationError(f"{name} must contain positive integers")
+    return tuple(sorted(set(value)))

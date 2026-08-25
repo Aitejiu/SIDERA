@@ -1010,6 +1010,12 @@ def _planner_capabilities(
         proposal_schema_versions=tuple(
             _positive_ints(value.get("proposal_schema_versions"), "proposal_schema_versions")
         ),
+        context_package_versions=tuple(
+            _positive_ints(
+                value.get("context_package_versions", ()),
+                "context_package_versions",
+            )
+        ),
     )
 
 

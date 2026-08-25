@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -16,6 +17,10 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerRunControl,
     PlannerTimeout,
     PlannerUnknownOutcome,
+)
+from sidera_control_plane.domain.context_packages import (
+    ContextAcknowledgement,
+    ContextMaterializationV1,
 )
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
@@ -88,6 +93,7 @@ class FakePlannerAdapter:
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
         proposal_schema_versions=(2,),
+        context_package_versions=(1,),
     )
 
     def __init__(self, config: FakePlannerConfig) -> None:
@@ -103,6 +109,31 @@ class FakePlannerAdapter:
         if configured_scenario is not None and configured_scenario != self.config.scenario:
             raise ValueError("fake planner scenario must be explicitly configured")
         return self._CAPABILITIES
+
+    def accept_context(
+        self,
+        materialization: ContextMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextAcknowledgement:
+        if not isinstance(operation_id, UUID):
+            raise TypeError("fake planner operation_id must be a UUID")
+        if materialization.schema_version not in self._CAPABILITIES.context_package_versions:
+            raise ValueError("fake planner context materialization is unsupported")
+        if materialization.total_byte_count > self._CAPABILITIES.max_context_bytes:
+            raise ValueError("fake planner context materialization exceeds its limit")
+        return ContextAcknowledgement(
+            package_id=materialization.metadata.package_id,
+            package_hash=materialization.metadata.package_hash,
+            consumer_type=materialization.metadata.consumer_type,
+            consumer_id=materialization.metadata.consumer_id,
+            context_version=materialization.metadata.context_version,
+            adapter_module_id=UUID(int=0),
+            adapter_config_version=1,
+            acknowledged_at=datetime.now(UTC),
+            schema_version=materialization.schema_version,
+            operation_id=operation_id,
+        )
 
     def plan(self, planner_input: PlannerInput, control: PlannerRunControl) -> PlannerResult:
         if control.operation_id != planner_input.operation_id:
