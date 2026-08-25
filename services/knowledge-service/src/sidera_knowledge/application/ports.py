@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from sidera_knowledge.domain.candidates import KnowledgeCandidate
+from sidera_knowledge.domain.candidates import (
+    KnowledgeCandidate,
+    KnowledgeCandidateReview,
+)
 from sidera_knowledge.domain.pages import (
     KnowledgePage,
     KnowledgeRevision,
@@ -16,6 +20,10 @@ class KnowledgePageRepositoryPort(Protocol):
 
     def get_page(self, page_id: UUID, workspace_id: UUID) -> KnowledgePage | None: ...
 
+    def get_page_for_update(
+        self, page_id: UUID, workspace_id: UUID
+    ) -> KnowledgePage | None: ...
+
     def get_revision(
         self, revision_id: UUID, workspace_id: UUID
     ) -> KnowledgeRevision | None: ...
@@ -23,6 +31,10 @@ class KnowledgePageRepositoryPort(Protocol):
     def add_revision_and_advance_page(
         self, revision: KnowledgeRevision, expected_page_version: int
     ) -> None: ...
+
+    def archive_page(
+        self, page_id: UUID, workspace_id: UUID, expected_version: int
+    ) -> KnowledgePage: ...
 
 
 class KnowledgeSourceRepositoryPort(Protocol):
@@ -34,6 +46,15 @@ class KnowledgeSourceRepositoryPort(Protocol):
         self, workspace_id: UUID, source_type: str, digest: str
     ) -> KnowledgeSource | None: ...
 
+    def mark_unavailable(
+        self,
+        source_id: UUID,
+        workspace_id: UUID,
+        expected_version: int,
+        reason_code: str,
+        checked_at: datetime,
+    ) -> KnowledgeSource: ...
+
 
 class KnowledgeCandidateRepositoryPort(Protocol):
     def add_candidate(self, candidate: KnowledgeCandidate) -> None: ...
@@ -41,6 +62,16 @@ class KnowledgeCandidateRepositoryPort(Protocol):
     def get_candidate(
         self, candidate_id: UUID, workspace_id: UUID
     ) -> KnowledgeCandidate | None: ...
+
+    def get_candidate_for_update(
+        self, candidate_id: UUID, workspace_id: UUID
+    ) -> KnowledgeCandidate | None: ...
+
+    def transition_candidate(
+        self, candidate_id: UUID, workspace_id: UUID, status: str, expected_version: int
+    ) -> None: ...
+
+    def add_review(self, review: KnowledgeCandidateReview, workspace_id: UUID) -> None: ...
 
 
 class CommandRepositoryPort(Protocol):

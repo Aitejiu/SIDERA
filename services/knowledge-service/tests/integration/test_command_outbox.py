@@ -72,7 +72,7 @@ def test_command_event_and_outbox_commit_as_one_transaction(database: Database) 
             select(OutboxMessageModel).where(OutboxMessageModel.event_id == event.event_id)
         )
         assert outbox is not None
-        assert outbox.topic == "knowledge.knowledge_page_archived"
+        assert outbox.topic == "knowledge.page_archived"
         assert outbox.payload == event.payload
 
 

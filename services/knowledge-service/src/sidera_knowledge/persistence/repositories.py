@@ -9,7 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from sidera_knowledge.domain.candidates import KnowledgeCandidate
+from sidera_knowledge.domain.candidates import (
+    KnowledgeCandidate,
+    KnowledgeCandidateReview,
+)
 from sidera_knowledge.domain.commands import (
     CommandEnvelope,
     EventEnvelope,
@@ -26,6 +29,7 @@ from sidera_knowledge.persistence.models import (
     CommandModel,
     EventModel,
     KnowledgeCandidateModel,
+    KnowledgeCandidateReviewModel,
     KnowledgeCandidateSourceModel,
     KnowledgePageModel,
     KnowledgeRelationSnapshotModel,
@@ -160,6 +164,19 @@ class SqlAlchemyKnowledgePageRepository:
         )
         return _row_to_page(row) if row is not None else None
 
+    def get_page_for_update(
+        self, page_id: UUID, workspace_id: UUID
+    ) -> KnowledgePage | None:
+        row = self._session.scalar(
+            select(KnowledgePageModel)
+            .where(
+                KnowledgePageModel.id == page_id,
+                KnowledgePageModel.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        return _row_to_page(row) if row is not None else None
+
     def get_revision(
         self, revision_id: UUID, workspace_id: UUID
     ) -> KnowledgeRevision | None:
@@ -249,6 +266,27 @@ class SqlAlchemyKnowledgePageRepository:
         page.current_revision_id = revision.revision_id
         page.version += 1
 
+    def archive_page(
+        self, page_id: UUID, workspace_id: UUID, expected_version: int
+    ) -> KnowledgePage:
+        page = self._session.scalar(
+            select(KnowledgePageModel)
+            .where(
+                KnowledgePageModel.id == page_id,
+                KnowledgePageModel.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        if page is None:
+            raise PersistenceNotFound("page not found in workspace")
+        if page.version != expected_version:
+            raise PersistenceConflict("page version conflict")
+        if page.status == "archived":
+            raise PersistenceConflict("page already archived")
+        page.status = "archived"
+        page.version += 1
+        return _row_to_page(page)
+
 
 class SqlAlchemyKnowledgeSourceRepository:
     def __init__(self, session: Session) -> None:
@@ -312,6 +350,40 @@ class SqlAlchemyKnowledgeSourceRepository:
             return None
         return self.get_source(row.id, workspace_id)
 
+    def mark_unavailable(
+        self,
+        source_id: UUID,
+        workspace_id: UUID,
+        expected_version: int,
+        reason_code: str,
+        checked_at: datetime,
+    ) -> KnowledgeSource:
+        row = self._session.scalar(
+            select(KnowledgeSourceModel)
+            .where(
+                KnowledgeSourceModel.id == source_id,
+                KnowledgeSourceModel.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise PersistenceNotFound("source not found in workspace")
+        if row.availability == "unavailable" and row.safe_reason_code == reason_code:
+            source = self.get_source(source_id, workspace_id)
+            if source is None:
+                raise PersistenceNotFound("source not found in workspace")
+            return source
+        if row.version != expected_version:
+            raise PersistenceConflict("source version conflict")
+        row.availability = "unavailable"
+        row.safe_reason_code = reason_code
+        row.last_checked_at = checked_at
+        row.version += 1
+        source = self.get_source(source_id, workspace_id)
+        if source is None:
+            raise PersistenceNotFound("source not found in workspace")
+        return source
+
 
 class SqlAlchemyKnowledgeCandidateRepository:
     def __init__(self, session: Session) -> None:
@@ -361,8 +433,24 @@ class SqlAlchemyKnowledgeCandidateRepository:
                 KnowledgeCandidateModel.workspace_id == workspace_id,
             )
         )
-        if row is None:
-            return None
+        return self._row_to_candidate(row) if row is not None else None
+
+    def get_candidate_for_update(
+        self, candidate_id: UUID, workspace_id: UUID
+    ) -> KnowledgeCandidate | None:
+        row = self._session.scalar(
+            select(KnowledgeCandidateModel)
+            .where(
+                KnowledgeCandidateModel.id == candidate_id,
+                KnowledgeCandidateModel.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        return self._row_to_candidate(row) if row is not None else None
+
+    def _row_to_candidate(
+        self, row: KnowledgeCandidateModel
+    ) -> KnowledgeCandidate:
         snapshot = cast(dict[str, Any], row.proposed_snapshot)
         sections = tuple(
             KnowledgeSectionSnapshot(
@@ -410,6 +498,45 @@ class SqlAlchemyKnowledgeCandidateRepository:
             supersedes_candidate_id=row.supersedes_candidate_id,
             status=cast(Any, row.status),
             version=row.version,
+        )
+
+    def transition_candidate(
+        self,
+        candidate_id: UUID,
+        workspace_id: UUID,
+        status: str,
+        expected_version: int,
+    ) -> None:
+        row = self._session.scalar(
+            select(KnowledgeCandidateModel)
+            .where(
+                KnowledgeCandidateModel.id == candidate_id,
+                KnowledgeCandidateModel.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise PersistenceNotFound("candidate not found in workspace")
+        if row.version != expected_version:
+            raise PersistenceConflict("candidate version conflict")
+        row.status = status
+        row.version += 1
+
+    def add_review(
+        self, review: KnowledgeCandidateReview, workspace_id: UUID
+    ) -> None:
+        self._session.add(
+            KnowledgeCandidateReviewModel(
+                id=review.review_id,
+                workspace_id=workspace_id,
+                candidate_id=review.candidate_id,
+                reviewer_actor=review.reviewer_actor,
+                decision=review.decision,
+                reason=review.reason,
+                observed_candidate_hash=review.observed_candidate_hash,
+                observed_target_revision_id=review.observed_target_revision_id,
+                created_revision_id=review.created_revision_id,
+            )
         )
 
 

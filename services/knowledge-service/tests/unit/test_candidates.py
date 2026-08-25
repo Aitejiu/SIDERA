@@ -102,3 +102,18 @@ def test_non_accept_review_cannot_create_revision_and_changes_use_new_candidate(
         supersedes_candidate_id=candidate.candidate_id,
     )
     assert replacement.supersedes_candidate_id == candidate.candidate_id
+
+
+def test_stale_review_can_record_rejection_without_published_revision() -> None:
+    candidate = _candidate(target_page_id=PAGE_ID)
+    review = KnowledgeCandidateReview(
+        review_id=uuid4(),
+        candidate_id=candidate.candidate_id,
+        reviewer_actor="user:aitejiu",
+        decision="reject",
+        reason="Target changed",
+        observed_candidate_hash=candidate.candidate_hash,
+        observed_target_revision_id=uuid4(),
+        created_revision_id=None,
+    )
+    assert review.created_revision_id is None
