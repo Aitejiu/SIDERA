@@ -30,6 +30,10 @@ class KnowledgeSourceRepositoryPort(Protocol):
 
     def get_source(self, source_id: UUID, workspace_id: UUID) -> KnowledgeSource | None: ...
 
+    def find_by_digest(
+        self, workspace_id: UUID, source_type: str, digest: str
+    ) -> KnowledgeSource | None: ...
+
 
 class KnowledgeCandidateRepositoryPort(Protocol):
     def add_candidate(self, candidate: KnowledgeCandidate) -> None: ...
@@ -44,6 +48,14 @@ class CommandRepositoryPort(Protocol):
 
     def mark_applied(
         self, command_id: UUID, workspace_id: UUID, result: dict[str, object]
+    ) -> None: ...
+
+    def mark_rejected(
+        self,
+        command_id: UUID,
+        workspace_id: UUID,
+        error_code: str,
+        details: dict[str, object],
     ) -> None: ...
 
 

@@ -123,4 +123,6 @@ class EventEnvelope:
 def topic_for_event(event_type: str) -> str:
     if re.fullmatch(r"[A-Z][A-Za-z0-9]*", event_type) is None:
         raise DomainValidationError("event_type must use PascalCase")
+    if event_type.startswith("Knowledge"):
+        event_type = event_type.removeprefix("Knowledge")
     return f"knowledge.{_pascal_to_snake(event_type)}"

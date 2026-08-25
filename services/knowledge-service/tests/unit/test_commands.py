@@ -62,5 +62,5 @@ def test_event_payload_rejects_knowledge_body_and_event_topic_is_stable() -> Non
         )
 
     assert topic_for_event("KnowledgeCandidateSubmitted") == (
-        "knowledge.knowledge_candidate_submitted"
+        "knowledge.candidate_submitted"
     )

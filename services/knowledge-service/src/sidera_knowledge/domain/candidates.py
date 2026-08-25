@@ -118,6 +118,7 @@ class KnowledgeCandidate:
     def proposed_snapshot(self) -> dict[str, Any]:
         return {
             "title": self.proposed_title,
+            "slug": self.proposed_slug,
             "summary": self.proposed_summary,
             "tags": list(self.proposed_tags),
             "sections": [section.snapshot for section in self.proposed_sections],

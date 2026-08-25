@@ -490,6 +490,10 @@ class CommandModel(TimestampMixin, Base):
     error_code: Mapped[str | None] = mapped_column(String(128))
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    @property
+    def request_hash(self) -> str:
+        return self.payload_hash
+
 
 class EventModel(TimestampMixin, Base):
     __tablename__ = "events"

@@ -26,6 +26,7 @@ from sidera_knowledge.persistence.models import (
     CommandModel,
     EventModel,
     KnowledgeCandidateModel,
+    KnowledgeCandidateSourceModel,
     KnowledgePageModel,
     KnowledgeRelationSnapshotModel,
     KnowledgeRevisionModel,
@@ -297,6 +298,20 @@ class SqlAlchemyKnowledgeSourceRepository:
             version=row.version,
         )
 
+    def find_by_digest(
+        self, workspace_id: UUID, source_type: str, digest: str
+    ) -> KnowledgeSource | None:
+        row = self._session.scalar(
+            select(KnowledgeSourceModel).where(
+                KnowledgeSourceModel.workspace_id == workspace_id,
+                KnowledgeSourceModel.source_type == source_type,
+                KnowledgeSourceModel.digest == digest,
+            )
+        )
+        if row is None:
+            return None
+        return self.get_source(row.id, workspace_id)
+
 
 class SqlAlchemyKnowledgeCandidateRepository:
     def __init__(self, session: Session) -> None:
@@ -323,6 +338,18 @@ class SqlAlchemyKnowledgeCandidateRepository:
                 status=candidate.status,
                 version=candidate.version,
             )
+        )
+        self._session.add_all(
+            [
+                KnowledgeCandidateSourceModel(
+                    candidate_id=candidate.candidate_id,
+                    source_id=source_id,
+                    workspace_id=candidate.workspace_id,
+                    ordinal=ordinal,
+                    provenance_role="candidate",
+                )
+                for ordinal, source_id in enumerate(candidate.source_refs)
+            ]
         )
 
     def get_candidate(
@@ -433,6 +460,26 @@ class SqlAlchemyCommandRepository:
             raise PersistenceNotFound("command not found in workspace")
         row.status = "applied"
         row.result = dict(result)
+        row.applied_at = datetime.now().astimezone()
+
+    def mark_rejected(
+        self,
+        command_id: UUID,
+        workspace_id: UUID,
+        error_code: str,
+        details: dict[str, object],
+    ) -> None:
+        row = self._session.scalar(
+            select(CommandModel).where(
+                CommandModel.id == command_id,
+                CommandModel.workspace_id == workspace_id,
+            )
+        )
+        if row is None:
+            raise PersistenceNotFound("command not found in workspace")
+        row.status = "rejected"
+        row.error_code = error_code
+        row.result = dict(details)
         row.applied_at = datetime.now().astimezone()
 
 
