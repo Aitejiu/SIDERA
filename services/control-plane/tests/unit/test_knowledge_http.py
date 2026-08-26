@@ -150,7 +150,10 @@ def _ref() -> ExactSectionRef:
     )
 
 
-def test_settings_add_knowledge_runtime_contract_and_redact_secret() -> None:
+def test_settings_add_knowledge_runtime_contract_and_redact_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SIDERA_KNOWLEDGE_BASE_URL", raising=False)
     settings = _settings(knowledge_control_plane_token=SecretStr(TOKEN))
 
     assert settings.knowledge_base_url == "http://127.0.0.1:8020"
