@@ -15,6 +15,7 @@ const EXECUTION_ID = "60000000-0000-0000-0000-000000000001";
 const SESSION_ID = "70000000-0000-0000-0000-000000000001";
 const WORKER_ID = "80000000-0000-0000-0000-000000000001";
 const WORKER_ITEM_ID = "40000000-0000-0000-0000-000000000001";
+const CONTEXT_PACKAGE_ID = "90000000-0000-0000-0000-000000000001";
 
 const trace = {
   schema_version: 1,
@@ -103,6 +104,55 @@ const execution = {
   worker_item_id: null,
 };
 
+const executionContextPackage = {
+  package_id: CONTEXT_PACKAGE_ID,
+  workspace_id: WORKSPACE_ID,
+  purpose: "execution",
+  consumer_type: "worker",
+  consumer_id: EXECUTION_ID,
+  worker_item_id: WORKER_ITEM_ID,
+  work_context_revision_id: "91000000-0000-0000-0000-000000000001",
+  work_context_revision_number: 5,
+  work_context_content_hash: "a".repeat(64),
+  context_version: 2,
+  control_plane_fact_snapshot: {},
+  knowledge_refs: [],
+  artifact_refs: [],
+  evidence_refs: [],
+  budget: {
+    profile_id: "92000000-0000-0000-0000-000000000001",
+    profile_version: 1,
+    max_sections: 1,
+    max_chars: 100,
+    max_input_tokens: 30,
+    actual_sections: 0,
+    actual_chars: 0,
+    actual_input_tokens: 0,
+  },
+  expires_at: "2026-08-27T08:00:00Z",
+  idempotency_key: "execution-context",
+  package_hash: "b".repeat(64),
+  status: "active",
+  created_at: "2026-08-21T08:00:00Z",
+  materialized_at: null,
+  revoked_at: null,
+  revocation_reason: null,
+  revocation_scope: null,
+  assembly: {
+    request_id: "93000000-0000-0000-0000-000000000001",
+    status: "ready",
+    attempt: 1,
+    next_attempt_at: null,
+    error_code: null,
+    request_fingerprint: "execution-context",
+    version: 1,
+    created_at: "2026-08-21T08:00:00Z",
+    updated_at: "2026-08-21T08:00:00Z",
+  },
+  acknowledgements: [],
+  materialization_audits: [],
+};
+
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -124,6 +174,7 @@ describe("ExecutionPage", () => {
       http.get(`/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`, () => HttpResponse.json(trace)),
       http.get("/api/v1/gateway/sessions", () => HttpResponse.json({ items: [session], next_cursor: null })),
       http.get(`/api/v1/executions/${EXECUTION_ID}`, () => HttpResponse.json(execution)),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/executions/${EXECUTION_ID}/context-package`, () => HttpResponse.json(executionContextPackage)),
     );
   });
 
@@ -136,6 +187,10 @@ describe("ExecutionPage", () => {
     expect(screen.queryByRole("heading", { name: "介入当前 Session" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "用户介入记录" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看 Agent Trace" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看本次运行上下文" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/context-packages/${CONTEXT_PACKAGE_ID}`,
+    );
     expect(screen.queryByRole("heading", { name: "Worker 轨迹" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "查看 Agent Trace" }));

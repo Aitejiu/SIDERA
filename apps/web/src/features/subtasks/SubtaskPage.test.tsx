@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -14,6 +14,9 @@ const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 const SUBTASK_KEY = "callback-idempotency";
 const IMPLEMENTER_ID = "40000000-0000-0000-0000-000000000001";
 const REVIEWER_ID = "40000000-0000-0000-0000-000000000002";
+const KNOWLEDGE_PAGE_ID = "90000000-0000-0000-0000-000000000001";
+const KNOWLEDGE_REVISION_ID = "91000000-0000-0000-0000-000000000001";
+const WORK_CONTEXT_REVISION_ID = "92000000-0000-0000-0000-000000000001";
 
 const workspace = {
   workspace_id: WORKSPACE_ID,
@@ -133,6 +136,58 @@ const workspace = {
   as_of: "2026-08-23T08:01:00Z",
 };
 
+const workContext = {
+  id: "93000000-0000-0000-0000-000000000001",
+  workspace_id: WORKSPACE_ID,
+  planning_request_id: "94000000-0000-0000-0000-000000000001",
+  root_task_id: ROOT_TASK_ID,
+  status: "active",
+  current_revision_id: WORK_CONTEXT_REVISION_ID,
+  current_revision_number: 4,
+  version: 4,
+  created_at: "2026-08-23T07:00:00Z",
+  updated_at: "2026-08-23T08:01:00Z",
+  current_revision: {
+    id: WORK_CONTEXT_REVISION_ID,
+    work_context_id: "93000000-0000-0000-0000-000000000001",
+    workspace_id: WORKSPACE_ID,
+    revision_number: 4,
+    brief_planning_request_id: "94000000-0000-0000-0000-000000000001",
+    brief_revision: 2,
+    proposal_revision_id: null,
+    plan_snapshot_id: null,
+    reason: "同步任务上下文",
+    content_hash: "a".repeat(64),
+    created_by: "main-agent",
+    created_at: "2026-08-23T08:01:00Z",
+    snapshot: {
+      schema_version: 1,
+      objective: "回调幂等",
+      constraints: [],
+      acceptance_criteria: [],
+      requested_outputs: [],
+      clarification_decisions: [],
+      accepted_decisions: [],
+      unresolved_questions: [],
+      knowledge_refs: [{
+        page_id: KNOWLEDGE_PAGE_ID,
+        revision_id: KNOWLEDGE_REVISION_ID,
+        revision_hash: "b".repeat(64),
+        section_key: "retry-policy",
+        section_hash: "c".repeat(64),
+        source_ids: [],
+        ordinal: 0,
+      }],
+      artifact_refs: [],
+      evidence_refs: [],
+      checkpoint_refs: [],
+      missing_fact_codes: [],
+    },
+  },
+  timeline: [],
+  next_cursor: null,
+};
+
 function LocationProbe() {
   const location = useLocation();
   return <output data-testid="route-location">{location.pathname}{location.search}</output>;
@@ -183,6 +238,69 @@ describe("SubtaskPage", () => {
     await user.click(screen.getByRole("button", { name: "打开 Worker：实现者" }));
     expect(screen.getByTestId("route-location")).toHaveTextContent(
       `/workspaces/${WORKSPACE_ID}/worker-items/${IMPLEMENTER_ID}`,
+    );
+  });
+
+  it("scopes knowledge candidates to the current subtask provenance", async () => {
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/work-context`, () => HttpResponse.json(workContext)),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${workspace.subtask.task_id}/knowledge-submissions`, () => HttpResponse.json({ items: [], next_cursor: null })),
+      http.get(`/knowledge-api/api/v1/workspaces/${WORKSPACE_ID}/knowledge/candidates`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get("source_task_id")).toBe(ROOT_TASK_ID);
+        expect(url.searchParams.get("source_subtask_id")).toBe(workspace.subtask.task_id);
+        return HttpResponse.json({
+          items: [{
+            candidate_id: "95000000-0000-0000-0000-000000000001",
+            operation: "revise_page",
+            target_page_id: KNOWLEDGE_PAGE_ID,
+            expected_revision_id: KNOWLEDGE_REVISION_ID,
+            expected_revision_hash: "d".repeat(64),
+            proposed_title: "回调规则候选",
+            proposed_slug: "callback-rule",
+            candidate_hash: "e".repeat(64),
+            status: "pending",
+            producer_type: "worker",
+            producer_id: IMPLEMENTER_ID,
+            task_id: ROOT_TASK_ID,
+            subtask_id: workspace.subtask.task_id,
+            worker_item_id: IMPLEMENTER_ID,
+            execution_id: null,
+            supersedes_candidate_id: null,
+            version: 1,
+            created_at: "2026-08-23T08:02:00Z",
+            updated_at: "2026-08-23T08:02:00Z",
+          }],
+          next_cursor: null,
+        });
+      }),
+      http.get(`/knowledge-api/api/v1/workspaces/${WORKSPACE_ID}/knowledge/pages/${KNOWLEDGE_PAGE_ID}/revisions/${KNOWLEDGE_REVISION_ID}`, () => HttpResponse.json({
+        revision_id: KNOWLEDGE_REVISION_ID,
+        page_id: KNOWLEDGE_PAGE_ID,
+        workspace_id: WORKSPACE_ID,
+        revision_number: 2,
+        title: "回调规则",
+        summary: "当前子任务的固定知识引用。",
+        tags: [],
+        content_hash: "f".repeat(64),
+        change_reason: "导入",
+        created_by: "aitejiu",
+        created_at: "2026-08-23T07:00:00Z",
+        accepted_candidate_id: null,
+        sections: [],
+        relations: [],
+        source_refs: [],
+        sources: [],
+      })),
+    );
+    renderPage();
+
+    const summary = await screen.findByRole("region", { name: "知识上下文" });
+    expect(await within(summary).findByText("回调规则")).toBeVisible();
+    expect(within(summary).getByText("待审核 1")).toBeVisible();
+    expect(within(summary).getByRole("link", { name: "查看全部知识候选" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/knowledge/inbox?source_task_id=${ROOT_TASK_ID}&source_subtask_id=${workspace.subtask.task_id}`,
     );
   });
 

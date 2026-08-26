@@ -1,7 +1,13 @@
 import { apiGetAt, apiRequestJson } from "@/shared/api/client";
 import type { paths } from "@/shared/api/schema";
 
-import type { ContextPackage, ContextPackageMaterialization, WorkContextDetail, WorkContextRevision } from "./types";
+import type {
+  ContextPackage,
+  ContextPackageMaterialization,
+  KnowledgeSubmissionPage,
+  WorkContextDetail,
+  WorkContextRevision,
+} from "./types";
 
 export function contextPackageQueryKey(workspaceId: string, packageId: string) {
   return ["context-package", workspaceId, packageId] as const;
@@ -17,6 +23,18 @@ export function contextPackageByPlanningRunQueryKey(workspaceId: string, runId: 
 
 export function workContextQueryKey(workspaceId: string, contextId: string) {
   return ["work-context", workspaceId, contextId] as const;
+}
+
+export function workContextByRootTaskQueryKey(workspaceId: string, rootTaskId: string) {
+  return ["work-context", workspaceId, "root-task", rootTaskId] as const;
+}
+
+export function workContextByPlanningRequestQueryKey(workspaceId: string, planningRequestId: string) {
+  return ["work-context", workspaceId, "planning-request", planningRequestId] as const;
+}
+
+export function taskKnowledgeSubmissionsQueryKey(workspaceId: string, taskId: string) {
+  return ["context-knowledge-submissions", workspaceId, "task", taskId] as const;
 }
 
 export async function getContextPackage(
@@ -64,9 +82,48 @@ export async function materializeContextPackage(
   signal?: AbortSignal,
 ): Promise<ContextPackageMaterialization> {
   const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/context-packages/${encodeURIComponent(packageId)}/materialize`;
-  const init: RequestInit = { method: "POST" };
+  const init: RequestInit = { method: "POST", cache: "no-store" };
   if (signal !== undefined) init.signal = signal;
   return apiRequestJson<ContextPackageMaterialization>(path, init);
+}
+
+export async function getWorkContextByRootTask(
+  workspaceId: string,
+  rootTaskId: string,
+  signal?: AbortSignal,
+): Promise<WorkContextDetail> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(rootTaskId)}/work-context`;
+  return apiGetAt(
+    path,
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/work-context" as keyof paths,
+    signal === undefined ? undefined : { signal },
+  ) as Promise<WorkContextDetail>;
+}
+
+export async function getWorkContextByPlanningRequest(
+  workspaceId: string,
+  planningRequestId: string,
+  signal?: AbortSignal,
+): Promise<WorkContextDetail> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests/${encodeURIComponent(planningRequestId)}/work-context`;
+  return apiGetAt(
+    path,
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{planning_request_id}/work-context" as keyof paths,
+    signal === undefined ? undefined : { signal },
+  ) as Promise<WorkContextDetail>;
+}
+
+export async function listTaskKnowledgeSubmissions(
+  workspaceId: string,
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeSubmissionPage> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}/knowledge-submissions`;
+  return apiGetAt(
+    path,
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/knowledge-submissions" as keyof paths,
+    signal === undefined ? undefined : { signal },
+  ) as Promise<KnowledgeSubmissionPage>;
 }
 
 export async function getWorkContext(

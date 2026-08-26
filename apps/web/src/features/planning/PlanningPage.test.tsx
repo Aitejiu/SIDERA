@@ -27,6 +27,8 @@ const CLARIFICATION_ID = "60000000-0000-0000-0000-000000000001";
 const SECOND_CLARIFICATION_ID = "60000000-0000-0000-0000-000000000002";
 const ROOT_TASK_ID = "a1000000-0000-0000-0000-000000000001";
 const PROPOSAL_HASH = "a".repeat(64);
+const CONTEXT_PACKAGE_ID = "b1000000-0000-0000-0000-000000000001";
+const PREVIOUS_CONTEXT_PACKAGE_ID = "b1000000-0000-0000-0000-000000000002";
 
 const capability = {
   structured_output: "json_schema",
@@ -128,6 +130,57 @@ function makeRequest(
     usage,
     last_change_cursor: 12,
     ...overrides,
+  };
+}
+
+function makePlanningContextPackage(packageId: string, knowledgeRefs: unknown[]) {
+  return {
+    package_id: packageId,
+    workspace_id: WORKSPACE_ID,
+    purpose: "planning_run",
+    consumer_type: "planner",
+    consumer_id: RUN_ID,
+    worker_item_id: null,
+    work_context_revision_id: "b2000000-0000-0000-0000-000000000001",
+    work_context_revision_number: 3,
+    work_context_content_hash: "c".repeat(64),
+    context_version: null,
+    control_plane_fact_snapshot: {},
+    knowledge_refs: knowledgeRefs,
+    artifact_refs: [{ ref_id: "b3000000-0000-0000-0000-000000000001", ref_type: "brief", ordinal: 0 }],
+    evidence_refs: [],
+    budget: {
+      profile_id: PROFILE_ID,
+      profile_version: 2,
+      max_sections: 10,
+      max_chars: 20000,
+      max_input_tokens: 5000,
+      actual_sections: knowledgeRefs.length,
+      actual_chars: 1200,
+      actual_input_tokens: 300,
+    },
+    expires_at: "2026-08-27T08:00:00Z",
+    idempotency_key: `planning-package-${packageId}`,
+    package_hash: "d".repeat(64),
+    status: "active",
+    created_at: "2026-08-23T08:00:00Z",
+    materialized_at: null,
+    revoked_at: null,
+    revocation_reason: null,
+    revocation_scope: null,
+    assembly: {
+      request_id: "b4000000-0000-0000-0000-000000000001",
+      status: "ready",
+      attempt: 1,
+      next_attempt_at: null,
+      error_code: null,
+      request_fingerprint: "fingerprint",
+      version: 1,
+      created_at: "2026-08-23T08:00:00Z",
+      updated_at: "2026-08-23T08:00:00Z",
+    },
+    acknowledgements: [],
+    materialization_audits: [],
   };
 }
 
@@ -337,6 +390,33 @@ describe("PlanningPage", () => {
     expect(screen.getByText(/已运行/)).toBeVisible();
     expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "取消规划" })).toBeVisible();
+  });
+
+  it("shows the planning run context revision and exact manifest delta", async () => {
+    const currentPackage = makePlanningContextPackage(CONTEXT_PACKAGE_ID, [
+      { page_id: "b5000000-0000-0000-0000-000000000001", revision_id: "b6000000-0000-0000-0000-000000000001", revision_hash: "1".repeat(64), section_key: "stable", section_hash: "2".repeat(64), source_ids: [], selection_reason: "work_context", trust_level: "workspace_confirmed", ordinal: 0 },
+      { page_id: "b5000000-0000-0000-0000-000000000002", revision_id: "b6000000-0000-0000-0000-000000000002", revision_hash: "3".repeat(64), section_key: "new", section_hash: "4".repeat(64), source_ids: [], selection_reason: "retrieval", trust_level: "workspace_confirmed", ordinal: 1 },
+    ]);
+    const previousPackage = makePlanningContextPackage(PREVIOUS_CONTEXT_PACKAGE_ID, [currentPackage.knowledge_refs[0]]);
+    installHandlers({
+      request: makeRequest("planning"),
+      runs: [makeRun({ id: SECOND_RUN_ID, status: "succeeded" }), makeRun()],
+    });
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-runs/${RUN_ID}/context-package`, () => HttpResponse.json(currentPackage)),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-runs/${SECOND_RUN_ID}/context-package`, () => HttpResponse.json(previousPackage)),
+    );
+    renderPage();
+
+    const context = await screen.findByRole("region", { name: "本次运行上下文" });
+    expect(within(context).getByText("WorkContext R3")).toBeVisible();
+    expect(within(context).getByText("Package active · dddddddd")).toBeVisible();
+    expect(within(context).getByText("已选 2 个知识 sections")).toBeVisible();
+    expect(within(context).getByText("引用变化：新增 1 · 移除 0")).toBeVisible();
+    expect(within(context).getByRole("link", { name: "查看本次运行上下文" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/context-packages/${CONTEXT_PACKAGE_ID}`,
+    );
   });
 
   it("shows blocked runs safely without exposing a retry command", async () => {

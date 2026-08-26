@@ -14,6 +14,7 @@ import { Link } from "react-router-dom";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { WorkerContextSummary } from "../context/WorkerContextSummary";
 import { ExecutionRoutingPanel } from "./ExecutionRoutingPanel";
 import type { WorkerPlacement, WorkerWorkspace } from "./types";
 
@@ -48,6 +49,11 @@ export function WorkerSidebar({
         rootTaskId={workerItem.root_task_id}
         subtaskKey={workspace.current_placement.subtask_key}
         onRefresh={onRefresh}
+      />
+
+      <WorkerContextSummary
+        workspaceId={workspace.workspace_id}
+        executions={workspace.execution_history}
       />
 
       <section className="worker-item-sidebar__section">

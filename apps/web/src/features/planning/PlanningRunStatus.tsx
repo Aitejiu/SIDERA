@@ -1,14 +1,36 @@
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ExternalLink, PackageOpen } from "lucide-react";
+import { Link } from "react-router-dom";
 
+import { contextPackageByPlanningRunQueryKey, getContextPackageByPlanningRun } from "../context/api";
+import type { ContextPackage } from "../context/types";
 import type { PlanningRun } from "./types";
 
 export function PlanningRunStatus({
   run,
   onCancel,
+  workspaceId = "",
+  previousRun = null,
 }: {
   run: PlanningRun | null;
   onCancel?: (() => void) | undefined;
+  workspaceId?: string;
+  previousRun?: PlanningRun | null;
 }) {
+  const contextPackageQuery = useQuery({
+    queryKey: contextPackageByPlanningRunQueryKey(workspaceId, run?.id ?? "none"),
+    queryFn: ({ signal }) => getContextPackageByPlanningRun(workspaceId, run?.id ?? "", signal),
+    enabled: Boolean(workspaceId && run?.id),
+    retry: false,
+  });
+  const previousContextPackageQuery = useQuery({
+    queryKey: contextPackageByPlanningRunQueryKey(workspaceId, previousRun?.id ?? "none"),
+    queryFn: ({ signal }) => getContextPackageByPlanningRun(workspaceId, previousRun?.id ?? "", signal),
+    enabled: Boolean(workspaceId && previousRun?.id),
+    retry: false,
+  });
+
   if (run === null) {
     return (
       <section className="planning-run-status" aria-label="规划运行">
@@ -54,8 +76,67 @@ export function PlanningRunStatus({
           <span>请检查运行记录和请求历史后再决定下一步。</span>
         </div>
       ) : null}
+      {contextPackageQuery.data ? (
+        <PlanningRunContextSummary
+          workspaceId={workspaceId}
+          contextPackage={contextPackageQuery.data}
+          previousContextPackage={previousContextPackageQuery.data}
+        />
+      ) : null}
     </section>
   );
+}
+
+function PlanningRunContextSummary({
+  workspaceId,
+  contextPackage,
+  previousContextPackage,
+}: {
+  workspaceId: string;
+  contextPackage: ContextPackage;
+  previousContextPackage: ContextPackage | undefined;
+}) {
+  const delta = compareKnowledgeRefs(contextPackage, previousContextPackage);
+  return (
+    <section className="planning-run-context" aria-label="本次运行上下文">
+      <div className="planning-run-context__heading">
+        <div>
+          <span className="eyebrow">RUN CONTEXT</span>
+          <h3><PackageOpen size={15} aria-hidden="true" />本次运行上下文</h3>
+        </div>
+        <Link
+          className="planning-run-context__link"
+          to={`/workspaces/${encodeURIComponent(workspaceId)}/context-packages/${encodeURIComponent(contextPackage.package_id)}`}
+        >
+          查看本次运行上下文 <ExternalLink size={13} aria-hidden="true" />
+        </Link>
+      </div>
+      <div className="planning-run-context__facts">
+        <span>WorkContext R{contextPackage.work_context_revision_number}</span>
+        <span>Package {contextPackage.status} · {shortHash(contextPackage.package_hash)}</span>
+        <span>已选 {contextPackage.knowledge_refs.length} 个知识 sections</span>
+        <span>引用变化：新增 {delta.added} · 移除 {delta.removed}</span>
+      </div>
+    </section>
+  );
+}
+
+function compareKnowledgeRefs(current: ContextPackage, previous: ContextPackage | undefined): { added: number; removed: number } {
+  if (previous === undefined) return { added: current.knowledge_refs.length, removed: 0 };
+  const currentKeys = new Set(current.knowledge_refs.map(knowledgeRefKey));
+  const previousKeys = new Set(previous.knowledge_refs.map(knowledgeRefKey));
+  return {
+    added: [...currentKeys].filter((key) => !previousKeys.has(key)).length,
+    removed: [...previousKeys].filter((key) => !currentKeys.has(key)).length,
+  };
+}
+
+function knowledgeRefKey(ref: ContextPackage["knowledge_refs"][number]): string {
+  return `${ref.page_id}:${ref.revision_id}:${ref.section_key}`;
+}
+
+function shortHash(value: string): string {
+  return value.slice(0, 8);
 }
 
 function ElapsedFact({ startedAt }: { startedAt: string }) {

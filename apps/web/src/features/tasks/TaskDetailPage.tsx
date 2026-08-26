@@ -21,6 +21,7 @@ import { MilestoneTrack } from "./MilestoneTrack";
 import { TaskActivity } from "./TaskActivity";
 import { TaskBoard } from "./TaskBoard";
 import { TaskGraph } from "./TaskGraph";
+import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
 import type { TaskActivity as TaskActivityProjection, TaskGraph as TaskGraphProjection } from "./types";
 
 export function TaskDetailPage() {
@@ -195,6 +196,7 @@ function TaskDeliveryContent({
         <SchedulingWaitSummary items={schedulingWaits} />
         <MilestoneTrack milestones={graph.milestones} />
         <ExecutionHorizon graph={graph} />
+        <TaskKnowledgeSummary workspaceId={workspaceId} rootTaskId={rootTaskId} />
         <div className="task-view-switch" role="tablist" aria-label="子任务状态视图">
           <button
             className={viewMode === "board" ? "is-active" : ""}

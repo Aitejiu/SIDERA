@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
 import { getSubtaskWorkspace, subtaskWorkspaceQueryKey } from "./api";
 import { WorkerBoard } from "./WorkerBoard";
 import { WorkerGraph } from "./WorkerGraph";
@@ -132,6 +133,13 @@ function SubtaskContent({
         upstream={workspace.upstream_subtasks}
         downstream={workspace.downstream_subtasks}
         onOpen={onOpenSubtask}
+      />
+
+      <TaskKnowledgeSummary
+        workspaceId={workspaceId}
+        rootTaskId={rootTaskId}
+        submissionTaskId={workspace.subtask.task_id ?? rootTaskId}
+        sourceSubtaskId={workspace.subtask.task_id}
       />
 
       {workspace.attention_items.length > 0 ? (

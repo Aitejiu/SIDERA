@@ -1,6 +1,6 @@
 import { RefreshCw, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { listKnowledgeCandidates, knowledgeCandidatesQueryKey } from "./api";
@@ -14,9 +14,11 @@ type CandidateStatusFilter = "attention" | "all" | "pending" | "changes_requeste
 
 export function KnowledgeInboxPage() {
   const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
+  const [searchParams] = useSearchParams();
   const [status, setStatus] = useState<CandidateStatusFilter>("attention");
   const [search, setSearch] = useState("");
-  const [sourceTask, setSourceTask] = useState("");
+  const [sourceTask, setSourceTask] = useState(() => searchParams.get("source_task_id") ?? "");
+  const [sourceSubtask, setSourceSubtask] = useState(() => searchParams.get("source_subtask_id") ?? "");
   const query = useQuery({
     queryKey: knowledgeCandidatesQueryKey(workspaceId, { limit: "100" }),
     queryFn: ({ signal }) => listKnowledgeCandidates(workspaceId, { limit: 100, signal }),
@@ -29,19 +31,22 @@ export function KnowledgeInboxPage() {
     const items = candidates ?? [];
     const normalizedSearch = search.trim().toLowerCase();
     const normalizedTask = sourceTask.trim().toLowerCase();
+    const normalizedSubtask = sourceSubtask.trim().toLowerCase();
     return items.filter((candidate) => {
       if (status === "attention" && !REVIEW_STATUSES.has(candidate.status)) return false;
       if (status !== "attention" && status !== "all" && candidate.status !== status) return false;
       if (normalizedSearch && !candidateMatches(candidate, normalizedSearch)) return false;
       if (normalizedTask && !(candidate.task_id ?? "").toLowerCase().includes(normalizedTask)) return false;
+      if (normalizedSubtask && !(candidate.subtask_id ?? "").toLowerCase().includes(normalizedSubtask)) return false;
       return true;
     });
-  }, [candidates, search, sourceTask, status]);
+  }, [candidates, search, sourceSubtask, sourceTask, status]);
 
   const clearFilters = () => {
     setStatus("attention");
     setSearch("");
     setSourceTask("");
+    setSourceSubtask("");
   };
 
   return (
@@ -79,11 +84,15 @@ export function KnowledgeInboxPage() {
             <span>来源任务</span>
             <input value={sourceTask} onChange={(event) => setSourceTask(event.target.value)} placeholder="任务 ID" aria-label="来源任务筛选" />
           </label>
+          <label className="knowledge-filter-field knowledge-filter-field--wide">
+            <span>来源子任务</span>
+            <input value={sourceSubtask} onChange={(event) => setSourceSubtask(event.target.value)} placeholder="子任务 ID" aria-label="来源子任务筛选" />
+          </label>
           <button
             className="icon-button knowledge-filter-clear"
             type="button"
             onClick={clearFilters}
-            disabled={status === "attention" && search === "" && sourceTask === ""}
+            disabled={status === "attention" && search === "" && sourceTask === "" && sourceSubtask === ""}
             aria-label="清除候选筛选"
             title="清除候选筛选"
           >

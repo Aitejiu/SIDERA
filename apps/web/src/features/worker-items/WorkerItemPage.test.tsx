@@ -15,6 +15,8 @@ const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 const EXECUTION_ONE_ID = "60000000-0000-0000-0000-000000000001";
 const EXECUTION_TWO_ID = "60000000-0000-0000-0000-000000000002";
 const SESSION_TWO_ID = "70000000-0000-0000-0000-000000000002";
+const CONTEXT_PACKAGE_ONE_ID = "90000000-0000-0000-0000-000000000001";
+const CONTEXT_PACKAGE_TWO_ID = "90000000-0000-0000-0000-000000000002";
 
 const workspace = {
   workspace_id: WORKSPACE_ID,
@@ -182,6 +184,66 @@ const workspace = {
   last_change_cursor: 42,
   as_of: "2026-08-23T08:05:00Z",
 };
+
+function makeExecutionContextPackage(packageId: string, executionId: string, contextVersion: number) {
+  return {
+    package_id: packageId,
+    workspace_id: WORKSPACE_ID,
+    purpose: "execution",
+    consumer_type: "worker",
+    consumer_id: executionId,
+    worker_item_id: WORKER_ITEM_ID,
+    work_context_revision_id: "a1000000-0000-0000-0000-000000000001",
+    work_context_revision_number: contextVersion,
+    work_context_content_hash: "a".repeat(64),
+    context_version: contextVersion,
+    control_plane_fact_snapshot: {},
+    knowledge_refs: [],
+    artifact_refs: [],
+    evidence_refs: [],
+    budget: {
+      profile_id: "a2000000-0000-0000-0000-000000000001",
+      profile_version: 1,
+      max_sections: 4,
+      max_chars: 1000,
+      max_input_tokens: 300,
+      actual_sections: 0,
+      actual_chars: 0,
+      actual_input_tokens: 0,
+    },
+    expires_at: "2026-08-27T08:00:00Z",
+    idempotency_key: packageId,
+    package_hash: `${packageId.slice(0, 1)}${"b".repeat(63)}`,
+    status: "active",
+    created_at: "2026-08-23T08:00:00Z",
+    materialized_at: null,
+    revoked_at: null,
+    revocation_reason: null,
+    revocation_scope: null,
+    assembly: {
+      request_id: "a3000000-0000-0000-0000-000000000001",
+      status: "ready",
+      attempt: 1,
+      next_attempt_at: null,
+      error_code: null,
+      request_fingerprint: packageId,
+      version: 1,
+      created_at: "2026-08-23T08:00:00Z",
+      updated_at: "2026-08-23T08:00:00Z",
+    },
+    acknowledgements: [{
+      package_id: packageId,
+      consumer_type: "worker",
+      consumer_id: executionId,
+      context_version: contextVersion,
+      package_hash: `${packageId.slice(0, 1)}${"b".repeat(63)}`,
+      adapter_module_id: "a4000000-0000-0000-0000-000000000001",
+      adapter_config_version: 1,
+      acknowledged_at: "2026-08-23T08:05:00Z",
+    }],
+    materialization_audits: [],
+  };
+}
 
 const firstActivityPage = {
   last_change_cursor: 42,
@@ -360,6 +422,8 @@ describe("WorkerItemPage", () => {
         next_cursor: null,
       })),
       http.get(`/api/v1/executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json({ status: "running" })),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/executions/${EXECUTION_TWO_ID}/context-package`, () => HttpResponse.json(makeExecutionContextPackage(CONTEXT_PACKAGE_ONE_ID, EXECUTION_TWO_ID, 4))),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/executions/${EXECUTION_ONE_ID}/context-package`, () => HttpResponse.json(makeExecutionContextPackage(CONTEXT_PACKAGE_TWO_ID, EXECUTION_ONE_ID, 3))),
     );
   });
 
@@ -398,6 +462,21 @@ describe("WorkerItemPage", () => {
     expect(within(sidebar).getByText("1,200")).toBeVisible();
     expect(within(sidebar).getByText("test-report")).toBeVisible();
     expect(within(sidebar).getByText("重复通知测试通过")).toBeVisible();
+  });
+
+  it("shows package and acknowledgement state for current and historical executions", async () => {
+    renderPage();
+
+    const context = await screen.findByRole("region", { name: "WorkerItem 上下文" });
+    expect(within(context).getByText("执行尝试 #2 · 当前")).toBeVisible();
+    expect(await within(context).findAllByText("Package active · 9bbbbbbb")).toHaveLength(2);
+    expect(within(context).getByText("context V4 · 已确认")).toBeVisible();
+    expect(within(context).getByText("执行尝试 #1 · 历史")).toBeVisible();
+    expect(within(context).getAllByRole("link", { name: /查看本次运行上下文/ })).toHaveLength(2);
+    expect(within(context).getByRole("link", { name: "查看本次运行上下文：执行尝试 #2" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/context-packages/${CONTEXT_PACKAGE_ONE_ID}`,
+    );
   });
 
   it("opens Agent Trace from an activity and returns focus to the WorkerItem page", async () => {

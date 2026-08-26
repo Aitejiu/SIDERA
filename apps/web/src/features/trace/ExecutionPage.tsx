@@ -1,10 +1,11 @@
-import { ArrowLeft, Code2, RefreshCcw, SearchCode, X } from "lucide-react";
+import { ArrowLeft, Code2, PackageOpen, RefreshCcw, SearchCode, X } from "lucide-react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
 
 import { StatusMark } from "@/shared/ui/StatusMark";
 
+import { contextPackageByExecutionQueryKey, getContextPackageByExecution } from "../context/api";
 import {
   executionQueryKey,
   executionSessionQueryKey,
@@ -52,6 +53,12 @@ export function ExecutionPage() {
     queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
     enabled: Boolean(workspaceId && executionId),
   });
+  const contextPackageQuery = useQuery({
+    queryKey: contextPackageByExecutionQueryKey(workspaceId, executionId),
+    queryFn: ({ signal }) => getContextPackageByExecution(workspaceId, executionId, signal),
+    enabled: Boolean(workspaceId && executionId),
+    retry: false,
+  });
   const trace = useMemo(() => {
     const pages = traceQuery.data?.pages ?? [];
     const [firstPage] = pages;
@@ -88,6 +95,14 @@ export function ExecutionPage() {
 
       <div className="execution-page__actions">
         <span className="execution-page__scope"><Code2 size={14} aria-hidden="true" />旧 Execution 仅保留执行步骤与诊断信息；介入请进入 WorkerItem 工作区。</span>
+        {contextPackageQuery.data ? (
+          <Link
+            className="quiet-button"
+            to={`/workspaces/${encodeURIComponent(workspaceId)}/context-packages/${encodeURIComponent(contextPackageQuery.data.package_id)}`}
+          >
+            <PackageOpen size={14} aria-hidden="true" />查看本次运行上下文
+          </Link>
+        ) : null}
         <button className="quiet-button" type="button" onClick={() => setTraceOpen(true)} disabled={trace === undefined}><SearchCode size={14} aria-hidden="true" />查看 Agent Trace</button>
       </div>
 

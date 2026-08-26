@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -12,6 +12,9 @@ import { TaskDetailPage } from "./TaskDetailPage";
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 const DESIGN_TASK_ID = "30000000-0000-0000-0000-000000000002";
+const KNOWLEDGE_PAGE_ID = "90000000-0000-0000-0000-000000000001";
+const KNOWLEDGE_REVISION_ID = "91000000-0000-0000-0000-000000000001";
+const WORK_CONTEXT_REVISION_ID = "92000000-0000-0000-0000-000000000001";
 
 const attentionItem = {
   key: "scheduling_block:30000000-0000-0000-0000-000000000001:callback-idempotency:80000000-0000-0000-0000-000000000001",
@@ -137,6 +140,146 @@ const activity = {
   next_cursor: "opaque-1",
 };
 
+const workContext = {
+  id: "93000000-0000-0000-0000-000000000001",
+  workspace_id: WORKSPACE_ID,
+  planning_request_id: "94000000-0000-0000-0000-000000000001",
+  root_task_id: ROOT_TASK_ID,
+  status: "active",
+  current_revision_id: WORK_CONTEXT_REVISION_ID,
+  current_revision_number: 4,
+  version: 4,
+  created_at: "2026-08-22T07:00:00Z",
+  updated_at: "2026-08-22T08:01:00Z",
+  current_revision: {
+    id: WORK_CONTEXT_REVISION_ID,
+    work_context_id: "93000000-0000-0000-0000-000000000001",
+    workspace_id: WORKSPACE_ID,
+    revision_number: 4,
+    brief_planning_request_id: "94000000-0000-0000-0000-000000000001",
+    brief_revision: 2,
+    proposal_revision_id: null,
+    plan_snapshot_id: null,
+    reason: "同步任务上下文",
+    content_hash: "a".repeat(64),
+    created_by: "main-agent",
+    created_at: "2026-08-22T08:01:00Z",
+    snapshot: {
+      schema_version: 1,
+      objective: "支付重构",
+      constraints: [],
+      acceptance_criteria: [],
+      requested_outputs: [],
+      clarification_decisions: [],
+      accepted_decisions: [],
+      unresolved_questions: [],
+      knowledge_refs: [{
+        page_id: KNOWLEDGE_PAGE_ID,
+        revision_id: KNOWLEDGE_REVISION_ID,
+        revision_hash: "b".repeat(64),
+        section_key: "retry-policy",
+        section_hash: "c".repeat(64),
+        source_ids: [],
+        ordinal: 0,
+      }],
+      artifact_refs: [],
+      evidence_refs: [],
+      checkpoint_refs: [],
+      missing_fact_codes: [],
+    },
+  },
+  timeline: [],
+  next_cursor: null,
+};
+
+const exactKnowledgeRevision = {
+  revision_id: KNOWLEDGE_REVISION_ID,
+  page_id: KNOWLEDGE_PAGE_ID,
+  workspace_id: WORKSPACE_ID,
+  revision_number: 2,
+  title: "支付回调规则",
+  summary: "固定的回调重试规则。",
+  tags: [],
+  content_hash: "d".repeat(64),
+  change_reason: "导入",
+  created_by: "aitejiu",
+  created_at: "2026-08-22T07:00:00Z",
+  accepted_candidate_id: null,
+  sections: [],
+  relations: [],
+  source_refs: [],
+  sources: [],
+};
+
+const knowledgeCandidates = {
+  items: [
+    {
+      candidate_id: "95000000-0000-0000-0000-000000000001",
+      operation: "revise_page",
+      target_page_id: KNOWLEDGE_PAGE_ID,
+      expected_revision_id: KNOWLEDGE_REVISION_ID,
+      expected_revision_hash: "d".repeat(64),
+      proposed_title: "支付回调规则更新",
+      proposed_slug: "payment-callback",
+      candidate_hash: "e".repeat(64),
+      status: "pending",
+      producer_type: "worker",
+      producer_id: "worker-1",
+      task_id: ROOT_TASK_ID,
+      subtask_id: DESIGN_TASK_ID,
+      worker_item_id: null,
+      execution_id: null,
+      supersedes_candidate_id: null,
+      version: 1,
+      created_at: "2026-08-22T08:02:00Z",
+      updated_at: "2026-08-22T08:02:00Z",
+    },
+    {
+      candidate_id: "95000000-0000-0000-0000-000000000002",
+      operation: "create_page",
+      target_page_id: null,
+      expected_revision_id: null,
+      expected_revision_hash: null,
+      proposed_title: "重试故障记录",
+      proposed_slug: "retry-incident",
+      candidate_hash: "f".repeat(64),
+      status: "changes_requested",
+      producer_type: "worker",
+      producer_id: "worker-2",
+      task_id: ROOT_TASK_ID,
+      subtask_id: null,
+      worker_item_id: null,
+      execution_id: null,
+      supersedes_candidate_id: null,
+      version: 2,
+      created_at: "2026-08-22T08:03:00Z",
+      updated_at: "2026-08-22T08:03:00Z",
+    },
+    {
+      candidate_id: "95000000-0000-0000-0000-000000000003",
+      operation: "revise_page",
+      target_page_id: KNOWLEDGE_PAGE_ID,
+      expected_revision_id: KNOWLEDGE_REVISION_ID,
+      expected_revision_hash: "d".repeat(64),
+      proposed_title: "过期规则",
+      proposed_slug: "expired-rule",
+      candidate_hash: "1".repeat(64),
+      status: "stale",
+      producer_type: "worker",
+      producer_id: "worker-3",
+      task_id: ROOT_TASK_ID,
+      subtask_id: null,
+      worker_item_id: null,
+      execution_id: null,
+      supersedes_candidate_id: null,
+      version: 1,
+      created_at: "2026-08-22T08:04:00Z",
+      updated_at: "2026-08-22T08:04:00Z",
+    },
+  ],
+  next_cursor: null,
+};
+
 function LocationProbe() {
   const location = useLocation();
   return (
@@ -208,6 +351,51 @@ describe("TaskDetailPage", () => {
     expect(screen.getByTestId("route-location")).toHaveTextContent(
       `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/callback-idempotency`,
     );
+  });
+
+  it("shows exact knowledge refs, delivery retry state, and review counts without loading body", async () => {
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/work-context`, () => HttpResponse.json(workContext)),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/knowledge-submissions`, () => HttpResponse.json({
+        items: [{
+          submission_id: "96000000-0000-0000-0000-000000000001",
+          workspace_id: WORKSPACE_ID,
+          producer_type: "worker",
+          producer_id: "worker-1",
+          planning_run_id: null,
+          execution_id: null,
+          worker_item_id: null,
+          task_id: ROOT_TASK_ID,
+          subtask_task_id: null,
+          proposal_hash: "2".repeat(64),
+          status: "retry_wait",
+          attempt: 2,
+          knowledge_command_id: null,
+          terminal_candidate_id: null,
+          candidate_deep_link: null,
+          error_code: "knowledge_unavailable",
+          created_at: "2026-08-22T08:02:00Z",
+          updated_at: "2026-08-22T08:03:00Z",
+        }],
+        next_cursor: null,
+      })),
+      http.get(`/knowledge-api/api/v1/workspaces/${WORKSPACE_ID}/knowledge/candidates`, () => HttpResponse.json(knowledgeCandidates)),
+      http.get(`/knowledge-api/api/v1/workspaces/${WORKSPACE_ID}/knowledge/pages/${KNOWLEDGE_PAGE_ID}/revisions/${KNOWLEDGE_REVISION_ID}`, () => HttpResponse.json(exactKnowledgeRevision)),
+    );
+    renderPage();
+
+    const summary = await screen.findByRole("region", { name: "知识上下文" });
+    expect(await within(summary).findByText("支付回调规则")).toBeVisible();
+    expect(within(summary).getByText("1 个固定引用")).toBeVisible();
+    expect(within(summary).getByText("待审核 1")).toBeVisible();
+    expect(within(summary).getByText("需修改 1")).toBeVisible();
+    expect(within(summary).getByText("已过期 1")).toBeVisible();
+    expect(within(summary).getByText("投递等待重试 · 第 2 次尝试")).toBeVisible();
+    expect(within(summary).getByRole("link", { name: "查看全部知识候选" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/knowledge/inbox?source_task_id=${ROOT_TASK_ID}`,
+    );
+    expect(within(summary).queryByText(/固定的回调重试规则/)).not.toBeInTheDocument();
   });
 
   it("offers a Main Agent draft scoped to the root task", async () => {

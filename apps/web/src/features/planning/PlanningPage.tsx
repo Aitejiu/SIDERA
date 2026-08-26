@@ -101,6 +101,9 @@ export function PlanningPage() {
 
   const request = requestData;
   const activeRun = request.active_run ?? runsQuery.data?.items.at(-1) ?? null;
+  const previousRun = activeRun === null
+    ? null
+    : runsQuery.data?.items.filter((run) => run.id !== activeRun.id).at(-1) ?? null;
   const clarifications = request.pending_clarifications.length > 0
     ? request.pending_clarifications
     : clarificationsQuery.data?.items.filter((item) => item.answer === null) ?? [];
@@ -266,6 +269,8 @@ export function PlanningPage() {
         <div className="planning-page__main">
           <PlanningRunStatus
             run={activeRun}
+            workspaceId={workspaceId}
+            previousRun={previousRun}
             onCancel={canCancel && activeRun !== null ? () => setConfirmation("cancel") : undefined}
           />
 
