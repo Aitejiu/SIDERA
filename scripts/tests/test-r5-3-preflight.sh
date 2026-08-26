@@ -91,6 +91,7 @@ write_env() {
     "SIDERA_WORKSPACE_ID=$workspace_id" \
     "SIDERA_CONTROL_PLANE_URL=$control_url" \
     'SIDERA_KNOWLEDGE_BASE_URL=http://127.0.0.1:8020' \
+    'SIDERA_KNOWLEDGE_LOCAL_OWNER_TOKEN=fake-knowledge-local-owner-token' \
     'SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN=fake-knowledge-control-plane-token' \
     'SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN=fake-knowledge-main-agent-token' \
     'SIDERA_MAIN_AGENT_GATEWAY_URL=http://127.0.0.1:8010' \
@@ -125,7 +126,7 @@ assert_failure() {
     fail "$label should fail"
   fi
   case "$output" in
-    *fake-db-password*|*fake-knowledge-control-plane-token*|*fake-knowledge-main-agent-token*|*fake-akashic-workspace-token*)
+    *fake-db-password*|*fake-knowledge-local-owner-token*|*fake-knowledge-control-plane-token*|*fake-knowledge-main-agent-token*|*fake-akashic-workspace-token*)
       fail "$label leaked a secret"
       ;;
   esac
@@ -136,7 +137,7 @@ write_env
 
 if output=$(run_preflight 2>&1); then
   case "$output" in
-    *fake-db-password*|*fake-knowledge-control-plane-token*|*fake-knowledge-main-agent-token*|*fake-akashic-workspace-token*)
+    *fake-db-password*|*fake-knowledge-local-owner-token*|*fake-knowledge-control-plane-token*|*fake-knowledge-main-agent-token*|*fake-akashic-workspace-token*)
       fail "valid preflight leaked a secret"
       ;;
   esac
