@@ -141,17 +141,27 @@ class SideraKnowledgeTools:
         page_id: str,
         revision_id: str | None = None,
     ) -> str:
-        """Read one current or exact project knowledge page revision."""
+        """Read one current or exact project knowledge page revision.
+
+        ``page_id`` may be a page UUID or the exact resource reference returned
+        by ``sidera_search_knowledge``.
+        """
 
         del event
-        parsed_page_id = _parse_uuid(page_id)
+        parsed_page_id, referenced_revision_id = _parse_page_reference(page_id)
         parsed_revision_id = _parse_optional_uuid(revision_id)
-        if parsed_page_id is None or (
-            revision_id is not None
-            and (not isinstance(revision_id, str) or revision_id.strip())
-            and parsed_revision_id is None
+        if parsed_revision_id is None and revision_id not in (None, ""):
+            return _encode(_input_error("invalid_resource_id", "knowledge page"))
+        if (
+            parsed_page_id is None
+            or (
+                referenced_revision_id is not None
+                and parsed_revision_id is not None
+                and referenced_revision_id != parsed_revision_id
+            )
         ):
             return _encode(_input_error("invalid_resource_id", "knowledge page"))
+        parsed_revision_id = parsed_revision_id or referenced_revision_id
 
         try:
             result = await self._client.get_page(
@@ -486,6 +496,29 @@ def _parse_uuid(value: object) -> UUID | None:
         return UUID(value.strip())
     except ValueError:
         return None
+
+
+def _parse_page_reference(value: object) -> tuple[UUID | None, UUID | None]:
+    """Parse a page UUID or a search result's exact page resource reference."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None, None
+    normalized = value.strip()
+    if not normalized.startswith("knowledge:page:"):
+        return _parse_uuid(normalized), None
+
+    parts = normalized.split(":")
+    if len(parts) not in {3, 5, 7} or parts[:2] != ["knowledge", "page"]:
+        return None, None
+    if len(parts) >= 5 and parts[3] != "revision":
+        return None, None
+    if len(parts) == 7 and (parts[5] != "section" or not parts[6].strip()):
+        return None, None
+    page_uuid = _parse_uuid(parts[2])
+    revision_uuid = _parse_uuid(parts[4]) if len(parts) >= 5 else None
+    if page_uuid is None or (len(parts) >= 5 and revision_uuid is None):
+        return None, None
+    return page_uuid, revision_uuid
 
 
 def _parse_optional_uuid(value: object) -> UUID | None:

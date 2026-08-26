@@ -317,7 +317,8 @@ def test_get_page_uses_exact_revision_and_marks_body_as_project_reference() -> N
         with tool_execution_context_scope(web_context()):
             result = decode(
                 await bridge.sidera_get_knowledge_page(
-                    None, str(PAGE_ID), str(REVISION_ID)
+                    None,
+                    f"knowledge:page:{PAGE_ID}:revision:{REVISION_ID}:section:overview",
                 )
             )
 
@@ -331,6 +332,41 @@ def test_get_page_uses_exact_revision_and_marks_body_as_project_reference() -> N
             "# Project reference"
         )
         assert "metadata" not in json.dumps(result)
+
+    asyncio.run(scenario())
+
+
+def test_get_page_rejects_conflicting_exact_revision_reference() -> None:
+    async def scenario() -> None:
+        bridge, client, _ = tools()
+        result = decode(
+            await bridge.sidera_get_knowledge_page(
+                None,
+                f"knowledge:page:{PAGE_ID}:revision:{REVISION_ID}:section:overview",
+                str(UUID("00000000-0000-0000-0000-000000000099")),
+            )
+        )
+
+        assert result["outcome"] == "failed"
+        assert result["error_code"] == "invalid_resource_id"
+        assert client.page_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_get_page_rejects_malformed_exact_revision_reference() -> None:
+    async def scenario() -> None:
+        bridge, client, _ = tools()
+        result = decode(
+            await bridge.sidera_get_knowledge_page(
+                None,
+                f"knowledge:page:{PAGE_ID}:revision:not-a-uuid:section:overview",
+            )
+        )
+
+        assert result["outcome"] == "failed"
+        assert result["error_code"] == "invalid_resource_id"
+        assert client.page_calls == []
 
     asyncio.run(scenario())
 
