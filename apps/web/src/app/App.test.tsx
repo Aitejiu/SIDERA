@@ -85,8 +85,8 @@ describe("app shell", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByRole("heading", { name: "知识页" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "关闭知识页" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "关闭知识页" })).toBeInTheDocument();
+    expect(await screen.findByText("无法读取知识页")).toBeInTheDocument();
 
     await act(async () => {
       await router.navigate(

@@ -8,12 +8,13 @@ import {
 import {
   App,
   ContextPackageRoutePlaceholder,
-  KnowledgeRoutePlaceholder,
   TaskRoutePlaceholder,
 } from "./App";
 import { KnowledgeInboxPage } from "@/features/knowledge/KnowledgeInboxPage";
 import { KnowledgeImportPage } from "@/features/knowledge/KnowledgeImportPage";
 import { KnowledgeLibraryPage } from "@/features/knowledge/KnowledgeLibraryPage";
+import { KnowledgeArticlePage } from "@/features/knowledge/KnowledgeArticlePage";
+import { KnowledgeCandidatePage } from "@/features/knowledge/KnowledgeCandidatePage";
 import { SubtaskPage } from "@/features/subtasks/SubtaskPage";
 import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
 import { TaskListPage } from "@/features/tasks/TaskListPage";
@@ -58,11 +59,11 @@ export const routes: RouteObject[] = [
       },
       {
         path: "/workspaces/:workspaceId/knowledge/pages/:pageId",
-        element: <KnowledgeRoutePlaceholder />,
+        element: <KnowledgeArticlePage />,
       },
       {
         path: "/workspaces/:workspaceId/knowledge/candidates/:candidateId",
-        element: <KnowledgeRoutePlaceholder />,
+        element: <KnowledgeCandidatePage />,
       },
       {
         path: "/workspaces/:workspaceId/context-packages/:packageId",

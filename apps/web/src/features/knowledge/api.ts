@@ -12,8 +12,12 @@ import type {
   KnowledgeRevisionDiff,
   KnowledgeSearchResponse,
   KnowledgeSourceList,
+  ReviewCandidatePayload,
+  ReviewKnowledgeCandidateCommand,
   SubmitCandidatePayload,
   SubmitKnowledgeCandidateCommand,
+  WithdrawCandidatePayload,
+  WithdrawKnowledgeCandidateCommand,
 } from "./types";
 
 const KNOWLEDGE_API_BASE = "/knowledge-api";
@@ -235,23 +239,60 @@ export function buildSubmitKnowledgeCandidateCommand({
   payload: SubmitCandidatePayload;
   actorId?: string;
 }): SubmitKnowledgeCandidateCommand {
-  const identity = createCommandIdentity();
-  return {
-    command_id: identity.commandId,
-    workspace_id: workspaceId,
-    command_type: "SubmitKnowledgeCandidate",
-    target_type: "knowledge_candidate",
-    actor: { type: "local_owner", id: actorId },
-    target_id: payload.candidate_id,
-    expected_version: null,
-    idempotency_key: identity.idempotencyKey,
-    correlation_id: crypto.randomUUID(),
+  return buildKnowledgeCommand({
+    workspaceId,
+    commandType: "SubmitKnowledgeCandidate",
+    targetId: payload.candidate_id,
+    actorId,
     payload,
-  };
+  });
 }
 
 export function submitKnowledgeCandidate(
   command: SubmitKnowledgeCandidateCommand,
+  signal?: AbortSignal,
+): Promise<KnowledgeCommandResponse> {
+  return submitKnowledgeCommand(command, signal);
+}
+
+export function buildReviewKnowledgeCandidateCommand({
+  workspaceId,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  payload: ReviewCandidatePayload;
+  actorId?: string;
+}): ReviewKnowledgeCandidateCommand {
+  return buildKnowledgeCommand({
+    workspaceId,
+    commandType: "ReviewKnowledgeCandidate",
+    targetId: payload.candidate_id,
+    actorId,
+    payload,
+  });
+}
+
+export function buildWithdrawKnowledgeCandidateCommand({
+  workspaceId,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  payload: WithdrawCandidatePayload;
+  actorId?: string;
+}): WithdrawKnowledgeCandidateCommand {
+  return buildKnowledgeCommand({
+    workspaceId,
+    commandType: "WithdrawKnowledgeCandidate",
+    targetId: payload.candidate_id,
+    actorId,
+    payload,
+  });
+}
+
+export function submitKnowledgeCommand(
+  command: SubmitKnowledgeCandidateCommand | ReviewKnowledgeCandidateCommand | WithdrawKnowledgeCandidateCommand,
   signal?: AbortSignal,
 ): Promise<KnowledgeCommandResponse> {
   const init: RequestInit = {
@@ -284,6 +325,46 @@ async function knowledgeGet<T>(
 
 function knowledgeRequest<T>(path: string, init: RequestInit): Promise<T> {
   return apiRequestJson<T>(`${KNOWLEDGE_API_BASE}${path}`, init);
+}
+
+function buildKnowledgeCommand<T extends "SubmitKnowledgeCandidate" | "ReviewKnowledgeCandidate" | "WithdrawKnowledgeCandidate">({
+  workspaceId,
+  commandType,
+  targetId,
+  actorId,
+  payload,
+}: {
+  workspaceId: string;
+  commandType: T;
+  targetId: string;
+  actorId: string;
+  payload: T extends "SubmitKnowledgeCandidate"
+    ? SubmitCandidatePayload
+    : T extends "ReviewKnowledgeCandidate"
+      ? ReviewCandidatePayload
+      : WithdrawCandidatePayload;
+}): T extends "SubmitKnowledgeCandidate"
+  ? SubmitKnowledgeCandidateCommand
+  : T extends "ReviewKnowledgeCandidate"
+    ? ReviewKnowledgeCandidateCommand
+    : WithdrawKnowledgeCandidateCommand {
+  const identity = createCommandIdentity();
+  return {
+    command_id: identity.commandId,
+    workspace_id: workspaceId,
+    command_type: commandType,
+    target_type: "knowledge_candidate",
+    actor: { type: "local_owner", id: actorId },
+    target_id: targetId,
+    expected_version: null,
+    idempotency_key: identity.idempotencyKey,
+    correlation_id: crypto.randomUUID(),
+    payload,
+  } as T extends "SubmitKnowledgeCandidate"
+    ? SubmitKnowledgeCandidateCommand
+    : T extends "ReviewKnowledgeCandidate"
+      ? ReviewKnowledgeCandidateCommand
+      : WithdrawKnowledgeCandidateCommand;
 }
 
 function workspacePath(workspaceId: string): string {

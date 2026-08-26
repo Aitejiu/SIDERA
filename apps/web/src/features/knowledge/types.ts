@@ -183,3 +183,17 @@ export type KnowledgeCommandStatus = {
 
 export type SubmitCandidatePayload = components["schemas"]["SubmitCandidatePayload"];
 export type SubmitKnowledgeCandidateCommand = components["schemas"]["SubmitCommandRequest"];
+export type ReviewCandidatePayload = components["schemas"]["ReviewCandidatePayload"];
+export type ReviewKnowledgeCandidateCommand = components["schemas"]["ReviewCommandRequest"];
+export type WithdrawCandidatePayload = components["schemas"]["WithdrawCandidatePayload"];
+export type WithdrawKnowledgeCandidateCommand = components["schemas"]["WithdrawCommandRequest"];
+
+export type KnowledgeProposedSnapshot = {
+  title: string;
+  slug: string;
+  summary: string;
+  tags: string[];
+  sections: KnowledgeSection[];
+  relations: KnowledgeRelation[];
+  source_refs: string[];
+};
