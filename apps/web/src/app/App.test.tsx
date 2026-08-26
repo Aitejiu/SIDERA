@@ -50,6 +50,51 @@ describe("app shell", () => {
     expect(screen.getByRole("link", { name: "执行节点" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "任务总览" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /任务 30000000/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "知识" })).toBeInTheDocument();
+  });
+
+  it("opens knowledge library routes without registering a closeable content tab", async () => {
+    const workspaceId = "20000000-0000-0000-0000-000000000001";
+    const router = createTestRouter([`/workspaces/${workspaceId}/knowledge`]);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "知识" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "任务总览" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /关闭知识/ })).not.toBeInTheDocument();
+  });
+
+  it("registers knowledge page and context package deep links as closeable tabs", async () => {
+    const workspaceId = "20000000-0000-0000-0000-000000000001";
+    const pageId = "30000000-0000-0000-0000-000000000001";
+    const router = createTestRouter([
+      `/workspaces/${workspaceId}/knowledge/pages/${pageId}`,
+    ]);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "知识页" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭知识页" })).toBeInTheDocument();
+
+    await act(async () => {
+      await router.navigate(
+        `/workspaces/${workspaceId}/context-packages/40000000-0000-0000-0000-000000000001`,
+      );
+    });
+    expect(await screen.findByRole("heading", { name: "上下文包" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭上下文包" })).toBeInTheDocument();
   });
 
   it("returns to the previous semantic tab when a direct child tab is closed", async () => {

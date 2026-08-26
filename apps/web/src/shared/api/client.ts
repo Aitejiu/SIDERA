@@ -64,6 +64,21 @@ export async function apiGetAt<Path extends keyof paths>(
   return parseResponse<JsonBody<GetOperation<Path>>>(response);
 }
 
+export async function apiRequestJson<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...init.headers,
+    },
+  });
+  return parseResponse<T>(response);
+}
+
 export async function apiGetBlobAt<Path extends keyof paths>(
   path: string,
   contractPath: Path,

@@ -3,9 +3,13 @@ import { fileURLToPath, URL } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-import { resolveE2eRuntime } from "./src/e2eConfig.js";
+import {
+  knowledgeProxyTarget,
+  resolveE2eRuntime,
+  rewriteKnowledgeProxyPath,
+} from "./src/e2eConfig.js";
 
-const { controlPlanePort } = resolveE2eRuntime(process.env);
+const { controlPlanePort, knowledgeServicePort } = resolveE2eRuntime(process.env);
 
 export default defineConfig({
   plugins: [react()],
@@ -18,6 +22,10 @@ export default defineConfig({
     host: "127.0.0.1",
     proxy: {
       "/api": `http://127.0.0.1:${controlPlanePort}`,
+      "/knowledge-api": {
+        target: knowledgeProxyTarget(knowledgeServicePort),
+        rewrite: rewriteKnowledgeProxyPath,
+      },
       "/main-agent": "http://127.0.0.1:8010",
     },
   },

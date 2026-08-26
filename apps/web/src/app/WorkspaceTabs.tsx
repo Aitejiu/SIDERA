@@ -228,6 +228,48 @@ function semanticTabForLocation(
     };
   }
 
+  const knowledgePageMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/knowledge/pages/([^/]+)$`),
+  );
+  if (knowledgePageMatch?.[1] !== undefined) {
+    const pageId = decodeURIComponent(knowledgePageMatch[1]);
+    return {
+      id: `knowledge-page:${pageId}`,
+      kind: "knowledge-page",
+      title: "知识页",
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
+  const knowledgeCandidateMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/knowledge/candidates/([^/]+)$`),
+  );
+  if (knowledgeCandidateMatch?.[1] !== undefined) {
+    const candidateId = decodeURIComponent(knowledgeCandidateMatch[1]);
+    return {
+      id: `knowledge-candidate:${candidateId}`,
+      kind: "knowledge-candidate",
+      title: "知识候选",
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
+  const contextPackageMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/context-packages/([^/]+)$`),
+  );
+  if (contextPackageMatch?.[1] !== undefined) {
+    const packageId = decodeURIComponent(contextPackageMatch[1]);
+    return {
+      id: `context-package:${packageId}`,
+      kind: "context-package",
+      title: "上下文包",
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
   const planningMatch = location.pathname.match(
     new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/planning/([^/]+)$`),
   );
@@ -314,6 +356,12 @@ function tabDetail(tab: WorkspaceTab): string {
       return "WorkerItem";
     case "chat":
       return "对话";
+    case "knowledge-page":
+      return "知识页";
+    case "knowledge-candidate":
+      return "候选";
+    case "context-package":
+      return "上下文包";
   }
 }
 

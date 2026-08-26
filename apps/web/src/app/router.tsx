@@ -7,6 +7,8 @@ import {
 
 import {
   App,
+  ContextPackageRoutePlaceholder,
+  KnowledgeRoutePlaceholder,
   TaskRoutePlaceholder,
 } from "./App";
 import { SubtaskPage } from "@/features/subtasks/SubtaskPage";
@@ -38,6 +40,30 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/tasks",
         element: <TaskListPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/knowledge",
+        element: <KnowledgeRoutePlaceholder />,
+      },
+      {
+        path: "/workspaces/:workspaceId/knowledge/inbox",
+        element: <KnowledgeRoutePlaceholder />,
+      },
+      {
+        path: "/workspaces/:workspaceId/knowledge/import",
+        element: <KnowledgeRoutePlaceholder />,
+      },
+      {
+        path: "/workspaces/:workspaceId/knowledge/pages/:pageId",
+        element: <KnowledgeRoutePlaceholder />,
+      },
+      {
+        path: "/workspaces/:workspaceId/knowledge/candidates/:candidateId",
+        element: <KnowledgeRoutePlaceholder />,
+      },
+      {
+        path: "/workspaces/:workspaceId/context-packages/:packageId",
+        element: <ContextPackageRoutePlaceholder />,
       },
       {
         path: "/workspaces/:workspaceId/planning/new",

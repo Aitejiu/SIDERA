@@ -1,4 +1,4 @@
-export const WORKSPACE_TABS_SCHEMA_VERSION = 4;
+export const WORKSPACE_TABS_SCHEMA_VERSION = 5;
 
 export type WorkspaceTabId =
   | "task-index"
@@ -7,7 +7,10 @@ export type WorkspaceTabId =
   | `root-task:${string}`
   | `subtask:${string}:${string}`
   | `worker-item:${string}`
-  | `chat:${string}`;
+  | `chat:${string}`
+  | `knowledge-page:${string}`
+  | `knowledge-candidate:${string}`
+  | `context-package:${string}`;
 
 export type WorkspaceTab =
   | {
@@ -56,6 +59,27 @@ export type WorkspaceTab =
       id: `chat:${string}`;
       kind: "chat";
       title: "Main Agent";
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `knowledge-page:${string}`;
+      kind: "knowledge-page";
+      title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `knowledge-candidate:${string}`;
+      kind: "knowledge-candidate";
+      title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `context-package:${string}`;
+      kind: "context-package";
+      title: string;
       href: string;
       closeable: true;
     };
@@ -172,7 +196,7 @@ export function reduceTabs(
 }
 
 export function storageKey(workspaceId: string): string {
-  return `sidera.workspace-tabs.v4:${workspaceId}`;
+  return `sidera.workspace-tabs.v5:${workspaceId}`;
 }
 
 export function serializeTabs(state: WorkspaceTabsState): string {
@@ -272,6 +296,21 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
       && value.closeable === true
       && isWorkspaceHref(value.href, workspaceId);
   }
+  if (value.id.startsWith("knowledge-page:")) {
+    return value.kind === "knowledge-page"
+      && value.closeable === true
+      && isWorkspaceHref(value.href, workspaceId);
+  }
+  if (value.id.startsWith("knowledge-candidate:")) {
+    return value.kind === "knowledge-candidate"
+      && value.closeable === true
+      && isWorkspaceHref(value.href, workspaceId);
+  }
+  if (value.id.startsWith("context-package:")) {
+    return value.kind === "context-package"
+      && value.closeable === true
+      && isWorkspaceHref(value.href, workspaceId);
+  }
   return value.closeable === true
     && ((value.id.startsWith("planning:") && value.kind === "planning")
       || (value.id.startsWith("root-task:") && value.kind === "root-task")
@@ -300,6 +339,9 @@ function isTabId(value: unknown): value is WorkspaceTabId {
       || value.startsWith("subtask:")
       || value.startsWith("worker-item:")
       || value.startsWith("chat:")
+      || value.startsWith("knowledge-page:")
+      || value.startsWith("knowledge-candidate:")
+      || value.startsWith("context-package:")
     ));
 }
 

@@ -83,6 +83,36 @@ function chatTab(threadId: string, workspaceId = "ws-1"): WorkspaceTab {
   };
 }
 
+function knowledgePageTab(pageId: string): WorkspaceTab {
+  return {
+    id: `knowledge-page:${pageId}`,
+    kind: "knowledge-page",
+    title: "知识页",
+    href: `/workspaces/ws-1/knowledge/pages/${pageId}`,
+    closeable: true,
+  };
+}
+
+function knowledgeCandidateTab(candidateId: string): WorkspaceTab {
+  return {
+    id: `knowledge-candidate:${candidateId}`,
+    kind: "knowledge-candidate",
+    title: "候选",
+    href: `/workspaces/ws-1/knowledge/candidates/${candidateId}`,
+    closeable: true,
+  };
+}
+
+function contextPackageTab(packageId: string): WorkspaceTab {
+  return {
+    id: `context-package:${packageId}`,
+    kind: "context-package",
+    title: "上下文包",
+    href: `/workspaces/ws-1/context-packages/${packageId}`,
+    closeable: true,
+  };
+}
+
 function stateWithTaskSubtaskAndWorker() {
   let state = taskIndex();
   state = reduceTabs(state, openTab(rootTaskTab("task-1")));
@@ -195,6 +225,33 @@ describe("workspace tabs", () => {
     expect(state.activeTabId).toBe("chat:thread-1");
   });
 
+  it("keeps knowledge pages, candidates, and context packages independently addressable", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(knowledgePageTab("page-1")));
+    state = reduceTabs(state, openTab(knowledgePageTab("page-1")));
+    state = reduceTabs(state, openTab(knowledgeCandidateTab("candidate-1")));
+    state = reduceTabs(state, openTab(contextPackageTab("package-1")));
+
+    expect(state.tabs.map((tab) => tab.id)).toEqual([
+      "task-index",
+      "knowledge-page:page-1",
+      "knowledge-candidate:candidate-1",
+      "context-package:package-1",
+    ]);
+    expect(state.activeTabId).toBe("context-package:package-1");
+  });
+
+  it("returns to the previous semantic tab when a context package is closed", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(knowledgePageTab("page-1")));
+    state = reduceTabs(state, openTab(contextPackageTab("package-1")));
+
+    const next = reduceTabs(state, closeTab("context-package:package-1"));
+
+    expect(next.activeTabId).toBe("knowledge-page:page-1");
+    expect(next.navigationHref).toBe("/workspaces/ws-1/knowledge/pages/page-1");
+  });
+
   it("closes an active chat tab to its left neighbor", () => {
     let state = taskIndex();
     state = reduceTabs(state, openTab(chatTab("thread-1")));
@@ -274,6 +331,16 @@ describe("workspace tabs", () => {
         serializeTabs(
           reduceTabs(state, openTab(rootTaskTab("task-1", "/workspaces/ws-2/tasks/task-1"))),
         ),
+      ),
+    ).toEqual(state);
+    expect(
+      hydrateTabs(
+        "ws-1",
+        JSON.stringify({
+          schemaVersion: 4,
+          tabs: state.tabs,
+          activeTabId: state.activeTabId,
+        }),
       ),
     ).toEqual(state);
   });

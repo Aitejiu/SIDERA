@@ -1,4 +1,4 @@
-import { Boxes, Clock3, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
+import { BookOpen, Boxes, Clock3, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
@@ -51,6 +51,7 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
           </div>
           <nav className="navigation-list">
             <NavItem to={`/workspaces/${workspaceId}/tasks`} label="任务" icon={<ListTodo size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/knowledge`} label="知识" icon={<BookOpen size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/inbox`} label="信箱" icon={<Mail size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/chat`} label="聊天" icon={<MessageCircle size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/history`} label="历史" icon={<Clock3 size={17} />} />
@@ -138,6 +139,43 @@ export function SubtaskRoutePlaceholder() {
           <h1 id="subtask-placeholder-title">正在打开子任务</h1>
         </div>
         <span className="mono-label">WORKSPACE LOADING</span>
+      </div>
+      <div className="placeholder-line" aria-hidden="true" />
+    </section>
+  );
+}
+
+export function KnowledgeRoutePlaceholder() {
+  const location = useLocation();
+  const isPage = location.pathname.includes("/knowledge/pages/");
+  const isCandidate = location.pathname.includes("/knowledge/candidates/");
+  const title = isPage ? "知识页" : isCandidate ? "知识候选" : "知识";
+  const detail = isPage ? "PAGE DETAIL" : isCandidate ? "CANDIDATE REVIEW" : "LIBRARY";
+  return (
+    <section className="route-placeholder" aria-labelledby="knowledge-placeholder-title">
+      <div className="breadcrumb">工作区 / 知识</div>
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">KNOWLEDGE REFERENCE</span>
+          <h1 id="knowledge-placeholder-title">{title}</h1>
+        </div>
+        <span className="mono-label">{detail} · LOADING</span>
+      </div>
+      <div className="placeholder-line" aria-hidden="true" />
+    </section>
+  );
+}
+
+export function ContextPackageRoutePlaceholder() {
+  return (
+    <section className="route-placeholder" aria-labelledby="context-package-placeholder-title">
+      <div className="breadcrumb">工作区 / 上下文包</div>
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">CONTEXT PACKAGE</span>
+          <h1 id="context-package-placeholder-title">上下文包</h1>
+        </div>
+        <span className="mono-label">MANIFEST · LOADING</span>
       </div>
       <div className="placeholder-line" aria-hidden="true" />
     </section>
