@@ -8,6 +8,7 @@ import {
   getKnowledgeCommandStatus,
   getKnowledgePage,
   knowledgePagesQueryKey,
+  knowledgeSearchQueryKey,
   listKnowledgePages,
   searchKnowledge,
   submitKnowledgeCandidate,
@@ -79,6 +80,15 @@ describe("Knowledge API client", () => {
       "knowledge",
       workspaceId,
       "pages",
+    ]);
+    expect(knowledgeSearchQueryKey(workspaceId, "context", [], [], "archived")).toEqual([
+      "knowledge",
+      workspaceId,
+      "search",
+      "context",
+      [],
+      [],
+      "archived",
     ]);
   });
 

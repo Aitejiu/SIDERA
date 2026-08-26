@@ -11,6 +11,9 @@ import {
   KnowledgeRoutePlaceholder,
   TaskRoutePlaceholder,
 } from "./App";
+import { KnowledgeInboxPage } from "@/features/knowledge/KnowledgeInboxPage";
+import { KnowledgeImportPage } from "@/features/knowledge/KnowledgeImportPage";
+import { KnowledgeLibraryPage } from "@/features/knowledge/KnowledgeLibraryPage";
 import { SubtaskPage } from "@/features/subtasks/SubtaskPage";
 import { TaskDetailPage } from "@/features/tasks/TaskDetailPage";
 import { TaskListPage } from "@/features/tasks/TaskListPage";
@@ -43,15 +46,15 @@ export const routes: RouteObject[] = [
       },
       {
         path: "/workspaces/:workspaceId/knowledge",
-        element: <KnowledgeRoutePlaceholder />,
+        element: <KnowledgeLibraryPage />,
       },
       {
         path: "/workspaces/:workspaceId/knowledge/inbox",
-        element: <KnowledgeRoutePlaceholder />,
+        element: <KnowledgeInboxPage />,
       },
       {
         path: "/workspaces/:workspaceId/knowledge/import",
-        element: <KnowledgeRoutePlaceholder />,
+        element: <KnowledgeImportPage />,
       },
       {
         path: "/workspaces/:workspaceId/knowledge/pages/:pageId",

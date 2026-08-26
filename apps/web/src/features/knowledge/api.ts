@@ -44,8 +44,9 @@ export function knowledgeSearchQueryKey(
   query: string,
   tags: readonly string[] = [],
   sourceTypes: readonly string[] = [],
+  status = "all",
 ) {
-  return ["knowledge", workspaceId, "search", query, tags, sourceTypes] as const;
+  return ["knowledge", workspaceId, "search", query, tags, sourceTypes, status] as const;
 }
 
 export function knowledgePageQueryKey(workspaceId: string, pageId: string) {

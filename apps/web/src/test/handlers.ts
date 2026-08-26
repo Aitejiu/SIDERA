@@ -51,3 +51,30 @@ export function modulesHandler(
     return HttpResponse.json(body);
   });
 }
+
+export function knowledgePagesHandler(
+  workspaceId: string,
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get(
+    `/knowledge-api/api/v1/workspaces/${workspaceId}/knowledge/pages`,
+    () => HttpResponse.json(body),
+  );
+}
+
+export function knowledgeCandidatesHandler(
+  workspaceId: string,
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get(
+    `/knowledge-api/api/v1/workspaces/${workspaceId}/knowledge/candidates`,
+    () => HttpResponse.json(body),
+  );
+}
+
+export function knowledgeCommandHandler(
+  body: Parameters<typeof HttpResponse.json>[0],
+  status = 201,
+): HttpHandler {
+  return http.post("/knowledge-api/api/v1/commands", () => HttpResponse.json(body, { status }));
+}

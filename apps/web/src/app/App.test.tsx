@@ -65,7 +65,7 @@ describe("app shell", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByRole("heading", { name: "知识" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "知识库" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "任务总览" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /关闭知识/ })).not.toBeInTheDocument();
   });
