@@ -14,6 +14,9 @@ const WORKER_ITEM_ID = "worker-item-1";
 const WORKER_ID = "worker-1";
 const EXECUTION_ID = "execution-1";
 const PLANNING_REQUEST_ID = "planning-request-1";
+const CONTEXT_ID = "context-1";
+const PACKAGE_ID = "package-1";
+const CANDIDATE_ID = "candidate-1";
 
 function change(
   projection_type: string,
@@ -210,6 +213,96 @@ describe("WorkspaceStreamProvider projection matching", () => {
         ["workers", "other-workspace"],
         WORKSPACE_ID,
         change("workers", WORKER_ID),
+      ),
+    ).toBe(false);
+  });
+
+  it("refreshes context package and work context aliases within the workspace", () => {
+    const packageChange = change("context_package", PACKAGE_ID);
+    expect(
+      matchesProjectionQuery(
+        ["context-package", WORKSPACE_ID, PACKAGE_ID],
+        WORKSPACE_ID,
+        packageChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["context-package", WORKSPACE_ID, "other-package"],
+        WORKSPACE_ID,
+        packageChange,
+      ),
+    ).toBe(false);
+    expect(
+      matchesProjectionQuery(
+        ["context-package", WORKSPACE_ID, "execution", EXECUTION_ID],
+        WORKSPACE_ID,
+        packageChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["context-package", "other-workspace", "execution", EXECUTION_ID],
+        WORKSPACE_ID,
+        packageChange,
+      ),
+    ).toBe(false);
+
+    const contextChange = change("work_context", CONTEXT_ID);
+    expect(
+      matchesProjectionQuery(
+        ["work-context", WORKSPACE_ID, CONTEXT_ID],
+        WORKSPACE_ID,
+        contextChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["work-context", WORKSPACE_ID, "root-task", ROOT_TASK_ID],
+        WORKSPACE_ID,
+        contextChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["work-context", WORKSPACE_ID, "planning-request", PLANNING_REQUEST_ID],
+        WORKSPACE_ID,
+        contextChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["work-context", WORKSPACE_ID, "other-context"],
+        WORKSPACE_ID,
+        contextChange,
+      ),
+    ).toBe(false);
+  });
+
+  it("refreshes task knowledge submission queries without touching knowledge service queries", () => {
+    const submissionChange = change(
+      "knowledge_candidate_submission",
+      CANDIDATE_ID,
+    );
+    expect(
+      matchesProjectionQuery(
+        ["context-knowledge-submissions", WORKSPACE_ID, "task", ROOT_TASK_ID],
+        WORKSPACE_ID,
+        submissionChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["knowledge", WORKSPACE_ID, "candidates", { limit: "100" }],
+        WORKSPACE_ID,
+        submissionChange,
+      ),
+    ).toBe(false);
+    expect(
+      matchesProjectionQuery(
+        ["task-overview", WORKSPACE_ID, ROOT_TASK_ID],
+        WORKSPACE_ID,
+        submissionChange,
       ),
     ).toBe(false);
   });

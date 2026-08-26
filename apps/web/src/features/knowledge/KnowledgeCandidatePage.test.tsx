@@ -121,7 +121,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE_ID}/knowledge/candidates/${CANDIDATE_ID}`]}>
         <Routes>
@@ -131,6 +131,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...rendered, queryClient };
 }
 
 describe("KnowledgeCandidatePage", () => {
@@ -170,7 +171,8 @@ describe("KnowledgeCandidatePage", () => {
         return HttpResponse.json({ command_id: COMMAND_ID, status: "applied", result: { status: "changes_requested" } });
       }),
     );
-    renderPage();
+    const { queryClient } = renderPage();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
 
     await screen.findByRole("heading", { name: "Updated runtime guide" });
     await user.click(screen.getByRole("button", { name: "请求修改" }));
@@ -187,6 +189,12 @@ describe("KnowledgeCandidatePage", () => {
     expect(payload.observed_target_revision_id).toBe(TARGET_REVISION_ID);
     expect(payload.observed_target_revision_hash).toBe("a".repeat(64));
     expect(await screen.findByText("审核命令已提交")).toBeVisible();
+    const invalidatedKeys = invalidateQueries.mock.calls.flatMap(([filters]) => (
+      filters?.queryKey === undefined ? [] : [filters.queryKey]
+    ));
+    expect(invalidatedKeys).toContainEqual(["knowledge", WORKSPACE_ID, "candidate", CANDIDATE_ID]);
+    expect(invalidatedKeys).toContainEqual(["knowledge", WORKSPACE_ID, "candidates"]);
+    expect(invalidatedKeys).not.toContainEqual(["knowledge", WORKSPACE_ID, "pages"]);
   });
 
   it("confirms reject and opens the exact accepted revision after accept", async () => {

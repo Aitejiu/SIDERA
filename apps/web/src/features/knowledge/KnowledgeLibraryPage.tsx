@@ -55,6 +55,9 @@ export function KnowledgeLibraryPage() {
     queryFn: ({ signal }) => listKnowledgePages(workspaceId, { signal }),
     enabled: workspaceId.length > 0 && !searching,
     retry: false,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const searchQuery = useQuery({
     queryKey: knowledgeSearchQueryKey(workspaceId, searchText, searchTags, sourceTypes, status),
@@ -69,6 +72,9 @@ export function KnowledgeLibraryPage() {
     },
     enabled: workspaceId.length > 0 && searching,
     retry: false,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 
   const rows = useMemo(

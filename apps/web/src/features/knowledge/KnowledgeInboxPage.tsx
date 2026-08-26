@@ -24,6 +24,9 @@ export function KnowledgeInboxPage() {
     queryFn: ({ signal }) => listKnowledgeCandidates(workspaceId, { limit: 100, signal }),
     enabled: workspaceId.length > 0,
     retry: false,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const candidates = query.data?.items;
   const pendingCount = candidates?.filter((candidate) => candidate.status === "pending").length ?? 0;

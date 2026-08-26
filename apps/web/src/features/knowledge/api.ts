@@ -39,8 +39,16 @@ const KNOWLEDGE_SOURCES_PATH =
 const KNOWLEDGE_COMMAND_STATUS_PATH =
   "/api/v1/workspaces/{workspace_id}/commands/{command_id}" as keyof KnowledgePaths;
 
-export function knowledgePagesQueryKey(workspaceId: string) {
+export function knowledgePagesRootQueryKey(workspaceId: string) {
   return ["knowledge", workspaceId, "pages"] as const;
+}
+
+export function knowledgePagesQueryKey(workspaceId: string) {
+  return knowledgePagesRootQueryKey(workspaceId);
+}
+
+export function knowledgeSearchRootQueryKey(workspaceId: string) {
+  return ["knowledge", workspaceId, "search"] as const;
 }
 
 export function knowledgeSearchQueryKey(
@@ -70,6 +78,10 @@ export function knowledgeCandidatesQueryKey(
   filters: Record<string, string | undefined> = {},
 ) {
   return ["knowledge", workspaceId, "candidates", filters] as const;
+}
+
+export function knowledgeCandidatesRootQueryKey(workspaceId: string) {
+  return ["knowledge", workspaceId, "candidates"] as const;
 }
 
 export function knowledgeCandidateQueryKey(workspaceId: string, candidateId: string) {

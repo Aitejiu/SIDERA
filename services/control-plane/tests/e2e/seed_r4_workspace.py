@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from collections.abc import Sequence
@@ -10,8 +11,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, insert, select, text, update
 
+from sidera_control_plane.domain.context_packages import (
+    ContextAssemblyRequest,
+    ContextBudgetV1,
+    ContextConsumerType,
+    ContextPackageKnowledgeRef,
+    ContextPackageManifestV1,
+    ContextPurpose,
+    ContextSelectionReason,
+    ContextTrustLevel,
+)
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
     DependencyKind,
@@ -23,12 +34,27 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
     WorkItemKind,
 )
+from sidera_control_plane.domain.work_context import (
+    KnowledgeRevisionRef,
+    WorkContext,
+    WorkContextRevision,
+    WorkContextRevisionReason,
+    WorkContextSnapshotV1,
+)
+from sidera_control_plane.persistence.context_package_repository import (
+    ContextAssemblyRepository,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
     AssignmentLeaseModel,
     AttentionAcknowledgementModel,
     CommandModel,
+    ContextAssemblyRequestModel,
+    ContextPackageAcknowledgementModel,
+    ContextPackageKnowledgeRefModel,
+    ContextPackageMaterializationAuditModel,
+    ContextPackageModel,
     EventModel,
     EvidenceClaimModel,
     ExecutionBindingModel,
@@ -40,6 +66,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     ExecutionWorkspaceModel,
     GatewayOperationModel,
+    KnowledgeCandidateSubmissionModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
@@ -56,12 +83,17 @@ from sidera_control_plane.persistence.models import (
     ProposalMaterializationModel,
     SchedulingBlockModel,
     TaskModel,
+    WorkContextModel,
+    WorkContextRevisionModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
     WorkerRuntimeConfigurationModel,
     WorkspaceModel,
     WorkspaceProjectionCursorModel,
+)
+from sidera_control_plane.persistence.work_context_repository import (
+    WorkContextRepository,
 )
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
@@ -98,6 +130,22 @@ REVIEWER_WORKER_ITEM_ID = UUID("a1000000-0000-0000-0000-000000000003")
 MIGRATED_WORKER_ITEM_ID = UUID("a1000000-0000-0000-0000-000000000004")
 LEGACY_WORKER_ITEM_ID = UUID("a1000000-0000-0000-0000-000000000005")
 SCALE_WORKER_ITEM_ID = UUID("a1000000-0000-0000-0000-000000000101")
+CONTEXT_PLANNING_REQUEST_ID = UUID("b0000000-0000-0000-0000-000000000001")
+CONTEXT_ID = UUID("b0000000-0000-0000-0000-000000000002")
+CONTEXT_REVISION_ID = UUID("b0000000-0000-0000-0000-000000000003")
+CONTEXT_EXECUTION_ASSEMBLY_ID = UUID("b0000000-0000-0000-0000-000000000004")
+CONTEXT_EXECUTION_PACKAGE_ID = UUID("b0000000-0000-0000-0000-000000000005")
+CONTEXT_PLANNING_ASSEMBLY_ID = UUID("b0000000-0000-0000-0000-000000000006")
+CONTEXT_PLANNING_PACKAGE_ID = UUID("b0000000-0000-0000-0000-000000000007")
+CONTEXT_PLANNING_RUN_ID = UUID("b0000000-0000-0000-0000-000000000008")
+CONTEXT_PLANNING_PROFILE_ID = UUID("b0000000-0000-0000-0000-000000000009")
+CONTEXT_SUBMISSION_ID = UUID("b0000000-0000-0000-0000-00000000000a")
+KNOWLEDGE_SOURCE_ID = UUID("c0000000-0000-0000-0000-000000000001")
+KNOWLEDGE_PAGE_ID = UUID("c0000000-0000-0000-0000-000000000002")
+KNOWLEDGE_REVISION_ONE_ID = UUID("c0000000-0000-0000-0000-000000000003")
+KNOWLEDGE_REVISION_TWO_ID = UUID("c0000000-0000-0000-0000-000000000004")
+KNOWLEDGE_PENDING_CANDIDATE_ID = UUID("c0000000-0000-0000-0000-000000000005")
+KNOWLEDGE_STALE_CANDIDATE_ID = UUID("c0000000-0000-0000-0000-000000000006")
 WORKSPACE_NAME = "SIDERA R4 E2E Workspace"
 
 
@@ -105,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenario",
-        choices=("task-first", "scale", "runtime-routing"),
+        choices=("task-first", "scale", "runtime-routing", "context-knowledge"),
         default="task-first",
     )
     parser.add_argument("--workspace-id", default=str(DEFAULT_WORKSPACE_ID))
@@ -129,6 +177,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _seed_scale(session, workspace_id)
             elif args.scenario == "runtime-routing":
                 _seed_runtime_routing(session, workspace_id)
+            elif args.scenario == "context-knowledge":
+                _seed_context_knowledge(session, workspace_id)
             else:
                 _seed_task_first(session, workspace_id)
             session.commit()
@@ -172,6 +222,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if args.scenario == "runtime-routing"
                     else None
                 ),
+                "context_package_id": (
+                    str(CONTEXT_EXECUTION_PACKAGE_ID)
+                    if args.scenario == "context-knowledge"
+                    else None
+                ),
+                "context_planning_run_id": (
+                    str(CONTEXT_PLANNING_RUN_ID)
+                    if args.scenario == "context-knowledge"
+                    else None
+                ),
                 "scenario": args.scenario,
             },
             sort_keys=True,
@@ -197,6 +257,15 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         )
     )
     session.execute(
+        delete(ContextPackageKnowledgeRefModel).where(
+            ContextPackageKnowledgeRefModel.package_id.in_(
+                select(ContextPackageModel.id).where(
+                    ContextPackageModel.workspace_id == workspace_id
+                )
+            )
+        )
+    )
+    session.execute(
         update(ExecutionModel)
         .where(ExecutionModel.workspace_id == workspace_id)
         .values(active_lease_id=None, source_execution_id=None, source_session_id=None)
@@ -206,6 +275,13 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         SchedulingBlockModel,
         ProjectionChangeModel,
         WorkspaceProjectionCursorModel,
+        ContextPackageMaterializationAuditModel,
+        ContextPackageAcknowledgementModel,
+        ContextPackageModel,
+        ContextAssemblyRequestModel,
+        KnowledgeCandidateSubmissionModel,
+        WorkContextRevisionModel,
+        WorkContextModel,
         ExecutionRequestDependencyModel,
         ExecutionRequestModel,
         ProposalMaterializationModel,
@@ -239,21 +315,37 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         CommandModel,
         TaskModel,
     )
-    for model in models:
-        if model is OutboxMessageModel:
-            session.execute(
-                delete(model).where(
-                    model.event_id.in_(
-                        select(EventModel.id).where(
-                            EventModel.workspace_id == workspace_id
+    session.execute(
+        text(
+            "ALTER TABLE work_contexts "
+            "DROP CONSTRAINT IF EXISTS fk_work_contexts_current_revision"
+        )
+    )
+    try:
+        for model in models:
+            if model is OutboxMessageModel:
+                session.execute(
+                    delete(model).where(
+                        model.event_id.in_(
+                            select(EventModel.id).where(
+                                EventModel.workspace_id == workspace_id
+                            )
                         )
                     )
                 )
+            else:
+                session.execute(
+                    delete(model).where(cast(Any, model).workspace_id == workspace_id)
+                )
+    finally:
+        session.execute(
+            text(
+                "ALTER TABLE work_contexts "
+                "ADD CONSTRAINT fk_work_contexts_current_revision "
+                "FOREIGN KEY (current_revision_id) REFERENCES work_context_revisions (id) "
+                "ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             )
-        else:
-            session.execute(
-                delete(model).where(cast(Any, model).workspace_id == workspace_id)
-            )
+        )
     if existing is not None:
         session.execute(delete(WorkspaceModel).where(WorkspaceModel.id == workspace_id))
     session.flush()
@@ -1034,6 +1126,418 @@ def _seed_task_first(session, workspace_id: UUID) -> None:
         )
         .values(active_lease_id=LEASE_ID)
     )
+
+
+def _seed_context_knowledge(session, workspace_id: UUID) -> None:
+    _seed_task_first(session, workspace_id)
+
+    adapter_instance_id = uuid5(NAMESPACE_URL, f"{workspace_id}:adapter-instance")
+    profile_snapshot = {
+        "profile_id": str(CONTEXT_PLANNING_PROFILE_ID),
+        "profile_version": 1,
+        "planner_module_instance_id": str(adapter_instance_id),
+        "planner_interface_version": "sidera.planner.v1",
+        "context_package_versions": [1],
+    }
+    session.add(
+        PlanningProfileModel(
+            id=CONTEXT_PLANNING_PROFILE_ID,
+            workspace_id=workspace_id,
+            profile_key="r5-3-context-e2e",
+            version=1,
+            display_name="R5.3 Context E2E",
+            planner_module_instance_id=adapter_instance_id,
+            planner_module_config_version=1,
+            planner_interface_version="sidera.planner.v1",
+            status="active",
+            user_selectable=True,
+            policy={},
+        )
+    )
+    session.flush()
+    planning_request = PlanningRequestModel(
+        id=CONTEXT_PLANNING_REQUEST_ID,
+        workspace_id=workspace_id,
+        kind="create",
+        status="materialized",
+        current_brief_revision=None,
+        current_proposal_revision=None,
+        current_proposal_content_hash=None,
+        planning_profile_id=CONTEXT_PLANNING_PROFILE_ID,
+        planning_profile_version=1,
+        profile_snapshot=profile_snapshot,
+        source_type="e2e",
+        source_ref="r5.3-context-knowledge",
+        actor="local:e2e",
+        correlation_id=CONTEXT_PLANNING_REQUEST_ID,
+        version=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    session.add(planning_request)
+    session.flush()
+    session.add(
+        PlanningBriefRevisionModel(
+            planning_request_id=CONTEXT_PLANNING_REQUEST_ID,
+            revision=1,
+            workspace_id=workspace_id,
+            payload={
+                "objective": "验证任务上下文与 Knowledge Service 的精确关联。",
+                "acceptance_criteria": ["页面正文仅在明确物化后出现"],
+                "source_correlation": str(CONTEXT_PLANNING_REQUEST_ID),
+            },
+            created_by="local:e2e",
+            created_at=NOW,
+        )
+    )
+    session.flush()
+    planning_request.current_brief_revision = 1
+    session.flush()
+    session.add(
+        PlanningRunModel(
+            id=CONTEXT_PLANNING_RUN_ID,
+            workspace_id=workspace_id,
+            planning_request_id=CONTEXT_PLANNING_REQUEST_ID,
+            brief_revision=1,
+            planning_profile_id=CONTEXT_PLANNING_PROFILE_ID,
+            planning_profile_version=1,
+            planner_module_instance_id=adapter_instance_id,
+            planner_module_config_version=1,
+            attempt=1,
+            status="succeeded",
+            result_kind="proposal",
+            capability_snapshot={"context_package_versions": [1]},
+            usage={
+                "input_tokens": 240,
+                "output_tokens": 180,
+                "cost_microunits": 0,
+                "runtime_seconds": 4,
+                "context_bytes": 512,
+            },
+            operation_id=uuid5(NAMESPACE_URL, f"{workspace_id}:context-planning-operation"),
+            provider_ref="r5.3-context-e2e",
+            error_code=None,
+            error_message=None,
+            diagnostic_refs=[],
+            queued_at=NOW,
+            started_at=NOW,
+            finished_at=NOW + timedelta(seconds=4),
+            version=1,
+            created_at=NOW,
+            updated_at=NOW + timedelta(seconds=4),
+        )
+    )
+    session.flush()
+
+    revision_hash, section_hash = _knowledge_fixture_hashes()
+    context_snapshot = WorkContextSnapshotV1.create(
+        objective="验证任务上下文与 Knowledge Service 的精确关联。",
+        constraints=(),
+        acceptance_criteria=(),
+        requested_outputs=(),
+        clarification_decisions=(),
+        accepted_decisions=(),
+        unresolved_questions=(),
+        knowledge_refs=(
+            KnowledgeRevisionRef(
+                page_id=KNOWLEDGE_PAGE_ID,
+                revision_id=KNOWLEDGE_REVISION_TWO_ID,
+                revision_hash=revision_hash,
+                section_key="execution",
+                section_hash=section_hash,
+                source_ids=(KNOWLEDGE_SOURCE_ID,),
+                ordinal=0,
+            ),
+        ),
+        artifact_refs=(),
+        evidence_refs=(),
+        checkpoint_refs=(),
+    )
+    context_revision = WorkContextRevision.create(
+        revision_id=CONTEXT_REVISION_ID,
+        work_context_id=CONTEXT_ID,
+        workspace_id=workspace_id,
+        revision_number=1,
+        brief_planning_request_id=CONTEXT_PLANNING_REQUEST_ID,
+        brief_revision=1,
+        proposal_revision_id=None,
+        plan_snapshot_id=None,
+        reason=WorkContextRevisionReason.REQUEST_CREATED,
+        snapshot=context_snapshot,
+        created_by="local:e2e",
+        created_at=NOW,
+    )
+    context = WorkContext.create(
+        work_context_id=CONTEXT_ID,
+        workspace_id=workspace_id,
+        planning_request_id=CONTEXT_PLANNING_REQUEST_ID,
+        first_revision=context_revision,
+        created_at=NOW,
+    )
+    context.root_task_id = ROOT_TASK_ID
+    context.version = 2
+    context.updated_at = NOW
+    WorkContextRepository(session).add(context, context_revision)
+    session.flush()
+
+    package_ref = ContextPackageKnowledgeRef(
+        page_id=KNOWLEDGE_PAGE_ID,
+        revision_id=KNOWLEDGE_REVISION_TWO_ID,
+        revision_hash=revision_hash,
+        section_key="execution",
+        section_hash=section_hash,
+        source_ids=(KNOWLEDGE_SOURCE_ID,),
+        selection_reason=ContextSelectionReason.WORK_CONTEXT,
+        trust_level=ContextTrustLevel.WORKSPACE_CONFIRMED,
+        ordinal=0,
+    )
+    _complete_context_package(
+        session,
+        workspace_id=workspace_id,
+        request_id=CONTEXT_EXECUTION_ASSEMBLY_ID,
+        package_id=CONTEXT_EXECUTION_PACKAGE_ID,
+        purpose=ContextPurpose.EXECUTION,
+        consumer_type=ContextConsumerType.WORKER,
+        consumer_id=BACKEND_EXECUTION_ID,
+        worker_item_id=IMPLEMENTER_WORKER_ITEM_ID,
+        context_version=1,
+        knowledge_ref=package_ref,
+        profile_id=CONTEXT_PLANNING_PROFILE_ID,
+        adapter_instance_id=adapter_instance_id,
+    )
+    _complete_context_package(
+        session,
+        workspace_id=workspace_id,
+        request_id=CONTEXT_PLANNING_ASSEMBLY_ID,
+        package_id=CONTEXT_PLANNING_PACKAGE_ID,
+        purpose=ContextPurpose.PLANNING_RUN,
+        consumer_type=ContextConsumerType.PLANNER,
+        consumer_id=CONTEXT_PLANNING_RUN_ID,
+        worker_item_id=None,
+        context_version=None,
+        knowledge_ref=package_ref,
+        profile_id=CONTEXT_PLANNING_PROFILE_ID,
+        adapter_instance_id=adapter_instance_id,
+    )
+
+    session.add(
+        KnowledgeCandidateSubmissionModel(
+            id=CONTEXT_SUBMISSION_ID,
+            workspace_id=workspace_id,
+            producer_type="worker",
+            producer_id=WORKER_ID,
+            planning_run_id=None,
+            execution_id=BACKEND_EXECUTION_ID,
+            worker_item_id=IMPLEMENTER_WORKER_ITEM_ID,
+            task_id=ROOT_TASK_ID,
+            subtask_task_id=BACKEND_TASK_ID,
+            artifact_refs=[],
+            evidence_refs=[],
+            proposal_hash="d" * 64,
+            content_ref="candidate-spool://r5.3-context-e2e/proposal.json",
+            content_bytes=256,
+            knowledge_command_id=None,
+            status="submitted",
+            attempt=1,
+            lease_owner=None,
+            lease_expires_at=None,
+            next_attempt_at=None,
+            terminal_candidate_id=KNOWLEDGE_PENDING_CANDIDATE_ID,
+            error_code=None,
+            version=1,
+            created_at=NOW + timedelta(seconds=5),
+            updated_at=NOW + timedelta(seconds=5),
+        )
+    )
+    session.add_all(
+        [
+            ProjectionChangeModel(
+                workspace_id=workspace_id,
+                cursor=7,
+                schema_version=1,
+                projection_type="work_context",
+                resource_id=CONTEXT_ID,
+                change_type="work_context_created",
+                resource_version=2,
+                occurred_at=NOW,
+                correlation_id=CONTEXT_PLANNING_REQUEST_ID,
+            ),
+            ProjectionChangeModel(
+                workspace_id=workspace_id,
+                cursor=8,
+                schema_version=1,
+                projection_type="context_package",
+                resource_id=CONTEXT_EXECUTION_PACKAGE_ID,
+                change_type="context_package_created",
+                resource_version=1,
+                occurred_at=NOW,
+                correlation_id=CONTEXT_EXECUTION_PACKAGE_ID,
+            ),
+            ProjectionChangeModel(
+                workspace_id=workspace_id,
+                cursor=9,
+                schema_version=1,
+                projection_type="context_package",
+                resource_id=CONTEXT_PLANNING_PACKAGE_ID,
+                change_type="context_package_created",
+                resource_version=1,
+                occurred_at=NOW,
+                correlation_id=CONTEXT_PLANNING_PACKAGE_ID,
+            ),
+            ProjectionChangeModel(
+                workspace_id=workspace_id,
+                cursor=10,
+                schema_version=1,
+                projection_type="knowledge_candidate_submission",
+                resource_id=CONTEXT_SUBMISSION_ID,
+                change_type="knowledge_candidate_submission_updated",
+                resource_version=1,
+                occurred_at=NOW + timedelta(seconds=5),
+                correlation_id=CONTEXT_SUBMISSION_ID,
+            ),
+        ]
+    )
+    session.execute(
+        update(WorkspaceProjectionCursorModel)
+        .where(WorkspaceProjectionCursorModel.workspace_id == workspace_id)
+        .values(last_cursor=10)
+    )
+
+
+def _complete_context_package(
+    session,
+    *,
+    workspace_id: UUID,
+    request_id: UUID,
+    package_id: UUID,
+    purpose: ContextPurpose,
+    consumer_type: ContextConsumerType,
+    consumer_id: UUID,
+    worker_item_id: UUID | None,
+    context_version: int | None,
+    knowledge_ref: ContextPackageKnowledgeRef,
+    profile_id: UUID,
+    adapter_instance_id: UUID,
+) -> None:
+    assembly = ContextAssemblyRequest.create(
+        request_id=request_id,
+        workspace_id=workspace_id,
+        purpose=purpose,
+        consumer_type=consumer_type,
+        consumer_id=consumer_id,
+        worker_item_id=worker_item_id,
+        work_context_revision_id=CONTEXT_REVISION_ID,
+        context_version=context_version,
+        knowledge_search_scope={},
+        knowledge_filter_refs=(),
+        fact_scope_refs=(),
+        budget={
+            "profile_id": str(profile_id),
+            "profile_version": 1,
+            "max_sections": 8,
+            "max_chars": 20_000,
+            "max_input_tokens": 4_000,
+        },
+        expires_at=NOW + timedelta(hours=1),
+        request_fingerprint=hashlib.sha256(str(request_id).encode()).hexdigest(),
+        idempotency_key=f"r5.3-context-e2e:{request_id}",
+        created_at=NOW,
+    )
+    repository = ContextAssemblyRepository(session)
+    repository.add(assembly)
+    claimed = repository.claim_next(
+        workspace_id=workspace_id,
+        owner="r5.3-context-e2e",
+        now=NOW,
+        lease_ttl=timedelta(minutes=1),
+        limit=1,
+    )[0]
+    budget = ContextBudgetV1(
+        profile_id=profile_id,
+        profile_version=1,
+        max_sections=8,
+        max_chars=20_000,
+        max_input_tokens=4_000,
+        actual_sections=1,
+        actual_chars=93,
+        actual_input_tokens=24,
+    )
+    manifest = ContextPackageManifestV1.create(
+        package_id=package_id,
+        workspace_id=workspace_id,
+        purpose=purpose,
+        consumer_type=consumer_type,
+        consumer_id=consumer_id,
+        worker_item_id=worker_item_id,
+        work_context_revision_id=CONTEXT_REVISION_ID,
+        context_version=context_version,
+        control_plane_fact_snapshot={
+            "root_task_id": str(ROOT_TASK_ID),
+            "consumer_id": str(consumer_id),
+        },
+        knowledge_refs=(knowledge_ref,),
+        artifact_refs=(),
+        evidence_refs=(),
+        budget=budget,
+        expires_at=NOW + timedelta(hours=1),
+        idempotency_key=assembly.idempotency_key,
+        created_at=NOW,
+    )
+    repository.complete_with_package(
+        claimed,
+        manifest,
+        owner="r5.3-context-e2e",
+        expected_version=claimed.version,
+        actor_type="system",
+        actor_id="r5.3-context-e2e",
+        causation_id=uuid5(NAMESPACE_URL, f"{workspace_id}:context-causation:{package_id}"),
+        correlation_id=package_id,
+    )
+    session.add(
+        ContextPackageAcknowledgementModel(
+            package_id=package_id,
+            workspace_id=workspace_id,
+            consumer_type=consumer_type.value,
+            consumer_id=consumer_id,
+            context_version=context_version,
+            acknowledged_package_hash=manifest.package_hash,
+            adapter_module_instance_id=adapter_instance_id,
+            adapter_config_version=1,
+            acknowledged_at=NOW + timedelta(seconds=1),
+        )
+    )
+    session.flush()
+
+
+def _knowledge_fixture_hashes() -> tuple[str, str]:
+    body = (
+        "The worker receives an exact immutable context package and keeps the "
+        "selected revision hash.\n"
+    )
+    section = {
+        "section_key": "execution",
+        "heading": "Execution handoff",
+        "summary": "",
+        "body_markdown": body,
+        "ordinal": 0,
+    }
+    snapshot = {
+        "title": "Worker context reference",
+        "summary": "Exact knowledge used by the execution context package.",
+        "tags": ["context", "r5"],
+        "sections": [section],
+        "relations": [],
+        "source_refs": [str(KNOWLEDGE_SOURCE_ID)],
+    }
+    return _sha256_json(snapshot), _sha256_json(section)
+
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _seed_runtime_routing(session, workspace_id: UUID) -> None:

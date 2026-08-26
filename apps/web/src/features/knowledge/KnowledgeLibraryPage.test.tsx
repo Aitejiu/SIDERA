@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
 
+import { knowledgePagesQueryKey } from "./api";
 import { KnowledgeLibraryPage } from "./KnowledgeLibraryPage";
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
@@ -57,7 +58,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE_ID}/knowledge`]}>
         <Routes>
@@ -70,6 +71,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...rendered, queryClient };
 }
 
 describe("KnowledgeLibraryPage", () => {
@@ -181,5 +183,23 @@ describe("KnowledgeLibraryPage", () => {
 
     expect(await screen.findByRole("button", { name: "重试读取知识页" })).toBeVisible();
     expect(screen.getByText("无法读取知识页")).toBeVisible();
+  });
+
+  it("uses low-frequency foreground refresh for the page library", async () => {
+    const { queryClient } = renderPage();
+
+    await screen.findByText("Repository guide");
+
+    const query = queryClient.getQueryCache().find({
+      queryKey: knowledgePagesQueryKey(WORKSPACE_ID),
+    });
+    const options = query?.options as {
+      refetchInterval?: number;
+      refetchIntervalInBackground?: boolean;
+      refetchOnWindowFocus?: boolean;
+    } | undefined;
+    expect(options?.refetchInterval).toBe(15_000);
+    expect(options?.refetchIntervalInBackground).toBe(false);
+    expect(options?.refetchOnWindowFocus).toBe(true);
   });
 });

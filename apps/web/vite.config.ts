@@ -25,6 +25,14 @@ export default defineConfig({
       "/knowledge-api": {
         target: knowledgeProxyTarget(knowledgeServicePort),
         rewrite: rewriteKnowledgeProxyPath,
+        configure: (proxy) => {
+          const token = process.env.SIDERA_WEB_KNOWLEDGE_TOKEN;
+          if (token !== undefined && token.length > 0) {
+            proxy.on("proxyReq", (proxyRequest) => {
+              proxyRequest.setHeader("Authorization", `Bearer ${token}`);
+            });
+          }
+        },
       },
       "/main-agent": "http://127.0.0.1:8010",
     },

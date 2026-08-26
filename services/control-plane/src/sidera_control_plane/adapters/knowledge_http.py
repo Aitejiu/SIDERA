@@ -175,7 +175,7 @@ class KnowledgeHttpAdapter(KnowledgeCatalogPort, KnowledgeCandidateCatalogPort):
         self._control_plane_token = control_plane_token
         self._metadata_timeout_seconds = metadata_timeout_seconds
         self._materialization_timeout_seconds = materialization_timeout_seconds
-        self._client = client or httpx.Client()
+        self._client = client or httpx.Client(trust_env=False)
         self._owns_client = client is None
 
     def close(self) -> None:

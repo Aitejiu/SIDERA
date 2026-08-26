@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
 
+import { knowledgeCandidatesQueryKey } from "./api";
 import { KnowledgeInboxPage } from "./KnowledgeInboxPage";
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
@@ -110,7 +111,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE_ID}/knowledge/inbox`]}>
         <Routes>
@@ -123,6 +124,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...rendered, queryClient };
 }
 
 describe("KnowledgeInboxPage", () => {
@@ -177,5 +179,23 @@ describe("KnowledgeInboxPage", () => {
 
     expect(await screen.findByRole("button", { name: "重试读取候选" })).toBeVisible();
     expect(screen.getByText("无法读取知识候选")).toBeVisible();
+  });
+
+  it("uses low-frequency foreground refresh for the review inbox", async () => {
+    const { queryClient } = renderPage();
+
+    await screen.findByText("New runtime guide");
+
+    const query = queryClient.getQueryCache().find({
+      queryKey: knowledgeCandidatesQueryKey(WORKSPACE_ID, { limit: "100" }),
+    });
+    const options = query?.options as {
+      refetchInterval?: number;
+      refetchIntervalInBackground?: boolean;
+      refetchOnWindowFocus?: boolean;
+    } | undefined;
+    expect(options?.refetchInterval).toBe(15_000);
+    expect(options?.refetchIntervalInBackground).toBe(false);
+    expect(options?.refetchOnWindowFocus).toBe(true);
   });
 });

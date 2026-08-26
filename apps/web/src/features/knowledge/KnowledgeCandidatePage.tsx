@@ -1,7 +1,7 @@
 import { AlertTriangle, Check, CircleX, RefreshCw, Undo2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import { ApiProblem } from "@/shared/api/client";
 
@@ -9,7 +9,12 @@ import {
   buildReviewKnowledgeCandidateCommand,
   buildWithdrawKnowledgeCandidateCommand,
   getKnowledgeCandidate,
+  knowledgeCandidatesRootQueryKey,
   knowledgeCandidateQueryKey,
+  knowledgePageQueryKey,
+  knowledgePagesRootQueryKey,
+  knowledgeRevisionQueryKey,
+  knowledgeSearchRootQueryKey,
   submitKnowledgeCommand,
 } from "./api";
 import { KnowledgeDiff } from "./KnowledgeDiff";
@@ -29,6 +34,7 @@ export function KnowledgeCandidatePage() {
   const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
   const candidateId = useParams<{ candidateId: string }>().candidateId ?? "";
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [decision, setDecision] = useState<ReviewDecision | null>(null);
   const [reason, setReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
@@ -86,6 +92,7 @@ export function KnowledgeCandidatePage() {
         buildReviewKnowledgeCandidateCommand({ workspaceId, payload }),
       );
       const result = commandResult(response);
+      invalidateKnowledgeCommandQueries(queryClient, workspaceId, detail, result);
       if (decision === "accept" && result.status === "accepted") {
         const pageId = stringValue(result.page_id) ?? detail.summary.target_page_id;
         const revisionId = stringValue(result.revision_id);
@@ -111,9 +118,10 @@ export function KnowledgeCandidatePage() {
     };
     setSubmitting(true);
     try {
-      await submitKnowledgeCommand(
+      const response = await submitKnowledgeCommand(
         buildWithdrawKnowledgeCandidateCommand({ workspaceId, payload }),
       );
+      invalidateKnowledgeCommandQueries(queryClient, workspaceId, detail, commandResult(response));
       setActionSuccess("撤回命令已提交");
     } catch (error) {
       await handleActionError(error);
@@ -368,6 +376,34 @@ function commandResult(response: unknown): Record<string, unknown> {
     return response.result;
   }
   return isRecord(response) ? response : {};
+}
+
+function invalidateKnowledgeCommandQueries(
+  queryClient: QueryClient,
+  workspaceId: string,
+  detail: KnowledgeCandidateDetail,
+  result: Record<string, unknown>,
+): void {
+  void queryClient.invalidateQueries({
+    queryKey: knowledgeCandidateQueryKey(workspaceId, detail.summary.candidate_id),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: knowledgeCandidatesRootQueryKey(workspaceId),
+  });
+
+  if (result.status !== "accepted") return;
+
+  void queryClient.invalidateQueries({ queryKey: knowledgePagesRootQueryKey(workspaceId) });
+  void queryClient.invalidateQueries({ queryKey: knowledgeSearchRootQueryKey(workspaceId) });
+  const pageId = stringValue(result.page_id) ?? detail.summary.target_page_id;
+  const revisionId = stringValue(result.revision_id);
+  if (pageId === null) return;
+  void queryClient.invalidateQueries({ queryKey: knowledgePageQueryKey(workspaceId, pageId) });
+  if (revisionId !== null) {
+    void queryClient.invalidateQueries({
+      queryKey: knowledgeRevisionQueryKey(workspaceId, pageId, revisionId),
+    });
+  }
 }
 
 function stringValue(value: unknown): string | null {

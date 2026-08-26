@@ -163,6 +163,21 @@ def test_settings_add_knowledge_runtime_contract_and_redact_secret() -> None:
     assert TOKEN not in repr(settings)
 
 
+def test_http_adapter_does_not_inherit_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_client = httpx.Client
+    seen: dict[str, object] = {}
+
+    def client_factory(*args: object, **kwargs: object) -> httpx.Client:
+        seen.update(kwargs)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client_factory)
+    adapter = KnowledgeHttpAdapter(base_url="http://127.0.0.1:8020")
+    adapter.close()
+
+    assert seen["trust_env"] is False
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

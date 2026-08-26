@@ -6,9 +6,16 @@ import { resolveE2eRuntime, resolveE2eWebUrl } from "./src/e2eConfig.js";
 const webRoot = resolve(import.meta.dirname);
 const repositoryRoot = resolve(webRoot, "../..");
 const controlPlaneRoot = resolve(repositoryRoot, "services/control-plane");
+const knowledgeServiceRoot = resolve(repositoryRoot, "services/knowledge-service");
 const databaseUrl = process.env.SIDERA_DATABASE_URL
   ?? "postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_test";
-const { controlPlanePort, webPort } = resolveE2eRuntime(process.env);
+const knowledgeDatabaseUrl = process.env.SIDERA_KNOWLEDGE_DATABASE_URL
+  ?? "postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_knowledge_test";
+const knowledgeToken = process.env.SIDERA_E2E_KNOWLEDGE_TOKEN ?? "r5-e2e-owner-token";
+const controlPlaneToken = process.env.SIDERA_E2E_CONTROL_PLANE_TOKEN
+  ?? "r5-e2e-control-plane-token";
+const { controlPlanePort, knowledgeServicePort, webPort } = resolveE2eRuntime(process.env);
+const webOrigin = `http://127.0.0.1:${webPort}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -57,8 +64,24 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       env: {
         SIDERA_DATABASE_URL: databaseUrl,
-        SIDERA_WEB_ORIGIN: "http://127.0.0.1:4173",
+        SIDERA_WEB_ORIGIN: webOrigin,
         SIDERA_MAIN_AGENT_ENTRY_URI: "http://127.0.0.1:18080/main-agent",
+        SIDERA_KNOWLEDGE_BASE_URL: `http://127.0.0.1:${knowledgeServicePort}`,
+        SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN: controlPlaneToken,
+      },
+    },
+    {
+      command: `${resolve(knowledgeServiceRoot, ".venv/bin/uvicorn")} sidera_knowledge.api.app:app --host 127.0.0.1 --port ${knowledgeServicePort}`,
+      cwd: knowledgeServiceRoot,
+      url: `http://127.0.0.1:${knowledgeServicePort}/health/live`,
+      timeout: 30_000,
+      reuseExistingServer: !process.env.CI,
+      env: {
+        SIDERA_KNOWLEDGE_DATABASE_URL: knowledgeDatabaseUrl,
+        SIDERA_KNOWLEDGE_LOCAL_OWNER_TOKEN: knowledgeToken,
+        SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN: process.env.SIDERA_E2E_MAIN_AGENT_TOKEN
+          ?? "r5-e2e-main-agent-token",
+        SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN: controlPlaneToken,
       },
     },
     {
@@ -67,6 +90,10 @@ export default defineConfig({
       url: resolveE2eWebUrl(webPort),
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
+      env: {
+        SIDERA_WEB_KNOWLEDGE_TOKEN: knowledgeToken,
+        SIDERA_E2E_KNOWLEDGE_SERVICE_PORT: String(knowledgeServicePort),
+      },
     },
   ],
 });
