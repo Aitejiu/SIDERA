@@ -225,7 +225,13 @@ def test_missing_materialization_is_an_empty_read_result() -> None:
 
 def test_neutral_client_modules_have_no_akashic_imports() -> None:
     forbidden = {"agent", "akashic_sdk", "session", "bootstrap"}
-    for filename in ("config.py", "contracts.py", "client.py"):
+    for filename in (
+        "config.py",
+        "contracts.py",
+        "client.py",
+        "knowledge_client.py",
+        "knowledge_contracts.py",
+    ):
         tree = ast.parse(
             Path(f"integrations/akashic/sidera_task_bridge/{filename}").read_text(),
             filename=filename,

@@ -20,10 +20,17 @@ def make_config(**overrides: Any) -> TaskBridgeConfig:
     return TaskBridgeConfig.model_validate(values)
 
 
-def test_config_accepts_loopback_urls_and_explicit_identity() -> None:
+def test_config_accepts_loopback_urls_and_explicit_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN", "knowledge-token-for-tests"
+    )
     config = make_config(
         control_plane_url="http://localhost:8000",
         web_base_url="http://[::1]:4174/",
+        knowledge_base_url="http://127.0.0.1:8020",
+        knowledge_timeout_seconds=5,
         actor_type="integration",
         actor_id="akashic-task-bridge",
     )
@@ -32,6 +39,67 @@ def test_config_accepts_loopback_urls_and_explicit_identity() -> None:
     assert config.planning_profile_id == PROFILE_ID
     assert str(config.control_plane_url) == "http://localhost:8000/"
     assert str(config.web_base_url) == "http://[::1]:4174/"
+    assert str(config.knowledge_base_url) == "http://127.0.0.1:8020/"
+    assert config.knowledge_timeout_seconds == 5
+    assert config.knowledge_main_agent_token is not None
+    assert (
+        config.knowledge_main_agent_token.get_secret_value()
+        == "knowledge-token-for-tests"
+    )
+
+
+def test_config_masks_knowledge_token_from_repr_and_serialized_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "knowledge-token-must-not-leak"
+    monkeypatch.setenv("SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN", token)
+    config = make_config()
+
+    assert token not in repr(config)
+    assert token not in str(config.model_dump())
+    assert token not in str(config.model_dump(mode="json"))
+
+
+def test_config_rejects_token_in_plugin_config() -> None:
+    with pytest.raises(ValidationError, match="provided through the environment"):
+        make_config(knowledge_main_agent_token="must-not-be-in-toml")
+
+
+def test_config_loads_knowledge_defaults_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIDERA_KNOWLEDGE_BASE_URL", "http://127.0.0.1:8021")
+    monkeypatch.setenv("SIDERA_KNOWLEDGE_TIMEOUT_SECONDS", "6")
+
+    config = make_config()
+
+    assert str(config.knowledge_base_url) == "http://127.0.0.1:8021/"
+    assert config.knowledge_timeout_seconds == 6
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com",
+        "http://127.0.0.2:8020",
+        "http://user:password@127.0.0.1:8020",
+        "http://127.0.0.1:8020/?token=secret",
+        "http://127.0.0.1:8020/#fragment",
+    ],
+)
+def test_config_rejects_non_loopback_or_unsafe_knowledge_urls(url: str) -> None:
+    with pytest.raises(ValidationError):
+        make_config(knowledge_base_url=url)
+
+
+def test_config_allows_remote_knowledge_url_only_with_explicit_opt_in() -> None:
+    config = make_config(
+        knowledge_base_url="https://knowledge.example.com",
+        knowledge_allow_remote=True,
+    )
+
+    assert str(config.knowledge_base_url) == "https://knowledge.example.com/"
+    assert config.knowledge_allow_remote is True
 
 
 @pytest.mark.parametrize(
@@ -71,6 +139,10 @@ def test_config_rejects_extra_fields_and_invalid_timeout_bounds() -> None:
         make_config(connect_timeout_seconds=0)
     with pytest.raises(ValidationError):
         make_config(request_timeout_seconds=121)
+    with pytest.raises(ValidationError):
+        make_config(knowledge_timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        make_config(knowledge_timeout_seconds=11)
 
 
 def test_config_exposes_bounded_notification_retry_and_stream_limits() -> None:
