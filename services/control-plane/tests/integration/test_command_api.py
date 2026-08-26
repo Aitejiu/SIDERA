@@ -326,6 +326,73 @@ def test_versioned_task_mutations_and_successful_replay(
     assert events[4].payload == {"status": "canceled", "previous_status": "pending"}
 
 
+def test_complete_task_requires_waiting_and_is_idempotent(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+    uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+) -> None:
+    task_id = create_task(client, workspace_id)
+    with uow_factory() as uow:
+        task = uow.tasks.get(task_id, workspace_id)
+        assert task is not None
+        task.mark_ready()
+        uow.tasks.save(task, 1)
+        task.mark_running()
+        uow.tasks.save(task, 2)
+        task.wait_for_decision()
+        uow.tasks.save(task, 3)
+
+    request = mutation_request(
+        workspace_id,
+        task_id,
+        "CompleteTask",
+        4,
+        "complete-task-001",
+    )
+    completed = client.post("/api/v1/commands", json=request)
+
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["aggregate_version"] == 5
+    with uow_factory() as uow:
+        task = uow.tasks.get(task_id, workspace_id)
+    assert task is not None
+    assert task.status is TaskStatus.SUCCEEDED
+    assert task.version == 5
+
+    replay = {**request, "correlation_id": str(uuid4())}
+    replayed = client.post("/api/v1/commands", json=replay)
+
+    assert replayed.status_code == 200
+    assert replayed.json() == completed.json()
+    with database.session() as session:
+        event_types = session.scalars(
+            select(EventModel.event_type).order_by(EventModel.created_at, EventModel.id)
+        ).all()
+    assert event_types == ["TaskCreated", "TaskCompleted"]
+
+
+def test_complete_task_rejects_non_waiting_status(
+    client: TestClient,
+    workspace_id: UUID,
+) -> None:
+    task_id = create_task(client, workspace_id)
+
+    rejected = client.post(
+        "/api/v1/commands",
+        json=mutation_request(
+            workspace_id,
+            task_id,
+            "CompleteTask",
+            1,
+            "complete-pending-task-001",
+        ),
+    )
+
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "invalid_transition"
+
+
 def test_stale_version_records_one_rejection_and_replays_it(
     client: TestClient,
     workspace_id: UUID,

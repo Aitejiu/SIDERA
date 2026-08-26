@@ -69,6 +69,9 @@ def test_knowledge_openapi_is_complete_and_security_scoped() -> None:
     assert paths["/api/v1/workspaces/{workspace_id}/knowledge/pages"]["get"][
         "security"
     ] == owner_main
+    assert paths[
+        "/api/v1/workspaces/{workspace_id}/knowledge/pages/{page_id}/revisions/{revision_id}"
+    ]["get"]["security"] == all_capabilities
     assert paths["/api/v1/workspaces/{workspace_id}/knowledge/search"]["get"][
         "security"
     ] == all_capabilities

@@ -123,3 +123,10 @@ class Task:
             raise InvalidTransition(f"task cannot wait from {self.status}")
         self.status = TaskStatus.WAITING
         self.version += 1
+
+    def complete(self) -> None:
+        self._assert_mutable()
+        if self.status is not TaskStatus.WAITING:
+            raise InvalidTransition("only a waiting task can complete")
+        self.status = TaskStatus.SUCCEEDED
+        self.version += 1

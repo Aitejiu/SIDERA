@@ -61,7 +61,7 @@ def get_revision(
     page_id: UUID,
     revision_id: UUID,
 ) -> dict[str, object]:
-    authorize_any_capability(request, _OWNER_READ)
+    authorize_any_capability(request, _ALL_CAPABILITIES)
     result = _query_service(request).get_revision(workspace_id, page_id, revision_id)
     if result is None:
         from fastapi import HTTPException

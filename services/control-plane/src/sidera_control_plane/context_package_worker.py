@@ -34,6 +34,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextPurpose,
 )
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.planning import PlanningRunStatus
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
     SchedulingIssue,
@@ -418,6 +419,8 @@ class ContextPackageWorker:
         if planning_request is None:
             return
         run = planning_request.run(request.consumer_id)
+        if run.status.value != PlanningRunStatus.QUEUED.value:
+            return
         previous_request_version = planning_request.version
         previous_run_version = run.version
         planning_request.block_queued_run(

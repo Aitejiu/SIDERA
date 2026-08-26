@@ -5,6 +5,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +25,7 @@ from sidera_control_plane.application.worker_gateway import (
     WorkerGateway,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.modules import ModuleInstance
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
@@ -31,6 +33,15 @@ from sidera_control_plane.persistence.artifact_content_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.outbox_store import SqlAlchemyOutboxStore
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+
+
+def _deterministic_artifact_storage_ref(instance_name: str) -> str:
+    """Keep the R5.3 fixture artifact identity stable within one gate run."""
+
+    clean_name = instance_name.strip()
+    if not clean_name:
+        raise ValueError("deterministic artifact instance name is required")
+    return f"artifact://r5-3-deterministic/{clean_name}/diff"
 
 
 @dataclass(slots=True)
@@ -67,8 +78,28 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             return adapter
 
         def fake_factory(instance: ModuleInstance) -> WorkerAdapter:
-            del instance
-            return FakeWorkerAdapter()
+            if _module_config_text(instance, "mode", "") != "r5-3-deterministic":
+                return FakeWorkerAdapter()
+            content = b"SIDERA R5.3 deterministic worker result\n"
+            criterion = _module_config_text(
+                instance,
+                "artifact_acceptance_criterion_ref",
+                "acceptance:implementation",
+            )
+            artifact = ArtifactCandidate(
+                artifact_type=ArtifactType.DIFF,
+                storage_ref=_deterministic_artifact_storage_ref(instance.instance_name),
+                content_hash=sha256(content).hexdigest(),
+                size_bytes=len(content),
+                media_type="text/plain",
+                provenance={
+                    "producer": "r5-3-deterministic-worker",
+                    "acceptance_criterion_ref": criterion,
+                    "conclusion": "The deterministic worker produced its result.",
+                    "environment_ref": "env://r5-3-deterministic",
+                },
+            )
+            return FakeWorkerAdapter(artifacts=(artifact,))
 
         def opencode_factory(instance: ModuleInstance) -> WorkerAdapter:
             return OpenCodeACPAdapter(

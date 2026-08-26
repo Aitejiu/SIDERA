@@ -10,6 +10,7 @@ PID_DIR="$RUNTIME_DIR/pids"
 LOG_DIR="$RUNTIME_DIR/logs"
 IDENTITY_DIR="$RUNTIME_DIR/identity"
 LAUNCH_ENV_DIR="$RUNTIME_DIR/launch-env"
+WORKSPACE_ROOT="$REPO_ROOT/.sidera/workspaces"
 
 KNOWLEDGE_COMPONENT=knowledge-service
 CONTROL_COMPONENT=control-plane
@@ -25,7 +26,7 @@ WEB_COMPONENT=web
 STARTED_COMPONENTS=''
 LAUNCH_ENV_PATH=''
 LAST_LAUNCH_ENV_PATH=''
-PYTHON_LAUNCHER_CODE='import os,sys; p=sys.argv[1]; e=dict(line.rstrip("\n").split("=",1) for line in open(p,encoding="utf-8")); os.unlink(p); os.environ.clear(); os.environ.update(e); os.execvp(sys.argv[2],sys.argv[2:])'
+PYTHON_LAUNCHER_CODE='import os,sys; os.setsid(); p=sys.argv[1]; e=dict(line.rstrip("\n").split("=",1) for line in open(p,encoding="utf-8")); os.unlink(p); os.environ.clear(); os.environ.update(e); os.execvp(sys.argv[2],sys.argv[2:])'
 
 fail() {
   printf 'r5-3 stack: %s\n' "$1" >&2
@@ -152,6 +153,7 @@ prepare_runtime() {
   ensure_private_directory "$LOG_DIR"
   ensure_private_directory "$IDENTITY_DIR"
   ensure_private_directory "$LAUNCH_ENV_DIR"
+  ensure_private_directory "$WORKSPACE_ROOT"
   case "$SIDERA_KNOWLEDGE_CANDIDATE_SPOOL_DIR" in
     "$RUNTIME_DIR"/*)
       [ ! -L "$SIDERA_KNOWLEDGE_CANDIDATE_SPOOL_DIR" ] || fail "candidate spool must not be a symlink"
@@ -191,7 +193,7 @@ component_expected_command() {
     "$SCHEDULER_COMPONENT") printf '%s\n' 'sidera_control_plane.scheduler_worker' ;;
     "$GATEWAY_COMPONENT") printf '%s\n' 'sidera_control_plane.gateway_worker' ;;
     "$MAIN_AGENT_COMPONENT") printf '%s\n' 'sidera_main_agent_gateway.api.app' ;;
-    "$WEB_COMPONENT") printf '%s\n' 'run dev' ;;
+    "$WEB_COMPONENT") printf '%s\n' 'npm' ;;
     *) return 1 ;;
   esac
 }
@@ -228,7 +230,7 @@ pid_is_trusted() {
     ''|*[!0-9]*) return 1 ;;
   esac
   identity_matches_process "$component" || return 1
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  command=$(ps -p "$pid" -o args= 2>/dev/null || true)
   expected=$(component_expected_command "$component")
   case "$command" in
     *"$expected"*) return 0 ;;

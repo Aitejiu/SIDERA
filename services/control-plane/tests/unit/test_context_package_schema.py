@@ -6,6 +6,11 @@ from uuid import uuid4
 
 import pytest
 
+from sidera_control_plane.api.schemas import ContextPackageResponse
+from sidera_control_plane.application.context_package_queries import (
+    ContextPackageAssemblyView,
+    ContextPackageView,
+)
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextBudgetV1,
@@ -159,6 +164,60 @@ def test_planning_rejects_worker_fields_and_refs_validate_exact_hashes() -> None
             idempotency_key="invalid-planning",
             created_at=NOW,
         )
+
+
+def test_package_response_serializes_nested_immutable_fact_snapshot() -> None:
+    manifest = ContextPackageManifestV1.create(
+        package_id=uuid4(),
+        workspace_id=uuid4(),
+        purpose=ContextPurpose.PLANNING_RUN,
+        consumer_type=ContextConsumerType.PLANNER,
+        consumer_id=uuid4(),
+        worker_item_id=None,
+        work_context_revision_id=uuid4(),
+        context_version=None,
+        control_plane_fact_snapshot={
+            "planning_request": {
+                "status": "running",
+                "node_ids": ["node-a", "node-b"],
+            }
+        },
+        knowledge_refs=(),
+        artifact_refs=(),
+        evidence_refs=(),
+        budget=_budget(),
+        expires_at=NOW + timedelta(hours=1),
+        idempotency_key="nested-facts-package",
+        created_at=NOW,
+    )
+    view = ContextPackageView(
+        manifest=manifest,
+        assembly=ContextPackageAssemblyView(
+            request_id=uuid4(),
+            status="ready",
+            attempt=1,
+            next_attempt_at=None,
+            error_code=None,
+            request_fingerprint="c" * 64,
+            version=2,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        work_context_revision_number=1,
+        work_context_content_hash="d" * 64,
+        acknowledgements=(),
+        materialization_audits=(),
+    )
+
+    response = ContextPackageResponse.from_view(view)
+
+    assert response.model_dump_json()
+    assert response.control_plane_fact_snapshot == {
+        "planning_request": {
+            "status": "running",
+            "node_ids": ["node-a", "node-b"],
+        }
+    }
     with pytest.raises(ValidationError):
         ContextPackageKnowledgeRef(
             page_id=uuid4(),

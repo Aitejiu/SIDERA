@@ -474,7 +474,10 @@ def _candidate_payload(
     submission: KnowledgeCandidateSubmission,
     candidate_id: UUID,
 ) -> dict[str, object]:
-    sources = [_source_payload(item, candidate_id) for item in proposal.source_suggestions]
+    sources = [
+        _source_payload(item, candidate_id, submission)
+        for item in proposal.source_suggestions
+    ]
     sources.extend(
         _reference_source(candidate_id, "artifact", value)
         for value in proposal.artifact_refs
@@ -525,7 +528,9 @@ def _candidate_payload(
 
 
 def _source_payload(
-    source: object, _candidate_id: UUID
+    source: object,
+    _candidate_id: UUID,
+    submission: KnowledgeCandidateSubmission,
 ) -> dict[str, object]:
     # The proposal type validates the shape; keeping conversion here limits the
     # Knowledge-specific source vocabulary to the submission boundary.
@@ -534,10 +539,9 @@ def _source_payload(
     allowed = {"manual", "markdown_file", "task", "artifact", "evidence", "external_url"}
     source_type = source.source_type if source.source_type in allowed else "manual"
     metadata = dict(source.metadata)
-    if source_type == "task" and not {
-        "task_id",
-        "subtask_id",
-    }.issubset(metadata):
+    if source_type == "task" and not (
+        submission.task_id is not None and submission.subtask_task_id is not None
+    ):
         source_type = "manual"
     if source_type in {"artifact", "evidence"}:
         key = f"{source_type}_id"

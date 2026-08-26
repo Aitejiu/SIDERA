@@ -106,6 +106,55 @@ class ContextAssemblyRepository:
         )
         return _to_assembly_request(row) if row is not None else None
 
+    def rebind_pending(
+        self,
+        request: ContextAssemblyRequest,
+        *,
+        expected_version: int,
+        now: datetime,
+    ) -> ContextAssemblyRequest:
+        if request.status not in {
+            ContextAssemblyStatus.QUEUED,
+            ContextAssemblyStatus.ASSEMBLING,
+        }:
+            raise ValidationError(
+                "only queued or assembling context assemblies can be rebound"
+            )
+        result = self._session.execute(
+            update(ContextAssemblyRequestModel)
+            .where(
+                ContextAssemblyRequestModel.id == request.request_id,
+                ContextAssemblyRequestModel.workspace_id == request.workspace_id,
+                ContextAssemblyRequestModel.version == expected_version,
+                ContextAssemblyRequestModel.status.in_(
+                    (
+                        ContextAssemblyStatus.QUEUED.value,
+                        ContextAssemblyStatus.ASSEMBLING.value,
+                    )
+                ),
+            )
+            .values(
+                status=ContextAssemblyStatus.QUEUED.value,
+                work_context_revision_id=request.work_context_revision_id,
+                knowledge_search_scope=_plain_json(request.knowledge_search_scope),
+                knowledge_filter_refs=_plain_json(request.knowledge_filter_refs),
+                request_fingerprint=request.request_fingerprint,
+                lease_owner=None,
+                lease_expires_at=None,
+                next_attempt_at=None,
+                error_code=None,
+                version=expected_version + 1,
+                updated_at=now,
+            )
+        )
+        if not isinstance(result, CursorResult) or result.rowcount != 1:
+            raise VersionConflict(expected_version, self._current_version(request))
+        self._session.flush()
+        updated = self.get_for_update(request.request_id, request.workspace_id)
+        if updated is None:
+            raise ValidationError("context assembly disappeared after rebind")
+        return updated
+
     def reset_for_retry(
         self,
         request: ContextAssemblyRequest,

@@ -2068,6 +2068,16 @@ class GatewayAssignmentRunner:
             try:
                 self._gateway.handle(message)
             except Exception as exc:  # noqa: BLE001
+                failure_code = _failure_code(exc)
+                logger.warning(
+                    "worker_gateway_assignment_failed "
+                    "message_id=%s event_id=%s topic=%s attempts=%s error_code=%s",
+                    message.id,
+                    message.event_id,
+                    message.topic,
+                    message.attempts,
+                    failure_code,
+                )
                 retry_at = self._clock().replace(microsecond=0)
                 delay_seconds = min(300, 2 ** min(message.attempts, 8))
                 retry_at += timedelta(seconds=delay_seconds)
@@ -2075,7 +2085,7 @@ class GatewayAssignmentRunner:
                     message.id,
                     message.claim_token,
                     retry_at,
-                    _failure_code(exc),
+                    failure_code,
                 ):
                     failed += 1
             else:

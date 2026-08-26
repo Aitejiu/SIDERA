@@ -351,3 +351,23 @@ def test_worker_retries_temporary_failure_then_blocks_at_attempt_limit() -> None
     assert state.assembly.request.status is ContextAssemblyStatus.BLOCKED
     assert state.run.status.value == "blocked"
     assert state.planning_request.status.value == "failed"
+
+
+def test_worker_does_not_block_terminal_planning_run_after_stale_claim() -> None:
+    state = FakeState(_assembly_request())
+    state.run.status = SimpleNamespace(value="succeeded")
+    state.catalog_error = KnowledgeAdapterError(
+        "permission_denied",
+        "Knowledge service permission was denied",
+        temporary=False,
+    )
+    catalog = FakeCatalog(state)
+
+    result = _worker(state, catalog).run_once(limit=1)
+
+    assert result.claimed == 1
+    assert result.blocked == 1
+    assert result.failed == 0
+    assert state.run.status.value == "succeeded"
+    assert state.saved_run is None
+    assert state.planning_request.status.value == "submitted"

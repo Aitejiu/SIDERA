@@ -4,12 +4,14 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
+    ContextAssemblyStatus,
     ContextConsumerType,
     ContextPurpose,
 )
@@ -171,6 +173,47 @@ def build_execution_context_assembly_request(
         request_fingerprint=fingerprint,
         idempotency_key=f"context:execution:{execution.id}:v1",
         created_at=created_at,
+    )
+
+
+def rebind_planning_context_assembly_request(
+    request: ContextAssemblyRequest,
+    *,
+    work_context_revision: WorkContextRevision,
+) -> ContextAssemblyRequest:
+    """Rebind a queued planning assembly to a newer immutable context revision."""
+    if request.purpose is not ContextPurpose.PLANNING_RUN:
+        raise ValueError("only planning assemblies can be rebound")
+    snapshot = work_context_revision.snapshot
+    search_scope = _search_scope(
+        snapshot.objective,
+        tuple(item.text for item in snapshot.requested_outputs),
+    )
+    filter_refs = tuple(item.to_mapping() for item in snapshot.knowledge_refs)
+    fingerprint = _request_fingerprint(
+        purpose=request.purpose,
+        consumer_type=request.consumer_type,
+        consumer_id=request.consumer_id,
+        worker_item_id=request.worker_item_id,
+        work_context_revision_id=work_context_revision.revision_id,
+        context_version=request.context_version,
+        search_scope=search_scope,
+        filter_refs=filter_refs,
+        fact_scope_refs=tuple(str(item) for item in request.fact_scope_refs),
+        budget=request.budget,
+        expires_at=request.expires_at,
+    )
+    return replace(
+        request,
+        work_context_revision_id=work_context_revision.revision_id,
+        knowledge_search_scope=search_scope,
+        knowledge_filter_refs=filter_refs,
+        request_fingerprint=fingerprint,
+        status=ContextAssemblyStatus.QUEUED,
+        lease_owner=None,
+        lease_expires_at=None,
+        next_attempt_at=None,
+        error_code=None,
     )
 
 

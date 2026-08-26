@@ -108,6 +108,32 @@ def test_task_readiness_lifecycle_supports_waiting_and_retry():
     assert task.version == 5
 
 
+def test_waiting_task_can_be_completed_explicitly():
+    task = make_task()
+
+    task.mark_ready()
+    task.mark_running()
+    task.wait_for_decision()
+    task.complete()
+
+    assert task.status is TaskStatus.SUCCEEDED
+    assert task.version == 5
+
+
+@pytest.mark.parametrize(
+    "setup_methods",
+    ((), ("mark_ready",), ("mark_ready", "mark_running")),
+)
+def test_task_cannot_be_completed_before_waiting(setup_methods: tuple[str, ...]):
+    task = make_task()
+
+    for method in setup_methods:
+        getattr(task, method)()
+
+    with pytest.raises(InvalidTransition, match="waiting"):
+        task.complete()
+
+
 def test_task_readiness_transitions_reject_invalid_states():
     task = make_task()
     with pytest.raises(InvalidTransition):

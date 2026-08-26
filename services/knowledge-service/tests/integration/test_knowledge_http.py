@@ -128,7 +128,7 @@ def test_http_reads_search_and_capabilities_are_scoped(
     database_url: str,
     database: Database,
 ) -> None:
-    page, _, _ = _seed_page(database)
+    page, _, revision = _seed_page(database)
     settings = _settings(database_url)
     with TestClient(create_app(settings)) as client:
         assert client.get(
@@ -161,6 +161,14 @@ def test_http_reads_search_and_capabilities_are_scoped(
         assert search.status_code == 200
         assert search.json()["items"][0]["page_id"] == str(page.page_id)
         assert "body_markdown" not in search.json()["items"][0]
+
+        exact_revision = client.get(
+            f"/api/v1/workspaces/{page.workspace_id}/knowledge/pages/"
+            f"{page.page_id}/revisions/{revision.revision_id}",
+            headers=_headers("control-plane-token"),
+        )
+        assert exact_revision.status_code == 200
+        assert exact_revision.json()["revision_id"] == str(revision.revision_id)
 
         forbidden = client.get(
             f"/api/v1/workspaces/{page.workspace_id}/knowledge/pages",

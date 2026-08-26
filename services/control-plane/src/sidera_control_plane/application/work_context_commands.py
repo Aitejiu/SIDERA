@@ -7,8 +7,15 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.context_requests import (
+    rebind_planning_context_assembly_request,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.context_packages import (
+    ContextAssemblyStatus,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.errors import (
     KnowledgeRefInvalid,
     ValidationError,
@@ -519,6 +526,13 @@ class WorkContextCommandHandler:
         uow.work_contexts.append_revision(
             context, revision, expected_version=previous_version
         )
+        self._rebind_queued_planning_assembly(
+            uow,
+            envelope,
+            request=request,
+            revision=revision,
+            now=now,
+        )
         event = work_context_event(
             envelope,
             context=context,
@@ -590,6 +604,13 @@ class WorkContextCommandHandler:
         uow.work_contexts.append_revision(
             context, revision, expected_version=previous_version
         )
+        self._rebind_queued_planning_assembly(
+            uow,
+            envelope,
+            request=request,
+            revision=revision,
+            now=now,
+        )
         event = work_context_event(
             envelope,
             context=context,
@@ -599,6 +620,36 @@ class WorkContextCommandHandler:
         )
         uow.events.append_with_outbox(event)
         return _revision_result(envelope, context, revision, event)
+
+    @staticmethod
+    def _rebind_queued_planning_assembly(
+        uow: ControlPlaneUnitOfWork,
+        envelope: CommandEnvelope,
+        *,
+        request: Any,
+        revision: WorkContextRevision,
+        now: datetime,
+    ) -> None:
+        assembly = uow.context_assemblies.get_for_consumer(
+            ContextPurpose.PLANNING_RUN,
+            request.current_run_id,
+            envelope.workspace_id,
+            for_update=True,
+        )
+        if assembly is None or assembly.status not in {
+            ContextAssemblyStatus.QUEUED,
+            ContextAssemblyStatus.ASSEMBLING,
+        }:
+            return
+        rebound = rebind_planning_context_assembly_request(
+            assembly,
+            work_context_revision=revision,
+        )
+        uow.context_assemblies.rebind_pending(
+            rebound,
+            expected_version=assembly.version,
+            now=now,
+        )
 
     def _archive(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope

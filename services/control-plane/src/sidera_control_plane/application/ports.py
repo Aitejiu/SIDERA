@@ -503,6 +503,15 @@ class ContextAssemblyRepositoryPort(Protocol):
     ) -> ContextAssemblyRequest | None:
         raise NotImplementedError
 
+    def rebind_pending(
+        self,
+        request: ContextAssemblyRequest,
+        *,
+        expected_version: int,
+        now: datetime,
+    ) -> ContextAssemblyRequest:
+        raise NotImplementedError
+
     def reset_for_retry(
         self,
         request: ContextAssemblyRequest,

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -10,6 +11,7 @@ from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ContextAssemblyRequestModel,
     EventModel,
     OutboxMessageModel,
     PlanningBriefRevisionModel,
@@ -424,6 +426,14 @@ def test_attach_knowledge_revision_appends_exact_ref_without_cross_database_look
                 WorkContextRevisionModel.revision_number == 2,
             )
         )
+        assembly = session.scalar(
+            select(ContextAssemblyRequestModel).where(
+                ContextAssemblyRequestModel.workspace_id == workspace_id,
+                ContextAssemblyRequestModel.purpose == "planning_run",
+                ContextAssemblyRequestModel.consumer_id
+                == UUID(data["planning_run_id"]),
+            )
+        )
 
     assert revision is not None
     assert revision.reason == "knowledge_attached"
@@ -439,6 +449,84 @@ def test_attach_knowledge_revision_appends_exact_ref_without_cross_database_look
     assert revision.snapshot["accepted_decisions"][-1]["key"].startswith(
         "knowledge:selection:"
     )
+    assert assembly is not None
+    assert assembly.work_context_revision_id == revision.id
+    assert assembly.status == "queued"
+    assert assembly.version == 2
+    assert assembly.knowledge_filter_refs[0]["revision_id"] == str(revision_id)
+
+
+def test_attach_knowledge_revision_requeues_claimed_planning_assembly(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    profile_id = _profile_id(client, workspace_id, "knowledge-claimed")
+    submitted = _submit(client, workspace_id, profile_id, "knowledge-claimed")
+    data = submitted.json()["data"]
+    context_id = UUID(data["work_context_id"])
+    page_id = uuid4()
+    revision_id = uuid4()
+
+    with database.session() as session:
+        assembly = session.scalar(
+            select(ContextAssemblyRequestModel).where(
+                ContextAssemblyRequestModel.workspace_id == workspace_id,
+                ContextAssemblyRequestModel.purpose == "planning_run",
+                ContextAssemblyRequestModel.consumer_id
+                == UUID(data["planning_run_id"]),
+            )
+        )
+        assert assembly is not None
+        assembly.status = "assembling"
+        assembly.lease_owner = "context-worker:test"
+        assembly.lease_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        assembly.version = 2
+        assert assembly.consumer_id == UUID(data["planning_run_id"])
+        session.commit()
+
+    response = client.post(
+        "/api/v1/commands",
+        json=_command(
+            workspace_id,
+            "AttachKnowledgeRevision",
+            {
+                "selection_reason": "operator selected the exact section",
+                "knowledge_ref": {
+                    "page_id": str(page_id),
+                    "revision_id": str(revision_id),
+                    "revision_hash": "c" * 64,
+                    "section_key": "claimed-api-contract",
+                    "section_hash": "d" * 64,
+                    "source_ids": [str(uuid4())],
+                    "ordinal": 0,
+                },
+            },
+            idempotency_key="context-knowledge-attach-claimed",
+            target_type="work_context",
+            target_id=context_id,
+            expected_version=1,
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    with database.session() as session:
+        assembly = session.scalar(
+            select(ContextAssemblyRequestModel).where(
+                ContextAssemblyRequestModel.workspace_id == workspace_id,
+                ContextAssemblyRequestModel.purpose == "planning_run",
+                ContextAssemblyRequestModel.consumer_id
+                == UUID(data["planning_run_id"]),
+            )
+        )
+
+    assert assembly is not None
+    assert assembly.status == "queued"
+    assert assembly.version == 3
+    assert assembly.lease_owner is None
+    assert assembly.lease_expires_at is None
+    assert assembly.work_context_revision_id is not None
+    assert assembly.knowledge_filter_refs[0]["revision_id"] == str(revision_id)
 
 
 def test_archive_work_context_requires_terminal_state_and_is_idempotent(

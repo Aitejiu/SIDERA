@@ -17,6 +17,7 @@ class TaskCommandHandler:
             "PauseTask",
             "ResumeTask",
             "CancelTask",
+            "CompleteTask",
         }
     )
 
@@ -111,9 +112,12 @@ class TaskCommandHandler:
             elif envelope.command_type == "ResumeTask":
                 task.resume()
                 event_type = "TaskResumed"
-            else:
+            elif envelope.command_type == "CancelTask":
                 task.cancel()
                 event_type = "TaskCanceled"
+            else:
+                task.complete()
+                event_type = "TaskCompleted"
             event_payload = {
                 "status": task.status.value,
                 "previous_status": previous_status,

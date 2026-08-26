@@ -344,8 +344,27 @@ check_opencode_and_akashic() {
   esac
 }
 
+pid_is_descendant_of() {
+  local child=$1 ancestor=$2 current
+  case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ancestor" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$child" = "$ancestor" ] && return 0
+  while [ "$child" != "$ancestor" ]; do
+    current=$(ps -p "$child" -o ppid= 2>/dev/null || true)
+    current=${current//[[:space:]]/}
+    case "$current" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$current" in
+      0|1|"$child") return 1 ;;
+    esac
+    child=$current
+  done
+  return 0
+}
+
 check_port_identity() {
-  local port=$1 component=$2 health_url pid_file pid_list pid cmd expected identity
+  local port=$1 component=$2 health_url pid_file pid_list pid port_pid cmd expected identity
   pid_list=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
   [ -z "$pid_list" ] && return 0
   pid_file="$RUNTIME_DIR/pids/$component.pid"
@@ -354,10 +373,10 @@ check_port_identity() {
   case "$pid" in
     ''|*[!0-9]*) fail "SIDERA runtime PID file is invalid: $component" ;;
   esac
-  case " $pid_list " in
-    *" $pid "*) ;;
-    *) fail "port $port is not owned by the recorded $component PID" ;;
-  esac
+  for port_pid in $pid_list; do
+    pid_is_descendant_of "$port_pid" "$pid" \
+      || fail "port $port is not owned by the recorded $component PID tree"
+  done
   kill -0 "$pid" >/dev/null 2>&1 || fail "SIDERA runtime PID is not alive: $component"
   identity="$RUNTIME_DIR/identity/$component.identity"
   [ -f "$identity" ] || fail "SIDERA runtime identity is missing: $component"
@@ -367,12 +386,12 @@ check_port_identity() {
     || fail "SIDERA runtime identity component mismatch: $component"
   grep -F "marker=sidera-r5-3:$component" "$identity" >/dev/null 2>&1 \
     || fail "SIDERA runtime identity marker mismatch: $component"
-  cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  cmd=$(ps -p "$pid" -o args= 2>/dev/null || true)
   case "$component" in
     control-plane) expected='sidera_control_plane.api.app' ;;
     knowledge-service) expected='sidera_knowledge.api.app' ;;
     main-agent-gateway) expected='sidera_main_agent_gateway.api.app' ;;
-    web) expected='run dev' ;;
+    web) expected='npm' ;;
     *) expected="sidera-r5-3:$component" ;;
   esac
   case "$cmd" in

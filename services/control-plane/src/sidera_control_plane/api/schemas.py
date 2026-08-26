@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
+from fastapi.encoders import jsonable_encoder
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -1254,6 +1255,7 @@ class CommandRequest(BaseModel):
             "PauseTask",
             "ResumeTask",
             "CancelTask",
+            "CompleteTask",
             "PublishPlanSnapshot",
         }
         if self.command_type in task_commands and self.target_type != "task":
@@ -1320,7 +1322,12 @@ class CommandRequest(BaseModel):
         elif self.command_type == "SetTaskPriority":
             self._require_mutation_target()
             parsed = SetTaskPriorityPayload.model_validate(self.payload)
-        elif self.command_type in {"PauseTask", "ResumeTask", "CancelTask"}:
+        elif self.command_type in {
+            "PauseTask",
+            "ResumeTask",
+            "CancelTask",
+            "CompleteTask",
+        }:
             self._require_mutation_target()
             parsed = EmptyPayload.model_validate(self.payload)
         elif self.command_type == "RegisterWorker":
@@ -2837,7 +2844,9 @@ class ContextPackageResponse(BaseModel):
             work_context_revision_number=view.work_context_revision_number,
             work_context_content_hash=view.work_context_content_hash,
             context_version=manifest.context_version,
-            control_plane_fact_snapshot=dict(manifest.control_plane_fact_snapshot),
+            control_plane_fact_snapshot=jsonable_encoder(
+                manifest.control_plane_fact_snapshot
+            ),
             knowledge_refs=tuple(
                 ContextPackageKnowledgeRefResponse(
                     page_id=item.page_id,

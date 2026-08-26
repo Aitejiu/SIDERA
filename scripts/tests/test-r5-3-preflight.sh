@@ -66,7 +66,12 @@ make_fake_commands() {
     'exit 0' > "$FAKE_BIN/git"
   printf '%s\n' \
     '#!/bin/sh' \
-    '[ "${R5_3_FAKE_PORT_CONFLICT:-0}" = "1" ] && printf "99999\\n"' > "$FAKE_BIN/lsof"
+    'case "$*" in' \
+    '  *"-iTCP:8000"*)' \
+    '    [ "${R5_3_FAKE_PORT_CONFLICT:-0}" = "1" ] && printf "99999\\n"' \
+    '    [ "${R5_3_FAKE_DESCENDANT_PORT:-0}" = "1" ] && printf "%s\\n" "${R5_3_DESCENDANT_PID:-424242}"' \
+    '    ;;' \
+    'esac' > "$FAKE_BIN/lsof"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/pg_isready"
   printf '%s\n' \
     '#!/bin/sh' \
@@ -226,6 +231,35 @@ mv "$TMP/spool-real" "$SPOOL_DIR"
 export R5_3_FAKE_PORT_CONFLICT=1
 assert_failure "occupied port" run_preflight
 unset R5_3_FAKE_PORT_CONFLICT
+
+RECORDED_PID=$$
+export R5_3_DESCENDANT_PID=424242
+printf '%s\n' "$RECORDED_PID" > "$RUNTIME_DIR/pids/control-plane.pid"
+printf '%s\n' \
+  "pid=$RECORDED_PID" \
+  'component=control-plane' \
+  "repo=$ROOT" \
+  'marker=sidera-r5-3:control-plane' \
+  'started_at=2026-08-26T00:00:00Z' \
+  'process_start=fixture' \
+  'command=control-plane uvicorn' > "$RUNTIME_DIR/identity/control-plane.identity"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'case "$*" in' \
+  '  *"-p 424242 -o ppid="*) printf "%s\\n" "'"$RECORDED_PID"'" ;;' \
+  '  *"-p '"$RECORDED_PID"' -o args="*) printf "uv run sidera_control_plane.api.app\\n" ;;' \
+  '  *) exit 1 ;;' \
+  'esac' > "$FAKE_BIN/ps"
+chmod +x "$FAKE_BIN/ps"
+export R5_3_FAKE_DESCENDANT_PORT=1
+if output=$(run_preflight 2>&1); then
+  :
+else
+  printf '%s\n' "$output" >&2
+  fail "descendant-owned service port should pass"
+fi
+unset R5_3_FAKE_DESCENDANT_PORT R5_3_DESCENDANT_PID
+rm -f "$RUNTIME_DIR/pids/control-plane.pid" "$RUNTIME_DIR/identity/control-plane.identity" "$FAKE_BIN/ps"
 
 export R5_3_FAKE_MIGRATION_FAIL=1
 assert_failure "migration mismatch" run_preflight

@@ -13,7 +13,11 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateProposalV1,
     KnowledgeCandidateSectionV1,
+    KnowledgeCandidateSourceSuggestionV1,
+    KnowledgeCandidateSubmission,
+    KnowledgeCandidateSubmissionStatus,
 )
+from sidera_control_plane.knowledge_candidate_worker import _candidate_payload
 
 
 def _proposal(*, body: str = "The durable fact.") -> KnowledgeCandidateProposalV1:
@@ -154,3 +158,51 @@ def test_proposal_ids_are_uuid_free_from_serialized_scope() -> None:
         for value in mapping.values()
         if not isinstance(value, (list, dict))
     )
+
+
+def test_worker_task_source_uses_submission_scope_not_proposal_metadata() -> None:
+    task_id = uuid4()
+    subtask_task_id = uuid4()
+    producer_id = uuid4()
+    proposal = KnowledgeCandidateProposalV1(
+        operation="create_page",
+        target_page_id=None,
+        expected_revision_id=None,
+        expected_revision_hash=None,
+        title="Worker fact",
+        slug="worker-fact",
+        summary="A worker fact.",
+        tags=(),
+        sections=_proposal().sections,
+        source_suggestions=(
+            KnowledgeCandidateSourceSuggestionV1(
+                source_type="task",
+                label="worker task",
+                source_id=uuid4(),
+            ),
+        ),
+        artifact_refs=(),
+        evidence_refs=(),
+    )
+    submission = KnowledgeCandidateSubmission.create(
+        submission_id=uuid4(),
+        workspace_id=uuid4(),
+        producer_type="worker",
+        producer_id=producer_id,
+        proposal=proposal,
+        content_ref="worker.json",
+        content_bytes=len(proposal.canonical_bytes()),
+        status=KnowledgeCandidateSubmissionStatus.QUEUED,
+        execution_id=uuid4(),
+        worker_item_id=uuid4(),
+        task_id=task_id,
+        subtask_task_id=subtask_task_id,
+        now=datetime.now(UTC),
+    )
+
+    payload = _candidate_payload(proposal, submission, uuid4())
+    source = payload["sources"][0]
+    assert source["source_type"] == "task"
+    assert source["metadata"] == {}
+    assert payload["provenance"]["task_id"] == str(task_id)
+    assert payload["provenance"]["subtask_id"] == str(subtask_task_id)

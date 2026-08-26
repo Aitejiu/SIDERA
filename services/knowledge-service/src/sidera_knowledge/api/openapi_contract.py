@@ -59,7 +59,7 @@ _ROUTE_CONTRACTS: dict[tuple[str, str], RouteContract] = {
         "/api/v1/workspaces/{workspace_id}/knowledge/pages/{page_id}/revisions/{revision_id}",
         "get",
     ): RouteContract(
-        "knowledge_get_revision", ("knowledge",), _OWNER_MAIN_SECURITY, _DETAIL_ERRORS
+        "knowledge_get_revision", ("knowledge",), _ALL_CAPABILITY_SECURITY, _DETAIL_ERRORS
     ),
     (
         "/api/v1/workspaces/{workspace_id}/knowledge/pages/{page_id}/diff",
