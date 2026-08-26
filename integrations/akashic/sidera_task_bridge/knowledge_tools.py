@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, cast, overload
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from agent.tools.base import get_current_tool_context
@@ -63,9 +63,15 @@ class KnowledgeToolsClient(Protocol):
         correlation_id: UUID | None = None,
     ) -> KnowledgeSearchResponse: ...
 
+    @overload
     async def get_page(
-        self, page_id: UUID, *, revision_id: UUID | None = None
-    ) -> KnowledgePageDetail | KnowledgeRevisionDetail: ...
+        self, page_id: UUID, *, revision_id: None = None
+    ) -> KnowledgePageDetail: ...
+
+    @overload
+    async def get_page(
+        self, page_id: UUID, *, revision_id: UUID
+    ) -> KnowledgeRevisionDetail: ...
 
 
 class SideraKnowledgeTools:
