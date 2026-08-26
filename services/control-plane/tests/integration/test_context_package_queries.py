@@ -41,7 +41,7 @@ from sidera_control_plane.persistence.work_context_repository import (
 
 pytestmark = pytest.mark.integration
 
-NOW = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
