@@ -9,6 +9,11 @@ from agent.plugins.registry import MetadataKind, plugin_registry
 if __package__:
     from .sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
     from .sidera_task_bridge.config import TaskBridgeConfig
+    from .sidera_task_bridge.knowledge_client import (
+        KnowledgeClient,
+        KnowledgeCommandClient,
+    )
+    from .sidera_task_bridge.knowledge_tools import SideraKnowledgeTools
     from .sidera_task_bridge.notifications import (
         NotificationDelivery,
         NotificationEvaluator,
@@ -20,6 +25,11 @@ if __package__:
 else:
     from sidera_task_bridge.client import CommandDispatcher, ControlPlaneClient
     from sidera_task_bridge.config import TaskBridgeConfig
+    from sidera_task_bridge.knowledge_client import (
+        KnowledgeClient,
+        KnowledgeCommandClient,
+    )
+    from sidera_task_bridge.knowledge_tools import SideraKnowledgeTools
     from sidera_task_bridge.notifications import (
         NotificationDelivery,
         NotificationEvaluator,
@@ -28,6 +38,18 @@ else:
     from sidera_task_bridge.source_routes import SourceContextResolver
     from sidera_task_bridge.state import BridgeStateStore
     from sidera_task_bridge.tools import SideraTaskTools
+
+
+_CONTROL_PLANE_COMMAND_TYPES = frozenset(
+    {
+        "SubmitPlanningRequest",
+        "AnswerPlanningClarification",
+        "RequestProposalRevision",
+        "ConfirmPlanningProposal",
+        "RejectPlanningProposal",
+    }
+)
+_KNOWLEDGE_COMMAND_TYPES = frozenset({"SubmitKnowledgeCandidate"})
 
 
 class SideraTaskBridge(Plugin):
@@ -42,8 +64,11 @@ class SideraTaskBridge(Plugin):
 
     def __init__(self) -> None:
         self._client: ControlPlaneClient | None = None
+        self._knowledge_client: KnowledgeClient | None = None
         self._dispatcher: CommandDispatcher | None = None
+        self._knowledge_dispatcher: CommandDispatcher | None = None
         self._tools: SideraTaskTools | None = None
+        self._knowledge_tools: SideraKnowledgeTools | None = None
         self._state: BridgeStateStore | None = None
         self._runner: NotificationRunner | None = None
         self._supervisor_task: asyncio.Task[object] | None = None
@@ -54,16 +79,27 @@ class SideraTaskBridge(Plugin):
         config = self.context.config
         if not isinstance(config, TaskBridgeConfig):
             raise TypeError("SideraTaskBridge requires TaskBridgeConfig")
-        self._client = ControlPlaneClient(config)
-        self._bind_runtime_components(config, self._client)
+        client = ControlPlaneClient(config)
+        knowledge_client = KnowledgeClient(config)
+        self._client = client
+        self._knowledge_client = knowledge_client
+        self._bind_runtime_components(config, client, knowledge_client)
 
     def _bind_runtime_components(
         self,
         config: TaskBridgeConfig,
         client: ControlPlaneClient,
+        knowledge_client: KnowledgeClient,
     ) -> None:
         state = BridgeStateStore(self.context.kv_store)
-        dispatcher = CommandDispatcher(client, state)
+        dispatcher = CommandDispatcher(
+            client, state, owned_command_types=_CONTROL_PLANE_COMMAND_TYPES
+        )
+        knowledge_dispatcher = CommandDispatcher(
+            KnowledgeCommandClient(knowledge_client, config),
+            state,
+            owned_command_types=_KNOWLEDGE_COMMAND_TYPES,
+        )
         evaluator = NotificationEvaluator(config, client=client, state=state)
         delivery = NotificationDelivery(
             config,
@@ -78,7 +114,9 @@ class SideraTaskBridge(Plugin):
             delivery=delivery,
         )
         self._client = client
+        self._knowledge_client = knowledge_client
         self._dispatcher = dispatcher
+        self._knowledge_dispatcher = knowledge_dispatcher
         self._state = state
         self._runner = runner
         self._tools = SideraTaskTools(
@@ -88,6 +126,12 @@ class SideraTaskBridge(Plugin):
             state=state,
             source_resolver=SourceContextResolver(),
             session_metadata_provider=self._session_metadata,
+        )
+        self._knowledge_tools = SideraKnowledgeTools(
+            config,
+            client=knowledge_client,
+            dispatcher=knowledge_dispatcher,
+            state=state,
         )
         self._bound_kv_store = self.context.kv_store
 
@@ -102,16 +146,20 @@ class SideraTaskBridge(Plugin):
         if self._is_validation_runtime():
             return
         if self._bound_kv_store is not self.context.kv_store:
-            self._bind_runtime_components(config, client)
+            knowledge_client = self._knowledge_client
+            if knowledge_client is None:
+                raise RuntimeError("SideraTaskBridge Knowledge client is not prepared")
+            self._bind_runtime_components(config, client, knowledge_client)
         dispatcher = self._dispatcher
+        knowledge_dispatcher = self._knowledge_dispatcher
         runner = self._runner
-        if dispatcher is None or runner is None:
+        if dispatcher is None or knowledge_dispatcher is None or runner is None:
             raise RuntimeError("SideraTaskBridge must be prepared before activation")
         if self._supervisor_task is not None and not self._supervisor_task.done():
             return
         self._supervisor_stop = asyncio.Event()
         self._supervisor_task = self.context.create_task(
-            self._run_supervisor(dispatcher, runner),
+            self._run_supervisor(dispatcher, runner, knowledge_dispatcher),
             name="sidera-task-bridge-supervisor",
         )
 
@@ -128,24 +176,34 @@ class SideraTaskBridge(Plugin):
         client = self._client
         if client is not None:
             await client.close()
+        knowledge_client = self._knowledge_client
+        if knowledge_client is not None:
+            await knowledge_client.close()
         self._client = None
+        self._knowledge_client = None
         self._dispatcher = None
+        self._knowledge_dispatcher = None
         self._state = None
         self._runner = None
         self._supervisor_task = None
         self._tools = None
+        self._knowledge_tools = None
         self._bound_kv_store = None
 
     async def _run_supervisor(
         self,
         dispatcher: CommandDispatcher,
         runner: NotificationRunner,
+        knowledge_dispatcher: CommandDispatcher,
     ) -> None:
         config = self.context.config
         if not isinstance(config, TaskBridgeConfig):
             raise TypeError("SideraTaskBridge requires TaskBridgeConfig")
         while not self._supervisor_stop.is_set():
-            results = await dispatcher.recover_all()
+            results = (
+                *await dispatcher.recover_all(),
+                *await knowledge_dispatcher.recover_all(),
+            )
             if any(
                 result.status in {"unavailable", "result_unknown"}
                 for result in results
@@ -177,6 +235,12 @@ class SideraTaskBridge(Plugin):
         if self._tools is None:
             raise RuntimeError("SideraTaskBridge tools are not prepared")
         return self._tools
+
+    def _knowledge_toolset(self) -> SideraKnowledgeTools:
+        self._ensure_runtime_started()
+        if self._knowledge_tools is None:
+            raise RuntimeError("SideraKnowledgeTools are not prepared")
+        return self._knowledge_tools
 
     def _is_validation_runtime(self) -> bool:
         data_dir = getattr(self.context, "data_dir", None)
@@ -346,6 +410,87 @@ class SideraTaskBridge(Plugin):
 
         return await self._toolset().sidera_get_task_status(event, task_id)
 
+    @tool(
+        name="sidera_search_knowledge",
+        risk="read-only",
+        always_on=True,
+        search_hint="SIDERA project knowledge search reference",
+    )
+    async def sidera_search_knowledge(
+        self,
+        event: object,
+        query: str,
+        tags: list | None = None,
+        source_types: list | None = None,
+        limit: int = 20,
+    ) -> str:
+        """Search bounded SIDERA project knowledge references."""
+
+        return await self._knowledge_toolset().sidera_search_knowledge(
+            event,
+            query,
+            tags or [],
+            source_types or [],
+            limit,
+        )
+
+    @tool(
+        name="sidera_get_knowledge_page",
+        risk="read-only",
+        always_on=True,
+        search_hint="SIDERA project knowledge page reference",
+    )
+    async def sidera_get_knowledge_page(
+        self,
+        event: object,
+        page_id: str,
+        revision_id: str | None = None,
+    ) -> str:
+        """Read one SIDERA project knowledge page or exact revision."""
+
+        return await self._knowledge_toolset().sidera_get_knowledge_page(
+            event, page_id, revision_id
+        )
+
+    @tool(
+        name="sidera_submit_knowledge_candidate",
+        risk="write",
+        search_hint="SIDERA propose project knowledge for review",
+    )
+    async def sidera_submit_knowledge_candidate(
+        self,
+        event: object,
+        operation: str,
+        title: str,
+        slug: str,
+        sections: list,
+        sources: list | None = None,
+        summary: str = "",
+        tags: list | None = None,
+        relations: list | None = None,
+        target_page_id: str | None = None,
+        expected_revision_id: str | None = None,
+        expected_revision_hash: str | None = None,
+        supersedes_candidate_id: str | None = None,
+    ) -> str:
+        """Submit a SIDERA knowledge candidate for user review only."""
+
+        return await self._knowledge_toolset().sidera_submit_knowledge_candidate(
+            event,
+            operation,
+            title,
+            slug,
+            sections,
+            sources,
+            summary,
+            tags,
+            relations,
+            target_page_id,
+            expected_revision_id,
+            expected_revision_hash,
+            supersedes_candidate_id,
+        )
+
 
 def _patch_host_tool_schemas() -> None:
     """Restore schemas lost by Akashic's future-annotation loader."""
@@ -359,6 +504,16 @@ def _patch_host_tool_schemas() -> None:
         },
         "sidera_answer_clarifications": {
             "answers": {"type": "object"},
+        },
+        "sidera_search_knowledge": {
+            "tags": {"type": "string"},
+            "source_types": {"type": "string"},
+        },
+        "sidera_submit_knowledge_candidate": {
+            "sections": {"type": "object"},
+            "sources": {"type": "object"},
+            "tags": {"type": "string"},
+            "relations": {"type": "object"},
         },
     }
     scalar_types = {
@@ -376,6 +531,12 @@ def _patch_host_tool_schemas() -> None:
             "request_version": "number",
             "proposal_revision": "number",
         },
+        "sidera_search_knowledge": {"limit": "number"},
+    }
+    numeric_bounds = {
+        "sidera_search_knowledge": {
+            "limit": {"minimum": 1, "maximum": 20},
+        },
     }
     for metadata in plugin_registry.get_handlers_by_module_path(__name__):
         if metadata.kind is not MetadataKind.TOOL:
@@ -392,6 +553,9 @@ def _patch_host_tool_schemas() -> None:
             property_schema = properties.get(name)
             if isinstance(property_schema, dict):
                 property_schema["type"] = json_type
+                property_schema.update(
+                    (numeric_bounds.get(metadata.tool_name or "") or {}).get(name, {})
+                )
         for name, item_schema in (fields or {}).items():
             property_schema = properties.get(name)
             if isinstance(property_schema, dict):

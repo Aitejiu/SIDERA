@@ -158,6 +158,9 @@ def test_submit_schema_exposes_only_business_fields() -> None:
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
+        "sidera_search_knowledge",
+        "sidera_get_knowledge_page",
+        "sidera_submit_knowledge_candidate",
     }
     forbidden = {
         "workspace_id",

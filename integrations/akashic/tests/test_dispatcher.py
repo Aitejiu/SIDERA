@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -8,11 +9,15 @@ import httpx
 from sidera_task_bridge.client import (
     CommandDispatcher,
     CommandEnvelope,
+    CommandExecution,
     CommandIntent,
+    CommandResponse,
+    CommandStatus,
     ControlPlaneClient,
 )
 from sidera_task_bridge.config import TaskBridgeConfig
-from sidera_task_bridge.state import BridgeStateStore
+from sidera_task_bridge.contracts import JsonValue
+from sidera_task_bridge.state import BridgeStateStore, OutboundCommand
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -349,5 +354,87 @@ def test_new_intent_uses_one_uuid_for_command_and_correlation() -> None:
         assert calls == 1
         assert built.command_id == built.correlation_id
         assert built.idempotency_key.endswith(str(built.command_id))
+
+    run(scenario())
+
+
+def test_owned_command_types_keep_recovery_queues_isolated() -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, UUID]] = []
+
+        def build_request_json(
+            self, envelope: CommandEnvelope
+        ) -> dict[str, JsonValue]:
+            return envelope.model_dump(mode="json")
+
+        def build_intent_request_json(
+            self, intent: CommandIntent
+        ) -> dict[str, JsonValue]:
+            return intent.model_dump(mode="json")
+
+        async def execute_command_json(
+            self, request_json: dict[str, Any], command_id: UUID
+        ) -> CommandExecution:
+            self.calls.append(("POST", command_id))
+            return CommandExecution(
+                status="applied",
+                command_id=command_id,
+                result=CommandResponse(
+                    command_id=command_id,
+                    aggregate_id=UUID("00000000-0000-0000-0000-000000000020"),
+                    aggregate_version=1,
+                    event_ids=(),
+                    data={},
+                ),
+            )
+
+        async def get_command_status(self, command_id: UUID) -> CommandStatus:
+            self.calls.append(("GET", command_id))
+            return CommandStatus(
+                command_id=command_id,
+                status="pending",
+                result=None,
+                error_code=None,
+            )
+
+    async def scenario() -> None:
+        store = BridgeStateStore(MemoryKV())
+        created_at = datetime.now(UTC)
+        cp_item = envelope(
+            command_id="00000000-0000-0000-0000-000000000070",
+            correlation_id="00000000-0000-0000-0000-000000000071",
+        )
+        knowledge_item = cp_item.model_copy(
+            update={
+                "command_id": UUID("00000000-0000-0000-0000-000000000072"),
+                "command_type": "SubmitKnowledgeCandidate",
+                "correlation_id": UUID("00000000-0000-0000-0000-000000000073"),
+            }
+        )
+        for item in (cp_item, knowledge_item):
+            await store.reserve(
+                OutboundCommand(
+                    command_id=item.command_id,
+                    resource_lock_key=f"resource:{item.command_id}",
+                    request_json=item.model_dump(mode="json"),
+                    created_at=created_at,
+                    last_attempted_at=created_at,
+                    attempt_count=0,
+                )
+            )
+
+        client = RecordingClient()
+        dispatcher = CommandDispatcher(
+            client,
+            store,
+            owned_command_types={"SubmitPlanningRequest"},
+        )
+        results = await dispatcher.recover_all()
+
+        assert [item.command_id for item in results] == [cp_item.command_id]
+        assert client.calls == [("GET", cp_item.command_id), ("POST", cp_item.command_id)]
+        state = await store.snapshot()
+        assert str(knowledge_item.command_id) in state.unresolved_commands
 
     run(scenario())

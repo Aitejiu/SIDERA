@@ -57,7 +57,7 @@ class FakeContext:
         return task
 
 
-def test_plugin_declares_exact_seven_tools_and_risks() -> None:
+def test_plugin_declares_exact_ten_tools_and_risks() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 
     metadata = [
@@ -65,7 +65,7 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
-    assert len(metadata) == 7
+    assert len(metadata) == 10
     assert {item.tool_name for item in metadata} == {
         "sidera_submit_brief",
         "sidera_get_planning_status",
@@ -74,8 +74,16 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
         "sidera_get_task_status",
+        "sidera_search_knowledge",
+        "sidera_get_knowledge_page",
+        "sidera_submit_knowledge_candidate",
     }
-    read_only = {"sidera_get_planning_status", "sidera_get_task_status"}
+    read_only = {
+        "sidera_get_planning_status",
+        "sidera_get_task_status",
+        "sidera_search_knowledge",
+        "sidera_get_knowledge_page",
+    }
     for item in metadata:
         assert item.tool_risk == ("read-only" if item.tool_name in read_only else "write")
         assert item.tool_schema is not None
@@ -86,6 +94,8 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         "sidera_submit_brief",
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_search_knowledge",
+        "sidera_get_knowledge_page",
     }
     hints = {
         item.tool_name for item in metadata if item.tool_search_hint is not None
@@ -95,7 +105,58 @@ def test_plugin_declares_exact_seven_tools_and_risks() -> None:
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
+        "sidera_search_knowledge",
+        "sidera_get_knowledge_page",
+        "sidera_submit_knowledge_candidate",
     }
+
+
+def test_knowledge_tool_schemas_expose_business_fields_only() -> None:
+    from agent.plugins.registry import MetadataKind, plugin_registry
+
+    metadata = {
+        item.tool_name: item
+        for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
+        if item.kind is MetadataKind.TOOL
+    }
+    forbidden = {
+        "workspace_id",
+        "actor",
+        "token",
+        "authorization",
+        "command_id",
+        "idempotency_key",
+        "correlation_id",
+        "source_route",
+    }
+    for name in (
+        "sidera_search_knowledge",
+        "sidera_get_knowledge_page",
+        "sidera_submit_knowledge_candidate",
+    ):
+        schema = metadata[name].tool_schema
+        assert schema is not None
+        assert not forbidden.intersection(schema["properties"])
+
+    search = metadata["sidera_search_knowledge"].tool_schema
+    assert search is not None
+    assert search["properties"]["tags"]["type"] == "array"
+    assert search["properties"]["source_types"]["type"] == "array"
+    assert search["properties"]["limit"] == {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 20,
+    }
+
+    get_page = metadata["sidera_get_knowledge_page"].tool_schema
+    assert get_page is not None
+    assert get_page["properties"]["page_id"]["type"] == "string"
+    assert "revision_id" not in get_page["required"]
+
+    submit = metadata["sidera_submit_knowledge_candidate"].tool_schema
+    assert submit is not None
+    assert submit["properties"]["sections"]["type"] == "array"
+    assert submit["properties"]["sources"]["type"] == "array"
 
 
 def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:
@@ -246,8 +307,11 @@ def test_prepare_constructs_bridge_without_starting_recovery_or_network() -> Non
         await bridge.prepare()
 
         assert bridge._client is not None
+        assert bridge._knowledge_client is not None
         assert bridge._dispatcher is not None
+        assert bridge._knowledge_dispatcher is not None
         assert bridge._tools is not None
+        assert bridge._knowledge_tools is not None
         assert context.tasks == []
         assert context.kv_store.writes == 0
         await bridge.terminate()

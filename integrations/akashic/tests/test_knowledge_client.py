@@ -8,16 +8,19 @@ from uuid import UUID
 import httpx
 import pytest
 
+from sidera_task_bridge.client import CommandDispatcher, CommandIntent
 from sidera_task_bridge.config import TaskBridgeConfig
 from sidera_task_bridge.knowledge_client import (
     KnowledgeClient,
     KnowledgeClientError,
+    KnowledgeCommandClient,
     KnowledgeCommandResultUnknown,
 )
 from sidera_task_bridge.knowledge_contracts import (
     KnowledgePageDetail,
     KnowledgeRevisionDetail,
 )
+from sidera_task_bridge.state import BridgeStateStore
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -42,6 +45,19 @@ def make_config(**overrides: Any) -> TaskBridgeConfig:
     }
     values.update(overrides)
     return TaskBridgeConfig.model_validate(values)
+
+
+class MemoryKV:
+    def __init__(self) -> None:
+        self.value: object = None
+
+    def get(self, key: str, default: object = None) -> object:
+        del key
+        return self.value if self.value is not None else default
+
+    def set(self, key: str, value: object) -> None:
+        del key
+        self.value = value
 
 
 def revision_summary() -> dict[str, Any]:
@@ -435,5 +451,102 @@ def test_unconfigured_knowledge_client_is_explicitly_unavailable(
 
         assert error.value.code == "knowledge_not_configured"
         assert error.value.outcome == "unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_knowledge_command_adapter_reuses_dispatcher_and_settles_candidate() -> None:
+    async def scenario() -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "status": "applied",
+                    "command_id": seen["body"]["command_id"],
+                    "result": {
+                        "candidate_id": str(CANDIDATE_ID),
+                        "status": "pending",
+                    },
+                },
+            )
+
+        config = make_config()
+        client = KnowledgeClient(config, transport=httpx.MockTransport(handler))
+        dispatcher = CommandDispatcher(
+            KnowledgeCommandClient(client, config),
+            BridgeStateStore(MemoryKV()),
+            owned_command_types={"SubmitKnowledgeCandidate"},
+        )
+        result = await dispatcher.execute(
+            f"knowledge:candidate:{CANDIDATE_ID}",
+            CommandIntent(
+                command_type="SubmitKnowledgeCandidate",
+                target_type="knowledge_candidate",
+                target_id=CANDIDATE_ID,
+                expected_version=None,
+                payload=candidate_payload(),
+            ),
+        )
+        await client.close()
+
+        assert result.status == "applied"
+        assert seen["body"]["actor"] == {
+            "type": "main_agent",
+            "id": "akashic-task-bridge",
+        }
+        assert seen["body"]["payload"] == candidate_payload()
+
+    asyncio.run(scenario())
+
+
+def test_knowledge_command_adapter_recovers_unknown_write_by_exact_command_id() -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.method)
+            command_id = request.url.path.rsplit("/", 1)[-1]
+            if request.method == "POST":
+                raise httpx.ReadTimeout("write wire detail", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "command_id": command_id,
+                    "workspace_id": str(WORKSPACE_ID),
+                    "status": "applied",
+                    "result": {
+                        "candidate_id": str(CANDIDATE_ID),
+                        "status": "pending",
+                    },
+                    "error_code": None,
+                },
+            )
+
+        config = make_config()
+        client = KnowledgeClient(config, transport=httpx.MockTransport(handler))
+        store = BridgeStateStore(MemoryKV())
+        dispatcher = CommandDispatcher(
+            KnowledgeCommandClient(client, config),
+            store,
+            owned_command_types={"SubmitKnowledgeCandidate"},
+        )
+        result = await dispatcher.execute(
+            f"knowledge:candidate:{CANDIDATE_ID}",
+            CommandIntent(
+                command_type="SubmitKnowledgeCandidate",
+                target_type="knowledge_candidate",
+                target_id=CANDIDATE_ID,
+                expected_version=None,
+                payload=candidate_payload(),
+            ),
+        )
+        await client.close()
+
+        assert result.status == "applied"
+        assert calls == ["POST", "GET"]
+        assert (await store.snapshot()).unresolved_commands == {}
 
     asyncio.run(scenario())

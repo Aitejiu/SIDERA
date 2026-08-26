@@ -129,3 +129,79 @@ class KnowledgeCommandStatus(KnowledgeModel):
     status: Literal["pending", "applied", "rejected"]
     result: KnowledgeCommandResult | None
     error_code: str | None
+
+
+class KnowledgeCandidateSectionPayload(KnowledgeModel):
+    section_key: str = Field(min_length=1, max_length=255)
+    heading: str = Field(min_length=1, max_length=500)
+    summary: str = Field(default="", max_length=16_384)
+    body_markdown: str = Field(min_length=1, max_length=131_072)
+    ordinal: int = Field(ge=0)
+
+
+class KnowledgeCandidateRelationPayload(KnowledgeModel):
+    relation_key: str = Field(min_length=1, max_length=255)
+    relation_kind: Literal[
+        "relates_to",
+        "depends_on",
+        "supersedes",
+        "derived_from",
+        "implements",
+    ]
+    target_page_id: UUID
+    target_revision_id: UUID | None = None
+
+
+class KnowledgeCandidateSourcePayload(KnowledgeModel):
+    source_id: UUID | None = None
+    source_type: Literal[
+        "manual",
+        "markdown_file",
+        "task",
+        "artifact",
+        "evidence",
+        "external_url",
+    ]
+    label: str = Field(min_length=1, max_length=500)
+    uri: str | None = None
+    workspace_relative_path: str | None = None
+    git_revision: str | None = None
+    digest: str | None = Field(default=None, min_length=64, max_length=64)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class KnowledgeCandidateProvenancePayload(KnowledgeModel):
+    producer_type: str | None = Field(default=None, max_length=64)
+    producer_id: str | None = Field(default=None, max_length=255)
+    task_id: UUID | None = None
+    subtask_id: UUID | None = None
+    worker_item_id: UUID | None = None
+    execution_id: UUID | None = None
+    artifact_id: UUID | None = None
+    evidence_id: UUID | None = None
+
+
+class KnowledgeCandidatePayload(KnowledgeModel):
+    candidate_schema_version: Literal[1]
+    candidate_id: UUID
+    operation: Literal["create_page", "revise_page"]
+    target_page_id: UUID | None = None
+    expected_revision_id: UUID | None = None
+    expected_revision_hash: str | None = None
+    title: str = Field(min_length=1, max_length=500)
+    slug: str = Field(min_length=1, max_length=255)
+    summary: str = Field(default="", max_length=65_536)
+    tags: list[str] = Field(default_factory=list, max_length=64)
+    sections: list[KnowledgeCandidateSectionPayload] = Field(
+        min_length=1, max_length=128
+    )
+    relations: list[KnowledgeCandidateRelationPayload] = Field(
+        default_factory=list, max_length=128
+    )
+    sources: list[KnowledgeCandidateSourcePayload] = Field(
+        default_factory=list, max_length=128
+    )
+    provenance: KnowledgeCandidateProvenancePayload = Field(
+        default_factory=KnowledgeCandidateProvenancePayload
+    )
+    supersedes_candidate_id: UUID | None = None

@@ -8,6 +8,16 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from .client import (
+    CommandEnvelope,
+    CommandExecution,
+    CommandIntent,
+    CommandResponse,
+    CommandResultUnknown,
+    CommandStatus,
+    ControlPlaneRejected,
+    TransportUnavailable,
+)
 from .config import TaskBridgeConfig
 from .contracts import JsonValue, ToolOutcome
 from .knowledge_contracts import (
@@ -52,9 +62,9 @@ class KnowledgeClientError(RuntimeError):
         status_code: int | None = None,
     ) -> None:
         super().__init__(code)
-        self.code = code
-        self.outcome = outcome
-        self.status_code = status_code
+        self.code: str = code
+        self.outcome: ToolOutcome = outcome
+        self.status_code: int | None = status_code
 
 
 class KnowledgeCommandResultUnknown(KnowledgeClientError):
@@ -327,3 +337,194 @@ class KnowledgeClient:
         if code in _UNAVAILABLE_CODES or status_code in {408, 425, 429} or status_code >= 500:
             return "unavailable"
         return "failed"
+
+
+class KnowledgeCommandClient:
+    """Adapt Knowledge commands to the bridge's durable CommandDispatcher."""
+
+    def __init__(self, client: KnowledgeClient, config: TaskBridgeConfig) -> None:
+        self._client = client
+        self._config = config
+
+    def build_request_json(
+        self, envelope: CommandEnvelope
+    ) -> dict[str, JsonValue]:
+        if envelope.command_type != "SubmitKnowledgeCandidate":
+            raise ValueError("unsupported knowledge command")
+        return self._build_request(
+            command_id=envelope.command_id,
+            command_type=envelope.command_type,
+            target_type=envelope.target_type,
+            target_id=envelope.target_id,
+            expected_version=envelope.expected_version,
+            idempotency_key=envelope.idempotency_key,
+            correlation_id=envelope.correlation_id,
+            payload=envelope.payload,
+        )
+
+    def build_intent_request_json(
+        self, intent: CommandIntent
+    ) -> dict[str, JsonValue]:
+        if intent.command_type != "SubmitKnowledgeCandidate":
+            raise ValueError("unsupported knowledge command")
+        return self._build_request(
+            command_id=UUID(int=0),
+            command_type=intent.command_type,
+            target_type=intent.target_type,
+            target_id=intent.target_id,
+            expected_version=intent.expected_version,
+            idempotency_key="",
+            correlation_id=UUID(int=0),
+            payload=intent.payload,
+        )
+
+    async def execute_command_json(
+        self, request_json: dict[str, JsonValue], command_id: UUID
+    ) -> CommandExecution:
+        try:
+            payload = self._request_payload(request_json)
+            correlation_id = self._request_uuid(request_json, "correlation_id")
+            idempotency_key = self._request_text(request_json, "idempotency_key")
+            execution = await self._client.submit_candidate(
+                command_id,
+                payload,
+                idempotency_key=idempotency_key,
+                correlation_id=correlation_id,
+            )
+        except KnowledgeCommandResultUnknown as exc:
+            raise CommandResultUnknown(exc.command_id) from None
+        except KnowledgeClientError as exc:
+            self._raise_dispatch_error(exc, command_id)
+        return self._to_execution(execution, command_id, payload)
+
+    async def get_command_status(self, command_id: UUID) -> CommandStatus:
+        try:
+            status = await self._client.get_command_status(command_id)
+        except KnowledgeClientError as exc:
+            self._raise_dispatch_error(exc, command_id)
+        return self._to_status(status)
+
+    def _build_request(
+        self,
+        *,
+        command_id: UUID,
+        command_type: str,
+        target_type: str,
+        target_id: UUID | None,
+        expected_version: int | None,
+        idempotency_key: str,
+        correlation_id: UUID,
+        payload: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        candidate_id = KnowledgeClient._candidate_id(payload)
+        if target_id != candidate_id:
+            raise ValueError("knowledge candidate target does not match payload")
+        return {
+            "command_id": str(command_id),
+            "workspace_id": str(self._config.workspace_id),
+            "command_type": command_type,
+            "target_type": target_type,
+            "target_id": str(candidate_id),
+            "actor": {"type": "main_agent", "id": self._config.actor_id},
+            "expected_version": expected_version,
+            "idempotency_key": idempotency_key,
+            "correlation_id": str(correlation_id),
+            "payload": dict(payload),
+        }
+
+    @staticmethod
+    def _request_payload(
+        request_json: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        payload = request_json.get("payload")
+        if not isinstance(payload, dict):
+            raise ControlPlaneRejected("invalid_knowledge_command", {})
+        return cast(dict[str, JsonValue], payload)
+
+    @staticmethod
+    def _request_uuid(request_json: Mapping[str, JsonValue], key: str) -> UUID:
+        value = request_json.get(key)
+        if not isinstance(value, str):
+            raise ControlPlaneRejected("invalid_knowledge_command", {})
+        try:
+            return UUID(value)
+        except ValueError:
+            raise ControlPlaneRejected("invalid_knowledge_command", {}) from None
+
+    @staticmethod
+    def _request_text(request_json: Mapping[str, JsonValue], key: str) -> str:
+        value = request_json.get(key)
+        if not isinstance(value, str) or not value:
+            raise ControlPlaneRejected("invalid_knowledge_command", {})
+        return value
+
+    @staticmethod
+    def _to_execution(
+        execution: KnowledgeCommandExecution,
+        command_id: UUID,
+        payload: Mapping[str, JsonValue],
+    ) -> CommandExecution:
+        result = (
+            KnowledgeCommandClient._to_response(command_id, execution.result)
+            if execution.result is not None
+            else None
+        )
+        if result is None and execution.status == "applied":
+            candidate_id = KnowledgeClient._candidate_id(payload)
+            result = KnowledgeCommandClient._empty_response(command_id, candidate_id)
+        return CommandExecution(
+            status=execution.status,
+            command_id=command_id,
+            result=result,
+            error_code=execution.error_code,
+        )
+
+    @staticmethod
+    def _to_status(status: KnowledgeCommandStatus) -> CommandStatus:
+        result = (
+            KnowledgeCommandClient._to_response(status.command_id, status.result)
+            if status.result is not None
+            else None
+        )
+        return CommandStatus(
+            command_id=status.command_id,
+            status=status.status,
+            result=result,
+            error_code=status.error_code,
+        )
+
+    @staticmethod
+    def _to_response(
+        command_id: UUID,
+        result: Any,
+    ) -> CommandResponse:
+        candidate_id = result.candidate_id
+        return KnowledgeCommandClient._response(
+            command_id, candidate_id, result.status
+        )
+
+    @staticmethod
+    def _empty_response(command_id: UUID, candidate_id: UUID) -> CommandResponse:
+        return KnowledgeCommandClient._response(command_id, candidate_id, "pending")
+
+    @staticmethod
+    def _response(
+        command_id: UUID, candidate_id: UUID, status: str
+    ) -> CommandResponse:
+        return CommandResponse(
+            command_id=command_id,
+            aggregate_id=candidate_id,
+            aggregate_version=1,
+            event_ids=(),
+            data={"candidate_id": str(candidate_id), "status": status},
+        )
+
+    @staticmethod
+    def _raise_dispatch_error(
+        error: KnowledgeClientError, command_id: UUID
+    ) -> NoReturn:
+        if error.outcome == "unavailable":
+            raise TransportUnavailable("knowledge service is unavailable") from None
+        if error.outcome == "result_unknown":
+            raise CommandResultUnknown(command_id) from None
+        raise ControlPlaneRejected(error.code, {}) from None

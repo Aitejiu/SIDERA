@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, NoReturn, Protocol, cast
@@ -403,11 +403,17 @@ class CommandDispatcher:
         *,
         uuid_factory: Callable[[], UUID] = uuid4,
         clock: Callable[[], datetime] | None = None,
+        owned_command_types: Collection[str] | None = None,
     ) -> None:
         self._client = client
         self._state = state
         self._uuid_factory = uuid_factory
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._owned_command_types = (
+            frozenset(owned_command_types)
+            if owned_command_types is not None
+            else None
+        )
 
     def new_envelope(self, intent: CommandIntent) -> CommandEnvelope:
         command_id = self._uuid_factory()
@@ -455,6 +461,8 @@ class CommandDispatcher:
 
         results: list[DispatchResult] = []
         for command in await self._state.list_unresolved():
+            if not self._owns(command.request_json):
+                continue
             try:
                 status = await self._client.get_command_status(command.command_id)
             except TransportUnavailable:
@@ -480,10 +488,21 @@ class CommandDispatcher:
     ) -> tuple[OutboundCommand | None, bool]:
         request_json = self._client.build_intent_request_json(intent)
         for existing in await self._state.list_resource(resource_lock_key):
+            if not self._owns(existing.request_json):
+                continue
             if same_logical_request(existing.request_json, request_json):
                 return existing, True
             return existing, False
         return None, False
+
+    def _owns(self, request_json: Mapping[str, JsonValue]) -> bool:
+        if self._owned_command_types is None:
+            return True
+        command_type = request_json.get("command_type")
+        return (
+            isinstance(command_type, str)
+            and command_type in self._owned_command_types
+        )
 
     def _to_outbound(
         self, resource_lock_key: str, command: CommandEnvelope
