@@ -10,6 +10,7 @@ public CP API does not register worker module definitions yet.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
+from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateProposalV1,
@@ -33,6 +35,7 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateSubmissionService,
     KnowledgeCandidateSubmissionStatus,
 )
+from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.context_packages import (
     ContextBudgetV1,
     ContextConsumerType,
@@ -66,6 +69,9 @@ from sidera_control_plane.domain.planning_profiles import (
 )
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
+from sidera_control_plane.persistence.artifact_content_store import (
+    LocalArtifactContentStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     CommandModel,
@@ -97,6 +103,8 @@ ALLOWED_ENV_KEYS = frozenset(
         "SIDERA_WEB_URL",
         "SIDERA_CONTEXT_PACKAGE_CUTOVER_AT",
         "SIDERA_KNOWLEDGE_CANDIDATE_SPOOL_DIR",
+        "SIDERA_ASSIGNMENT_LEASE_SECONDS",
+        "SIDERA_ASSIGNMENT_LEASE_RENEW_INTERVAL_SECONDS",
         "SIDERA_AKASHIC_ENDPOINT",
         "SIDERA_AKASHIC_WORKSPACE_TOKEN",
         "SIDERA_AKASHIC_WORKSPACE",
@@ -199,6 +207,10 @@ class RunnerConfig:
     deadline_seconds: float
     poll_interval_seconds: float
     run_id: UUID
+    opencode_executable: str
+    opencode_expected_version: str | None
+    planning_profile_id: UUID | None
+    planning_profile_version: int | None
 
 
 class JsonHttpClient:
@@ -256,6 +268,126 @@ class JsonHttpClient:
         ):
             raise GateFailure(stage, "invalid_json_object")
         return response.status_code, cast(dict[str, Any] | list[Any], document)
+
+
+def build_real_evidence_report(
+    *,
+    run_marker: str,
+    workspace_id: UUID,
+    task_id: UUID,
+    execution_id: UUID,
+    session_id: UUID,
+    worker_item_id: UUID,
+    worker_id: UUID,
+    lease_id: UUID,
+    fencing_token: int,
+    execution_status: str,
+    session_status: str,
+    trace_event_counts: Mapping[str, int],
+    trace_last_sequence: int,
+    workspace_ref: str,
+    repository_revision: str,
+    provider: str,
+    model: str,
+    interface_version: str,
+    config_version: int,
+    planner_provider: str,
+    planner_model: str,
+    planner_interface_version: str,
+    planner_config_version: int,
+    workspace_provider: str,
+    workspace_interface_version: str,
+    workspace_config_version: int,
+    opencode_version: str,
+    planning_profile_id: UUID | None,
+    planning_profile_version: int | None,
+) -> bytes:
+    """Build an artifact from allowlisted facts, never from raw runtime payloads."""
+
+    marker = _required_text(run_marker, "run_marker")
+    revision = _required_text(repository_revision, "repository_revision")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("repository_revision must be a lowercase Git SHA")
+    counts: dict[str, int] = {}
+    for event_type, count in sorted(trace_event_counts.items()):
+        clean_type = _required_text(event_type, "trace event type")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("trace event counts must be non-negative integers")
+        counts[clean_type] = count
+    if not isinstance(trace_last_sequence, int) or isinstance(trace_last_sequence, bool):
+        raise TypeError("trace_last_sequence must be an integer")
+    if trace_last_sequence < 0 or sum(counts.values()) != trace_last_sequence:
+        raise ValueError("trace sequence count is inconsistent")
+
+    document = {
+        "schema_version": 1,
+        "run_marker": marker,
+        "scope": {
+            "workspace_id": str(workspace_id),
+            "task_id": str(task_id),
+            "worker_item_id": str(worker_item_id),
+            "execution_id": str(execution_id),
+            "session_id": str(session_id),
+        },
+        "binding": {
+            "worker_id": str(worker_id),
+            "lease_id": str(lease_id),
+            "fencing_token": _positive_int(fencing_token, "fencing_token"),
+        },
+        "execution": {
+            "status": _required_text(execution_status, "execution_status"),
+            "session_status": _required_text(session_status, "session_status"),
+        },
+        "trace": {
+            "event_count": trace_last_sequence,
+            "event_type_counts": counts,
+            "last_sequence": trace_last_sequence,
+        },
+        "workspace": {
+            "ref": _required_text(workspace_ref, "workspace_ref"),
+            "repository_clean": True,
+            "repository_revision": revision,
+        },
+        "runtime": {
+            "opencode_version": _required_text(opencode_version, "opencode_version"),
+            "planner": {
+                "config_version": _positive_int(
+                    planner_config_version, "planner_config_version"
+                ),
+                "interface_version": _required_text(
+                    planner_interface_version, "planner_interface_version"
+                ),
+                "model": _required_text(planner_model, "planner_model"),
+                "provider": _required_text(planner_provider, "planner_provider"),
+            },
+            "worker": {
+                "config_version": _positive_int(config_version, "config_version"),
+                "interface_version": _required_text(
+                    interface_version, "interface_version"
+                ),
+                "model": _required_text(model, "model"),
+                "provider": _required_text(provider, "provider"),
+            },
+            "workspace_provider": {
+                "config_version": _positive_int(
+                    workspace_config_version, "workspace_config_version"
+                ),
+                "interface_version": _required_text(
+                    workspace_interface_version, "workspace_interface_version"
+                ),
+                "provider": _required_text(
+                    workspace_provider, "workspace_provider"
+                ),
+            },
+            "planning_profile": {
+                "id": str(planning_profile_id) if planning_profile_id else None,
+                "version": planning_profile_version,
+            },
+        },
+    }
+    return json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
 
 
 class VerticalLoopRunner:
@@ -603,6 +735,380 @@ class VerticalLoopRunner:
                 "status": candidate["status"],
             },
         }
+
+    def record_real_execution_evidence(
+        self,
+        *,
+        task_id: UUID,
+        execution_id: UUID,
+        session_id: UUID | None,
+        acceptance_ref: str,
+        run_marker: str,
+        repository_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Register a redacted report after rechecking a real execution."""
+
+        task = self._cp_get(
+            f"/api/v1/tasks/{task_id}",
+            params={"workspace_id": str(self.config.workspace_id)},
+            stage="real_evidence_task",
+        )
+        criteria = tuple(
+            _required_text(item, "task.acceptance_criteria.item")
+            for item in _sequence(task.get("acceptance_criteria"), "task.acceptance_criteria")
+        )
+        acceptance = _required_text(acceptance_ref, "acceptance_ref")
+        if acceptance not in criteria:
+            raise GateFailure("real_evidence_task", "acceptance_ref_not_declared")
+
+        execution = self._cp_get(
+            f"/api/v1/executions/{execution_id}",
+            params={"workspace_id": str(self.config.workspace_id)},
+            stage="real_evidence_execution",
+        )
+        if execution.get("task_id") != str(task_id):
+            raise GateFailure("real_evidence_execution", "execution_task_mismatch")
+        if execution.get("status") != "succeeded":
+            raise GateFailure("real_evidence_execution", "execution_not_succeeded")
+
+        sessions_doc = self._cp_get(
+            "/api/v1/gateway/sessions",
+            params={
+                "workspace_id": str(self.config.workspace_id),
+                "execution_id": str(execution_id),
+                "limit": "50",
+            },
+            stage="real_evidence_sessions",
+        )
+        session_items = [
+            _mapping(item, "real_evidence.session")
+            for item in _sequence(sessions_doc.get("items"), "real_evidence.sessions")
+        ]
+        if session_id is None:
+            if len(session_items) != 1:
+                raise GateFailure("real_evidence_sessions", "session_not_unique")
+            selected_session = session_items[0]
+        else:
+            selected_session = next(
+                (
+                    item
+                    for item in session_items
+                    if item.get("id") == str(session_id)
+                ),
+                None,
+            )
+            if selected_session is None:
+                raise GateFailure("real_evidence_sessions", "session_not_found")
+        selected_session_id = _as_uuid(
+            selected_session.get("id"), "real_evidence.session.id"
+        )
+        if selected_session.get("status") != "closed":
+            raise GateFailure("real_evidence_sessions", "session_not_closed")
+        if selected_session.get("execution_id") != str(execution_id):
+            raise GateFailure("real_evidence_sessions", "session_execution_mismatch")
+
+        trace = self._real_trace_summary(execution_id, selected_session_id)
+        binding = self._cp_get(
+            f"/api/v1/gateway/executions/{execution_id}/binding",
+            params={"workspace_id": str(self.config.workspace_id)},
+            stage="real_evidence_binding",
+        )
+        worker_id = _as_uuid(binding.get("worker_id"), "real_evidence.worker_id")
+        worker_item_id = _as_uuid(
+            execution.get("worker_item_id"), "real_evidence.worker_item_id"
+        )
+        lease_id = _as_uuid(binding.get("lease_id"), "real_evidence.lease_id")
+        fencing_token = _positive_int(
+            binding.get("fencing_token"), "real_evidence.fencing_token"
+        )
+        if selected_session.get("worker_id") != str(worker_id):
+            raise GateFailure("real_evidence_binding", "session_worker_mismatch")
+
+        runtime = self._real_runtime_facts(binding)
+        repository = repository_path or (
+            Path(__file__).resolve().parents[1]
+            / ".sidera"
+            / "workspaces"
+            / str(execution_id)
+        )
+        repository_revision = self._real_repository_revision(repository)
+        opencode_version = self._real_opencode_version(runtime["worker"]["executable"])
+        workspace_ref = _required_text(
+            selected_session.get("workspace_ref"), "real_evidence.workspace_ref"
+        )
+        report = build_real_evidence_report(
+            run_marker=run_marker,
+            workspace_id=self.config.workspace_id,
+            task_id=task_id,
+            execution_id=execution_id,
+            session_id=selected_session_id,
+            worker_item_id=worker_item_id,
+            worker_id=worker_id,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            execution_status=_required_text(
+                execution.get("status"), "real_evidence.execution_status"
+            ),
+            session_status=_required_text(
+                selected_session.get("status"), "real_evidence.session_status"
+            ),
+            trace_event_counts=trace["event_type_counts"],
+            trace_last_sequence=trace["last_sequence"],
+            workspace_ref=workspace_ref,
+            repository_revision=repository_revision,
+            provider=runtime["worker"]["provider"],
+            model=runtime["worker"]["model"],
+            interface_version=runtime["worker"]["interface_version"],
+            config_version=runtime["worker"]["config_version"],
+            planner_provider=runtime["planner"]["provider"],
+            planner_model=runtime["planner"]["model"],
+            planner_interface_version=runtime["planner"]["interface_version"],
+            planner_config_version=runtime["planner"]["config_version"],
+            workspace_provider=runtime["workspace"]["provider"],
+            workspace_interface_version=runtime["workspace"]["interface_version"],
+            workspace_config_version=runtime["workspace"]["config_version"],
+            opencode_version=opencode_version,
+            planning_profile_id=runtime["planning_profile"]["id"],
+            planning_profile_version=runtime["planning_profile"]["version"],
+        )
+        content_hash = hashlib.sha256(report).hexdigest()
+        artifact_store = LocalArtifactContentStore(
+            Path(__file__).resolve().parents[1] / ".sidera" / "artifacts"
+        )
+        storage_ref = artifact_store.put(
+            self.config.workspace_id,
+            execution_id,
+            content_hash,
+            report,
+        )
+        artifact_candidate = ArtifactCandidate(
+            artifact_type=ArtifactType.REPORT,
+            storage_ref=storage_ref,
+            content_hash=content_hash,
+            size_bytes=len(report),
+            media_type="application/json",
+            provenance={
+                "producer": "r5-3-5-gate-verifier",
+                "acceptance_criterion_refs": [acceptance],
+                "conclusion": (
+                    "The real OpenCode execution succeeded with a closed session, "
+                    "a contiguous trace, and a clean Git worktree."
+                ),
+                "environment_ref": workspace_ref,
+                "run_marker": _required_text(run_marker, "run_marker"),
+            },
+        )
+        registration = ArtifactRegistry(
+            lambda: SqlAlchemyUnitOfWork(self.database)
+        ).register(
+            workspace_id=self.config.workspace_id,
+            task_id=task_id,
+            execution_id=execution_id,
+            session_id=selected_session_id,
+            candidates=(artifact_candidate,),
+            acceptance_criteria=criteria,
+            producer="r5-3-5-gate-verifier",
+            environment_ref=workspace_ref,
+        )
+        if len(registration.artifacts) != 1 or len(registration.evidence_claims) != 1:
+            raise GateFailure("real_evidence_register", "registration_incomplete")
+        artifact = registration.artifacts[0]
+        claim = registration.evidence_claims[0]
+        return {
+            "status": "recorded",
+            "task_id": str(task_id),
+            "execution_id": str(execution_id),
+            "session_id": str(selected_session_id),
+            "artifact_id": str(artifact.id),
+            "evidence_id": str(claim.id),
+            "content_hash": content_hash,
+            "size_bytes": len(report),
+            "acceptance_ref": acceptance,
+            "trace_event_count": trace["event_count"],
+            "trace_last_sequence": trace["last_sequence"],
+            "provider": runtime["worker"]["provider"],
+            "model": runtime["worker"]["model"],
+            "opencode_version": opencode_version,
+            "planning_profile_id": str(runtime["planning_profile"]["id"]),
+            "planning_profile_version": runtime["planning_profile"]["version"],
+        }
+
+    def _real_trace_summary(
+        self, execution_id: UUID, session_id: UUID
+    ) -> dict[str, Any]:
+        cursor = 0
+        expected_sequence = 1
+        counts: dict[str, int] = {}
+        while True:
+            document = self._cp_get(
+                "/api/v1/gateway/events",
+                params={
+                    "workspace_id": str(self.config.workspace_id),
+                    "execution_id": str(execution_id),
+                    "session_id": str(session_id),
+                    "cursor": str(cursor),
+                    "limit": "100",
+                },
+                stage="real_evidence_trace",
+            )
+            items = [
+                _mapping(item, "real_evidence.event")
+                for item in _sequence(document.get("items"), "real_evidence.events")
+            ]
+            for item in items:
+                sequence = _positive_int(
+                    item.get("sequence"), "real_evidence.event.sequence"
+                )
+                if sequence != expected_sequence:
+                    raise GateFailure("real_evidence_trace", "trace_sequence_gap")
+                event_type = _required_text(
+                    item.get("event_type"), "real_evidence.event.event_type"
+                )
+                counts[event_type] = counts.get(event_type, 0) + 1
+                expected_sequence += 1
+            next_cursor = document.get("next_cursor")
+            if next_cursor is None:
+                break
+            try:
+                next_value = int(next_cursor)
+            except (TypeError, ValueError) as exc:
+                raise GateFailure("real_evidence_trace", "trace_cursor_invalid") from exc
+            next_value = _positive_or_zero(next_value, "real_evidence.next_cursor")
+            if next_value <= cursor:
+                raise GateFailure("real_evidence_trace", "trace_cursor_stalled")
+            cursor = next_value
+        if expected_sequence == 1:
+            raise GateFailure("real_evidence_trace", "trace_empty")
+        return {
+            "event_count": expected_sequence - 1,
+            "event_type_counts": counts,
+            "last_sequence": expected_sequence - 1,
+        }
+
+    def _real_runtime_facts(self, binding: Mapping[str, Any]) -> dict[str, Any]:
+        adapter_id = _as_uuid(
+            binding.get("adapter_module_id"), "real_evidence.adapter_module_id"
+        )
+        workspace_id = _as_uuid(
+            binding.get("workspace_module_id"), "real_evidence.workspace_module_id"
+        )
+        profile_id = self.config.planning_profile_id
+        profile_version = self.config.planning_profile_version
+        if profile_id is None or profile_version is None:
+            raise GateFailure("real_evidence_runtime", "planning_profile_not_configured")
+        with self.database.session() as session:
+            profile = session.get(PlanningProfileModel, profile_id)
+            if profile is None or profile.workspace_id != self.config.workspace_id:
+                raise GateFailure("real_evidence_runtime", "planning_profile_not_found")
+            if profile.version != profile_version:
+                raise GateFailure("real_evidence_runtime", "planning_profile_version_mismatch")
+
+            def module_facts(module_id: UUID, label: str) -> dict[str, Any]:
+                instance = session.get(ModuleInstanceModel, module_id)
+                if instance is None or instance.workspace_id != self.config.workspace_id:
+                    raise GateFailure("real_evidence_runtime", f"{label}_module_not_found")
+                definition = session.get(ModuleDefinitionModel, instance.definition_id)
+                if definition is None or definition.workspace_id != self.config.workspace_id:
+                    raise GateFailure("real_evidence_runtime", f"{label}_definition_not_found")
+                return {
+                    "provider": definition.provider,
+                    "interface_version": definition.interface_version,
+                    "config_version": instance.config_version,
+                    "config": dict(instance.config),
+                }
+
+            worker = module_facts(adapter_id, "worker")
+            planner = module_facts(profile.planner_module_instance_id, "planner")
+            workspace = module_facts(workspace_id, "workspace")
+        worker_config = worker["config"]
+        planner_config = planner["config"]
+        worker_model = worker_config.get("opencode.model")
+        planner_model = planner_config.get("planning.model")
+        executable = worker_config.get("opencode.executable")
+        return {
+            "worker": {
+                "provider": _required_text(worker["provider"], "worker.provider"),
+                "model": _required_text(worker_model, "worker.model"),
+                "interface_version": _required_text(
+                    worker["interface_version"], "worker.interface_version"
+                ),
+                "config_version": _positive_int(
+                    worker["config_version"], "worker.config_version"
+                ),
+                "executable": _required_text(executable, "worker.executable"),
+            },
+            "planner": {
+                "provider": _required_text(planner["provider"], "planner.provider"),
+                "model": _required_text(planner_model, "planner.model"),
+                "interface_version": _required_text(
+                    planner["interface_version"], "planner.interface_version"
+                ),
+                "config_version": _positive_int(
+                    planner["config_version"], "planner.config_version"
+                ),
+            },
+            "workspace": {
+                "provider": _required_text(
+                    workspace["provider"], "workspace.provider"
+                ),
+                "interface_version": _required_text(
+                    workspace["interface_version"], "workspace.interface_version"
+                ),
+                "config_version": _positive_int(
+                    workspace["config_version"], "workspace.config_version"
+                ),
+            },
+            "planning_profile": {"id": profile_id, "version": profile_version},
+        }
+
+    @staticmethod
+    def _real_repository_revision(repository: Path) -> str:
+        if repository.is_symlink() or not repository.is_dir():
+            raise GateFailure("real_evidence_worktree", "repository_unavailable")
+        try:
+            status = subprocess.run(
+                ["git", "-C", str(repository), "status", "--porcelain", "--untracked-files=all"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            revision = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise GateFailure("real_evidence_worktree", "repository_unavailable") from exc
+        if status:
+            raise GateFailure("real_evidence_worktree", "repository_not_clean")
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise GateFailure("real_evidence_worktree", "repository_revision_invalid")
+        return revision
+
+    def _real_opencode_version(self, executable: str) -> str:
+        try:
+            completed = subprocess.run(
+                [executable, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GateFailure("real_evidence_runtime", "opencode_version_unavailable") from exc
+        if completed.returncode != 0:
+            raise GateFailure("real_evidence_runtime", "opencode_version_unavailable")
+        match = re.search(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)", completed.stdout)
+        if match is None:
+            raise GateFailure("real_evidence_runtime", "opencode_version_invalid")
+        version = match.group(1)
+        if (
+            self.config.opencode_expected_version is not None
+            and version != self.config.opencode_expected_version
+        ):
+            raise GateFailure("real_evidence_runtime", "opencode_version_mismatch")
+        return version
 
     def _create_and_accept_initial_knowledge(self) -> dict[str, Any]:
         candidate_id = self.identity.entity("knowledge-initial-candidate")
@@ -1848,7 +2354,9 @@ def run_fault_recovery(config: RunnerConfig) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("deterministic", "fault"), required=True)
+    parser.add_argument(
+        "--mode", choices=("deterministic", "fault", "real-evidence"), required=True
+    )
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--control-plane-url", default=None)
     parser.add_argument("--knowledge-base-url", default=None)
@@ -1857,6 +2365,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deadline-seconds", type=float, default=60.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=0.5)
     parser.add_argument("--cleanup-test-run", action="store_true")
+    parser.add_argument("--task-id", default=None)
+    parser.add_argument("--execution-id", default=None)
+    parser.add_argument("--session-id", default=None)
+    parser.add_argument("--acceptance-ref", default=None)
+    parser.add_argument("--run-marker", default=None)
+    parser.add_argument("--repository-path", type=Path, default=None)
     return parser
 
 
@@ -1872,6 +2386,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.cleanup_test_run:
                 raise GateFailure("cleanup", "unsupported_mode")
             result = run_fault_recovery(config)
+        elif args.mode == "real-evidence":
+            if args.cleanup_test_run:
+                raise GateFailure("cleanup", "unsupported_mode")
+            if not all(
+                (
+                    args.task_id,
+                    args.execution_id,
+                    args.acceptance_ref,
+                    args.run_marker,
+                )
+            ):
+                raise GateFailure("configuration", "real_evidence_ids_required")
+            runner = VerticalLoopRunner(config)
+            result = runner.record_real_execution_evidence(
+                task_id=UUID(args.task_id),
+                execution_id=UUID(args.execution_id),
+                session_id=UUID(args.session_id) if args.session_id else None,
+                acceptance_ref=args.acceptance_ref,
+                run_marker=args.run_marker,
+                repository_path=args.repository_path,
+            )
         else:
             runner = VerticalLoopRunner(config)
             result = (
@@ -1978,6 +2513,18 @@ def load_config(args: argparse.Namespace) -> RunnerConfig:
         deadline_seconds=args.deadline_seconds,
         poll_interval_seconds=args.poll_interval_seconds,
         run_id=UUID(args.run_id) if args.run_id else uuid4(),
+        opencode_executable=values.get("SIDERA_OPENCODE_EXECUTABLE") or "opencode",
+        opencode_expected_version=values.get("SIDERA_OPENCODE_EXPECTED_VERSION"),
+        planning_profile_id=(
+            UUID(values["SIDERA_PLANNING_PROFILE_ID"])
+            if values.get("SIDERA_PLANNING_PROFILE_ID")
+            else None
+        ),
+        planning_profile_version=(
+            int(values["SIDERA_PLANNING_PROFILE_VERSION"])
+            if values.get("SIDERA_PLANNING_PROFILE_VERSION")
+            else None
+        ),
     )
 
 

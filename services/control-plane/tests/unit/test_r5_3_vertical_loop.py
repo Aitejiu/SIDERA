@@ -65,6 +65,23 @@ def test_runner_accepts_the_shared_r5_3_env_example(tmp_path: Path) -> None:
     assert "SIDERA_OPENCODE_MODEL" in values
 
 
+def test_runner_accepts_stack_lease_overrides(tmp_path: Path) -> None:
+    module = _load_runner_module()
+    env_file = tmp_path / "r5-3.local.env"
+    env_file.write_text(
+        "SIDERA_ASSIGNMENT_LEASE_SECONDS=300\n"
+        "SIDERA_ASSIGNMENT_LEASE_RENEW_INTERVAL_SECONDS=30.0\n",
+        encoding="utf-8",
+    )
+
+    values = module.parse_env_file(env_file)
+
+    assert values == {
+        "SIDERA_ASSIGNMENT_LEASE_SECONDS": "300",
+        "SIDERA_ASSIGNMENT_LEASE_RENEW_INTERVAL_SECONDS": "30.0",
+    }
+
+
 def test_runner_ids_are_stable_and_run_scoped() -> None:
     module = _load_runner_module()
     run_id = module.UUID("11111111-1111-4111-8111-111111111111")
@@ -237,6 +254,100 @@ def test_runner_builds_worker_candidate_with_task_provenance() -> None:
     assert source.source_type == "task"
     assert source.source_id == source_id
     assert source.metadata == {}
+
+
+def test_real_evidence_report_contains_only_redacted_execution_facts() -> None:
+    module = _load_runner_module()
+    report = module.build_real_evidence_report(
+        run_marker="SIDERA-R5-3-5-REAL-20260827-R23T",
+        workspace_id=module.UUID("20000000-0000-0000-0000-000000000001"),
+        task_id=module.UUID("82cd1382-ad9a-4925-b95f-43160b360468"),
+        execution_id=module.UUID("c9ab4cd6-baf5-4d29-8477-e4827d3b0bf8"),
+        session_id=module.UUID("f4c07678-3d36-4853-9382-ed882860ec86"),
+        worker_item_id=module.UUID("aa2407ae-a657-44be-b621-33cceca88ca2"),
+        worker_id=module.UUID("0156fd33-d298-5f3c-b9f8-f33841d31853"),
+        lease_id=module.UUID("ec855030-8416-4a72-adb6-c07932c84e32"),
+        fencing_token=1,
+        execution_status="succeeded",
+        session_status="closed",
+        trace_event_counts={
+            "input.accepted": 1,
+            "progress.updated": 295,
+            "session.heartbeat": 1,
+        },
+        trace_last_sequence=297,
+        workspace_ref="r5.3.5-real-git-worktree",
+        repository_revision="a" * 40,
+        provider="opencode",
+        model="opencode-go/MiMo-V2.5",
+        interface_version="sidera.worker-adapter.v1",
+        config_version=1,
+        planner_provider="opencode-acp-planner",
+        planner_model="opencode-go/MiMo-V2.5",
+        planner_interface_version="sidera.planner.v1",
+        planner_config_version=1,
+        workspace_provider="git-worktree",
+        workspace_interface_version="sidera.workspace-provider.v1",
+        workspace_config_version=1,
+        opencode_version="1.18.19",
+        planning_profile_id=module.UUID("b4000000-0000-0000-0000-000000000001"),
+        planning_profile_version=1,
+    )
+
+    document = module.json.loads(report)
+
+    assert document["schema_version"] == 1
+    assert document["scope"]["execution_id"] == (
+        "c9ab4cd6-baf5-4d29-8477-e4827d3b0bf8"
+    )
+    assert document["runtime"]["worker"] == {
+        "config_version": 1,
+        "interface_version": "sidera.worker-adapter.v1",
+        "model": "opencode-go/MiMo-V2.5",
+        "provider": "opencode",
+    }
+    assert document["runtime"]["planner"]["provider"] == "opencode-acp-planner"
+    assert document["trace"] == {
+        "event_count": 297,
+        "event_type_counts": {
+            "input.accepted": 1,
+            "progress.updated": 295,
+            "session.heartbeat": 1,
+        },
+        "last_sequence": 297,
+    }
+    assert document["workspace"]["repository_clean"] is True
+    assert "payload" not in document
+    assert "sk-" not in report.decode("utf-8")
+
+
+def test_real_trace_summary_accepts_string_pagination_cursors() -> None:
+    module = _load_runner_module()
+    responses = iter(
+        (
+            {"items": [{"sequence": 1, "event_type": "input.accepted"}], "next_cursor": "1"},
+            {"items": [{"sequence": 2, "event_type": "session.closed"}], "next_cursor": None},
+        )
+    )
+    runner = object.__new__(module.VerticalLoopRunner)
+    runner.config = SimpleNamespace(
+        workspace_id=module.UUID("20000000-0000-0000-0000-000000000001")
+    )
+    runner._cp_get = lambda path, *, params, stage: next(responses)
+
+    summary = runner._real_trace_summary(
+        module.UUID("c9ab4cd6-baf5-4d29-8477-e4827d3b0bf8"),
+        module.UUID("f4c07678-3d36-4853-9382-ed882860ec86"),
+    )
+
+    assert summary == {
+        "event_count": 2,
+        "event_type_counts": {
+            "input.accepted": 1,
+            "session.closed": 1,
+        },
+        "last_sequence": 2,
+    }
 
 
 def test_runner_replan_reference_replaces_section_identity_with_revision() -> None:
