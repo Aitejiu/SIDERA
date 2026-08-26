@@ -113,6 +113,15 @@ ALLOWED_ENV_KEYS = frozenset(
 )
 _ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _SAFE_CODE = re.compile(r"[^a-z0-9_.:-]+")
+_FAULT_RECOVERY_RELATIVE_PATHS = (
+    "services/control-plane/tests/integration/test_r5_3_fault_recovery.py",
+    "services/control-plane/tests/integration/test_context_package_failures.py",
+    "services/control-plane/tests/integration/test_context_package_worker.py",
+    "services/control-plane/tests/integration/test_execution_context_gate.py",
+    "services/control-plane/tests/integration/test_gateway_runner.py",
+    "services/control-plane/tests/integration/test_knowledge_candidate_submission.py",
+    "services/control-plane/tests/integration/test_outbox_dispatcher.py",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +192,7 @@ class RunnerConfig:
     knowledge_base_url: str
     workspace_id: UUID
     database_url: str
+    test_database_url: str
     candidate_spool_dir: Path
     owner_token: str
     control_plane_token: str
@@ -1789,9 +1799,56 @@ def recompute_package_hash(package: Mapping[str, Any]) -> str:
     return manifest.package_hash
 
 
+def fault_recovery_test_paths() -> tuple[Path, ...]:
+    root = Path(__file__).resolve().parents[1]
+    return tuple(root / relative_path for relative_path in _FAULT_RECOVERY_RELATIVE_PATHS)
+
+
+def run_fault_recovery(config: RunnerConfig) -> dict[str, Any]:
+    """Run the fixed CP recovery suite without forwarding test output to the gate."""
+
+    paths = fault_recovery_test_paths()
+    if not paths or any(not path.is_file() for path in paths):
+        raise GateFailure("fault_recovery", "test_scope_unavailable")
+    environment = os.environ.copy()
+    environment["SIDERA_DATABASE_URL"] = config.test_database_url
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-m",
+        "integration",
+        "-q",
+        *(str(path) for path in paths),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=config.deadline_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GateFailure("fault_recovery", "deadline_exceeded") from exc
+    except OSError as exc:
+        raise GateFailure("fault_recovery", "test_runner_unavailable") from exc
+    if completed.returncode != 0:
+        raise GateFailure("fault_recovery", "tests_failed")
+    return {
+        "status": "passed",
+        "mode": "fault",
+        "run_id": str(config.run_id),
+        "test_file_count": len(paths),
+        "database_scope": "isolated_test_database",
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("deterministic",), required=True)
+    parser.add_argument("--mode", choices=("deterministic", "fault"), required=True)
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--control-plane-url", default=None)
     parser.add_argument("--knowledge-base-url", default=None)
@@ -1811,10 +1868,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = load_config(args)
         if args.cleanup_test_run and args.run_id is None:
             raise GateFailure("cleanup", "run_id_required")
-        runner = VerticalLoopRunner(config)
-        result = (
-            runner.cleanup_test_run() if args.cleanup_test_run else runner.run()
-        )
+        if args.mode == "fault":
+            if args.cleanup_test_run:
+                raise GateFailure("cleanup", "unsupported_mode")
+            result = run_fault_recovery(config)
+        else:
+            runner = VerticalLoopRunner(config)
+            result = (
+                runner.cleanup_test_run() if args.cleanup_test_run else runner.run()
+            )
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except GateFailure as exc:
@@ -1885,10 +1947,22 @@ def load_config(args: argparse.Namespace) -> RunnerConfig:
     knowledge_url = args.knowledge_base_url or values.get("SIDERA_KNOWLEDGE_BASE_URL")
     workspace_text = args.workspace_id or values.get("SIDERA_WORKSPACE_ID")
     database_url = values.get("SIDERA_DATABASE_URL")
+    test_database_url = values.get("SIDERA_R5_3_TEST_DATABASE_URL") or database_url
     owner_token = values.get("SIDERA_KNOWLEDGE_LOCAL_OWNER_TOKEN")
     control_plane_token = values.get("SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN")
     spool_dir = values.get("SIDERA_KNOWLEDGE_CANDIDATE_SPOOL_DIR")
-    if not all((cp_url, knowledge_url, workspace_text, database_url, owner_token, control_plane_token, spool_dir)):
+    if not all(
+        (
+            cp_url,
+            knowledge_url,
+            workspace_text,
+            database_url,
+            test_database_url,
+            owner_token,
+            control_plane_token,
+            spool_dir,
+        )
+    ):
         raise ValueError("required runner configuration is missing")
     if args.deadline_seconds <= 0 or args.poll_interval_seconds <= 0:
         raise ValueError("poll limits must be positive")
@@ -1897,6 +1971,7 @@ def load_config(args: argparse.Namespace) -> RunnerConfig:
         knowledge_base_url=_loopback_url(knowledge_url),
         workspace_id=UUID(workspace_text),
         database_url=database_url,
+        test_database_url=test_database_url,
         candidate_spool_dir=Path(spool_dir),
         owner_token=owner_token,
         control_plane_token=control_plane_token,

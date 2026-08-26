@@ -36,6 +36,20 @@ def test_runner_help_exposes_bounded_gate_cli() -> None:
     assert "--cleanup-test-run" in help_text
 
 
+def test_runner_exposes_fault_recovery_mode_and_fixed_test_scope() -> None:
+    module = _load_runner_module()
+
+    parser = module.build_parser()
+    args = parser.parse_args(["--mode", "fault"])
+
+    assert args.mode == "fault"
+    assert module.fault_recovery_test_paths()
+    assert all(
+        path.parent.name == "integration" and path.parent.parent.name == "tests"
+        for path in module.fault_recovery_test_paths()
+    )
+
+
 def test_runner_accepts_the_shared_r5_3_env_example(tmp_path: Path) -> None:
     module = _load_runner_module()
     example = SCRIPT.parents[1] / "config" / "examples" / "r5-3.local.env.example"
