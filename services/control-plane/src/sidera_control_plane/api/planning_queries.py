@@ -4,10 +4,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path, Query
 
 from sidera_control_plane.api.dependencies import (
+    get_plan_revision_query_service,
     get_planning_metrics_service,
     get_planning_query_service,
 )
 from sidera_control_plane.api.schemas import (
+    ActivePlanHeadResponse,
     PlanningBriefPageResponse,
     PlanningClarificationPageResponse,
     PlanningMaterializationResponse,
@@ -19,6 +21,10 @@ from sidera_control_plane.api.schemas import (
     PlanningRequestPageResponse,
     PlanningRequestSummaryResponse,
     PlanningRunPageResponse,
+    RevisionDiffResponse,
+)
+from sidera_control_plane.application.plan_revision_queries import (
+    PlanRevisionQueryService,
 )
 from sidera_control_plane.application.planning_metrics import PlanningMetricsService
 from sidera_control_plane.application.planning_queries import PlanningQueryService
@@ -73,9 +79,48 @@ def get_planning_request(
     workspace_id: UUID,
     request_id: UUID,
     service: Annotated[PlanningQueryService, Depends(get_planning_query_service)],
+    revision_service: Annotated[
+        PlanRevisionQueryService, Depends(get_plan_revision_query_service)
+    ],
 ) -> PlanningRequestDetailResponse:
+    detail = service.get_request_detail(workspace_id, request_id)
     return PlanningRequestDetailResponse.from_detail_view(
-        service.get_request_detail(workspace_id, request_id)
+        detail,
+        revision_freshness=revision_service.get_revision_freshness(
+            workspace_id, request_id
+        ),
+    )
+
+
+@router.get(
+    "/{workspace_id}/planning-requests/{request_id}/diff",
+    response_model=RevisionDiffResponse,
+)
+def get_planning_request_diff(
+    workspace_id: UUID,
+    request_id: UUID,
+    service: Annotated[
+        PlanRevisionQueryService, Depends(get_plan_revision_query_service)
+    ],
+) -> RevisionDiffResponse:
+    return RevisionDiffResponse.from_view(
+        service.get_revision_diff(workspace_id, request_id)
+    )
+
+
+@router.get(
+    "/{workspace_id}/tasks/{root_task_id}/active-plan",
+    response_model=ActivePlanHeadResponse,
+)
+def get_active_plan(
+    workspace_id: UUID,
+    root_task_id: UUID,
+    service: Annotated[
+        PlanRevisionQueryService, Depends(get_plan_revision_query_service)
+    ],
+) -> ActivePlanHeadResponse:
+    return ActivePlanHeadResponse.from_view(
+        service.get_active_plan(workspace_id, root_task_id)
     )
 
 

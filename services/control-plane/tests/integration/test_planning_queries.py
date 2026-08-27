@@ -68,6 +68,8 @@ def test_planning_queries_return_safe_request_views(
     assert "chat_id" not in detail_body
     assert detail_body["active_run"]["status"] == "needs_clarification"
     assert detail_body["pending_clarifications"]
+    assert detail_body["revision_base"] is None
+    assert detail_body["revision_freshness"] is None
     assert "error_message" not in detail_body["active_run"]
     assert "provider_raw_response" not in detail_body
 

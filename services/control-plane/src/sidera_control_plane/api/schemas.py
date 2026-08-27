@@ -22,6 +22,20 @@ from sidera_control_plane.application.context_package_queries import (
     KnowledgeSubmissionView,
 )
 from sidera_control_plane.application.module_queries import ModuleSummaryView
+from sidera_control_plane.application.plan_revision_queries import (
+    AcceptedTransitionPolicyView,
+    ActivePlanHeadView,
+    RevisionBaseView,
+    RevisionDependencyChangeView,
+    RevisionDiffView,
+    RevisionFieldChangeView,
+    RevisionFreshnessView,
+    RevisionImpactCountsView,
+    RevisionSubtaskChangeView,
+    RevisionTargetDescriptorView,
+    RevisionTransitionPreviewView,
+    RevisionWorkerItemChangeView,
+)
 from sidera_control_plane.application.planning_metrics import PlanningMetricsView
 from sidera_control_plane.application.planning_queries import (
     PlanningBriefView,
@@ -1638,6 +1652,357 @@ class TaskPlanSnapshotResponse(BaseModel):
         )
 
 
+class RevisionBaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    plan_snapshot_id: UUID
+    plan_generation: int
+    plan_content_hash: str
+    root_task_version: int
+    captured_at: datetime
+
+    @classmethod
+    def from_view(cls, view: RevisionBaseView) -> "RevisionBaseResponse":
+        return cls(
+            schema_version=view.schema_version,
+            workspace_id=view.workspace_id,
+            root_task_id=view.root_task_id,
+            plan_snapshot_id=view.plan_snapshot_id,
+            plan_generation=view.plan_generation,
+            plan_content_hash=view.plan_content_hash,
+            root_task_version=view.root_task_version,
+            captured_at=view.captured_at,
+        )
+
+
+class RevisionFreshnessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base: RevisionBaseResponse
+    current_plan_snapshot_id: UUID | None
+    current_plan_generation: int | None
+    current_plan_content_hash: str | None
+    current_root_task_version: int | None
+    base_fresh: bool
+    stale_reasons: tuple[str, ...]
+    checked_at: datetime
+
+    @classmethod
+    def from_view(cls, view: RevisionFreshnessView) -> "RevisionFreshnessResponse":
+        return cls(
+            base=RevisionBaseResponse.from_view(view.base),
+            current_plan_snapshot_id=view.current_plan_snapshot_id,
+            current_plan_generation=view.current_plan_generation,
+            current_plan_content_hash=view.current_plan_content_hash,
+            current_root_task_version=view.current_root_task_version,
+            base_fresh=view.base_fresh,
+            stale_reasons=view.stale_reasons,
+            checked_at=view.checked_at,
+        )
+
+
+class RevisionTargetDescriptorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_generation: int
+    parent_snapshot_id: UUID
+    target_plan_content_hash: str
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionTargetDescriptorView
+    ) -> "RevisionTargetDescriptorResponse":
+        return cls(
+            target_generation=view.target_generation,
+            parent_snapshot_id=view.parent_snapshot_id,
+            target_plan_content_hash=view.target_plan_content_hash,
+        )
+
+
+class RevisionFieldChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field_path: str
+    before: Any
+    after: Any
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionFieldChangeView
+    ) -> "RevisionFieldChangeResponse":
+        return cls(
+            field_path=view.field_path,
+            before=view.before,
+            after=view.after,
+        )
+
+
+class RevisionSubtaskChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_subtask_key: str
+    path: str
+    existing_task_id: UUID | None
+    strategy: str
+    field_changes: tuple[RevisionFieldChangeResponse, ...]
+    reason: str
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionSubtaskChangeView
+    ) -> "RevisionSubtaskChangeResponse":
+        return cls(
+            target_subtask_key=view.target_subtask_key,
+            path=view.path,
+            existing_task_id=view.existing_task_id,
+            strategy=view.strategy,
+            field_changes=tuple(
+                RevisionFieldChangeResponse.from_view(item)
+                for item in view.field_changes
+            ),
+            reason=view.reason,
+        )
+
+
+class RevisionWorkerItemChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_worker_item_key: str
+    path: str
+    existing_worker_item_id: UUID | None
+    strategy: str
+    from_subtask_key: str | None
+    to_subtask_key: str
+    context_disposition: str
+    field_changes: tuple[RevisionFieldChangeResponse, ...]
+    reasons: tuple[str, ...]
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionWorkerItemChangeView
+    ) -> "RevisionWorkerItemChangeResponse":
+        return cls(
+            target_worker_item_key=view.target_worker_item_key,
+            path=view.path,
+            existing_worker_item_id=view.existing_worker_item_id,
+            strategy=view.strategy,
+            from_subtask_key=view.from_subtask_key,
+            to_subtask_key=view.to_subtask_key,
+            context_disposition=view.context_disposition,
+            field_changes=tuple(
+                RevisionFieldChangeResponse.from_view(item)
+                for item in view.field_changes
+            ),
+            reasons=view.reasons,
+        )
+
+
+class RevisionDependencyChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    graph_scope: str
+    upstream_key: str
+    downstream_key: str
+    upstream_path: str
+    downstream_path: str
+    dependency_kind: str
+    change_type: str
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionDependencyChangeView
+    ) -> "RevisionDependencyChangeResponse":
+        return cls(
+            graph_scope=view.graph_scope,
+            upstream_key=view.upstream_key,
+            downstream_key=view.downstream_key,
+            upstream_path=view.upstream_path,
+            downstream_path=view.downstream_path,
+            dependency_kind=view.dependency_kind,
+            change_type=view.change_type,
+        )
+
+
+class RevisionTransitionPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_worker_item_key: str
+    path: str
+    worker_item_id: UUID | None
+    allowed_actions: tuple[str, ...]
+    fallback_action: str | None
+    reason_codes: tuple[str, ...]
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionTransitionPreviewView
+    ) -> "RevisionTransitionPreviewResponse":
+        return cls(
+            target_worker_item_key=view.target_worker_item_key,
+            path=view.path,
+            worker_item_id=view.worker_item_id,
+            allowed_actions=view.allowed_actions,
+            fallback_action=view.fallback_action,
+            reason_codes=view.reason_codes,
+        )
+
+
+class RevisionImpactCountsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    preserve: int
+    move: int
+    patch: int
+    continue_: int = Field(
+        serialization_alias="continue",
+        validation_alias="continue",
+    )
+    create: int
+    derive: int
+    retire: int
+    affected_branches: int
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionImpactCountsView
+    ) -> "RevisionImpactCountsResponse":
+        return cls(
+            preserve=view.preserve,
+            move=view.move,
+            patch=view.patch,
+            continue_=view.continue_,
+            create=view.create,
+            derive=view.derive,
+            retire=view.retire,
+            affected_branches=view.affected_branches,
+        )
+
+
+class AcceptedTransitionPolicyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activate_immediately: bool
+    budget_level: str
+    failure_policy: str
+    manual_gate: bool
+    revision_operation: str | None
+
+    @classmethod
+    def from_view(
+        cls, view: AcceptedTransitionPolicyView
+    ) -> "AcceptedTransitionPolicyResponse":
+        return cls(
+            activate_immediately=view.activate_immediately,
+            budget_level=view.budget_level,
+            failure_policy=view.failure_policy,
+            manual_gate=view.manual_gate,
+            revision_operation=view.revision_operation,
+        )
+
+
+class RevisionDiffResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    planning_request_id: UUID
+    proposal_revision_id: UUID
+    proposal_revision: int
+    proposal_content_hash: str
+    base: RevisionBaseResponse
+    target_descriptor_preview: RevisionTargetDescriptorResponse
+    root_changes: tuple[RevisionFieldChangeResponse, ...]
+    subtask_changes: tuple[RevisionSubtaskChangeResponse, ...]
+    worker_item_changes: tuple[RevisionWorkerItemChangeResponse, ...]
+    subtask_dependency_changes: tuple[RevisionDependencyChangeResponse, ...]
+    worker_dependency_changes: tuple[RevisionDependencyChangeResponse, ...]
+    transition_preview: tuple[RevisionTransitionPreviewResponse, ...]
+    impact_counts: RevisionImpactCountsResponse
+    affected_branch_keys: tuple[str, ...]
+    affected_branch_paths: tuple[str, ...]
+    risk_flags: tuple[str, ...]
+    diff_hash: str
+    accepted_transition_policy: AcceptedTransitionPolicyResponse
+    freshness: RevisionFreshnessResponse
+
+    @classmethod
+    def from_view(cls, view: RevisionDiffView) -> "RevisionDiffResponse":
+        return cls(
+            workspace_id=view.workspace_id,
+            root_task_id=view.root_task_id,
+            planning_request_id=view.planning_request_id,
+            proposal_revision_id=view.proposal_revision_id,
+            proposal_revision=view.proposal_revision,
+            proposal_content_hash=view.proposal_content_hash,
+            base=RevisionBaseResponse.from_view(view.base),
+            target_descriptor_preview=RevisionTargetDescriptorResponse.from_view(
+                view.target_descriptor_preview
+            ),
+            root_changes=tuple(
+                RevisionFieldChangeResponse.from_view(item)
+                for item in view.root_changes
+            ),
+            subtask_changes=tuple(
+                RevisionSubtaskChangeResponse.from_view(item)
+                for item in view.subtask_changes
+            ),
+            worker_item_changes=tuple(
+                RevisionWorkerItemChangeResponse.from_view(item)
+                for item in view.worker_item_changes
+            ),
+            subtask_dependency_changes=tuple(
+                RevisionDependencyChangeResponse.from_view(item)
+                for item in view.subtask_dependency_changes
+            ),
+            worker_dependency_changes=tuple(
+                RevisionDependencyChangeResponse.from_view(item)
+                for item in view.worker_dependency_changes
+            ),
+            transition_preview=tuple(
+                RevisionTransitionPreviewResponse.from_view(item)
+                for item in view.transition_preview
+            ),
+            impact_counts=RevisionImpactCountsResponse.from_view(view.impact_counts),
+            affected_branch_keys=view.affected_branch_keys,
+            affected_branch_paths=view.affected_branch_paths,
+            risk_flags=view.risk_flags,
+            diff_hash=view.diff_hash,
+            accepted_transition_policy=AcceptedTransitionPolicyResponse.from_view(
+                view.accepted_transition_policy
+            ),
+            freshness=RevisionFreshnessResponse.from_view(view.freshness),
+        )
+
+
+class ActivePlanHeadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    active_snapshot_id: UUID
+    active_generation: int
+    active_snapshot_hash: str
+    version: int
+    updated_at: datetime
+    snapshot: TaskPlanSnapshotResponse
+
+    @classmethod
+    def from_view(cls, view: ActivePlanHeadView) -> "ActivePlanHeadResponse":
+        return cls(
+            workspace_id=view.workspace_id,
+            root_task_id=view.root_task_id,
+            active_snapshot_id=view.active_snapshot_id,
+            active_generation=view.active_generation,
+            active_snapshot_hash=view.active_snapshot_hash,
+            version=view.version,
+            updated_at=view.updated_at,
+            snapshot=TaskPlanSnapshotResponse.from_snapshot(view.snapshot),
+        )
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str
@@ -2428,10 +2793,15 @@ class PlanningRequestDetailResponse(PlanningRequestSummaryResponse):
     pending_clarifications: tuple[PlanningClarificationResponse, ...]
     usage: PlanningUsageResponse
     last_change_cursor: int
+    revision_base: RevisionBaseResponse | None = None
+    revision_freshness: RevisionFreshnessResponse | None = None
 
     @classmethod
     def from_detail_view(
-        cls, view: PlanningRequestDetailView
+        cls,
+        view: PlanningRequestDetailView,
+        *,
+        revision_freshness: RevisionFreshnessView | None = None,
     ) -> "PlanningRequestDetailResponse":
         summary = PlanningRequestSummaryResponse.from_view(view.summary)
         return cls(
@@ -2452,6 +2822,16 @@ class PlanningRequestDetailResponse(PlanningRequestSummaryResponse):
             ),
             usage=PlanningUsageResponse.from_view(view.usage),
             last_change_cursor=view.last_change_cursor,
+            revision_base=(
+                RevisionBaseResponse.from_view(revision_freshness.base)
+                if revision_freshness is not None
+                else None
+            ),
+            revision_freshness=(
+                RevisionFreshnessResponse.from_view(revision_freshness)
+                if revision_freshness is not None
+                else None
+            ),
         )
 
 

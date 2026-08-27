@@ -25,6 +25,9 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
 )
 from sidera_control_plane.application.module_queries import ModuleQueryService
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
+from sidera_control_plane.application.plan_revision_queries import (
+    PlanRevisionQueryService,
+)
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.planning_metrics import PlanningMetricsService
 from sidera_control_plane.application.planning_queries import PlanningQueryService
@@ -66,6 +69,9 @@ from sidera_control_plane.persistence.context_package_query_store import (
     SqlAlchemyContextPackageQueryStore,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.plan_revision_query_store import (
+    SqlAlchemyPlanRevisionQueryStore,
+)
 from sidera_control_plane.persistence.planning_query_store import (
     SqlAlchemyPlanningMetricsStore,
     SqlAlchemyPlanningQueryStore,
@@ -169,6 +175,12 @@ def get_planning_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> PlanningQueryService:
     return PlanningQueryService(SqlAlchemyPlanningQueryStore(database))
+
+
+def get_plan_revision_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> PlanRevisionQueryService:
+    return PlanRevisionQueryService(SqlAlchemyPlanRevisionQueryStore(database))
 
 
 def get_work_context_query_service(
