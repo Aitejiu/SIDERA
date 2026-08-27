@@ -718,6 +718,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Planning Request Diff */
+        get: operations["get_planning_request_diff_api_v1_workspaces__workspace_id__planning_requests__request_id__diff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/materialization": {
         parameters: {
             query?: never;
@@ -846,6 +863,23 @@ export interface paths {
         };
         /** List Task Overviews */
         get: operations["list_task_overviews_api_v1_workspaces__workspace_id__task_overviews_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/active-plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Active Plan */
+        get: operations["get_active_plan_api_v1_workspaces__workspace_id__tasks__root_task_id__active_plan_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -987,6 +1021,49 @@ export interface components {
             source: string;
             /** Statement */
             statement: string;
+        };
+        /** AcceptedTransitionPolicyResponse */
+        AcceptedTransitionPolicyResponse: {
+            /** Activate Immediately */
+            activate_immediately: boolean;
+            /** Budget Level */
+            budget_level: string;
+            /** Failure Policy */
+            failure_policy: string;
+            /** Manual Gate */
+            manual_gate: boolean;
+            /** Revision Operation */
+            revision_operation: string | null;
+        };
+        /** ActivePlanHeadResponse */
+        ActivePlanHeadResponse: {
+            /** Active Generation */
+            active_generation: number;
+            /** Active Snapshot Hash */
+            active_snapshot_hash: string;
+            /**
+             * Active Snapshot Id
+             * Format: uuid
+             */
+            active_snapshot_id: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            snapshot: components["schemas"]["TaskPlanSnapshotResponse"];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** ActorRequest */
         ActorRequest: {
@@ -2857,6 +2934,8 @@ export interface components {
             profile_key: string | null;
             /** Requires Attention */
             requires_attention: boolean;
+            revision_base?: components["schemas"]["RevisionBaseResponse"] | null;
+            revision_freshness?: components["schemas"]["RevisionFreshnessResponse"] | null;
             /** Source Ref */
             source_ref: string | null;
             /** Source Type */
@@ -3162,6 +3241,218 @@ export interface components {
              * @enum {string}
              */
             reason: "replanned" | "user_intervention";
+        };
+        /** RevisionBaseResponse */
+        RevisionBaseResponse: {
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            captured_at: string;
+            /** Plan Content Hash */
+            plan_content_hash: string;
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Root Task Version */
+            root_task_version: number;
+            /** Schema Version */
+            schema_version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** RevisionDependencyChangeResponse */
+        RevisionDependencyChangeResponse: {
+            /** Change Type */
+            change_type: string;
+            /** Dependency Kind */
+            dependency_kind: string;
+            /** Downstream Key */
+            downstream_key: string;
+            /** Downstream Path */
+            downstream_path: string;
+            /** Graph Scope */
+            graph_scope: string;
+            /** Upstream Key */
+            upstream_key: string;
+            /** Upstream Path */
+            upstream_path: string;
+        };
+        /** RevisionDiffResponse */
+        RevisionDiffResponse: {
+            accepted_transition_policy: components["schemas"]["AcceptedTransitionPolicyResponse"];
+            /** Affected Branch Keys */
+            affected_branch_keys: string[];
+            /** Affected Branch Paths */
+            affected_branch_paths: string[];
+            base: components["schemas"]["RevisionBaseResponse"];
+            /** Diff Hash */
+            diff_hash: string;
+            freshness: components["schemas"]["RevisionFreshnessResponse"];
+            impact_counts: components["schemas"]["RevisionImpactCountsResponse"];
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /** Proposal Content Hash */
+            proposal_content_hash: string;
+            /** Proposal Revision */
+            proposal_revision: number;
+            /**
+             * Proposal Revision Id
+             * Format: uuid
+             */
+            proposal_revision_id: string;
+            /** Risk Flags */
+            risk_flags: string[];
+            /** Root Changes */
+            root_changes: components["schemas"]["RevisionFieldChangeResponse"][];
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Subtask Changes */
+            subtask_changes: components["schemas"]["RevisionSubtaskChangeResponse"][];
+            /** Subtask Dependency Changes */
+            subtask_dependency_changes: components["schemas"]["RevisionDependencyChangeResponse"][];
+            target_descriptor_preview: components["schemas"]["RevisionTargetDescriptorResponse"];
+            /** Transition Preview */
+            transition_preview: components["schemas"]["RevisionTransitionPreviewResponse"][];
+            /** Worker Dependency Changes */
+            worker_dependency_changes: components["schemas"]["RevisionDependencyChangeResponse"][];
+            /** Worker Item Changes */
+            worker_item_changes: components["schemas"]["RevisionWorkerItemChangeResponse"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** RevisionFieldChangeResponse */
+        RevisionFieldChangeResponse: {
+            /** After */
+            after: unknown;
+            /** Before */
+            before: unknown;
+            /** Field Path */
+            field_path: string;
+        };
+        /** RevisionFreshnessResponse */
+        RevisionFreshnessResponse: {
+            base: components["schemas"]["RevisionBaseResponse"];
+            /** Base Fresh */
+            base_fresh: boolean;
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Current Plan Content Hash */
+            current_plan_content_hash: string | null;
+            /** Current Plan Generation */
+            current_plan_generation: number | null;
+            /** Current Plan Snapshot Id */
+            current_plan_snapshot_id: string | null;
+            /** Current Root Task Version */
+            current_root_task_version: number | null;
+            /** Stale Reasons */
+            stale_reasons: string[];
+        };
+        /** RevisionImpactCountsResponse */
+        RevisionImpactCountsResponse: {
+            /** Affected Branches */
+            affected_branches: number;
+            /** Continue */
+            continue: number;
+            /** Create */
+            create: number;
+            /** Derive */
+            derive: number;
+            /** Move */
+            move: number;
+            /** Patch */
+            patch: number;
+            /** Preserve */
+            preserve: number;
+            /** Retire */
+            retire: number;
+        };
+        /** RevisionSubtaskChangeResponse */
+        RevisionSubtaskChangeResponse: {
+            /** Existing Task Id */
+            existing_task_id: string | null;
+            /** Field Changes */
+            field_changes: components["schemas"]["RevisionFieldChangeResponse"][];
+            /** Path */
+            path: string;
+            /** Reason */
+            reason: string;
+            /** Strategy */
+            strategy: string;
+            /** Target Subtask Key */
+            target_subtask_key: string;
+        };
+        /** RevisionTargetDescriptorResponse */
+        RevisionTargetDescriptorResponse: {
+            /**
+             * Parent Snapshot Id
+             * Format: uuid
+             */
+            parent_snapshot_id: string;
+            /** Target Generation */
+            target_generation: number;
+            /** Target Plan Content Hash */
+            target_plan_content_hash: string;
+        };
+        /** RevisionTransitionPreviewResponse */
+        RevisionTransitionPreviewResponse: {
+            /** Allowed Actions */
+            allowed_actions: string[];
+            /** Fallback Action */
+            fallback_action: string | null;
+            /** Path */
+            path: string;
+            /** Reason Codes */
+            reason_codes: string[];
+            /** Target Worker Item Key */
+            target_worker_item_key: string;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+        };
+        /** RevisionWorkerItemChangeResponse */
+        RevisionWorkerItemChangeResponse: {
+            /** Context Disposition */
+            context_disposition: string;
+            /** Existing Worker Item Id */
+            existing_worker_item_id: string | null;
+            /** Field Changes */
+            field_changes: components["schemas"]["RevisionFieldChangeResponse"][];
+            /** From Subtask Key */
+            from_subtask_key: string | null;
+            /** Path */
+            path: string;
+            /** Reasons */
+            reasons: string[];
+            /** Strategy */
+            strategy: string;
+            /** Target Worker Item Key */
+            target_worker_item_key: string;
+            /** To Subtask Key */
+            to_subtask_key: string;
         };
         /** RevokeContextPackagePayload */
         RevokeContextPackagePayload: {
@@ -6308,6 +6599,38 @@ export interface operations {
             };
         };
     };
+    get_planning_request_diff_api_v1_workspaces__workspace_id__planning_requests__request_id__diff_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionDiffResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_planning_materialization_api_v1_workspaces__workspace_id__planning_requests__request_id__materialization_get: {
         parameters: {
             query?: never;
@@ -6557,6 +6880,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskConsoleOverviewProjectionResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_active_plan_api_v1_workspaces__workspace_id__tasks__root_task_id__active_plan_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivePlanHeadResponse"];
                 };
             };
             /** @description Validation Error */
