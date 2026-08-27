@@ -2436,6 +2436,8 @@ export interface components {
             cancellation: string;
             /** Clarification */
             clarification: boolean;
+            /** Context Package Versions */
+            context_package_versions?: number[];
             /** Idempotency */
             idempotency: string;
             /** Interface Version */
@@ -2513,6 +2515,8 @@ export interface components {
             cancellation: string;
             /** Clarification */
             clarification: boolean;
+            /** Context Package Versions */
+            context_package_versions: number[];
             /** Idempotency */
             idempotency: string;
             /** Interface Version */

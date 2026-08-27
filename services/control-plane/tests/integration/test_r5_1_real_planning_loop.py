@@ -109,6 +109,7 @@ def test_real_opencode_planning_to_gateway_vertical_path(
     settings = _settings(database_url, executable, tmp_path)
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     settings.artifact_root.mkdir(parents=True, exist_ok=True)
+    context_runtime = None
     planning_runtime = None
     activation_runtime = None
     scheduler_runtime = None
@@ -116,8 +117,15 @@ def test_real_opencode_planning_to_gateway_vertical_path(
     adapters: list[OpenCodeACPAdapter] = []
     try:
         from sidera_control_plane.activation_worker import build_activation_worker
+        from sidera_control_plane.context_package_worker import (
+            build_context_package_worker,
+        )
         from sidera_control_plane.planning_worker import build_planning_worker
         from sidera_control_plane.scheduler_worker import build_scheduler
+
+        context_runtime = build_context_package_worker(settings)
+        context_summary = context_runtime.worker.run_once(1)
+        assert context_summary.ready == 1, context_summary
 
         planning_runtime = build_planning_worker(settings)
         planning_summary = planning_runtime.worker.run_once(1)
@@ -175,6 +183,9 @@ def test_real_opencode_planning_to_gateway_vertical_path(
         activation_runtime = build_activation_worker(settings)
         activation_summary = activation_runtime.worker.run_once(20)
         assert activation_summary.materialized >= 1, activation_summary
+
+        execution_context_summary = context_runtime.worker.run_once(20)
+        assert execution_context_summary.ready >= 1, execution_context_summary
 
         scheduler_runtime = build_scheduler(settings)
         scheduler_summary = scheduler_runtime.scheduler.run_once(20)
@@ -240,6 +251,9 @@ def test_real_opencode_planning_to_gateway_vertical_path(
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     process.kill()
+        if context_runtime is not None:
+            context_runtime.catalog.close()
+            context_runtime.database.dispose()
         if scheduler_runtime is not None:
             scheduler_runtime.database.dispose()
         if activation_runtime is not None:
@@ -271,6 +285,7 @@ def _register_real_planner(
                     "stability": "experimental",
                     "interface_version": "sidera.planner.v1",
                     "proposal_schema_versions": [2],
+                    "context_package_versions": [1],
                 },
                 "instance_name": "r5.1-real-opencode-planner",
                 "config_namespace": "planning",

@@ -19,6 +19,7 @@ class PlanningCapabilityView:
     stability: str
     interface_version: str
     proposal_schema_versions: tuple[int, ...]
+    context_package_versions: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

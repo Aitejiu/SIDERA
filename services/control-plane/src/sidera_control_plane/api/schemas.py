@@ -124,6 +124,7 @@ class PlannerCapabilityPayload(BaseModel):
     stability: NonEmptyString
     interface_version: NonEmptyString
     proposal_schema_versions: tuple[int, ...] = Field(min_length=1)
+    context_package_versions: tuple[int, ...] = Field(default_factory=tuple)
 
 
 class RegisterPlannerModulePayload(BaseModel):
@@ -2152,6 +2153,7 @@ class PlanningCapabilityResponse(BaseModel):
     stability: str
     interface_version: str
     proposal_schema_versions: tuple[int, ...]
+    context_package_versions: tuple[int, ...]
 
     @classmethod
     def from_view(cls, view: PlanningCapabilityView) -> "PlanningCapabilityResponse":
@@ -2165,6 +2167,7 @@ class PlanningCapabilityResponse(BaseModel):
             stability=view.stability,
             interface_version=view.interface_version,
             proposal_schema_versions=view.proposal_schema_versions,
+            context_package_versions=view.context_package_versions,
         )
 
 

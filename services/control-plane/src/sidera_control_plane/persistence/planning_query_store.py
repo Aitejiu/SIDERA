@@ -713,6 +713,10 @@ def _materialization_view(
 def _capability_view(value: Mapping[str, object]) -> PlanningCapabilityView:
     versions = value.get("proposal_schema_versions", ())
     version_values = versions if isinstance(versions, list | tuple) else ()
+    context_versions = value.get("context_package_versions", ())
+    context_version_values = (
+        context_versions if isinstance(context_versions, list | tuple) else ()
+    )
     return PlanningCapabilityView(
         structured_output=str(value.get("structured_output", "none")),
         clarification=bool(value.get("clarification", False)),
@@ -724,6 +728,9 @@ def _capability_view(value: Mapping[str, object]) -> PlanningCapabilityView:
         interface_version=str(value.get("interface_version", "unknown")),
         proposal_schema_versions=tuple(
             int(item) for item in version_values if isinstance(item, int)
+        ),
+        context_package_versions=tuple(
+            int(item) for item in context_version_values if isinstance(item, int)
         ),
     )
 

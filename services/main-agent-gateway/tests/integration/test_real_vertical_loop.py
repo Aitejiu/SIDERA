@@ -21,6 +21,8 @@ REQUIRED_ENV = (
     "SIDERA_REAL_MAIN_AGENT_PROVIDER",
 )
 
+pytestmark = pytest.mark.integration
+
 
 def _require_real_environment() -> dict[str, str]:
     if os.environ.get("SIDERA_RUN_REAL_MAIN_AGENT") != "1":
@@ -49,29 +51,33 @@ async def _turn_events(
     events: list[dict[str, Any]] = []
     terminal: dict[str, Any] = {}
     deadline = time.monotonic() + timeout_seconds
-    async with client.stream(
-        "GET",
-        f"{gateway_url}/main-agent/v1/threads/{thread_id}/turns/{turn_id}/events",
-        timeout=httpx.Timeout(10.0, read=None),
-    ) as response:
-        response.raise_for_status()
-        event_name = "message"
-        data_lines: list[str] = []
-        async for line in response.aiter_lines():
-            if time.monotonic() > deadline:
-                raise AssertionError("real turn stream timed out")
-            if line.startswith("event: "):
-                event_name = line.removeprefix("event: ")
-            elif line.startswith("data: "):
-                data_lines.append(line.removeprefix("data: "))
-            elif line == "" and data_lines:
-                payload = _json("\n".join(data_lines))
-                payload["_event"] = event_name
-                events.append(payload)
-                data_lines = []
-                if event_name in {"completed", "failed", "interrupted", "cancelled"}:
-                    terminal = payload
-                    break
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async with client.stream(
+                "GET",
+                f"{gateway_url}/main-agent/v1/threads/{thread_id}/turns/{turn_id}/events",
+                timeout=httpx.Timeout(10.0, read=None),
+            ) as response:
+                response.raise_for_status()
+                event_name = "message"
+                data_lines: list[str] = []
+                async for line in response.aiter_lines():
+                    if time.monotonic() > deadline:
+                        raise AssertionError("real turn stream timed out")
+                    if line.startswith("event: "):
+                        event_name = line.removeprefix("event: ")
+                    elif line.startswith("data: "):
+                        data_lines.append(line.removeprefix("data: "))
+                    elif line == "" and data_lines:
+                        payload = _json("\n".join(data_lines))
+                        payload["_event"] = event_name
+                        events.append(payload)
+                        data_lines = []
+                        if event_name in {"completed", "failed", "interrupted", "cancelled"}:
+                            terminal = payload
+                            break
+    except TimeoutError as exc:
+        raise AssertionError("real turn stream timed out") from exc
     if not terminal:
         raise AssertionError("real turn stream ended without a terminal event")
     return events, terminal
@@ -155,6 +161,7 @@ async def _find_request(
     page = response.json()
     if not isinstance(page, Mapping) or not isinstance(page.get("items"), list):
         raise TypeError("Planning request list is not a page")
+    matches: list[tuple[str, dict[str, Any]]] = []
     for summary in page["items"]:
         if not isinstance(summary, Mapping) or not isinstance(summary.get("id"), str):
             continue
@@ -163,13 +170,24 @@ async def _find_request(
             client, control_plane_url, workspace_id, request_id
         )
         if marker in json.dumps(detail, ensure_ascii=False):
-            return request_id, detail
+            matches.append((request_id, detail))
+            continue
         briefs = await client.get(
             f"{control_plane_url}/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/briefs",
             timeout=20.0,
         )
         if briefs.is_success and marker in briefs.text:
-            return request_id, detail
+            matches.append((request_id, detail))
+    if matches:
+        terminal_failures = {"failed", "blocked", "cancelled", "rejected"}
+        matches.sort(
+            key=lambda item: (
+                str(item[1].get("status") or "") not in terminal_failures,
+                str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+            ),
+            reverse=True,
+        )
+        return matches[0]
     raise AssertionError("marker PlanningRequest was not found in the configured workspace")
 
 
@@ -189,6 +207,10 @@ async def _wait_for_status(
         )
         if detail.get("status") in statuses:
             return detail
+        if detail.get("status") in {"failed", "blocked", "cancelled", "rejected"}:
+            raise AssertionError(
+                f"PlanningRequest reached unexpected terminal status: {detail.get('status')}"
+            )
         await asyncio.sleep(2.0)
     raise AssertionError(f"PlanningRequest did not reach {sorted(statuses)}")
 
