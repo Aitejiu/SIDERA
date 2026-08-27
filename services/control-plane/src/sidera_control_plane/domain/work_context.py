@@ -702,6 +702,31 @@ class WorkContext:
             raise InvalidTransition("only an active work context can be revised")
         self._append_revision(revision, expected_version=expected_version, now=now)
 
+    def append_external_revision(
+        self, revision: WorkContextRevision, *, expected_version: int, now: datetime
+    ) -> None:
+        """Append a replan/confirmation revision sourced by another request.
+
+        A root Task keeps one WorkContext lineage, while each replan owns a
+        separate PlanningRequest and Brief. The revision therefore points at
+        the newer brief without changing the WorkContext's original owner.
+        """
+        if self.status is not WorkContextStatus.ACTIVE:
+            raise InvalidTransition("only an active work context can be revised")
+        if revision.reason not in {
+            WorkContextRevisionReason.REPLANNED,
+            WorkContextRevisionReason.PROPOSAL_CONFIRMED,
+        }:
+            raise ValidationError(
+                "external work context revisions must be replanned or proposal_confirmed"
+            )
+        self._append_revision(
+            revision,
+            expected_version=expected_version,
+            now=now,
+            allow_external_brief=True,
+        )
+
     def complete_legacy(
         self, revision: WorkContextRevision, *, expected_version: int, now: datetime
     ) -> None:
@@ -761,19 +786,31 @@ class WorkContext:
         self.updated_at = _aware(now, "work context updated_at")
 
     def _append_revision(
-        self, revision: WorkContextRevision, *, expected_version: int, now: datetime
+        self,
+        revision: WorkContextRevision,
+        *,
+        expected_version: int,
+        now: datetime,
+        allow_external_brief: bool = False,
     ) -> None:
         self._check_version(expected_version)
-        self._validate_revision_for_append(revision)
+        self._validate_revision_for_append(
+            revision, allow_external_brief=allow_external_brief
+        )
         self.current_revision_id = revision.revision_id
         self.current_revision_number = revision.revision_number
         self.version += 1
         self.updated_at = _aware(now, "work context updated_at")
 
-    def _validate_revision_for_append(self, revision: WorkContextRevision) -> None:
+    def _validate_revision_for_append(
+        self, revision: WorkContextRevision, *, allow_external_brief: bool = False
+    ) -> None:
         if revision.work_context_id != self.id or revision.workspace_id != self.workspace_id:
             raise ValidationError("work context revision belongs to another context")
-        if revision.brief_planning_request_id != self.planning_request_id:
+        if (
+            not allow_external_brief
+            and revision.brief_planning_request_id != self.planning_request_id
+        ):
             raise ValidationError("brief planning request does not match work context")
         if revision.revision_number != self.current_revision_number + 1:
             raise ValidationError("work context revision number must advance by one")

@@ -5,13 +5,20 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.api.schemas import CommandRequest
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_packages import ContextAssemblyRequest
-from sidera_control_plane.domain.errors import OperatorRequired, ValidationError
+from sidera_control_plane.domain.errors import (
+    OperatorRequired,
+    PlanGenerationConflict,
+    PlanningConflict,
+    ValidationError,
+    VersionConflict,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
@@ -23,6 +30,10 @@ from sidera_control_plane.domain.modules import (
     StabilityLevel,
     StructuredOutputCapability,
     UsageReportingCapability,
+)
+from sidera_control_plane.domain.plan_revisions import (
+    RootTaskPlanHead,
+    plan_snapshot_content_hash,
 )
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
@@ -39,6 +50,8 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
 )
+from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.work_context import (
     WorkContext,
     WorkContextRevision,
@@ -50,7 +63,9 @@ WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")
 PROPOSAL_HASH = "a" * 64
 
 
-def planner_capabilities() -> PlannerAdapterCapabilityProfile:
+def planner_capabilities(
+    proposal_schema_versions: tuple[int, ...] = (2,),
+) -> PlannerAdapterCapabilityProfile:
     return PlannerAdapterCapabilityProfile(
         structured_output=StructuredOutputCapability.JSON_SCHEMA,
         clarification=True,
@@ -60,11 +75,13 @@ def planner_capabilities() -> PlannerAdapterCapabilityProfile:
         max_context_bytes=128_000,
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2,),
+        proposal_schema_versions=proposal_schema_versions,
     )
 
 
-def module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
+def module_facts(
+    *, proposal_schema_versions: tuple[int, ...] = (2,)
+) -> tuple[ModuleDefinition, ModuleInstance]:
     definition_id = uuid4()
     instance_id = uuid4()
     definition = ModuleDefinition(
@@ -74,7 +91,7 @@ def module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
         provider="fake",
         interface_version="sidera.planner.v1",
         config_schema_version=1,
-        capabilities=planner_capabilities(),
+        capabilities=planner_capabilities(proposal_schema_versions),
         lifecycle=ModuleLifecycle.ACTIVE,
     )
     instance = ModuleInstance(
@@ -91,7 +108,9 @@ def module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
     return definition, instance
 
 
-def profile(instance_id: UUID) -> PlanningProfile:
+def profile(
+    instance_id: UUID, *, proposal_schema_version: int = 2
+) -> PlanningProfile:
     return PlanningProfile(
         id=uuid4(),
         workspace_id=WORKSPACE_ID,
@@ -103,7 +122,7 @@ def profile(instance_id: UUID) -> PlanningProfile:
         planner_interface_version="sidera.planner.v1",
         prompt_policy_version="prompt.v1",
         system_policy={"approval": {"required": True}},
-        proposal_schema_version=2,
+        proposal_schema_version=proposal_schema_version,
         allowed_capabilities=("code",),
         adapter_preferences=("opencode",),
         adapter_forbidden=(),
@@ -172,6 +191,7 @@ class ProfileRepository:
 class RequestRepository:
     def __init__(self, request: PlanningRequest | None = None) -> None:
         self.request = request
+        self.active_revision: PlanningRequest | None = None
         self.added: list[PlanningRequest] = []
         self.saved: list[tuple[PlanningRequest, int]] = []
 
@@ -189,6 +209,60 @@ class RequestRepository:
     def save(self, request: PlanningRequest, previous_version: int) -> None:
         self.request = request
         self.saved.append((request, previous_version))
+
+    def get_active_revision_for_root(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRequest | None:
+        del for_update
+        revision = self.active_revision
+        if (
+            revision is not None
+            and revision.workspace_id == workspace_id
+            and revision.root_task_id == root_task_id
+        ):
+            return revision
+        return None
+
+
+class TaskRepository:
+    def __init__(self, task: Task) -> None:
+        self.task = task
+
+    def get(self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False):
+        del for_update
+        if self.task.id == task_id and self.task.workspace_id == workspace_id:
+            return self.task
+        return None
+
+
+class PlanRepository:
+    def __init__(self, snapshot: TaskPlanSnapshot, head: RootTaskPlanHead) -> None:
+        self.snapshot = snapshot
+        self.head = head
+
+    def get_head(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ):
+        del for_update
+        if (
+            self.head.root_task_id == root_task_id
+            and self.head.workspace_id == workspace_id
+        ):
+            return self.head
+        return None
+
+    def get(self, snapshot_id: UUID, workspace_id: UUID):
+        if self.snapshot.id == snapshot_id and self.snapshot.workspace_id == workspace_id:
+            return self.snapshot
+        return None
 
 
 class RunRepository:
@@ -309,6 +383,18 @@ class WorkContextRepository:
             return self.context
         return None
 
+    def get_by_root_task(
+        self, root_task_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkContext | None:
+        del for_update
+        if (
+            self.context is not None
+            and self.context.root_task_id == root_task_id
+            and self.context.workspace_id == workspace_id
+        ):
+            return self.context
+        return None
+
     def get_revision(
         self, revision_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> WorkContextRevision | None:
@@ -364,6 +450,8 @@ def unit(
     current_proposal: object | None = None,
 ) -> Any:
     return SimpleNamespace(
+        tasks=SimpleNamespace(),
+        plans=SimpleNamespace(),
         modules=ModuleRepository(definition, instance),
         planning_profiles=ProfileRepository(stored_profile),
         planning_requests=RequestRepository(stored_request),
@@ -873,3 +961,280 @@ def test_retry_blocked_planning_run_requires_operator_and_records_decision() -> 
     assert new_run.operation_id != old_run.operation_id
     assert unit_of_work.planning_runs.added == [new_run]
     assert unit_of_work.events.events[-1].payload["unknown_outcome_decision"] == "retry"
+
+
+def test_planning_handler_registers_submit_plan_revision() -> None:
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    assert "SubmitPlanRevision" in handler.command_types
+
+
+def test_submit_plan_revision_payload_uses_strict_command_schema() -> None:
+    root_task_id = uuid4()
+
+    with pytest.raises(ValueError, match="extra"):
+        CommandRequest(
+            command_id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            command_type="SubmitPlanRevision",
+            target_type="task",
+            actor={"type": "user", "id": "operator"},
+            target_id=root_task_id,
+            expected_version=1,
+            idempotency_key=uuid4().hex,
+            correlation_id=uuid4(),
+            payload={
+                "root_task_id": str(root_task_id),
+                "expected_base_snapshot_id": str(uuid4()),
+                "expected_base_generation": 4,
+                "expected_base_content_hash": PROPOSAL_HASH,
+                "objective": "Revise the running plan",
+                "constraints": [],
+                "acceptance_criteria": ["The revision is reviewable"],
+                "planning_profile_id": str(uuid4()),
+                "planning_profile_version": 1,
+                "unexpected": True,
+            },
+        )
+
+
+def _revision_fixture(
+    *,
+    proposal_schema_versions: tuple[int, ...] = (2, 3),
+    proposal_schema_version: int = 3,
+) -> tuple[Any, Task, TaskPlanSnapshot, PlanningProfile]:
+    definition, instance = module_facts(
+        proposal_schema_versions=proposal_schema_versions
+    )
+    stored_profile = profile(
+        instance.id, proposal_schema_version=proposal_schema_version
+    )
+    profile_snapshot = stored_profile.snapshot(
+        planner_capabilities(proposal_schema_versions)
+    )
+    stored_request = PlanningRequest.create(
+        request_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        profile_snapshot=profile_snapshot,
+        objective="Create the original plan",
+        constraints=(),
+        acceptance_criteria=("The original plan is reviewable",),
+        context_refs=(),
+        requested_outputs=("plan",),
+        source_type="web",
+        source_ref=None,
+        actor="operator",
+        correlation_id=uuid4(),
+        run_id=uuid4(),
+        now=NOW,
+    )
+    root_task = Task.create(
+        task_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        title="Original root task",
+        description="Root task under revision test",
+        acceptance_criteria=("The task remains unchanged",),
+        priority=50,
+        requested_by="operator",
+    )
+    snapshot = TaskPlanSnapshot.create(
+        snapshot_id=uuid4(),
+        schema_version=1,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=root_task.id,
+        generation=1,
+        parent_snapshot_id=None,
+        source_type="test",
+        source_ref="revision-test",
+        title="Original plan",
+        goal_summary="Original plan for revision command",
+        acceptance_refs=("plan:reviewable",),
+        published_by="operator",
+        published_at=NOW,
+    )
+    head = RootTaskPlanHead(
+        workspace_id=WORKSPACE_ID,
+        root_task_id=root_task.id,
+        active_snapshot_id=snapshot.id,
+        active_generation=snapshot.generation,
+        active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+        version=1,
+        updated_at=NOW,
+    )
+    unit_of_work = unit(definition, instance, stored_profile, stored_request)
+    unit_of_work.tasks = TaskRepository(root_task)
+    unit_of_work.plans = PlanRepository(snapshot, head)
+    assert unit_of_work.work_contexts.context is not None
+    unit_of_work.work_contexts.context.root_task_id = root_task.id
+    return unit_of_work, root_task, snapshot, stored_profile
+
+
+def _submit_revision_envelope(
+    root_task: Task,
+    snapshot: TaskPlanSnapshot,
+    profile_item: PlanningProfile,
+    *,
+    expected_task_version: int | None = None,
+    expected_generation: int | None = None,
+    expected_content_hash: str | None = None,
+) -> CommandEnvelope:
+    return envelope(
+        "SubmitPlanRevision",
+        {
+            "root_task_id": str(root_task.id),
+            "expected_base_snapshot_id": str(snapshot.id),
+            "expected_base_generation": (
+                snapshot.generation
+                if expected_generation is None
+                else expected_generation
+            ),
+            "expected_base_content_hash": (
+                plan_snapshot_content_hash(snapshot)
+                if expected_content_hash is None
+                else expected_content_hash
+            ),
+            "objective": "Revise the running plan",
+            "constraints": ["Keep completed work reusable"],
+            "acceptance_criteria": ["The revision is reviewable"],
+            "planning_profile_id": str(profile_item.id),
+            "planning_profile_version": profile_item.version,
+        },
+        target_type="task",
+        target_id=root_task.id,
+        expected_version=(
+            root_task.version
+            if expected_task_version is None
+            else expected_task_version
+        ),
+    )
+
+
+def test_submit_plan_revision_creates_queued_run_and_reuses_context_lineage() -> None:
+    unit_of_work, root_task, snapshot, stored_profile = _revision_fixture()
+    old_head = (
+        unit_of_work.plans.head.active_snapshot_id,
+        unit_of_work.plans.head.active_generation,
+        unit_of_work.plans.head.active_snapshot_hash,
+        unit_of_work.plans.head.version,
+    )
+    old_root = (root_task.status, root_task.version, root_task.title)
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        _submit_revision_envelope(root_task, snapshot, stored_profile),
+    )
+
+    revision_request = unit_of_work.planning_requests.added[-1]
+    assert revision_request.kind.value == "revision"
+    assert revision_request.root_task_id == root_task.id
+    assert revision_request.base_descriptor is not None
+    assert revision_request.base_descriptor.plan_snapshot_id == snapshot.id
+    assert revision_request.base_descriptor.plan_generation == snapshot.generation
+    assert revision_request.base_descriptor.plan_content_hash == old_head[2]
+    assert revision_request.runs[-1].status is PlanningRunStatus.QUEUED
+    assert result.data["planning_request_id"] == str(revision_request.id)
+    assert result.data["planning_run_id"] == str(revision_request.current_run_id)
+    assert result.data["base_snapshot_id"] == str(snapshot.id)
+    assert result.data["base_generation"] == 1
+    assert unit_of_work.work_contexts.context is not None
+    assert unit_of_work.work_contexts.context.root_task_id == root_task.id
+    assert unit_of_work.work_contexts.context.current_revision_number == 2
+    revision = unit_of_work.work_contexts.appended[-1][0]
+    assert revision.reason is WorkContextRevisionReason.REPLANNED
+    assert revision.brief_planning_request_id == revision_request.id
+    assert unit_of_work.context_assemblies.added[-1].consumer_id == revision_request.current_run_id
+    assert [event.event_type for event in unit_of_work.events.events[-2:]] == [
+        "WorkContextRevised",
+        "PlanRevisionRequested",
+    ]
+    assert (
+        unit_of_work.plans.head.active_snapshot_id,
+        unit_of_work.plans.head.active_generation,
+        unit_of_work.plans.head.active_snapshot_hash,
+        unit_of_work.plans.head.version,
+    ) == old_head
+    assert (root_task.status, root_task.version, root_task.title) == old_root
+
+
+def test_submit_plan_revision_rejects_stale_generation_without_writes() -> None:
+    unit_of_work, root_task, snapshot, stored_profile = _revision_fixture()
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    with pytest.raises(PlanGenerationConflict):
+        handler.handle(
+            unit_of_work,
+            _submit_revision_envelope(
+                root_task,
+                snapshot,
+                stored_profile,
+                expected_generation=2,
+            ),
+        )
+
+    assert unit_of_work.planning_requests.added == []
+    assert unit_of_work.work_contexts.appended == []
+    assert unit_of_work.context_assemblies.added == []
+    assert unit_of_work.events.events == []
+
+
+def test_submit_plan_revision_rejects_stale_root_task_without_writes() -> None:
+    unit_of_work, root_task, snapshot, stored_profile = _revision_fixture()
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+    root_task.version = 2
+
+    with pytest.raises(VersionConflict):
+        handler.handle(
+            unit_of_work,
+            _submit_revision_envelope(
+                root_task,
+                snapshot,
+                stored_profile,
+                expected_task_version=1,
+            ),
+        )
+
+    assert unit_of_work.planning_requests.added == []
+    assert unit_of_work.work_contexts.appended == []
+    assert unit_of_work.context_assemblies.added == []
+    assert unit_of_work.events.events == []
+
+
+def test_submit_plan_revision_rejects_v2_profile_and_existing_active_revision() -> None:
+    unit_of_work, root_task, snapshot, v2_profile = _revision_fixture(
+        proposal_schema_version=2
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    with pytest.raises(ValidationError, match="schema v3"):
+        handler.handle(
+            unit_of_work,
+            _submit_revision_envelope(root_task, snapshot, v2_profile),
+        )
+
+    active_revision = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=root_task.id,
+        version=4,
+        current_proposal_revision=None,
+        current_proposal_content_hash=None,
+    )
+    unit_of_work.planning_requests.active_revision = active_revision
+    v3_profile = profile(unit_of_work.modules.instance.id)
+    unit_of_work.planning_profiles.stored = v3_profile
+    with pytest.raises(PlanningConflict):
+        handler.handle(
+            unit_of_work,
+            _submit_revision_envelope(root_task, snapshot, v3_profile),
+        )

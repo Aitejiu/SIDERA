@@ -648,6 +648,21 @@ def test_stale_answer_returns_actionable_planning_conflict(
             },
         ),
         (
+            "SubmitPlanRevision",
+            "task",
+            {
+                "root_task_id": str(uuid4()),
+                "expected_base_snapshot_id": str(uuid4()),
+                "expected_base_generation": 1,
+                "expected_base_content_hash": "a" * 64,
+                "objective": "revise the plan",
+                "constraints": [],
+                "acceptance_criteria": ["the revision is reviewable"],
+                "planning_profile_id": str(uuid4()),
+                "planning_profile_version": 1,
+            },
+        ),
+        (
             "ConfirmPlanningProposal",
             "planning_request",
             {

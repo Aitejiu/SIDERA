@@ -22,6 +22,7 @@ from sidera_control_plane.application.work_context_commands import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     OperatorRequired,
+    PlanGenerationConflict,
     PlanningConflict,
     ValidationError,
     VersionConflict,
@@ -33,6 +34,10 @@ from sidera_control_plane.domain.modules import (
     ModuleInstance,
     ModuleLifecycle,
     PlannerAdapterCapabilityProfile,
+)
+from sidera_control_plane.domain.plan_revisions import (
+    RevisionBaseDescriptorV1,
+    plan_snapshot_content_hash,
 )
 from sidera_control_plane.domain.planning import (
     RUN_TERMINAL_STATUSES,
@@ -64,6 +69,7 @@ class PlanningCommandHandler:
             "RegisterPlannerModule",
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
+            "SubmitPlanRevision",
             "CancelPlanningRequest",
             "AnswerPlanningClarification",
             "RequestProposalRevision",
@@ -103,6 +109,8 @@ class PlanningCommandHandler:
             return self._register_profile(uow, envelope)
         if envelope.command_type == "SubmitPlanningRequest":
             return self._submit_request(uow, envelope)
+        if envelope.command_type == "SubmitPlanRevision":
+            return self._submit_plan_revision(uow, envelope)
         if envelope.command_type == "CancelPlanningRequest":
             return self._cancel_request(uow, envelope)
         if envelope.command_type == "AnswerPlanningClarification":
@@ -392,6 +400,247 @@ class PlanningCommandHandler:
                 "brief_revision": request.current_brief_revision,
                 "work_context_id": str(work_context.id),
                 "work_context_revision": work_context.current_revision_number,
+                "work_context_content_hash": work_context_revision.content_hash,
+            },
+        )
+
+    def _submit_plan_revision(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if envelope.target_type != "task":
+            raise ValidationError("SubmitPlanRevision requires target_type=task")
+        if envelope.target_id is None or envelope.expected_version is None:
+            raise ValidationError(
+                "SubmitPlanRevision requires target_id and expected_version"
+            )
+        if envelope.expected_version < 1:
+            raise ValidationError("expected_version must be positive")
+        payload = envelope.payload
+        root_task_id = _uuid(payload, "root_task_id")
+        if envelope.target_id != root_task_id:
+            raise ValidationError("SubmitPlanRevision root_task_id must match target_id")
+
+        root_task = uow.tasks.get(
+            root_task_id, envelope.workspace_id, for_update=True
+        )
+        if root_task is None:
+            raise NotFound("root task not found")
+        if root_task.version != envelope.expected_version:
+            raise VersionConflict(envelope.expected_version, root_task.version)
+
+        plan_head = uow.plans.get_head(
+            root_task_id, envelope.workspace_id, for_update=True
+        )
+        if plan_head is None:
+            raise NotFound("current plan head not found")
+
+        expected_snapshot_id = _uuid(payload, "expected_base_snapshot_id")
+        expected_generation = _positive_int(payload, "expected_base_generation")
+        expected_content_hash = _content_hash(
+            _required_string(payload, "expected_base_content_hash")
+        )
+        if plan_head.active_generation != expected_generation:
+            raise PlanGenerationConflict(
+                expected_generation, plan_head.active_generation
+            )
+        if plan_head.active_snapshot_id != expected_snapshot_id:
+            raise ValidationError(
+                "revision base snapshot does not match the current plan head",
+                details={
+                    "expected_snapshot_id": str(expected_snapshot_id),
+                    "current_snapshot_id": str(plan_head.active_snapshot_id),
+                    "current_generation": plan_head.active_generation,
+                },
+            )
+        if plan_head.active_snapshot_hash != expected_content_hash:
+            raise ValidationError(
+                "revision base content hash does not match the current plan head",
+                details={
+                    "expected_content_hash": expected_content_hash,
+                    "current_content_hash": plan_head.active_snapshot_hash,
+                },
+            )
+
+        base_snapshot = uow.plans.get(expected_snapshot_id, envelope.workspace_id)
+        if base_snapshot is None:
+            raise NotFound("revision base snapshot not found")
+        actual_content_hash = plan_snapshot_content_hash(base_snapshot)
+        if (
+            base_snapshot.root_task_id != root_task_id
+            or base_snapshot.generation != expected_generation
+            or actual_content_hash != expected_content_hash
+        ):
+            raise ValidationError(
+                "revision base snapshot content does not match the current plan head",
+                details={
+                    "snapshot_id": str(base_snapshot.id),
+                    "root_task_id": str(base_snapshot.root_task_id),
+                    "generation": base_snapshot.generation,
+                    "content_hash": actual_content_hash,
+                },
+            )
+
+        active_revision = uow.planning_requests.get_active_revision_for_root(
+            root_task_id, envelope.workspace_id, for_update=True
+        )
+        if active_revision is not None:
+            raise PlanningConflict(
+                current_request_version=active_revision.version,
+                current_proposal_revision=active_revision.current_proposal_revision,
+                current_proposal_content_hash=(
+                    active_revision.current_proposal_content_hash
+                ),
+            )
+
+        profile_id = _uuid(payload, "planning_profile_id")
+        profile_version = _positive_int(payload, "planning_profile_version")
+        profile = uow.planning_profiles.get(
+            profile_id, envelope.workspace_id, version=profile_version
+        )
+        if profile is None:
+            raise NotFound("planning profile not found")
+        profile.assert_user_selectable()
+        if profile.proposal_schema_version != 3:
+            raise ValidationError(
+                "plan revision requires a planning profile with proposal schema v3"
+            )
+        instance = uow.modules.get_instance(
+            profile.planner_module_instance_id, envelope.workspace_id
+        )
+        if instance is None:
+            raise ValidationError("planning profile module instance is unavailable")
+        definition = uow.modules.get_definition(
+            instance.definition_id, envelope.workspace_id
+        )
+        if definition is None or not isinstance(
+            definition.capabilities, PlannerAdapterCapabilityProfile
+        ):
+            raise ValidationError("planning profile planner capability is unavailable")
+        if 3 not in definition.capabilities.proposal_schema_versions:
+            raise ValidationError(
+                "planner adapter does not support revision proposal schema v3"
+            )
+        profile_snapshot = profile.snapshot(
+            definition.capabilities,
+            module_instance_config_version=instance.config_version,
+        )
+
+        work_context = uow.work_contexts.get_by_root_task(
+            root_task_id, envelope.workspace_id, for_update=True
+        )
+        if work_context is None:
+            raise NotFound("work context not found for plan revision")
+        current_context_revision = uow.work_contexts.get_revision(
+            work_context.current_revision_id,
+            envelope.workspace_id,
+        )
+        if current_context_revision is None:
+            raise NotFound("work context current revision not found")
+
+        now = self._clock()
+        base = RevisionBaseDescriptorV1(
+            schema_version=1,
+            workspace_id=envelope.workspace_id,
+            root_task_id=root_task_id,
+            plan_snapshot_id=expected_snapshot_id,
+            plan_generation=expected_generation,
+            plan_content_hash=expected_content_hash,
+            root_task_version=root_task.version,
+            captured_at=now,
+        )
+        request = PlanningRequest.create_revision(
+            request_id=uuid4(),
+            workspace_id=envelope.workspace_id,
+            profile_snapshot=profile_snapshot,
+            objective=_required_string(payload, "objective"),
+            constraints=_string_tuple(payload.get("constraints", ()), "constraints"),
+            acceptance_criteria=_string_tuple(
+                payload.get("acceptance_criteria", ()), "acceptance_criteria"
+            ),
+            context_refs=(),
+            requested_outputs=("plan",),
+            source_type="plan_revision",
+            source_ref=str(envelope.id),
+            actor=envelope.actor_id,
+            correlation_id=envelope.correlation_id,
+            run_id=uuid4(),
+            now=now,
+            base=base,
+        )
+        work_context_revision = self._work_context_factory.create(
+            work_context_id=work_context.id,
+            workspace_id=envelope.workspace_id,
+            brief=request.briefs[0],
+            revision_number=work_context.current_revision_number + 1,
+            reason=WorkContextRevisionReason.REPLANNED,
+            actor=envelope.actor_id,
+            created_at=now,
+            base_snapshot=current_context_revision.snapshot,
+            plan_snapshot_id=base_snapshot.id,
+        )
+        previous_context_version = work_context.version
+        work_context.append_external_revision(
+            work_context_revision,
+            expected_version=previous_context_version,
+            now=now,
+        )
+
+        uow.planning_requests.add(request)
+        uow.work_contexts.append_revision(
+            work_context,
+            work_context_revision,
+            expected_version=previous_context_version,
+        )
+        uow.context_assemblies.add(
+            build_planning_context_assembly_request(
+                run=request.runs[-1],
+                brief=request.briefs[-1],
+                work_context_revision=work_context_revision,
+                ttl_seconds=self._planning_context_ttl_seconds,
+                created_at=now,
+                planning_kind=request.kind,
+                revision_base=request.base_descriptor,
+            )
+        )
+        context_event = work_context_event(
+            envelope,
+            context=work_context,
+            revision=work_context_revision,
+            event_type="WorkContextRevised",
+        )
+        event = _event(
+            envelope,
+            aggregate_type="planning_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type="PlanRevisionRequested",
+            payload={
+                "root_task_id": str(root_task_id),
+                "planning_request_id": str(request.id),
+                "planning_run_id": str(request.current_run_id),
+                "work_context_id": str(work_context.id),
+                "work_context_revision": work_context_revision.revision_number,
+                "base_snapshot_id": str(base.plan_snapshot_id),
+                "base_generation": base.plan_generation,
+                "base_content_hash": base.plan_content_hash,
+            },
+        )
+        uow.events.append_with_outbox(context_event)
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=(context_event.id, event.id),
+            data={
+                "planning_request_id": str(request.id),
+                "planning_run_id": str(request.current_run_id),
+                "root_task_id": str(root_task_id),
+                "base_snapshot_id": str(base.plan_snapshot_id),
+                "base_generation": base.plan_generation,
+                "base_content_hash": base.plan_content_hash,
+                "work_context_id": str(work_context.id),
+                "work_context_revision": work_context_revision.revision_number,
                 "work_context_content_hash": work_context_revision.content_hash,
             },
         )
@@ -1002,6 +1251,10 @@ class PlanningCommandHandler:
             context = uow.work_contexts.get_by_planning_request(
                 request.id, request.workspace_id
             )
+            if context is None and request.root_task_id is not None:
+                context = uow.work_contexts.get_by_root_task(
+                    request.root_task_id, request.workspace_id
+                )
             if context is None:
                 raise NotFound("work context not found for planning context assembly")
             revision = uow.work_contexts.get_revision(
@@ -1018,6 +1271,8 @@ class PlanningCommandHandler:
                 work_context_revision=revision,
                 ttl_seconds=self._planning_context_ttl_seconds,
                 created_at=run.queued_at,
+                planning_kind=request.kind,
+                revision_base=request.base_descriptor,
             )
         )
 

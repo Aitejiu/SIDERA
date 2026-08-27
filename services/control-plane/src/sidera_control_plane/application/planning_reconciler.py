@@ -203,6 +203,10 @@ class PlanningReconciler:
         context = uow.work_contexts.get_by_planning_request(
             request.id, request.workspace_id
         )
+        if context is None and request.root_task_id is not None:
+            context = uow.work_contexts.get_by_root_task(
+                request.root_task_id, request.workspace_id
+            )
         if context is None:
             raise NotFound("work context not found for planning retry")
         revision = uow.work_contexts.get_revision(
@@ -217,6 +221,8 @@ class PlanningReconciler:
                 work_context_revision=revision,
                 ttl_seconds=ttl_seconds,
                 created_at=run.queued_at,
+                planning_kind=request.kind,
+                revision_base=request.base_descriptor,
             )
         )
 

@@ -66,6 +66,7 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "RegisterPlannerModule": "RegisterPlannerModulePayload",
     "RegisterPlanningProfile": "RegisterPlanningProfilePayload",
     "SubmitPlanningRequest": "SubmitPlanningRequestPayload",
+    "SubmitPlanRevision": "SubmitPlanRevisionPayload",
     "CancelPlanningRequest": "CancelPlanningRequestPayload",
     "AnswerPlanningClarification": "AnswerPlanningClarificationPayload",
     "RequestProposalRevision": "RequestProposalRevisionPayload",

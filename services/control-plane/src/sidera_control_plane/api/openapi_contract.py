@@ -28,6 +28,7 @@ from sidera_control_plane.api.schemas import (
     RevokeContextPackagePayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
+    SubmitPlanRevisionPayload,
 )
 from sidera_control_plane.config import Settings
 
@@ -35,6 +36,7 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RegisterPlannerModule", RegisterPlannerModulePayload),
     ("RegisterPlanningProfile", RegisterPlanningProfilePayload),
     ("SubmitPlanningRequest", SubmitPlanningRequestPayload),
+    ("SubmitPlanRevision", SubmitPlanRevisionPayload),
     ("CancelPlanningRequest", CancelPlanningRequestPayload),
     ("AnswerPlanningClarification", AnswerPlanningClarificationPayload),
     ("RequestProposalRevision", RequestProposalRevisionPayload),

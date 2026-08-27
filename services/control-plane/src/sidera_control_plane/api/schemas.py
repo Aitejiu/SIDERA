@@ -199,6 +199,20 @@ class SubmitPlanningRequestPayload(BaseModel):
     source_ref: NonEmptyString | None = None
 
 
+class SubmitPlanRevisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_task_id: UUID
+    expected_base_snapshot_id: UUID
+    expected_base_generation: int = Field(gt=0)
+    expected_base_content_hash: NonEmptyString
+    objective: NonEmptyString
+    constraints: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    acceptance_criteria: tuple[NonEmptyString, ...] = Field(min_length=1)
+    planning_profile_id: UUID
+    planning_profile_version: int = Field(gt=0)
+
+
 class CancelPlanningRequestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1276,6 +1290,11 @@ class CommandRequest(BaseModel):
         elif self.command_type == "SubmitPlanningRequest":
             self._require_create("workspace")
             parsed = SubmitPlanningRequestPayload.model_validate(self.payload)
+        elif self.command_type == "SubmitPlanRevision":
+            self._require_mutation_target("task")
+            parsed = SubmitPlanRevisionPayload.model_validate(self.payload)
+            if parsed.root_task_id != self.target_id:
+                raise ValueError("SubmitPlanRevision root_task_id must match target_id")
         elif self.command_type == "CancelPlanningRequest":
             self._require_mutation_target("planning_request")
             parsed = CancelPlanningRequestPayload.model_validate(self.payload)

@@ -3204,6 +3204,36 @@ export interface components {
              */
             lifecycle: "active" | "draining" | "disabled";
         };
+        /** SubmitPlanRevisionPayload */
+        SubmitPlanRevisionPayload: {
+            /** Acceptance Criteria */
+            acceptance_criteria: string[];
+            /** Constraints */
+            constraints?: string[];
+            /** Expected Base Content Hash */
+            expected_base_content_hash: string;
+            /** Expected Base Generation */
+            expected_base_generation: number;
+            /**
+             * Expected Base Snapshot Id
+             * Format: uuid
+             */
+            expected_base_snapshot_id: string;
+            /** Objective */
+            objective: string;
+            /**
+             * Planning Profile Id
+             * Format: uuid
+             */
+            planning_profile_id: string;
+            /** Planning Profile Version */
+            planning_profile_version: number;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+        };
         /** SubmitPlanningRequestPayload */
         SubmitPlanningRequestPayload: {
             /** Acceptance Criteria */

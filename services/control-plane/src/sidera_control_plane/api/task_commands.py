@@ -35,6 +35,7 @@ def execute_command(
         "RegisterPlannerModule",
         "RegisterPlanningProfile",
         "SubmitPlanningRequest",
+        "SubmitPlanRevision",
         "ConfirmPlanningProposal",
     } and result.command_id == request.command_id
     is_new_create = is_new_create or (

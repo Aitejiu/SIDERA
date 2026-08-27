@@ -17,8 +17,10 @@ from sidera_control_plane.domain.context_packages import (
 )
 from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.execution_requests import ExecutionRequest
+from sidera_control_plane.domain.plan_revisions import RevisionBaseDescriptorV1
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
+    PlanningRequestKind,
     PlanningRun,
 )
 from sidera_control_plane.domain.work_context import WorkContextRevision
@@ -37,7 +39,13 @@ def build_planning_context_assembly_request(
     work_context_revision: WorkContextRevision,
     ttl_seconds: int,
     created_at: datetime,
+    planning_kind: PlanningRequestKind = PlanningRequestKind.CREATE,
+    revision_base: RevisionBaseDescriptorV1 | None = None,
 ) -> ContextAssemblyRequest:
+    if planning_kind is PlanningRequestKind.REVISION and revision_base is None:
+        raise ValueError("revision planning assembly requires an exact base")
+    if planning_kind is PlanningRequestKind.CREATE and revision_base is not None:
+        raise ValueError("create planning assembly cannot carry a revision base")
     profile = run.profile_snapshot
     budget = {
         "profile_id": str(profile.profile_id),
@@ -50,7 +58,19 @@ def build_planning_context_assembly_request(
         "planner_interface_version": profile.planner_interface_version,
         "prompt_policy_version": profile.prompt_policy_version,
         "proposal_schema_version": profile.proposal_schema_version,
+        "planning_kind": planning_kind.value,
     }
+    if revision_base is not None:
+        budget["revision_base"] = {
+            "schema_version": revision_base.schema_version,
+            "workspace_id": str(revision_base.workspace_id),
+            "root_task_id": str(revision_base.root_task_id),
+            "plan_id": str(revision_base.plan_snapshot_id),
+            "generation": revision_base.plan_generation,
+            "content_hash": revision_base.plan_content_hash,
+            "root_task_version": revision_base.root_task_version,
+            "captured_at": revision_base.captured_at.isoformat(),
+        }
     search_scope = _search_scope(brief.objective, brief.requested_outputs)
     filter_refs = tuple(
         item.to_mapping() for item in work_context_revision.snapshot.knowledge_refs
@@ -62,6 +82,8 @@ def build_planning_context_assembly_request(
         "planning_profile",
         "planner_module",
     )
+    if planning_kind is PlanningRequestKind.REVISION:
+        fact_scope_refs += ("revision_base",)
     expires_at = _expires_at(created_at, ttl_seconds)
     fingerprint = _request_fingerprint(
         purpose=ContextPurpose.PLANNING_RUN,
