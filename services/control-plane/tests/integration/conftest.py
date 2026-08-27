@@ -14,6 +14,8 @@ from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     AttentionAcknowledgementModel,
     CommandModel,
+    ContextPatchAcknowledgementModel,
+    ContextPatchModel,
     EventModel,
     EvidenceClaimModel,
     ExecutionBindingModel,
@@ -28,6 +30,7 @@ from sidera_control_plane.persistence.models import (
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
+    PlanEntityLineageModel,
     PlanningBriefRevisionModel,
     PlanningClarificationModel,
     PlanningProfileModel,
@@ -36,15 +39,18 @@ from sidera_control_plane.persistence.models import (
     PlanningRunLeaseModel,
     PlanningRunModel,
     PlanSnapshotModel,
+    PlanTransitionModel,
     ProcessDescriptorModel,
     ProjectionChangeModel,
     ProposalMaterializationModel,
+    RootTaskPlanHeadModel,
     SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
     WorkerRuntimeConfigurationModel,
+    WorkerTransitionModel,
     WorkspaceModel,
     WorkspaceProjectionCursorModel,
 )
@@ -64,6 +70,12 @@ PLANNING_CLEANUP_MODELS = (
     PlanningBriefRevisionModel,
     PlanningRequestModel,
     PlanningProfileModel,
+    ContextPatchAcknowledgementModel,
+    ContextPatchModel,
+    PlanEntityLineageModel,
+    WorkerTransitionModel,
+    PlanTransitionModel,
+    RootTaskPlanHeadModel,
 )
 
 
@@ -95,6 +107,18 @@ def clean_database(database: Database) -> Iterator[None]:
 
 def _clear_database(database: Database) -> None:
     with database.session() as session:
+        session.execute(
+            text(
+                "TRUNCATE TABLE "
+                "context_patch_acknowledgements, "
+                "context_patches, "
+                "plan_entity_lineages, "
+                "worker_transitions, "
+                "plan_transitions, "
+                "root_task_plan_heads "
+                "CASCADE"
+            )
+        )
         session.execute(
             text(
                 "TRUNCATE TABLE "
