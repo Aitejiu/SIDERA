@@ -1,14 +1,19 @@
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
-from sidera_control_plane.application.ports import ArtifactContentWriter
+from sidera_control_plane.application.ports import (
+    ArtifactContentWriter,
+    ControlPlaneUnitOfWork,
+)
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
     STOP_TOPIC,
+    AssignmentLeaseKeeper,
     GatewayAssignmentRunner,
     GatewayMessageError,
     WorkerGateway,
@@ -19,6 +24,7 @@ from sidera_control_plane.domain.gateway import (
     RuntimeModuleOperation,
     runtime_module_operation_allowed,
 )
+from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import ModuleLifecycle
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
@@ -80,6 +86,106 @@ class RecordingArtifactContentWriter(ArtifactContentWriter):
     ) -> str:
         self.calls.append((workspace_id, execution_id, expected_hash, content))
         return f"artifact-local://{workspace_id}/{execution_id}/{expected_hash}"
+
+
+class RecordingLeaseRepository:
+    def __init__(self, lease: AssignmentLease) -> None:
+        self.lease = lease
+        self.saved: list[tuple[int, int]] = []
+
+    def get(self, lease_id, workspace_id, *, for_update=False):
+        assert for_update is True
+        assert lease_id == self.lease.id
+        assert workspace_id == self.lease.workspace_id
+        return self.lease
+
+    def save(self, lease, previous_version):
+        self.saved.append((previous_version, lease.version))
+
+
+class RecordingEventStore:
+    def __init__(self) -> None:
+        self.events = []
+
+    def append_with_outbox(self, event) -> None:
+        self.events.append(event)
+
+
+class RecordingCommandRepository:
+    def __init__(self) -> None:
+        self.commands = []
+
+    def record_applied(self, command, request_hash, result) -> None:
+        self.commands.append((command, request_hash, result))
+
+
+class RecordingLeaseUow:
+    def __init__(self, leases, events, commands) -> None:
+        self.leases = leases
+        self.events = events
+        self.commands = commands
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        del exc_type, exc_value, traceback
+
+
+def test_assignment_lease_keeper_renews_and_audits_with_fencing() -> None:
+    workspace_id = UUID("20000000-0000-0000-0000-000000000001")
+    execution_id = UUID("70000000-0000-0000-0000-000000000001")
+    worker_id = UUID("80000000-0000-0000-0000-000000000001")
+    lease = AssignmentLease.issue(
+        lease_id=UUID("90000000-0000-0000-0000-000000000001"),
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        worker_id=worker_id,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+        fencing_token=4,
+        assignment_reason={"source": "unit-test"},
+    )
+    leases = RecordingLeaseRepository(lease)
+    events = RecordingEventStore()
+    commands = RecordingCommandRepository()
+    uow = RecordingLeaseUow(leases, events, commands)
+    keeper = AssignmentLeaseKeeper(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        lease_id=lease.id,
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        worker_id=worker_id,
+        fencing_token=4,
+        lease_ttl_seconds=30,
+        renew_interval_seconds=10,
+        clock=lambda: NOW + timedelta(seconds=5),
+    )
+
+    assert keeper.renew_once() is True
+    assert lease.expires_at == NOW + timedelta(seconds=35)
+    assert lease.renewed_at == NOW + timedelta(seconds=5)
+    assert leases.saved == [(1, 2)]
+    assert len(events.events) == 1
+    assert events.events[0].event_type == "LeaseRenewed"
+    assert events.events[0].aggregate_version == 2
+    assert events.events[0].payload["fencing_token"] == 4
+    assert commands.commands[0][0].command_type == "RenewLease"
+    assert commands.commands[0][2].event_ids == (events.events[0].id,)
+
+
+def test_assignment_lease_keeper_requires_renew_interval_below_half_ttl() -> None:
+    with pytest.raises(ValueError, match="less than half"):
+        AssignmentLeaseKeeper(
+            uow_factory=lambda: None,  # type: ignore[return-value]
+            lease_id=uuid4(),
+            workspace_id=uuid4(),
+            execution_id=uuid4(),
+            worker_id=uuid4(),
+            fencing_token=1,
+            lease_ttl_seconds=30,
+            renew_interval_seconds=15,
+        )
 
 
 def test_gateway_runner_claims_assignment_and_stop_topics_and_acknowledges() -> None:

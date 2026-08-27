@@ -384,6 +384,8 @@ def _settings(database_url: str, executable: str, tmp_path: Path) -> Settings:
         planning_opencode_model=os.environ.get(
             "SIDERA_OPENCODE_MODEL", "deepseek/deepseek-chat"
         ),
+        assignment_lease_seconds=300,
+        assignment_lease_renew_interval_seconds=30.0,
         opencode_executable=executable,
         opencode_request_timeout_seconds=90,
         opencode_stop_grace_seconds=2,
@@ -604,6 +606,10 @@ def _real_gateway(
         artifact_content_store=LocalArtifactContentStore(
             settings.artifact_root,
             max_bytes=settings.artifact_max_bytes,
+        ),
+        assignment_lease_ttl_seconds=settings.assignment_lease_seconds,
+        assignment_lease_renew_interval_seconds=(
+            settings.assignment_lease_renew_interval_seconds
         ),
         clock=lambda: datetime.now(UTC),
     )

@@ -45,6 +45,7 @@ def test_scheduler_settings_are_positive():
     )
 
     assert settings.assignment_lease_seconds == 30
+    assert settings.assignment_lease_renew_interval_seconds == 10.0
     assert settings.worker_heartbeat_timeout_seconds == 45
     assert settings.scheduler_batch_size == 20
     assert settings.scheduler_poll_interval_seconds == 1.0
@@ -58,6 +59,13 @@ def test_scheduler_settings_are_positive():
 
     with pytest.raises(ValueError):
         Settings(database_url="postgresql+psycopg://test", scheduler_batch_size=0)
+
+    with pytest.raises(ValueError, match="less than half"):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            assignment_lease_seconds=30,
+            assignment_lease_renew_interval_seconds=15,
+        )
 
 
 def test_workspace_settings_have_safe_defaults_and_validate_retention():

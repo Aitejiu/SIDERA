@@ -147,6 +147,10 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
                     quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
                 )
             ),
+            assignment_lease_ttl_seconds=settings.assignment_lease_seconds,
+            assignment_lease_renew_interval_seconds=(
+                settings.assignment_lease_renew_interval_seconds
+            ),
             clock=lambda: datetime.now(UTC),
         )
         runner = GatewayAssignmentRunner(

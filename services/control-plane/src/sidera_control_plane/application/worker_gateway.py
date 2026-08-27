@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -196,6 +197,149 @@ class _OperationState:
     blocked_failure_code: str | None = None
 
 
+class AssignmentLeaseKeeper:
+    """Renew one execution lease while Gateway performs external work."""
+
+    def __init__(
+        self,
+        *,
+        uow_factory: Callable[[], ControlPlaneUnitOfWork],
+        lease_id: UUID,
+        workspace_id: UUID,
+        execution_id: UUID,
+        worker_id: UUID,
+        fencing_token: int,
+        lease_ttl_seconds: int,
+        renew_interval_seconds: float = 0.0,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if lease_ttl_seconds <= 0:
+            raise ValueError("lease ttl must be positive")
+        if renew_interval_seconds < 0 or renew_interval_seconds >= lease_ttl_seconds / 2:
+            raise ValueError("lease renew interval must be less than half the TTL")
+        self._uow_factory = uow_factory
+        self._lease_id = lease_id
+        self._workspace_id = workspace_id
+        self._execution_id = execution_id
+        self._worker_id = worker_id
+        self._fencing_token = fencing_token
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._renew_interval_seconds = renew_interval_seconds
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._stop_event = threading.Event()
+        self._cancel_event = threading.Event()
+        self._health_error: Exception | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_event.is_set()
+
+    @property
+    def health_error(self) -> Exception | None:
+        return self._health_error
+
+    def start(self) -> None:
+        if self._renew_interval_seconds <= 0:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"assignment-lease-{self._lease_id}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self._renew_interval_seconds, 1.0) + 1.0)
+
+    def renew_once(self) -> bool:
+        now = self._clock()
+        with self._uow_factory() as uow:
+            lease = uow.leases.get(
+                self._lease_id, self._workspace_id, for_update=True
+            )
+            if lease is None:
+                self._cancel_event.set()
+                return False
+            try:
+                lease.assert_owner(self._worker_id, self._fencing_token, now)
+            except DomainError as exc:
+                self._health_error = exc
+                self._cancel_event.set()
+                return False
+            previous_version = lease.version
+            old_expires_at = lease.expires_at
+            lease.renew(
+                worker_id=self._worker_id,
+                fencing_token=self._fencing_token,
+                now=now,
+                ttl=timedelta(seconds=self._lease_ttl_seconds),
+            )
+            uow.leases.save(lease, previous_version)
+            command_id = uuid5(
+                NAMESPACE_URL,
+                f"sidera.gateway.lease-renew:{lease.id}:v{lease.version}",
+            )
+            event = _gateway_event(
+                command_id,
+                workspace_id=self._workspace_id,
+                aggregate_type="lease",
+                aggregate_id=lease.id,
+                aggregate_version=lease.version,
+                event_type="LeaseRenewed",
+                payload={
+                    "status": lease.status.value,
+                    "execution_id": str(self._execution_id),
+                    "worker_id": str(self._worker_id),
+                    "old_expires_at": old_expires_at.isoformat(),
+                    "expires_at": lease.expires_at.isoformat(),
+                    "fencing_token": lease.fencing_token,
+                },
+            )
+            command = CommandEnvelope(
+                id=command_id,
+                workspace_id=self._workspace_id,
+                command_type="RenewLease",
+                target_type="lease",
+                actor_type="system",
+                actor_id="gateway",
+                target_id=lease.id,
+                payload={
+                    "execution_id": str(self._execution_id),
+                    "worker_id": str(self._worker_id),
+                    "lease_id": str(lease.id),
+                    "fencing_token": lease.fencing_token,
+                },
+                expected_version=previous_version,
+                idempotency_key=f"gateway-lease-renew:{lease.id}:v{lease.version}",
+                correlation_id=command_id,
+            )
+            uow.commands.record_applied(
+                command,
+                hash_request(command),
+                CommandResult(
+                    command_id=command.id,
+                    aggregate_id=lease.id,
+                    aggregate_version=lease.version,
+                    event_ids=(event.id,),
+                ),
+            )
+            uow.events.append_with_outbox(event)
+        return True
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._renew_interval_seconds):
+            try:
+                if not self.renew_once():
+                    return
+            except Exception as exc:  # noqa: BLE001
+                self._health_error = exc
+                self._cancel_event.set()
+                return
+
+
 class ConfiguredExecutionSpecFactory:
     """Build the R3 single-repository spec from a workspace module snapshot."""
 
@@ -339,6 +483,8 @@ class WorkerGateway:
         context_materializer: ContextMaterializer | None = None,
         context_package_cutover_at: datetime | None = None,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
+        assignment_lease_ttl_seconds: int = 30,
+        assignment_lease_renew_interval_seconds: float = 0.0,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
@@ -362,6 +508,10 @@ class WorkerGateway:
         self._context_materializer = context_materializer
         self._context_package_cutover_at = context_package_cutover_at
         self._candidate_submission_service = candidate_submission_service
+        self._assignment_lease_ttl_seconds = assignment_lease_ttl_seconds
+        self._assignment_lease_renew_interval_seconds = (
+            assignment_lease_renew_interval_seconds
+        )
 
     def handle(
         self, message: OutboxMessage
@@ -374,26 +524,35 @@ class WorkerGateway:
                 raise
         try:
             context = self._load_context(message)
-            context_materialization = self._prepare_execution_context(context)
-            spec = self._spec_factory.create(
-                context.execution,
-                context.task,
-                context.binding,
-                context.adapter_instance,
-                context.workspace_instance,
-                context_materialization=context_materialization,
-            )
-            workspace = self._ensure_workspace(context, spec)
-            result = self._ensure_session(context, spec, workspace)
-            self._ensure_initial_prompt(context, spec, result)
-            self.sync_session(
-                workspace_id=context.execution.workspace_id,
-                execution_id=context.execution.id,
-                session_id=result.session_id,
-                lease_id=context.lease.id,
-                fencing_token=context.binding.fencing_token,
-            )
-            return result
+            keeper = self._lease_keeper(context)
+            keeper.start()
+            try:
+                context_materialization = self._prepare_execution_context(context)
+                spec = self._spec_factory.create(
+                    context.execution,
+                    context.task,
+                    context.binding,
+                    context.adapter_instance,
+                    context.workspace_instance,
+                    context_materialization=context_materialization,
+                )
+                workspace = self._ensure_workspace(context, spec)
+                result = self._ensure_session(context, spec, workspace)
+                self._ensure_initial_prompt(context, spec, result)
+                if keeper.health_error is not None:
+                    raise GatewayRecoveryRequired(
+                        "assignment lease renewal failed"
+                    ) from keeper.health_error
+                self.sync_session(
+                    workspace_id=context.execution.workspace_id,
+                    execution_id=context.execution.id,
+                    session_id=result.session_id,
+                    lease_id=context.lease.id,
+                    fencing_token=context.binding.fencing_token,
+                )
+                return result
+            finally:
+                keeper.stop()
         except GatewayMessageError as exc:
             if exc.code in _START_BLOCK_FAILURE_CODES:
                 self._audit_start_block_from_message(message, exc.code)
@@ -402,6 +561,19 @@ class WorkerGateway:
         except GatewayError as exc:
             _log_gateway_error(message, exc)
             raise
+
+    def _lease_keeper(self, context: _AssignmentContext) -> AssignmentLeaseKeeper:
+        return AssignmentLeaseKeeper(
+            uow_factory=self._uow_factory,
+            lease_id=context.lease.id,
+            workspace_id=context.execution.workspace_id,
+            execution_id=context.execution.id,
+            worker_id=context.worker.id,
+            fencing_token=context.binding.fencing_token,
+            lease_ttl_seconds=self._assignment_lease_ttl_seconds,
+            renew_interval_seconds=self._assignment_lease_renew_interval_seconds,
+            clock=self._clock,
+        )
 
     def handle_stop(self, message: OutboxMessage) -> GatewayStopResult:
         (

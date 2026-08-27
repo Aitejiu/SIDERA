@@ -12,6 +12,7 @@ from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
     STOP_TOPIC,
+    AssignmentLeaseKeeper,
     GatewayRecoveryRequired,
     GatewayStopResult,
     WorkerGateway,
@@ -43,6 +44,7 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     CommandModel,
+    EventModel,
     ExecutionBindingModel,
     ExecutionEventModel,
     ExecutionInputModel,
@@ -482,6 +484,39 @@ def test_gateway_starts_once_and_replays_duplicate_assignment(
         assert session.query(ExecutionEventModel).count() == 2
         assert session.query(GatewayOperationModel).count() == 3
         assert session.query(GatewayOperationModel).filter_by(status="succeeded").count() == 3
+
+
+def test_assignment_lease_keeper_persists_command_for_audited_renewal(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    keeper = AssignmentLeaseKeeper(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(database),
+        lease_id=ids["lease_id"],
+        workspace_id=workspace_id,
+        execution_id=ids["execution_id"],
+        worker_id=ids["worker_id"],
+        fencing_token=1,
+        lease_ttl_seconds=300,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert keeper.renew_once() is True
+
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        assert lease is not None
+        assert lease.renewed_at == NOW + timedelta(seconds=1)
+        assert lease.version == 2
+        renewal_event = session.query(EventModel).filter_by(
+            aggregate_type="lease",
+            aggregate_id=ids["lease_id"],
+            event_type="LeaseRenewed",
+        ).one()
+        command = session.get(CommandModel, renewal_event.causation_id)
+        assert command is not None
+        assert command.command_type == "RenewLease"
 
 
 def test_gateway_marks_unresolved_running_operation_unknown_without_restart(

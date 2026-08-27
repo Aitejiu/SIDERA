@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     database_url: str
     environment: str = "development"
     assignment_lease_seconds: int = Field(default=30, gt=0)
+    assignment_lease_renew_interval_seconds: float = Field(default=10.0, gt=0)
     worker_heartbeat_timeout_seconds: int = Field(default=45, gt=0)
     scheduler_batch_size: int = Field(default=20, gt=0)
     scheduler_poll_interval_seconds: float = Field(default=1.0, gt=0)
@@ -97,5 +98,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "planning_lease_renew_interval_seconds must be less than half "
                 "planning_lease_ttl_seconds"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_assignment_lease_intervals(self) -> "Settings":
+        if self.assignment_lease_renew_interval_seconds >= (
+            self.assignment_lease_seconds / 2
+        ):
+            raise ValueError(
+                "assignment_lease_renew_interval_seconds must be less than half "
+                "assignment_lease_seconds"
             )
         return self
