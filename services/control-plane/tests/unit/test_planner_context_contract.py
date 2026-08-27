@@ -23,6 +23,9 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerInputAssembler,
     PlannerPolicyConstraints,
 )
+from sidera_control_plane.application.revision_planning_context import (
+    CreatePlanningContextV1,
+)
 from sidera_control_plane.domain.context_packages import ContextMaterializationMode
 from sidera_control_plane.domain.planning import PlanningBriefRevision
 
@@ -78,6 +81,8 @@ def test_planner_input_derives_compatibility_refs_from_materialization() -> None
     planner_input = _planner_input()
 
     assert planner_input.context_materialization is not None
+    assert planner_input.kind.value == "create"
+    assert isinstance(planner_input.planning_context, CreatePlanningContextV1)
     assert [item.ref for item in planner_input.context_refs] == [
         "artifact:10000000-0000-0000-0000-000000000005",
         "evidence:10000000-0000-0000-0000-000000000006",

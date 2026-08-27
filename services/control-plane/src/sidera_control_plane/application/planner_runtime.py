@@ -8,10 +8,16 @@ from uuid import UUID
 from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateProposalV1,
 )
+from sidera_control_plane.application.revision_planning_context import (
+    CreatePlanningContextV1,
+    PlanningContextV1,
+    RevisionPlanningContextV1,
+)
 from sidera_control_plane.domain.context_packages import ContextMaterializationV1
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
     PlanningClarification,
+    PlanningRequestKind,
     PlanningUsage,
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
@@ -142,6 +148,8 @@ class PlannerInput:
     policy_constraints: PlannerPolicyConstraints
     context_refs: tuple[ContextReference, ...]
     context_materialization: ContextMaterializationV1 | None = None
+    planning_context: PlanningContextV1 | None = None
+    kind: PlanningRequestKind = PlanningRequestKind.CREATE
 
     def __post_init__(self) -> None:
         if not self.interface_version.strip():
@@ -152,6 +160,46 @@ class PlannerInput:
             raise ValueError("planner input brief revision does not match brief")
         if self.brief.planning_request_id != self.planning_request_id:
             raise ValueError("planner input request id does not match brief")
+        try:
+            normalized_kind = (
+                self.kind
+                if isinstance(self.kind, PlanningRequestKind)
+                else PlanningRequestKind(self.kind)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unsupported planner input kind: {self.kind!r}") from exc
+
+        planning_context = self.planning_context
+        if planning_context is None:
+            if normalized_kind is PlanningRequestKind.REVISION:
+                raise ValueError("revision planner input requires a typed planning_context")
+            planning_context = CreatePlanningContextV1(
+                context_materialization=self.context_materialization,
+            )
+        elif isinstance(planning_context, RevisionPlanningContextV1):
+            if self.context_materialization is not None:
+                raise ValueError(
+                    "revision planner input cannot contain create context_materialization"
+                )
+            if normalized_kind is PlanningRequestKind.CREATE:
+                normalized_kind = PlanningRequestKind.REVISION
+        elif isinstance(planning_context, CreatePlanningContextV1):
+            if normalized_kind is PlanningRequestKind.REVISION:
+                raise ValueError("create planning context cannot be used for a revision")
+            materialization = planning_context.context_materialization
+            if (
+                self.context_materialization is not None
+                and materialization is not None
+                and self.context_materialization != materialization
+            ):
+                raise ValueError("planner create context has duplicate materialization")
+            if self.context_materialization is None:
+                object.__setattr__(self, "context_materialization", materialization)
+        else:
+            raise TypeError("planner planning_context must be typed")
+
+        object.__setattr__(self, "planning_context", planning_context)
+        object.__setattr__(self, "kind", normalized_kind)
         if self.context_materialization is not None:
             if not isinstance(self.context_materialization, ContextMaterializationV1):
                 raise TypeError("planner context_materialization must be typed")
@@ -189,6 +237,8 @@ class PlannerInputAssembler:
         planning_run_id: UUID,
         context_refs: Sequence[ContextReference] = (),
         context_materialization: ContextMaterializationV1 | None = None,
+        planning_context: PlanningContextV1 | None = None,
+        kind: PlanningRequestKind | None = None,
     ) -> PlannerInput:
         normalized_refs = () if context_materialization is not None else tuple(context_refs)
         if context_materialization is None:
@@ -208,6 +258,16 @@ class PlannerInputAssembler:
             policy_constraints=policy_constraints,
             context_refs=normalized_refs,
             context_materialization=context_materialization,
+            planning_context=planning_context,
+            kind=(
+                kind
+                if kind is not None
+                else (
+                    PlanningRequestKind.REVISION
+                    if isinstance(planning_context, RevisionPlanningContextV1)
+                    else PlanningRequestKind.CREATE
+                )
+            ),
         )
 
 
