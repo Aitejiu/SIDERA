@@ -5,12 +5,18 @@ from typing import NoReturn
 
 from sidera_control_plane.domain.artifacts import ArtifactType
 from sidera_control_plane.domain.errors import ValidationError
-from sidera_control_plane.domain.planning import PlanningRequestKind
+from sidera_control_plane.domain.modules import PlannerAdapterCapabilityProfile
+from sidera_control_plane.domain.planning import PlanningRequest, PlanningRequestKind
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
 )
-from sidera_control_plane.domain.plans import DependencyKind
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
+from sidera_control_plane.domain.plans import DependencyKind, TaskPlanSnapshot
+
+ProposalPayload = PlanningProposalPayload | PlanningRevisionProposalPayloadV3
 
 
 class ProposalValidationError(ValidationError):
@@ -27,12 +33,44 @@ class ProposalValidationError(ValidationError):
 
 
 def validate_proposal(
-    payload: PlanningProposalPayload | Mapping[str, object],
+    payload: ProposalPayload | Mapping[str, object],
     *,
     profile_snapshot: PlanningProfileSnapshot,
     brief_revision: int,
-) -> PlanningProposalPayload:
+    request: PlanningRequest | None = None,
+    capability_snapshot: PlannerAdapterCapabilityProfile | None = None,
+    base_snapshot: TaskPlanSnapshot | None = None,
+    kind: PlanningRequestKind | None = None,
+) -> ProposalPayload:
     typed_payload = _typed_payload(payload)
+    explicit_revision = request is not None or kind is not None
+    expected_kind = request.kind if request is not None else kind
+    if expected_kind is None:
+        expected_kind = typed_payload.kind
+    if expected_kind is PlanningRequestKind.REVISION:
+        if not isinstance(typed_payload, PlanningRevisionProposalPayloadV3):
+            if not explicit_revision:
+                expected_kind = PlanningRequestKind.CREATE
+            else:
+                _fail(
+                    "proposal_schema_invalid",
+                    "revision proposal schema v3 is required",
+                )
+        else:
+            _validate_revision_proposal(
+                typed_payload,
+                profile_snapshot=profile_snapshot,
+                capability_snapshot=capability_snapshot,
+                brief_revision=brief_revision,
+                request=request,
+                base_snapshot=base_snapshot,
+            )
+            return typed_payload
+    if not isinstance(typed_payload, PlanningProposalPayload):
+        _fail(
+            "proposal_schema_invalid",
+            "create proposal schema v2 is required",
+        )
     if typed_payload.schema_version != 2:
         _fail("proposal_schema_invalid", "R5.1 requires proposal schema version 2")
     if profile_snapshot.proposal_schema_version != typed_payload.schema_version:
@@ -58,12 +96,19 @@ def validate_proposal(
 
 
 def _typed_payload(
-    payload: PlanningProposalPayload | Mapping[str, object],
-) -> PlanningProposalPayload:
-    if isinstance(payload, PlanningProposalPayload):
+    payload: ProposalPayload | Mapping[str, object],
+) -> ProposalPayload:
+    if isinstance(payload, (PlanningProposalPayload, PlanningRevisionProposalPayloadV3)):
         return payload
     if not isinstance(payload, Mapping):
         _fail("proposal_schema_invalid", "proposal payload must be a typed mapping")
+    schema_version = payload.get("schema_version")
+    kind = payload.get("kind")
+    if schema_version == 3 or kind == PlanningRequestKind.REVISION.value:
+        try:
+            return PlanningRevisionProposalPayloadV3.from_mapping(payload)
+        except ValidationError as exc:
+            _fail("proposal_schema_invalid", str(exc))
     if _contains_concrete_identity(
         payload, {"root_task_id", "task_id", "worker_item_id", "pinned_worker_id"}
     ):
@@ -73,6 +118,59 @@ def _typed_payload(
     except ValidationError as exc:
         _fail("proposal_schema_invalid", str(exc))
     raise AssertionError("proposal payload validation did not return")
+
+
+def _validate_revision_proposal(
+    payload: PlanningRevisionProposalPayloadV3,
+    *,
+    profile_snapshot: PlanningProfileSnapshot,
+    capability_snapshot: PlannerAdapterCapabilityProfile | None,
+    brief_revision: int,
+    request: PlanningRequest | None,
+    base_snapshot: TaskPlanSnapshot | None,
+) -> None:
+    if profile_snapshot.proposal_schema_version != 3:
+        _fail(
+            "proposal_schema_invalid",
+            "revision proposal schema v3 is not selected by the profile",
+        )
+    capabilities = capability_snapshot or profile_snapshot.planner_capabilities
+    if not isinstance(capabilities, PlannerAdapterCapabilityProfile):
+        _fail("proposal_schema_invalid", "planner capability snapshot is invalid")
+    if 3 not in capabilities.proposal_schema_versions:
+        _fail(
+            "proposal_schema_invalid",
+            "revision proposal schema v3 is not supported by the adapter",
+        )
+    if brief_revision < 1:
+        _fail("proposal_schema_invalid", "brief revision must be positive")
+    if request is not None:
+        if request.kind is not PlanningRequestKind.REVISION:
+            _fail("proposal_revision_operation_forbidden", "request is not a revision")
+        if request.base_descriptor != payload.base_descriptor:
+            _fail(
+                "proposal_base_mismatch",
+                "revision proposal base descriptor does not match the request",
+            )
+    try:
+        if base_snapshot is not None:
+            payload.validate_against_base(base_snapshot)
+        else:
+            payload.validate()
+    except ValidationError as exc:
+        detail = str(exc)
+        lowered = detail.lower()
+        if "base" in lowered:
+            code = "proposal_base_mismatch"
+        elif "cycle" in lowered:
+            code = "proposal_cycle"
+        elif "identity" in lowered or "cover" in lowered:
+            code = "proposal_identity_invalid"
+        else:
+            code = "proposal_schema_invalid"
+        _fail(code, detail)
+    _validate_capabilities(payload, profile_snapshot)
+    _validate_budget(payload, profile_snapshot)
 
 
 def _validate_unique_keys(payload: PlanningProposalPayload) -> None:
@@ -195,7 +293,7 @@ def _validate_cycles(payload: PlanningProposalPayload) -> None:
 
 
 def _validate_capabilities(
-    payload: PlanningProposalPayload,
+    payload: ProposalPayload,
     profile_snapshot: PlanningProfileSnapshot,
 ) -> None:
     allowed = set(profile_snapshot.allowed_capabilities)
@@ -213,7 +311,7 @@ def _validate_capabilities(
 
 
 def _validate_budget(
-    payload: PlanningProposalPayload,
+    payload: ProposalPayload,
     profile_snapshot: PlanningProfileSnapshot,
 ) -> None:
     budget = profile_snapshot.budget

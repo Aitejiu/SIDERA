@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -137,7 +138,41 @@ class NormalizedRevisionDiff:
             },
             "affected_branch_keys": list(self.affected_branch_keys),
             "risk_flags": list(self.risk_flags),
+            "diff_hash": self.diff_hash,
         }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> NormalizedRevisionDiff:
+        raw = _mapping(value, "normalized revision diff")
+        provisional = cls(
+            base_descriptor=_base_descriptor(raw.get("base_descriptor")),
+            target_descriptor_preview=_target_descriptor_preview(
+                raw.get("target_descriptor_preview")
+            ),
+            root_changes=_field_changes_from_mapping(raw.get("root_changes")),
+            subtask_changes=_subtask_changes_from_mapping(raw.get("subtask_changes")),
+            worker_changes=_worker_changes_from_mapping(raw.get("worker_changes")),
+            subtask_dependency_changes=_dependency_changes_from_mapping(
+                raw.get("subtask_dependency_changes")
+            ),
+            worker_dependency_changes=_dependency_changes_from_mapping(
+                raw.get("worker_dependency_changes")
+            ),
+            transition_preview=_transition_preview_from_mapping(
+                raw.get("transition_preview")
+            ),
+            impact_counts=_impact_counts_from_mapping(raw.get("impact_counts")),
+            affected_branch_keys=_strings_from_mapping(
+                raw.get("affected_branch_keys"), "affected_branch_keys"
+            ),
+            risk_flags=_strings_from_mapping(raw.get("risk_flags"), "risk_flags"),
+            diff_hash="",
+        )
+        computed_hash = _hash_diff(provisional)
+        stored_hash = raw.get("diff_hash")
+        if stored_hash is not None and stored_hash != computed_hash:
+            raise ValidationError("normalized revision diff hash does not match content")
+        return replace(provisional, diff_hash=computed_hash)
 
 
 class RevisionDiffNormalizer:
@@ -245,15 +280,7 @@ class RevisionDiffNormalizer:
             risk_flags=risks,
             diff_hash="",
         )
-        diff_hash = hashlib.sha256(
-            json.dumps(
-                diff.to_mapping(),
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        diff_hash = _hash_diff(diff)
         return NormalizedRevisionDiff(
             base_descriptor=diff.base_descriptor,
             target_descriptor_preview=diff.target_descriptor_preview,
@@ -360,11 +387,6 @@ def _worker_change(
                     "subtask.acceptance_refs",
                     existing_subtask.acceptance_refs if existing_subtask else None,
                     target_subtask.acceptance_refs,
-                ),
-                (
-                    "root.goal_summary",
-                    None,
-                    payload.root_task.goal_summary,
                 ),
             )
         )
@@ -653,3 +675,228 @@ def _transition_mapping(value: WorkerTransitionPreview) -> dict[str, object]:
         "fallback_action": value.fallback_action.value if value.fallback_action else None,
         "reason_codes": list(value.reason_codes),
     }
+
+
+def _hash_diff(diff: NormalizedRevisionDiff) -> str:
+    mapping = diff.to_mapping()
+    mapping.pop("diff_hash", None)
+    return hashlib.sha256(
+        json.dumps(
+            mapping,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _mapping(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValidationError(f"{name} must be an object")
+    return value
+
+
+def _mappings(value: object, name: str) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be a list")
+    result: list[Mapping[str, object]] = []
+    for item in value:
+        result.append(_mapping(item, name))
+    return tuple(result)
+
+
+def _text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} must be a non-empty string")
+    return value
+
+
+def _strings_from_mapping(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be a list")
+    if any(not isinstance(item, str) for item in value):
+        raise ValidationError(f"{name} must contain strings")
+    return tuple(value)
+
+
+def _int(value: Mapping[str, object], name: str) -> int:
+    item = value.get(name)
+    if not isinstance(item, int) or isinstance(item, bool):
+        raise ValidationError(f"{name} must be an integer")
+    return item
+
+
+def _uuid(value: object, name: str) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a UUID")
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be a UUID") from exc
+
+
+def _optional_uuid(value: object, name: str) -> UUID | None:
+    return None if value is None else _uuid(value, name)
+
+
+def _datetime(value: object, name: str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a datetime")
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be a datetime") from exc
+
+
+def _base_descriptor(value: object) -> RevisionBaseDescriptorV1:
+    raw = _mapping(value, "base_descriptor")
+    return RevisionBaseDescriptorV1(
+        schema_version=_int(raw, "schema_version"),
+        workspace_id=_uuid(raw.get("workspace_id"), "workspace_id"),
+        root_task_id=_uuid(raw.get("root_task_id"), "root_task_id"),
+        plan_snapshot_id=_uuid(raw.get("plan_snapshot_id"), "plan_snapshot_id"),
+        plan_generation=_int(raw, "plan_generation"),
+        plan_content_hash=_text(raw.get("plan_content_hash"), "plan_content_hash"),
+        root_task_version=_int(raw, "root_task_version"),
+        captured_at=_datetime(raw.get("captured_at"), "captured_at"),
+    )
+
+
+def _target_descriptor_preview(value: object) -> TargetPlanDescriptorPreview:
+    raw = _mapping(value, "target_descriptor_preview")
+    return TargetPlanDescriptorPreview(
+        target_generation=_int(raw, "target_generation"),
+        parent_snapshot_id=_uuid(raw.get("parent_snapshot_id"), "parent_snapshot_id"),
+        target_plan_content_hash=_text(
+            raw.get("target_plan_content_hash"), "target_plan_content_hash"
+        ),
+    )
+
+
+def _field_change(value: Mapping[str, object]) -> FieldChange:
+    return FieldChange(
+        field_path=_text(value.get("field_path"), "field_path"),
+        before=value.get("before"),
+        after=value.get("after"),
+    )
+
+
+def _field_changes_from_mapping(value: object) -> tuple[FieldChange, ...]:
+    return tuple(_field_change(item) for item in _mappings(value, "field_changes"))
+
+
+def _subtask_change_from_mapping(value: Mapping[str, object]) -> SubtaskChange:
+    return SubtaskChange(
+        target_subtask_key=_text(
+            value.get("target_subtask_key"), "target_subtask_key"
+        ),
+        existing_task_id=_optional_uuid(
+            value.get("existing_task_id"), "existing_task_id"
+        ),
+        strategy=IdentityStrategy(_text(value.get("strategy"), "strategy")),
+        field_changes=_field_changes_from_mapping(value.get("field_changes")),
+        reason=_text(value.get("reason"), "reason"),
+    )
+
+
+def _subtask_changes_from_mapping(value: object) -> tuple[SubtaskChange, ...]:
+    return tuple(
+        _subtask_change_from_mapping(item)
+        for item in _mappings(value, "subtask_changes")
+    )
+
+
+def _worker_change_from_mapping(value: Mapping[str, object]) -> WorkerItemChange:
+    return WorkerItemChange(
+        target_worker_item_key=_text(
+            value.get("target_worker_item_key"), "target_worker_item_key"
+        ),
+        existing_worker_item_id=_optional_uuid(
+            value.get("existing_worker_item_id"), "existing_worker_item_id"
+        ),
+        strategy=IdentityStrategy(_text(value.get("strategy"), "strategy")),
+        from_subtask_key=(
+            None
+            if value.get("from_subtask_key") is None
+            else _text(value.get("from_subtask_key"), "from_subtask_key")
+        ),
+        to_subtask_key=_text(value.get("to_subtask_key"), "to_subtask_key"),
+        context_disposition=ContextDisposition(
+            _text(value.get("context_disposition"), "context_disposition")
+        ),
+        field_changes=_field_changes_from_mapping(value.get("field_changes")),
+        reasons=_strings_from_mapping(value.get("reasons"), "reasons"),
+    )
+
+
+def _worker_changes_from_mapping(value: object) -> tuple[WorkerItemChange, ...]:
+    return tuple(
+        _worker_change_from_mapping(item)
+        for item in _mappings(value, "worker_changes")
+    )
+
+
+def _dependency_change(value: Mapping[str, object]) -> DependencyChange:
+    return DependencyChange(
+        graph_scope=_text(value.get("graph_scope"), "graph_scope"),
+        upstream_key=_text(value.get("upstream_key"), "upstream_key"),
+        downstream_key=_text(value.get("downstream_key"), "downstream_key"),
+        dependency_kind=_text(value.get("dependency_kind"), "dependency_kind"),
+        change_type=_text(value.get("change_type"), "change_type"),
+    )
+
+
+def _dependency_changes_from_mapping(value: object) -> tuple[DependencyChange, ...]:
+    return tuple(
+        _dependency_change(item)
+        for item in _mappings(value, "dependency_changes")
+    )
+
+
+def _transition(value: Mapping[str, object]) -> WorkerTransitionPreview:
+    raw_fallback = value.get("fallback_action")
+    return WorkerTransitionPreview(
+        target_worker_item_key=_text(
+            value.get("target_worker_item_key"), "target_worker_item_key"
+        ),
+        worker_item_id=_optional_uuid(value.get("worker_item_id"), "worker_item_id"),
+        allowed_actions=tuple(
+            WorkerTransitionAction(_text(item, "allowed_action"))
+            for item in _strings_from_mapping(
+                value.get("allowed_actions"), "allowed_actions"
+            )
+        ),
+        fallback_action=(
+            None
+            if raw_fallback is None
+            else WorkerTransitionAction(_text(raw_fallback, "fallback_action"))
+        ),
+        reason_codes=_strings_from_mapping(value.get("reason_codes"), "reason_codes"),
+    )
+
+
+def _transition_preview_from_mapping(
+    value: object,
+) -> tuple[WorkerTransitionPreview, ...]:
+    return tuple(
+        _transition(item) for item in _mappings(value, "transition_preview")
+    )
+
+
+def _impact_counts_from_mapping(value: object) -> RevisionImpactCounts:
+    raw = _mapping(value, "impact_counts")
+    return RevisionImpactCounts(
+        preserve=_int(raw, "preserve"),
+        move=_int(raw, "move"),
+        patch=_int(raw, "patch"),
+        continue_=_int(raw, "continue"),
+        create=_int(raw, "create"),
+        derive=_int(raw, "derive"),
+        retire=_int(raw, "retire"),
+        affected_branches=_int(raw, "affected_branches"),
+    )

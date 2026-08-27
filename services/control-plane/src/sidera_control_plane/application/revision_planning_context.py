@@ -647,53 +647,13 @@ def _context_package_ref(
 
 
 def _normalize_plan_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
-    normalized = dict(payload)
-    for key, sort_key in (
-        ("subtasks", "key"),
-        ("worker_items", "key"),
-        ("milestones", "key"),
-    ):
-        values = normalized.get(key)
-        if isinstance(values, list):
-            normalized[key] = sorted(
-                values,
-                key=lambda item: _mapping_sort_key(item, sort_key),
-            )
-    for key, primary, secondary in (
-        (
-            "subtask_dependencies",
-            "upstream_subtask_key",
-            "downstream_subtask_key",
-        ),
-        (
-            "worker_item_dependencies",
-            "upstream_worker_item_key",
-            "downstream_worker_item_key",
-        ),
-    ):
-        values = normalized.get(key)
-        if isinstance(values, list):
-            normalized[key] = sorted(
-                values,
-                key=lambda item: (
-                    _mapping_sort_key(item, primary),
-                    _mapping_sort_key(item, secondary),
-                    json.dumps(item, sort_keys=True),
-                ),
-            )
+    # Preserve the stored order because the exact base content hash covers the
+    # snapshot payload. Determinism comes from the immutable snapshot itself;
+    # mutable facts are sorted by their builders below.
     return cast(
         Mapping[str, object],
-        _freeze_json(normalized, "revision plan snapshot payload"),
+        _freeze_json(dict(payload), "revision plan snapshot payload"),
     )
-
-
-def _mapping_sort_key(value: object, key: str) -> str:
-    if not isinstance(value, Mapping):
-        raise ValidationError("revision plan payload collection must contain mappings")
-    item = value.get(key)
-    if not isinstance(item, str):
-        raise ValidationError(f"revision plan payload item is missing {key}")
-    return item
 
 
 def _unique_by_id[T](items: Sequence[T], label: str) -> dict[UUID, T]:

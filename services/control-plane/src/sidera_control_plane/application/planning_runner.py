@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,6 +41,12 @@ from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     PlannerAdapter,
 )
+from sidera_control_plane.application.revision_planning_context import (
+    AdapterCapabilitySnapshotV1,
+    ConfirmedContextPackageRefV1,
+    RevisionPlanningContextBuilder,
+    RevisionPlanningContextV1,
+)
 from sidera_control_plane.application.secret_resolution import (
     EnvironmentSecretResolver,
     SecretResolutionError,
@@ -56,12 +62,14 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV1,
     ContextPackageStatus,
     ContextPurpose,
+    context_package_reference,
 )
 from sidera_control_plane.domain.errors import (
     DomainError,
     StaleFencingToken,
 )
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.execution import ExecutionSession
 from sidera_control_plane.domain.modules import (
     PLANNER_ADAPTER_MODULE_TYPE,
     IdempotencyCapability,
@@ -73,6 +81,7 @@ from sidera_control_plane.domain.modules import (
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
     PlanningRequest,
+    PlanningRequestKind,
     PlanningRequestStatus,
     PlanningRun,
     PlanningRunLease,
@@ -89,6 +98,11 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     ProposalRevision,
 )
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
+from sidera_control_plane.domain.proposal_validation import validate_proposal
+from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 from sidera_control_plane.domain.work_context import WorkContextRevision
 
 logger = logging.getLogger(__name__)
@@ -230,8 +244,10 @@ class _ClaimedRun:
     correlation_id: UUID
     definition: ModuleDefinition | None
     instance: ModuleInstance | None
+    kind: PlanningRequestKind = PlanningRequestKind.CREATE
     context_package: ContextPackageManifestV1 | None = None
     context_revision: WorkContextRevision | None = None
+    planning_context: RevisionPlanningContextV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +509,44 @@ class PlanningRunner:
                         )
                         continue
                     context_package, context_revision = gate
+                planning_context: RevisionPlanningContextV1 | None = None
+                if request.kind is PlanningRequestKind.REVISION:
+                    try:
+                        planning_context = self._build_revision_context(
+                            uow,
+                            request,
+                            context_package=context_package,
+                        )
+                    except (DomainError, TypeError, ValueError) as exc:
+                        previous_request_version = request.version
+                        previous_run_version = request_run.version
+                        request.block_queued_run(
+                            run_id=request_run.id,
+                            error_code="revision_context_invalid",
+                            error_message=self._diagnostic(str(exc)),
+                            now=now,
+                        )
+                        uow.planning_runs.save(request_run, previous_run_version)
+                        uow.planning_requests.save(request, previous_request_version)
+                        self._record_event(
+                            uow,
+                            request=request,
+                            event_type="PlanningRunContextBlocked",
+                            payload={
+                                "planning_run_id": str(request_run.id),
+                                "error_code": "revision_context_invalid",
+                                "status": request_run.status.value,
+                            },
+                        )
+                        preblocked.append(
+                            PlanningRunOutcome(
+                                run_id=request_run.id,
+                                status=request_run.status,
+                                attempt=request_run.attempt,
+                                code="revision_context_invalid",
+                            )
+                        )
+                        continue
                 previous_request_version = request.version
                 previous_run_version = request_run.version
                 lease = PlanningRunLease(
@@ -552,11 +606,81 @@ class PlanningRunner:
                         correlation_id=request.correlation_id,
                         definition=definition,
                         instance=instance,
+                        kind=request.kind,
                         context_package=context_package,
                         context_revision=context_revision,
+                        planning_context=planning_context,
                     )
                 )
         return _ClaimBatch(items=tuple(claimed), preblocked=tuple(preblocked))
+
+    def _build_revision_context(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        *,
+        context_package: ContextPackageManifestV1 | None,
+    ) -> RevisionPlanningContextV1:
+        base = request.base_descriptor
+        if base is None:
+            raise ValueError("revision request has no exact base descriptor")
+        snapshot = uow.plans.get(base.plan_snapshot_id, request.workspace_id)
+        if snapshot is None:
+            raise ValueError("revision base plan snapshot is unavailable")
+
+        task_ids = tuple(
+            dict.fromkeys(
+                (
+                    snapshot.root_task_id,
+                    *(item.task_id for item in snapshot.subtasks if item.task_id is not None),
+                )
+            )
+        )
+        tasks = uow.tasks.get_many(task_ids, request.workspace_id)
+        worker_ids = tuple(
+            dict.fromkeys(
+                item.worker_item_id
+                for item in snapshot.worker_item_plans
+                if item.worker_item_id is not None
+            )
+        )
+        worker_items = tuple(
+            item
+            for item_id in worker_ids
+            for item in (uow.worker_items.get(item_id, request.workspace_id),)
+            if item is not None
+        )
+        executions = uow.executions.list_for_tasks(task_ids, request.workspace_id)
+        sessions = tuple(
+            session
+            for execution in executions
+            for session in (uow.sessions.get_active_for_execution(execution.id),)
+            if session is not None
+        )
+        context_refs: tuple[ConfirmedContextPackageRefV1, ...] = ()
+        if context_package is not None:
+            context_refs = (
+                ConfirmedContextPackageRefV1(
+                    ref=context_package_reference(
+                        context_package.package_id,
+                        context_package.package_hash,
+                    ),
+                    package_hash=context_package.package_hash,
+                    context_version=context_package.context_version,
+                ),
+            )
+        return RevisionPlanningContextBuilder(
+            max_context_bytes=request.profile_snapshot.budget.max_context_bytes,
+        ).build(
+            request=request,
+            snapshot=snapshot,
+            tasks=tasks,
+            worker_items=worker_items,
+            executions=executions,
+            sessions=sessions,
+            context_package_refs=context_refs,
+            adapter_capabilities=_adapter_capability_snapshots(sessions),
+        )
 
     def _legacy_run(self, queued_at: datetime) -> bool:
         return (
@@ -693,7 +817,13 @@ class PlanningRunner:
                 ContextReference(ref=ref, safe_summary=None)
                 for ref in item.brief.context_refs
             ),
-            context_materialization=context_materialization,
+            context_materialization=(
+                None
+                if item.kind is PlanningRequestKind.REVISION
+                else context_materialization
+            ),
+            planning_context=item.planning_context,
+            kind=item.kind,
         )
         deadline = now + timedelta(
             seconds=item.profile_snapshot.budget.max_runtime_seconds
@@ -1063,6 +1193,34 @@ class PlanningRunner:
             if locked is None:
                 return self._stale_outcome(item)
             request, run, lease = locked
+            derived_diff = adapter_proposal.derived_diff
+            if item.kind is PlanningRequestKind.REVISION:
+                base = request.base_descriptor
+                if base is None:
+                    raise ValueError("revision request has no exact base descriptor")
+                base_snapshot = uow.plans.get(
+                    base.plan_snapshot_id,
+                    request.workspace_id,
+                )
+                if base_snapshot is None:
+                    raise ValueError("revision base plan snapshot is unavailable")
+                validated_payload = validate_proposal(
+                    adapter_proposal.payload,
+                    profile_snapshot=request.profile_snapshot,
+                    capability_snapshot=request.profile_snapshot.planner_capabilities,
+                    brief_revision=run.brief_revision,
+                    request=request,
+                    base_snapshot=base_snapshot,
+                )
+                if not isinstance(
+                    validated_payload,
+                    PlanningRevisionProposalPayloadV3,
+                ):
+                    raise ValueError("revision proposal schema v3 is required")
+                derived_diff = RevisionDiffNormalizer().normalize(
+                    base_snapshot,
+                    validated_payload,
+                )
             proposals = uow.planning_records.list_proposals(
                 item.request_id, item.workspace_id
             )
@@ -1078,6 +1236,7 @@ class PlanningRunner:
                 ),
                 profile_snapshot=request.profile_snapshot,
                 created_at=now,
+                derived_diff=derived_diff,
             )
             previous_request_version = request.version
             previous_run_version = run.version
@@ -1408,6 +1567,36 @@ def _capability_catalog(
         max_concurrency=profile_snapshot.budget.max_concurrency,
         workspace_providers=(),
     )
+
+
+def _adapter_capability_snapshots(
+    sessions: Sequence[ExecutionSession],
+) -> tuple[AdapterCapabilitySnapshotV1, ...]:
+    snapshots: list[AdapterCapabilitySnapshotV1] = []
+    for session in sessions:
+        profile = session.capability_snapshot
+        if profile is None:
+            continue
+        snapshots.append(
+            AdapterCapabilitySnapshotV1(
+                adapter_ref=f"worker-session:{session.id}",
+                interface_version="sidera.worker.v1",
+                config_version=session.adapter_config_version or 1,
+                capabilities=(
+                    f"input:{profile.input.value}",
+                    f"idempotency:{profile.idempotency.value}",
+                    f"resume:{profile.resume.value}",
+                    f"stop:{profile.stop.value}",
+                    f"sandbox:{profile.sandbox.value}",
+                    f"stability:{profile.stability.value}",
+                    *(
+                        f"context_package:{version}"
+                        for version in profile.context_package_versions
+                    ),
+                ),
+            )
+        )
+    return tuple(snapshots)
 
 
 def _provider_ref(item: _ClaimedRun) -> str:

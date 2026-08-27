@@ -18,10 +18,14 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerTimeout,
     PlannerUnknownOutcome,
 )
+from sidera_control_plane.application.revision_planning_context import (
+    RevisionPlanningContextV1,
+)
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextMaterializationV1,
 )
+from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
     IdempotencyCapability,
@@ -29,6 +33,12 @@ from sidera_control_plane.domain.modules import (
     StabilityLevel,
     StructuredOutputCapability,
     UsageReportingCapability,
+)
+from sidera_control_plane.domain.plan_revisions import (
+    ContextDisposition,
+    IdentityStrategy,
+    SubtaskIdentityDecision,
+    WorkerItemIdentityDecision,
 )
 from sidera_control_plane.domain.planning import (
     PlanningClarification,
@@ -45,16 +55,22 @@ from sidera_control_plane.domain.planning_proposals import (
     ProposedSubtask,
     ProposedWorkerItem,
 )
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
     DependencyKind,
     SubtaskDependency,
+    TaskPlanSnapshot,
     WorkerItemDependency,
     WorkItemKind,
 )
+from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 
 FakeScenario = Literal[
     "proposal",
+    "revision",
     "clarification",
     "scale",
     "invalid_schema",
@@ -71,6 +87,7 @@ class FakePlannerConfig:
     def __post_init__(self) -> None:
         if self.scenario not in {
             "proposal",
+            "revision",
             "clarification",
             "scale",
             "invalid_schema",
@@ -92,7 +109,7 @@ class FakePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2,),
+        proposal_schema_versions=(2, 3),
         context_package_versions=(1,),
     )
 
@@ -195,6 +212,58 @@ class FakePlannerAdapter:
                 retryable=False,
                 unknown_outcome=True,
             )
+        if planner_input.kind is PlanningRequestKind.REVISION:
+            if not isinstance(
+                planner_input.planning_context, RevisionPlanningContextV1
+            ):
+                return self._failure(
+                    PlannerInvalidResult,
+                    code="invalid_result",
+                    safe_message="revision planner context is invalid",
+                    retryable=True,
+                    unknown_outcome=False,
+                )
+            try:
+                base_plan = TaskPlanSnapshot.from_payload(
+                    dict(planner_input.planning_context.plan_snapshot_payload)
+                )
+                payload = _revision_proposal_payload(
+                    planner_input.planning_context,
+                    base_plan,
+                )
+                derived_diff = RevisionDiffNormalizer().normalize(base_plan, payload)
+            except (DomainError, TypeError, ValueError):
+                return self._failure(
+                    PlannerInvalidResult,
+                    code="invalid_result",
+                    safe_message="fake planner produced an invalid revision proposal",
+                    retryable=True,
+                    unknown_outcome=False,
+                )
+            proposal = ProposalRevision.create(
+                planning_request_id=planner_input.planning_request_id,
+                revision=1,
+                brief_revision=planner_input.brief_revision,
+                planning_run_id=planner_input.planning_run_id,
+                kind=PlanningRequestKind.REVISION,
+                payload=payload,
+                profile_descriptor=PlanningProfileDescriptor.from_snapshot(
+                    planner_input.profile_snapshot
+                ),
+                profile_snapshot=planner_input.profile_snapshot,
+                created_at=control.started_at,
+                derived_diff=derived_diff,
+            )
+            return PlannerProposalResult(
+                proposal=replace(
+                    proposal,
+                    id=uuid5(
+                        NAMESPACE_URL,
+                        f"sidera.fake.planner:{planner_input.operation_id}:proposal",
+                    ),
+                )
+            )
+
         payload = _scale_proposal_payload() if self.config.scenario == "scale" else _proposal_payload()
         proposal = ProposalRevision.create(
             planning_request_id=planner_input.planning_request_id,
@@ -412,4 +481,251 @@ def _scale_proposal_payload() -> PlanningProposalPayload:
             failure_policy="retry_then_block",
         ),
         base_descriptor=None,
+    )
+
+
+def _revision_proposal_payload(
+    context: RevisionPlanningContextV1,
+    base_plan: TaskPlanSnapshot,
+) -> PlanningRevisionProposalPayloadV3:
+    """Produce a stable revision fixture with a small fan-out/fan-in graph."""
+    subtasks = tuple(
+        ProposedSubtask(
+            key=item.key,
+            kind=item.kind,
+            title=item.title,
+            goal_summary=item.goal_summary,
+            acceptance_refs=item.acceptance_refs,
+            expected_outputs=item.expected_outputs,
+            milestone_key=item.milestone_key,
+            source_refs=item.source_refs,
+        )
+        for item in base_plan.subtasks
+    )
+    workers = tuple(
+        ProposedWorkerItem(
+            key=item.key,
+            subtask_key=item.subtask_key,
+            title=item.title,
+            role=item.role,
+            responsibility=item.responsibility,
+            capability_requirements=item.capability_requirements,
+            worker_policy_ref=item.worker_policy_ref,
+            configuration_ref=item.configuration_ref,
+            concurrency_limit=item.concurrency_limit,
+            source_refs=item.source_refs,
+        )
+        for item in base_plan.worker_item_plans
+    )
+    fanout = (
+        ProposedSubtask(
+            key="revision-fan-out-a",
+            kind=WorkItemKind.CHILD,
+            title="Revision fan-out A",
+            goal_summary="Prepare the first independent revision branch.",
+            acceptance_refs=("acceptance:revision-fan-out-a",),
+            expected_outputs=("artifact_type:diff",),
+            milestone_key=None,
+            source_refs=("brief:revision",),
+        ),
+        ProposedSubtask(
+            key="revision-fan-out-b",
+            kind=WorkItemKind.CHILD,
+            title="Revision fan-out B",
+            goal_summary="Prepare the second independent revision branch.",
+            acceptance_refs=("acceptance:revision-fan-out-b",),
+            expected_outputs=("artifact_type:diff",),
+            milestone_key=None,
+            source_refs=("brief:revision",),
+        ),
+        ProposedSubtask(
+            key="revision-fan-in",
+            kind=WorkItemKind.INTEGRATION,
+            title="Revision fan-in",
+            goal_summary="Integrate the independent revision branches.",
+            acceptance_refs=("acceptance:revision-fan-in",),
+            expected_outputs=("artifact_type:diff",),
+            milestone_key=None,
+            source_refs=("brief:revision",),
+        ),
+    )
+    subtasks = (*subtasks, *fanout)
+    fanout_workers = (
+        ProposedWorkerItem(
+            key="revision-worker-a",
+            subtask_key="revision-fan-out-a",
+            title="Revision worker A",
+            role="implementation",
+            responsibility="Implement the first independent revision branch.",
+            capability_requirements=("code",),
+            worker_policy_ref="policy:standard",
+            configuration_ref=None,
+            concurrency_limit=1,
+            source_refs=("brief:revision",),
+        ),
+        ProposedWorkerItem(
+            key="revision-worker-b",
+            subtask_key="revision-fan-out-b",
+            title="Revision worker B",
+            role="implementation",
+            responsibility="Implement the second independent revision branch.",
+            capability_requirements=("code",),
+            worker_policy_ref="policy:standard",
+            configuration_ref=None,
+            concurrency_limit=1,
+            source_refs=("brief:revision",),
+        ),
+        ProposedWorkerItem(
+            key="revision-worker-merge",
+            subtask_key="revision-fan-in",
+            title="Revision integration worker",
+            role="integration",
+            responsibility="Integrate both revision branches.",
+            capability_requirements=("code",),
+            worker_policy_ref="policy:standard",
+            configuration_ref=None,
+            concurrency_limit=1,
+            source_refs=("brief:revision",),
+        ),
+    )
+    workers = (*workers, *fanout_workers)
+    subtask_dependencies = (
+        *base_plan.subtask_dependencies,
+        SubtaskDependency(
+            upstream_subtask_key="revision-fan-out-a",
+            downstream_subtask_key="revision-fan-in",
+            kind=DependencyKind.HARD,
+            required_evidence_refs=(),
+            enforcement=DependencyEnforcement.CONTROL_PLANE,
+        ),
+        SubtaskDependency(
+            upstream_subtask_key="revision-fan-out-b",
+            downstream_subtask_key="revision-fan-in",
+            kind=DependencyKind.HARD,
+            required_evidence_refs=(),
+            enforcement=DependencyEnforcement.CONTROL_PLANE,
+        ),
+    )
+    worker_dependencies = (
+        *base_plan.worker_item_dependencies,
+        WorkerItemDependency(
+            upstream_worker_item_key="revision-worker-a",
+            downstream_worker_item_key="revision-worker-merge",
+            kind="hard",
+            required_artifact_refs=("artifact_type:diff",),
+        ),
+        WorkerItemDependency(
+            upstream_worker_item_key="revision-worker-b",
+            downstream_worker_item_key="revision-worker-merge",
+            kind="hard",
+            required_artifact_refs=("artifact_type:diff",),
+        ),
+    )
+    subtask_by_key = {item.key: item for item in subtasks}
+    intents = tuple(
+        ExecutionIntent(
+            worker_item_key=worker.key,
+            purpose=worker.responsibility,
+            context_refs=("context:revision",),
+            expected_artifact_refs=("artifact_type:diff",),
+            required_evidence_refs=subtask_by_key[worker.subtask_key].acceptance_refs,
+            capability_requirements=worker.capability_requirements,
+            adapter_preferences=("fake",),
+            budget_class="standard",
+            deadline_seconds=120,
+            not_before_seconds=None,
+            max_attempts=1,
+            activation_dependencies=(),
+        )
+        for worker in workers
+    )
+    subtask_identity_decisions = tuple(
+        SubtaskIdentityDecision(
+            target_subtask_key=item.key,
+            strategy=(
+                IdentityStrategy.REUSE
+                if item.task_id is not None
+                else IdentityStrategy.CREATE
+            ),
+            existing_subtask_task_id=item.task_id,
+            derived_from_subtask_task_ids=(),
+            reason="preserve the existing subtask identity"
+            if item.task_id is not None
+            else "create the new revision branch",
+        )
+        for item in base_plan.subtasks
+    ) + tuple(
+        SubtaskIdentityDecision(
+            target_subtask_key=item.key,
+            strategy=IdentityStrategy.CREATE,
+            existing_subtask_task_id=None,
+            derived_from_subtask_task_ids=(),
+            reason="create the new revision branch",
+        )
+        for item in fanout
+    )
+    worker_identity_decisions = tuple(
+        WorkerItemIdentityDecision(
+            target_worker_item_key=item.key,
+            strategy=(
+                IdentityStrategy.REUSE
+                if item.worker_item_id is not None
+                else IdentityStrategy.CREATE
+            ),
+            existing_worker_item_id=item.worker_item_id,
+            derived_from_worker_item_ids=(),
+            target_subtask_key=item.subtask_key,
+            context_disposition=ContextDisposition.UNCHANGED,
+            change_reasons=(),
+        )
+        for item in base_plan.worker_item_plans
+    ) + tuple(
+        WorkerItemIdentityDecision(
+            target_worker_item_key=item.key,
+            strategy=IdentityStrategy.CREATE,
+            existing_worker_item_id=None,
+            derived_from_worker_item_ids=(),
+            target_subtask_key=item.subtask_key,
+            context_disposition=ContextDisposition.UNCHANGED,
+            change_reasons=(),
+        )
+        for item in fanout_workers
+    )
+    return PlanningRevisionProposalPayloadV3(
+        schema_version=3,
+        kind=PlanningRequestKind.REVISION,
+        base_descriptor=context.base_descriptor,
+        root_task=ProposedRootTask(
+            title=base_plan.title,
+            goal_summary=base_plan.goal_summary,
+            acceptance_refs=base_plan.acceptance_refs,
+        ),
+        subtasks=subtasks,
+        worker_items=workers,
+        subtask_milestones=tuple(base_plan.subtask_milestones),
+        subtask_dependencies=subtask_dependencies,
+        worker_item_dependencies=worker_dependencies,
+        execution_intents=intents,
+        subtask_identity_decisions=subtask_identity_decisions,
+        worker_item_identity_decisions=worker_identity_decisions,
+        retired_subtask_ids=(),
+        retired_worker_item_ids=(),
+        decision_summary=DecisionSummary(
+            understanding="Preserve the active plan and add a deterministic fan-out/fan-in revision branch.",
+            assumptions=("The exact base snapshot remains authoritative.",),
+            risks=("The integration worker depends on both new branches.",),
+            estimated_cost_microunits=300,
+            estimated_runtime_seconds=120,
+            estimated_concurrency=2,
+            scope_includes=("revision branches", "revision integration"),
+            scope_excludes=(),
+            metadata={"fixture": "revision-fan-out-fan-in"},
+            estimated_tokens=500,
+        ),
+        impact_policy=ImpactPolicy(
+            activate_immediately=True,
+            budget_level="standard",
+            failure_policy="block_affected_branch",
+            revision_operation="revise",
+        ),
     )

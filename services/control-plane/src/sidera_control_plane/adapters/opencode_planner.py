@@ -29,6 +29,9 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerResult,
     PlannerRunControl,
 )
+from sidera_control_plane.application.revision_planning_context import (
+    RevisionPlanningContextV1,
+)
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextMaterializationV1,
@@ -44,6 +47,7 @@ from sidera_control_plane.domain.modules import (
 )
 from sidera_control_plane.domain.planning import (
     PlanningClarification,
+    PlanningRequestKind,
     PlanningUsage,
 )
 from sidera_control_plane.domain.planning_proposals import (
@@ -51,6 +55,12 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
     ProposalRevision,
 )
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
+from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.proposal_validation import validate_proposal
+from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 
 _MAX_KNOWLEDGE_CANDIDATES = 16
 _MAX_SCHEMA_REPAIRS = 2
@@ -72,7 +82,7 @@ class OpenCodePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.EXPERIMENTAL,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2,),
+        proposal_schema_versions=(2, 3),
         context_package_versions=(1,),
     )
     provider_ref = "opencode-acp-planner"
@@ -385,6 +395,7 @@ class OpenCodePlannerAdapter:
 
 
 def _planner_prompt(planner_input: PlannerInput) -> str:
+    is_revision = planner_input.kind is PlanningRequestKind.REVISION
     document = {
         "contract": "sidera.planner.v1",
         "operation_id": str(planner_input.operation_id),
@@ -427,7 +438,13 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
     }
     if planner_input.context_materialization is not None:
         document["context_materialization"] = planner_input.context_materialization.to_mapping()
-    return (
+    if is_revision:
+        if not isinstance(planner_input.planning_context, RevisionPlanningContextV1):
+            raise OpenCodePlannerError(
+                "revision planner input is missing typed planning context"
+            )
+        document["revision_context"] = planner_input.planning_context.to_mapping()
+    prompt = (
         "Return exactly one JSON object. Do not use Markdown or explanatory text. "
         "The context_materialization object contains six typed sections: metadata, "
         "system_constraints, work_context, control_plane_facts, project_knowledge, "
@@ -464,9 +481,25 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         "the exact field names from this minimal valid shape, replace the example "
         "values, and omit no required field. Empty dependency and milestone arrays "
         "are valid. Do not add fields.\n"
-        + json.dumps(_proposal_shape_hint(), sort_keys=True, separators=(",", ":"))
+        + json.dumps(
+            _revision_proposal_shape_hint() if is_revision else _proposal_shape_hint(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         + "\n"
         + json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+    if not is_revision:
+        return prompt
+    return prompt + (
+        "\nThis is a plan revision. Return a complete target plan using proposal schema "
+        "version 3. Copy the exact base_descriptor from revision_context. Preserve "
+        "every existing subtask and WorkerItem identity decision exactly once unless "
+        "the revised requirement justifies a create or derive strategy. Include every "
+        "target strategy, retired identity, complete subtask and WorkerItem DAG, all "
+        "execution intents, and the impact_policy. Do not emit concrete runtime worker "
+        "bindings; SIDERA resolves those after user confirmation. The target plan is "
+        "the full replacement plan, not a patch fragment."
     )
 
 
@@ -601,6 +634,67 @@ def _proposal_shape_hint() -> dict[str, object]:
     }
 
 
+def _revision_proposal_shape_hint() -> dict[str, object]:
+    return {
+        "result_type": "proposal",
+        "proposal": {
+            "schema_version": 3,
+            "kind": "revision",
+            "base_descriptor": {
+                "schema_version": 1,
+                "workspace_id": "workspace-uuid",
+                "root_task_id": "root-task-uuid",
+                "plan_snapshot_id": "base-snapshot-uuid",
+                "plan_generation": 1,
+                "plan_content_hash": "64-lowercase-hex-characters",
+                "root_task_version": 1,
+                "captured_at": "2026-01-01T00:00:00+00:00",
+            },
+            "root_task": {
+                "title": "one root task",
+                "goal_summary": "the revised requested outcome",
+                "acceptance_refs": ["acceptance:one"],
+            },
+            "subtasks": [],
+            "worker_items": [],
+            "milestones": [],
+            "subtask_dependencies": [],
+            "worker_item_dependencies": [],
+            "execution_intents": [],
+            "subtask_identity_decisions": [],
+            "worker_item_identity_decisions": [],
+            "retired_subtask_ids": [],
+            "retired_worker_item_ids": [],
+            "decision_summary": {
+                "understanding": "the revised requested outcome",
+                "assumptions": [],
+                "risks": [],
+                "estimated_cost_microunits": 0,
+                "estimated_tokens": 0,
+                "estimated_runtime_seconds": 60,
+                "estimated_concurrency": 1,
+                "scope_includes": ["the revised requested outcome"],
+                "scope_excludes": [],
+                "metadata": {},
+            },
+            "impact_policy": {
+                "activate_immediately": True,
+                "budget_level": "standard",
+                "failure_policy": "block_affected_branch",
+                "manual_gate": False,
+                "revision_operation": "revise",
+            },
+        },
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_microunits": 0,
+            "runtime_seconds": 0,
+            "context_bytes": 0,
+        },
+    }
+
+
 def _repair_diagnostic(error: OpenCodePlannerError) -> str | None:
     cause = error.__cause__
     if cause is None:
@@ -650,7 +744,27 @@ def _parse_result(
             raw_payload = value.get("proposal")
             if not isinstance(raw_payload, Mapping):
                 raise ValueError("proposal must be an object")
-            payload = PlanningProposalPayload.from_mapping(raw_payload)
+            derived_diff = None
+            if planner_input.kind is PlanningRequestKind.REVISION:
+                if not isinstance(
+                    planner_input.planning_context, RevisionPlanningContextV1
+                ):
+                    raise ValueError("revision planner context is missing")
+                payload = PlanningRevisionProposalPayloadV3.from_mapping(raw_payload)
+                base_plan = TaskPlanSnapshot.from_payload(
+                    dict(planner_input.planning_context.plan_snapshot_payload)
+                )
+                validate_proposal(
+                    payload,
+                    profile_snapshot=planner_input.profile_snapshot,
+                    capability_snapshot=planner_input.profile_snapshot.planner_capabilities,
+                    brief_revision=planner_input.brief_revision,
+                    kind=PlanningRequestKind.REVISION,
+                    base_snapshot=base_plan,
+                )
+                derived_diff = RevisionDiffNormalizer().normalize(base_plan, payload)
+            else:
+                payload = PlanningProposalPayload.from_mapping(raw_payload)
             proposal = ProposalRevision.create(
                 planning_request_id=planner_input.planning_request_id,
                 revision=1,
@@ -663,6 +777,7 @@ def _parse_result(
                 ),
                 profile_snapshot=planner_input.profile_snapshot,
                 created_at=datetime.now(UTC),
+                derived_diff=derived_diff,
             )
             raw_candidates = value.get("knowledge_candidates", [])
             candidates: list[KnowledgeCandidateProposalV1] = []

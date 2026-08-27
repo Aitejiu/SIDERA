@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -682,9 +683,9 @@ def _reject_unknown_fields(
 
 
 def _payload_mapping(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise PlanValidationError("invalid_payload", f"{label} must be an object")
-    return value
+    return dict(value)
 
 
 def _subtask_to_payload(item: SubtaskPlanItem) -> dict[str, Any]:

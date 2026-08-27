@@ -13,6 +13,13 @@ from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
     FakePlannerConfig,
 )
+from sidera_control_plane.application.planner_runtime import (
+    CapabilityCatalogSnapshot,
+    PlannerInputAssembler,
+    PlannerPolicyConstraints,
+    PlannerProposalResult,
+    PlannerRunControl,
+)
 from sidera_control_plane.application.planning_runner import (
     PlannerAdapterFactory,
     PlanningAdapterUnavailable,
@@ -30,11 +37,14 @@ from sidera_control_plane.domain.modules import (
     PlannerAdapterCapabilityProfile,
 )
 from sidera_control_plane.domain.planning import (
+    PlanningBriefRevision,
     PlanningRequest,
+    PlanningRequestKind,
     PlanningRequestStatus,
     PlanningRunLeaseStatus,
     PlanningRunStatus,
 )
+from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -354,6 +364,65 @@ def test_runner_claims_calls_fake_and_persists_proposal_atomically() -> None:
     assert len(state.proposals) == 1
     assert len(state.events) >= 2
     assert next(iter(state.leases.values())).status is PlanningRunLeaseStatus.RELEASED
+
+
+def test_fake_planner_emits_v3_for_a_revision_context() -> None:
+    from test_plan_revisions import profile_snapshot
+    from test_revision_planning_context import _build_context
+
+    context = _build_context()
+    request_id = uuid4()
+    brief = PlanningBriefRevision.create(
+        planning_request_id=request_id,
+        revision=1,
+        objective="Revise the running plan",
+        constraints=(),
+        acceptance_criteria=("The revision is reviewable",),
+        context_refs=(),
+        requested_outputs=("revision plan",),
+        user_feedback=None,
+        source_correlation=uuid4(),
+        created_by="operator",
+        created_at=NOW,
+    )
+    planner_profile = profile_snapshot()
+    planner_input = PlannerInputAssembler().assemble(
+        brief=brief,
+        profile_snapshot=planner_profile,
+        capability_catalog=CapabilityCatalogSnapshot(
+            snapshot_version=1,
+            captured_at=NOW,
+            capabilities=(),
+            adapter_preferences=(),
+            budget_level="standard",
+            max_concurrency=2,
+            workspace_providers=(),
+        ),
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(
+            planner_profile
+        ),
+        operation_id=uuid4(),
+        planning_request_id=request_id,
+        planning_run_id=uuid4(),
+        planning_context=context,
+        kind=PlanningRequestKind.REVISION,
+    )
+
+    result = FakePlannerAdapter(
+        FakePlannerConfig(scenario="revision")
+    ).plan(
+        planner_input,
+        PlannerRunControl(
+            operation_id=planner_input.operation_id,
+            started_at=NOW,
+            deadline_at=NOW + timedelta(minutes=1),
+        ),
+    )
+
+    assert isinstance(result, PlannerProposalResult)
+    assert result.proposal.payload.schema_version == 3
+    assert isinstance(result.proposal.derived_diff, NormalizedRevisionDiff)
+    assert result.proposal.kind is PlanningRequestKind.REVISION
 
 
 def test_runner_does_not_mark_proposal_ready_when_proposal_write_fails() -> None:

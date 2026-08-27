@@ -125,6 +125,27 @@ class ExecutionRepository:
         ).all()
         return tuple(_to_domain_execution(row) for row in rows)
 
+    def list_for_tasks(
+        self, task_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Execution, ...]:
+        ordered_ids = tuple(dict.fromkeys(task_ids))
+        if not ordered_ids:
+            return ()
+        rows = self._session.scalars(
+            select(ExecutionModel)
+            .where(
+                ExecutionModel.task_id.in_(ordered_ids),
+                ExecutionModel.workspace_id == workspace_id,
+            )
+            .order_by(
+                ExecutionModel.task_id.asc(),
+                ExecutionModel.lineage_id.asc(),
+                ExecutionModel.attempt.asc(),
+                ExecutionModel.id.asc(),
+            )
+        ).all()
+        return tuple(_to_domain_execution(row) for row in rows)
+
     def claim_schedulable(
         self,
         *,

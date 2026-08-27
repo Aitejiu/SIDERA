@@ -41,6 +41,9 @@ from sidera_control_plane.domain.planning_proposals import (
     ProposalRevision,
     derive_proposal_diff,
 )
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
 from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 from sidera_control_plane.persistence.models import (
     PlanningBriefRevisionModel,
@@ -1188,7 +1191,14 @@ def _to_proposal(row: PlanningProposalRevisionModel) -> ProposalRevision:
         "execution_intents": row.execution_intents,
         "impact_policy": row.impact_policy,
     }
-    payload = PlanningProposalPayload.from_mapping(payload_mapping)
+    if row.proposal_schema_version == 3 or row.kind == PlanningRequestKind.REVISION.value:
+        payload = PlanningRevisionProposalPayloadV3.from_mapping(payload_mapping)
+        derived_diff = NormalizedRevisionDiff.from_mapping(
+            _mapping(row.derived_diff, "proposal derived_diff")
+        )
+    else:
+        payload = PlanningProposalPayload.from_mapping(payload_mapping)
+        derived_diff = derive_proposal_diff(payload)
     descriptor = PlanningProfileDescriptor(
         profile_id=row.profile_id,
         profile_version=row.profile_version,
@@ -1212,7 +1222,7 @@ def _to_proposal(row: PlanningProposalRevisionModel) -> ProposalRevision:
         kind=PlanningRequestKind(row.kind),
         profile_descriptor=descriptor,
         payload=payload,
-        derived_diff=derive_proposal_diff(payload),
+        derived_diff=derived_diff,
         canonical_payload=canonical,
         content_hash=row.content_hash,
         created_at=row.created_at,

@@ -54,7 +54,7 @@ def planner_capabilities() -> PlannerAdapterCapabilityProfile:
         max_context_bytes=128_000,
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2,),
+        proposal_schema_versions=(2, 3),
     )
 
 

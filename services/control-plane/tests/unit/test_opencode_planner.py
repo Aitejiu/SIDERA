@@ -2,6 +2,7 @@ import json
 import stat
 import textwrap
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -9,7 +10,11 @@ from uuid import uuid4
 import pytest
 from test_planning_commands import module_facts, profile
 
-from sidera_control_plane.adapters.fake_planner import _proposal_payload
+from sidera_control_plane.adapters.fake_planner import (
+    FakePlannerAdapter,
+    FakePlannerConfig,
+    _proposal_payload,
+)
 from sidera_control_plane.adapters.opencode_planner import (
     OpenCodePlannerAdapter,
     OpenCodePlannerError,
@@ -23,6 +28,7 @@ from sidera_control_plane.application.planner_runtime import (
     ContextReference,
     PlannerClarificationResult,
     PlannerInput,
+    PlannerInputAssembler,
     PlannerPolicyConstraints,
     PlannerProposalResult,
     PlannerRunControl,
@@ -34,8 +40,14 @@ from sidera_control_plane.domain.modules import (
     StructuredOutputCapability,
     UsageReportingCapability,
 )
-from sidera_control_plane.domain.planning import PlanningBriefRevision
+from sidera_control_plane.domain.planning import (
+    PlanningBriefRevision,
+    PlanningRequestKind,
+)
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
 
 NOW = datetime.now(UTC)
 
@@ -139,6 +151,51 @@ def _planner_input() -> tuple[PlannerInput, PlanningProfileSnapshot]:
     return planner_input, snapshot
 
 
+def _revision_planner_input() -> tuple[PlannerInput, PlanningProfileSnapshot]:
+    from test_plan_revisions import profile_snapshot
+    from test_revision_planning_context import _build_context
+
+    context = _build_context()
+    request_id = uuid4()
+    brief = PlanningBriefRevision.create(
+        planning_request_id=request_id,
+        revision=1,
+        objective="Revise the running plan",
+        constraints=("Keep completed work auditable",),
+        acceptance_criteria=("The revision is reviewable",),
+        context_refs=(),
+        requested_outputs=("revision plan",),
+        user_feedback=None,
+        source_correlation=uuid4(),
+        created_by="test",
+        created_at=NOW,
+    )
+    snapshot = replace(
+        profile_snapshot(),
+        allowed_capabilities=("code", "test"),
+    )
+    planner_input = PlannerInputAssembler().assemble(
+        brief=brief,
+        profile_snapshot=snapshot,
+        capability_catalog=CapabilityCatalogSnapshot(
+            snapshot_version=1,
+            captured_at=NOW,
+            capabilities=(),
+            adapter_preferences=snapshot.adapter_preferences,
+            budget_level=snapshot.execution_budget_level,
+            max_concurrency=snapshot.budget.max_concurrency,
+            workspace_providers=(),
+        ),
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(snapshot),
+        operation_id=uuid4(),
+        planning_request_id=request_id,
+        planning_run_id=uuid4(),
+        planning_context=context,
+        kind=PlanningRequestKind.REVISION,
+    )
+    return planner_input, snapshot
+
+
 def _response(result_type: str, body: object, *, usage: dict[str, int] | None = None) -> str:
     return json.dumps(
         {
@@ -172,6 +229,7 @@ def test_planner_probe_declares_json_text_not_json_schema(tmp_path: Path) -> Non
     assert profile.idempotency is IdempotencyCapability.NONE
     assert profile.cancellation is CancellationCapability.PROCESS
     assert profile.usage_reporting is UsageReportingCapability.TOKENS
+    assert profile.proposal_schema_versions == (2, 3)
 
 
 def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
@@ -189,6 +247,21 @@ def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
         "acceptance:<criterion-ref> format"
     ) in prompt
     assert "Never use acceptance_criterion: values" in prompt
+
+
+def test_revision_planner_prompt_binds_complete_target_plan_and_exact_identity() -> None:
+    planner_input, _ = _revision_planner_input()
+
+    prompt = _planner_prompt(planner_input)
+
+    assert '"schema_version":3' in prompt
+    assert '"kind":"revision"' in prompt
+    assert '"revision_context"' in prompt
+    assert "complete target plan" in prompt
+    assert "exact base_descriptor" in prompt
+    assert "every existing subtask and WorkerItem identity decision exactly once" in prompt
+    assert "complete subtask and WorkerItem DAG" in prompt
+    assert "full replacement plan, not a patch fragment" in prompt
 
 
 def test_planner_opencode_config_denies_tools_and_external_directories() -> None:
@@ -277,6 +350,60 @@ def test_planner_parses_proposal_and_usage_and_cleans_temp_directory(
     assert result.usage.output_tokens == 20
     assert adapter.provider_ref == "opencode-acp-planner"
     assert not any((tmp_path / "planner-runs").iterdir())
+
+
+def test_planner_parses_revision_proposal_against_exact_context_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner_input, _ = _revision_planner_input()
+    fake_result = FakePlannerAdapter(FakePlannerConfig(scenario="revision")).plan(
+        planner_input,
+        PlannerRunControl(
+            operation_id=planner_input.operation_id,
+            started_at=NOW,
+            deadline_at=NOW + timedelta(seconds=30),
+        ),
+    )
+    assert isinstance(fake_result, PlannerProposalResult)
+    assert isinstance(fake_result.proposal.payload, PlanningRevisionProposalPayloadV3)
+    monkeypatch.setenv(
+        "SIDERA_TEST_PLANNER_RESPONSE",
+        _response("proposal", fake_result.proposal.payload.to_mapping()),
+    )
+
+    result = _adapter(tmp_path).plan(
+        planner_input,
+        PlannerRunControl(
+            operation_id=planner_input.operation_id,
+            started_at=NOW,
+            deadline_at=NOW + timedelta(seconds=30),
+        ),
+    )
+
+    assert isinstance(result, PlannerProposalResult)
+    assert isinstance(result.proposal.payload, PlanningRevisionProposalPayloadV3)
+    assert result.proposal.payload.schema_version == 3
+    assert result.proposal.derived_diff is not None
+
+
+def test_planner_rejects_create_schema_for_revision_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner_input, _ = _revision_planner_input()
+    monkeypatch.setenv(
+        "SIDERA_TEST_PLANNER_RESPONSE",
+        _response("proposal", _proposal_payload().to_mapping()),
+    )
+
+    with pytest.raises(OpenCodePlannerError, match="strict JSON"):
+        _adapter(tmp_path).plan(
+            planner_input,
+            PlannerRunControl(
+                operation_id=planner_input.operation_id,
+                started_at=NOW,
+                deadline_at=NOW + timedelta(seconds=30),
+            ),
+        )
 
 
 def test_planner_parses_blocking_clarifications(

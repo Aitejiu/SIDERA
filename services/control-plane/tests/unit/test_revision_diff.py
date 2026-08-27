@@ -33,7 +33,10 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
     WorkItemKind,
 )
-from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
+from sidera_control_plane.domain.revision_diff import (
+    NormalizedRevisionDiff,
+    RevisionDiffNormalizer,
+)
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("20000000-0000-0000-0000-000000000001")
@@ -242,6 +245,15 @@ def test_normalized_diff_is_stable_and_exposes_patch_fallback() -> None:
     assert diff.affected_branch_keys == ("backend",)
     assert len(diff.diff_hash) == 64
     assert diff.diff_hash == shuffled_diff.diff_hash
+
+
+def test_normalized_diff_round_trips_through_its_persisted_mapping() -> None:
+    snapshot = base_snapshot()
+    diff = RevisionDiffNormalizer().normalize(snapshot, revision_payload(snapshot))
+
+    restored = NormalizedRevisionDiff.from_mapping(diff.to_mapping())
+
+    assert restored == diff
 
 
 def test_normalizer_rejects_unchanged_context_when_effective_fields_change() -> None:

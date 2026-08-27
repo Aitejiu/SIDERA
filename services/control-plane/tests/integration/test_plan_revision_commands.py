@@ -193,6 +193,7 @@ def _seed_revision_base(
         )
         uow.planning_profiles.add(profile)
         uow.tasks.add(root_task)
+        uow.session.flush()
         uow.plans.add_snapshot_and_advance_head(snapshot, expected_head=None)
         uow.planning_requests.add(original_request)
         context_revision = WorkContextRevisionFactory().create(

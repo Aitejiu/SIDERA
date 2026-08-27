@@ -1044,6 +1044,11 @@ class ExecutionRepositoryPort(Protocol):
     ) -> tuple[Execution, ...]:
         raise NotImplementedError
 
+    def list_for_tasks(
+        self, task_ids: Collection[UUID], workspace_id: UUID
+    ) -> tuple[Execution, ...]:
+        raise NotImplementedError
+
     def claim_schedulable(
         self,
         *,

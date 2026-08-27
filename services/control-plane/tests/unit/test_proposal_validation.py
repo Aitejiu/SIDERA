@@ -2,7 +2,11 @@ from dataclasses import replace
 
 import pytest
 from test_planning_proposals import payload, planning_profile_snapshot
+from test_revision_diff import base_snapshot, revision_payload
+from test_revision_planning_context import _request
 
+from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.planning import PlanningRequestKind
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
 )
@@ -160,3 +164,58 @@ def test_proposal_validation_rejects_forbidden_adapter_preference() -> None:
     )
 
     expect_code(item, "proposal_capability_forbidden")
+
+
+def test_revision_validation_accepts_v3_against_the_exact_base() -> None:
+    snapshot = base_snapshot()
+    request = _request(snapshot)
+    proposal = revision_payload(snapshot)
+    revision_profile = replace(
+        request.profile_snapshot,
+        allowed_capabilities=("code", "python"),
+    )
+
+    validated = validate_proposal(
+        proposal,
+        brief_revision=1,
+        request=request,
+        profile_snapshot=revision_profile,
+        capability_snapshot=request.profile_snapshot.planner_capabilities,
+        base_snapshot=snapshot,
+    )
+
+    assert validated is proposal
+    assert validated.schema_version == 3
+    assert validated.kind is PlanningRequestKind.REVISION
+
+
+def test_revision_validation_rejects_a_create_payload_even_with_a_v3_profile() -> None:
+    snapshot = base_snapshot()
+    request = _request(snapshot)
+
+    with pytest.raises(ValidationError, match="revision proposal schema v3"):
+        validate_proposal(
+            payload(),
+            brief_revision=1,
+            request=request,
+            profile_snapshot=request.profile_snapshot,
+            capability_snapshot=request.profile_snapshot.planner_capabilities,
+            base_snapshot=snapshot,
+        )
+
+
+def test_revision_validation_rejects_a_base_mismatch_with_a_typed_error() -> None:
+    snapshot = base_snapshot()
+    request = _request(snapshot)
+    proposal = revision_payload(snapshot)
+    changed_snapshot = replace(snapshot, title="different base")
+
+    with pytest.raises(ValidationError, match="base.*hash"):
+        validate_proposal(
+            proposal,
+            brief_revision=1,
+            request=request,
+            profile_snapshot=request.profile_snapshot,
+            capability_snapshot=request.profile_snapshot.planner_capabilities,
+            base_snapshot=changed_snapshot,
+        )
