@@ -41,6 +41,7 @@ from sidera_control_plane.domain.planning_proposals import (
     ProposalRevision,
     derive_proposal_diff,
 )
+from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 from sidera_control_plane.persistence.models import (
     PlanningBriefRevisionModel,
     PlanningClarificationModel,
@@ -1197,7 +1198,11 @@ def _usage_from_mapping(value: Mapping[str, object]) -> PlanningUsage:
     )
 
 
-def _diff_to_mapping(diff: ProposalDiff) -> dict[str, object]:
+def _diff_to_mapping(
+    diff: ProposalDiff | NormalizedRevisionDiff,
+) -> dict[str, object]:
+    if isinstance(diff, NormalizedRevisionDiff):
+        return diff.to_mapping()
     return {
         "root_task_added": diff.root_task_added,
         "added_subtask_keys": list(diff.added_subtask_keys),
