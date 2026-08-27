@@ -139,6 +139,10 @@ def test_create_request_emits_brief_revision_one_and_queued_run_one() -> None:
         request.runs[0].id, request.runs[0].attempt
     )
     assert request.version == 1
+    assert request.root_task_id is None
+    assert request.base_plan_snapshot_id is None
+    assert request.base_plan_generation is None
+    assert request.base_plan_content_hash is None
 
     with pytest.raises(ValidationError, match="create"):
         PlanningRequest.create(

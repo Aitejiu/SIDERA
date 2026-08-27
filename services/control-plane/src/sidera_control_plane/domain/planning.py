@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
+from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import (
@@ -12,6 +13,7 @@ from sidera_control_plane.domain.errors import (
     ValidationError,
 )
 from sidera_control_plane.domain.modules import PlannerAdapterCapabilityProfile
+from sidera_control_plane.domain.plan_revisions import RevisionBaseDescriptorV1
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
 
 
@@ -567,6 +569,52 @@ class PlanningRequest:
     version: int
     created_at: datetime
     updated_at: datetime
+    root_task_id: UUID | None = None
+    base_plan_snapshot_id: UUID | None = None
+    base_plan_generation: int | None = None
+    base_plan_content_hash: str | None = None
+    base_root_task_version: int | None = None
+    base_captured_at: datetime | None = None
+    conflict_reason: str | None = None
+    _base_initialized: bool = False
+
+    def __post_init__(self) -> None:
+        base_values = (
+            self.root_task_id,
+            self.base_plan_snapshot_id,
+            self.base_plan_generation,
+            self.base_plan_content_hash,
+            self.base_root_task_version,
+            self.base_captured_at,
+        )
+        if self.kind is PlanningRequestKind.CREATE:
+            if any(value is not None for value in base_values):
+                raise ValidationError("create request cannot contain a revision base")
+        else:
+            if any(value is None for value in base_values):
+                raise ValidationError("revision request requires an exact base")
+            if self.base_descriptor is None:
+                raise ValidationError("revision request requires an exact base")
+        object.__setattr__(self, "_base_initialized", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in {
+            "root_task_id",
+            "base_plan_snapshot_id",
+            "base_plan_generation",
+            "base_plan_content_hash",
+            "base_root_task_version",
+            "base_captured_at",
+        }:
+            try:
+                initialized = object.__getattribute__(self, "_base_initialized")
+            except AttributeError:
+                initialized = False
+            if initialized:
+                current = object.__getattribute__(self, name)
+                if current != value:
+                    raise InvalidTransition("revision base is immutable")
+        object.__setattr__(self, name, value)
 
     @classmethod
     def create(
@@ -590,6 +638,91 @@ class PlanningRequest:
     ) -> "PlanningRequest":
         if kind is not PlanningRequestKind.CREATE:
             raise ValidationError("R5.1 only accepts planning request kind=create")
+        return cls._create(
+            request_id=request_id,
+            workspace_id=workspace_id,
+            profile_snapshot=profile_snapshot,
+            objective=objective,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+            context_refs=context_refs,
+            requested_outputs=requested_outputs,
+            source_type=source_type,
+            source_ref=source_ref,
+            actor=actor,
+            correlation_id=correlation_id,
+            run_id=run_id,
+            now=now,
+            kind=PlanningRequestKind.CREATE,
+            base=None,
+        )
+
+    @classmethod
+    def create_revision(
+        cls,
+        *,
+        request_id: UUID,
+        workspace_id: UUID,
+        profile_snapshot: PlanningProfileSnapshot,
+        objective: str,
+        constraints: Sequence[str],
+        acceptance_criteria: Sequence[str],
+        context_refs: Sequence[str],
+        requested_outputs: Sequence[str],
+        source_type: str,
+        source_ref: str | None,
+        actor: str,
+        correlation_id: UUID,
+        run_id: UUID,
+        now: datetime,
+        base: RevisionBaseDescriptorV1 | None,
+    ) -> "PlanningRequest":
+        if base is None:
+            raise ValidationError("revision request requires an exact base")
+        if not isinstance(base, RevisionBaseDescriptorV1):
+            raise ValidationError("revision request requires an exact base descriptor")
+        if base.workspace_id != workspace_id:
+            raise ValidationError("revision base belongs to another workspace")
+        return cls._create(
+            request_id=request_id,
+            workspace_id=workspace_id,
+            profile_snapshot=profile_snapshot,
+            objective=objective,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+            context_refs=context_refs,
+            requested_outputs=requested_outputs,
+            source_type=source_type,
+            source_ref=source_ref,
+            actor=actor,
+            correlation_id=correlation_id,
+            run_id=run_id,
+            now=now,
+            kind=PlanningRequestKind.REVISION,
+            base=base,
+        )
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        request_id: UUID,
+        workspace_id: UUID,
+        profile_snapshot: PlanningProfileSnapshot,
+        objective: str,
+        constraints: Sequence[str],
+        acceptance_criteria: Sequence[str],
+        context_refs: Sequence[str],
+        requested_outputs: Sequence[str],
+        source_type: str,
+        source_ref: str | None,
+        actor: str,
+        correlation_id: UUID,
+        run_id: UUID,
+        now: datetime,
+        kind: PlanningRequestKind,
+        base: RevisionBaseDescriptorV1 | None,
+    ) -> "PlanningRequest":
         if profile_snapshot.workspace_id != workspace_id:
             raise ValidationError("planning profile snapshot belongs to another workspace")
         timestamp = _aware(now, "planning request timestamp")
@@ -636,7 +769,42 @@ class PlanningRequest:
             version=1,
             created_at=timestamp,
             updated_at=timestamp,
+            root_task_id=base.root_task_id if base else None,
+            base_plan_snapshot_id=base.plan_snapshot_id if base else None,
+            base_plan_generation=base.plan_generation if base else None,
+            base_plan_content_hash=base.plan_content_hash if base else None,
+            base_root_task_version=base.root_task_version if base else None,
+            base_captured_at=base.captured_at if base else None,
         )
+
+    @property
+    def base_descriptor(self) -> RevisionBaseDescriptorV1 | None:
+        if self.kind is PlanningRequestKind.CREATE:
+            return None
+        values = (
+            self.root_task_id,
+            self.base_plan_snapshot_id,
+            self.base_plan_generation,
+            self.base_plan_content_hash,
+            self.base_root_task_version,
+            self.base_captured_at,
+        )
+        if any(value is None for value in values):
+            raise ValidationError("revision request requires an exact base")
+        return RevisionBaseDescriptorV1(
+            schema_version=1,
+            workspace_id=self.workspace_id,
+            root_task_id=cast(UUID, self.root_task_id),
+            plan_snapshot_id=cast(UUID, self.base_plan_snapshot_id),
+            plan_generation=cast(int, self.base_plan_generation),
+            plan_content_hash=cast(str, self.base_plan_content_hash),
+            root_task_version=cast(int, self.base_root_task_version),
+            captured_at=cast(datetime, self.base_captured_at),
+        )
+
+    def replace_revision_base(self, base: RevisionBaseDescriptorV1) -> None:
+        del base
+        raise InvalidTransition("revision base is immutable")
 
     @property
     def current_run_id(self) -> UUID:
@@ -914,10 +1082,12 @@ class PlanningRequest:
         self.status = PlanningRequestStatus.PLANNING
         self._touch(now)
 
-    def mark_conflicted(self, *, now: datetime) -> None:
+    def mark_conflicted(self, *, now: datetime, reason: str = "stale_base") -> None:
         if self.status is not PlanningRequestStatus.PROPOSAL_READY:
             raise InvalidTransition("only a proposal-ready request can conflict")
+        clean_reason = _required_text(reason, "conflict reason")
         self.status = PlanningRequestStatus.CONFLICTED
+        self.conflict_reason = clean_reason
         self._touch(now)
 
     def reject(self, *, now: datetime) -> None:
