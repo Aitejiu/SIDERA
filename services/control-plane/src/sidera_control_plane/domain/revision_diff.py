@@ -113,8 +113,12 @@ class NormalizedRevisionDiff:
                 "target_plan_content_hash": self.target_descriptor_preview.target_plan_content_hash,
             },
             "root_changes": [_field_mapping(item) for item in self.root_changes],
-            "subtask_changes": [_subtask_change_mapping(item) for item in self.subtask_changes],
-            "worker_changes": [_worker_change_mapping(item) for item in self.worker_changes],
+            "subtask_changes": [
+                _subtask_change_mapping(item) for item in self.subtask_changes
+            ],
+            "worker_changes": [
+                _worker_change_mapping(item) for item in self.worker_changes
+            ],
             "subtask_dependency_changes": [
                 _dependency_change_mapping(item)
                 for item in self.subtask_dependency_changes
@@ -171,7 +175,9 @@ class NormalizedRevisionDiff:
         computed_hash = _hash_diff(provisional)
         stored_hash = raw.get("diff_hash")
         if stored_hash is not None and stored_hash != computed_hash:
-            raise ValidationError("normalized revision diff hash does not match content")
+            raise ValidationError(
+                "normalized revision diff hash does not match content"
+            )
         return replace(provisional, diff_hash=computed_hash)
 
 
@@ -194,8 +200,7 @@ class RevisionDiffNormalizer:
         }
         target_subtasks = {item.key: item for item in payload.subtasks}
         subtask_decisions = {
-            item.target_subtask_key: item
-            for item in payload.subtask_identity_decisions
+            item.target_subtask_key: item for item in payload.subtask_identity_decisions
         }
         base_workers = {
             item.worker_item_id: item
@@ -210,7 +215,9 @@ class RevisionDiffNormalizer:
 
         root_changes = _root_changes(base_plan, payload)
         subtask_changes = tuple(
-            _subtask_change(target_subtasks[key], base_subtasks_by_id, subtask_decisions[key])
+            _subtask_change(
+                target_subtasks[key], base_subtasks_by_id, subtask_decisions[key]
+            )
             for key in sorted(target_subtasks)
         )
         worker_changes = tuple(
@@ -366,9 +373,21 @@ def _worker_change(
                     before.capability_requirements,
                     target.capability_requirements,
                 ),
-                ("worker_policy_ref", before.worker_policy_ref, target.worker_policy_ref),
-                ("configuration_ref", before.configuration_ref, target.configuration_ref),
-                ("concurrency_limit", before.concurrency_limit, target.concurrency_limit),
+                (
+                    "worker_policy_ref",
+                    before.worker_policy_ref,
+                    target.worker_policy_ref,
+                ),
+                (
+                    "configuration_ref",
+                    before.configuration_ref,
+                    target.configuration_ref,
+                ),
+                (
+                    "concurrency_limit",
+                    before.concurrency_limit,
+                    target.concurrency_limit,
+                ),
                 ("source_refs", before.source_refs, target.source_refs),
             )
         )
@@ -403,7 +422,7 @@ def _worker_change(
 
 
 def _field_changes(
-    values: tuple[tuple[str, object, object], ...]
+    values: tuple[tuple[str, object, object], ...],
 ) -> tuple[FieldChange, ...]:
     return tuple(
         FieldChange(path, before, after)
@@ -419,18 +438,15 @@ def _validate_context_dispositions(
 ) -> None:
     context_changed = bool(root_changes)
     changed_subtasks = {
-        item.target_subtask_key
-        for item in subtask_changes
-        if item.field_changes
+        item.target_subtask_key for item in subtask_changes if item.field_changes
     }
     for item in worker_changes:
+        if item.strategy is not IdentityStrategy.REUSE:
+            continue
         changed = bool(item.field_changes) or item.to_subtask_key in changed_subtasks
         if context_changed:
             changed = True
-        if (
-            changed
-            and item.context_disposition is ContextDisposition.UNCHANGED
-        ):
+        if changed and item.context_disposition is ContextDisposition.UNCHANGED:
             raise ValidationError(
                 "context fingerprint changed but disposition is unchanged"
             )
@@ -494,10 +510,20 @@ def _impact_counts(
     affected: tuple[str, ...],
 ) -> RevisionImpactCounts:
     return RevisionImpactCounts(
-        preserve=sum(WorkerTransitionAction.PRESERVE in item.allowed_actions for item in transitions),
-        move=sum(WorkerTransitionAction.MOVE in item.allowed_actions for item in transitions),
-        patch=sum(WorkerTransitionAction.PATCH in item.allowed_actions for item in transitions),
-        continue_=sum(WorkerTransitionAction.CONTINUE in item.allowed_actions for item in transitions),
+        preserve=sum(
+            WorkerTransitionAction.PRESERVE in item.allowed_actions
+            for item in transitions
+        ),
+        move=sum(
+            WorkerTransitionAction.MOVE in item.allowed_actions for item in transitions
+        ),
+        patch=sum(
+            WorkerTransitionAction.PATCH in item.allowed_actions for item in transitions
+        ),
+        continue_=sum(
+            WorkerTransitionAction.CONTINUE in item.allowed_actions
+            for item in transitions
+        ),
         create=sum(
             WorkerTransitionAction.CREATE in item.allowed_actions
             and item.worker_item_id is None
@@ -508,7 +534,10 @@ def _impact_counts(
             for item in payload.worker_item_identity_decisions
             if item.strategy is IdentityStrategy.DERIVE
         ),
-        retire=sum(WorkerTransitionAction.RETIRE in item.allowed_actions for item in transitions),
+        retire=sum(
+            WorkerTransitionAction.RETIRE in item.allowed_actions
+            for item in transitions
+        ),
         affected_branches=len(affected),
     )
 
@@ -524,7 +553,10 @@ def _risk_flags(
     risks: set[str] = set()
     if root_changes:
         risks.add("root_context_changed")
-    if any(item.context_disposition is ContextDisposition.PATCH_REQUIRED for item in worker_changes):
+    if any(
+        item.context_disposition is ContextDisposition.PATCH_REQUIRED
+        for item in worker_changes
+    ):
         risks.add("context_patch_required")
     if any(item.strategy is IdentityStrategy.DERIVE for item in worker_changes):
         risks.add("worker_item_derived")
@@ -550,7 +582,9 @@ def _base_subtask_edges(snapshot: TaskPlanSnapshot) -> tuple[tuple[str, str, str
     )
 
 
-def _target_subtask_edges(payload: PlanningRevisionProposalPayloadV3) -> tuple[tuple[str, str, str], ...]:
+def _target_subtask_edges(
+    payload: PlanningRevisionProposalPayloadV3,
+) -> tuple[tuple[str, str, str], ...]:
     return tuple(
         sorted(
             (
@@ -576,7 +610,9 @@ def _base_worker_edges(snapshot: TaskPlanSnapshot) -> tuple[tuple[str, str, str]
     )
 
 
-def _target_worker_edges(payload: PlanningRevisionProposalPayloadV3) -> tuple[tuple[str, str, str], ...]:
+def _target_worker_edges(
+    payload: PlanningRevisionProposalPayloadV3,
+) -> tuple[tuple[str, str, str], ...]:
     return tuple(
         sorted(
             (
@@ -598,7 +634,11 @@ def _dependency_changes(
     after_set = set(after)
     changes: list[DependencyChange] = []
     for upstream, downstream, kind in sorted(before_set | after_set):
-        if (upstream, downstream, kind) in before_set and (upstream, downstream, kind) in after_set:
+        if (upstream, downstream, kind) in before_set and (
+            upstream,
+            downstream,
+            kind,
+        ) in after_set:
             continue
         changes.append(
             DependencyChange(
@@ -631,13 +671,19 @@ def _target_plan_hash(payload: PlanningRevisionProposalPayloadV3) -> str:
 
 
 def _field_mapping(value: FieldChange) -> dict[str, object]:
-    return {"field_path": value.field_path, "before": value.before, "after": value.after}
+    return {
+        "field_path": value.field_path,
+        "before": value.before,
+        "after": value.after,
+    }
 
 
 def _subtask_change_mapping(value: SubtaskChange) -> dict[str, object]:
     return {
         "target_subtask_key": value.target_subtask_key,
-        "existing_task_id": str(value.existing_task_id) if value.existing_task_id else None,
+        "existing_task_id": str(value.existing_task_id)
+        if value.existing_task_id
+        else None,
         "strategy": value.strategy.value,
         "field_changes": [_field_mapping(item) for item in value.field_changes],
         "reason": value.reason,
@@ -647,7 +693,9 @@ def _subtask_change_mapping(value: SubtaskChange) -> dict[str, object]:
 def _worker_change_mapping(value: WorkerItemChange) -> dict[str, object]:
     return {
         "target_worker_item_key": value.target_worker_item_key,
-        "existing_worker_item_id": str(value.existing_worker_item_id) if value.existing_worker_item_id else None,
+        "existing_worker_item_id": str(value.existing_worker_item_id)
+        if value.existing_worker_item_id
+        else None,
         "strategy": value.strategy.value,
         "from_subtask_key": value.from_subtask_key,
         "to_subtask_key": value.to_subtask_key,
@@ -672,7 +720,9 @@ def _transition_mapping(value: WorkerTransitionPreview) -> dict[str, object]:
         "target_worker_item_key": value.target_worker_item_key,
         "worker_item_id": str(value.worker_item_id) if value.worker_item_id else None,
         "allowed_actions": [item.value for item in value.allowed_actions],
-        "fallback_action": value.fallback_action.value if value.fallback_action else None,
+        "fallback_action": value.fallback_action.value
+        if value.fallback_action
+        else None,
         "reason_codes": list(value.reason_codes),
     }
 
@@ -792,9 +842,7 @@ def _field_changes_from_mapping(value: object) -> tuple[FieldChange, ...]:
 
 def _subtask_change_from_mapping(value: Mapping[str, object]) -> SubtaskChange:
     return SubtaskChange(
-        target_subtask_key=_text(
-            value.get("target_subtask_key"), "target_subtask_key"
-        ),
+        target_subtask_key=_text(value.get("target_subtask_key"), "target_subtask_key"),
         existing_task_id=_optional_uuid(
             value.get("existing_task_id"), "existing_task_id"
         ),
@@ -836,8 +884,7 @@ def _worker_change_from_mapping(value: Mapping[str, object]) -> WorkerItemChange
 
 def _worker_changes_from_mapping(value: object) -> tuple[WorkerItemChange, ...]:
     return tuple(
-        _worker_change_from_mapping(item)
-        for item in _mappings(value, "worker_changes")
+        _worker_change_from_mapping(item) for item in _mappings(value, "worker_changes")
     )
 
 
@@ -853,8 +900,7 @@ def _dependency_change(value: Mapping[str, object]) -> DependencyChange:
 
 def _dependency_changes_from_mapping(value: object) -> tuple[DependencyChange, ...]:
     return tuple(
-        _dependency_change(item)
-        for item in _mappings(value, "dependency_changes")
+        _dependency_change(item) for item in _mappings(value, "dependency_changes")
     )
 
 
@@ -883,9 +929,7 @@ def _transition(value: Mapping[str, object]) -> WorkerTransitionPreview:
 def _transition_preview_from_mapping(
     value: object,
 ) -> tuple[WorkerTransitionPreview, ...]:
-    return tuple(
-        _transition(item) for item in _mappings(value, "transition_preview")
-    )
+    return tuple(_transition(item) for item in _mappings(value, "transition_preview"))
 
 
 def _impact_counts_from_mapping(value: object) -> RevisionImpactCounts:

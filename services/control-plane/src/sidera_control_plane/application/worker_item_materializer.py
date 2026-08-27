@@ -33,6 +33,7 @@ class WorkerItemMaterializer:
         snapshot: TaskPlanSnapshot,
         *,
         now: datetime,
+        allow_paused_reuse: bool = False,
     ) -> MaterializedPlan:
         canonical = self._normalizer.normalize(snapshot)
         if snapshot.schema_version == 1:
@@ -55,6 +56,7 @@ class WorkerItemMaterializer:
                 worker_plan,
                 existing_placement,
                 now=now,
+                allow_paused_reuse=allow_paused_reuse,
             )
             if (
                 item.id not in created_ids
@@ -127,6 +129,7 @@ class WorkerItemMaterializer:
         existing_placement: WorkerItemPlacement | None,
         *,
         now: datetime,
+        allow_paused_reuse: bool,
     ) -> WorkerItem:
         requested_id = worker_plan.worker_item_id
         if requested_id is None and existing_placement is not None:
@@ -141,7 +144,12 @@ class WorkerItemMaterializer:
                     "worker_item_reuse_not_found",
                     "explicit WorkerItem ID does not belong to this workspace",
                 )
-            self._validate_reuse(item, snapshot, worker_plan)
+            self._validate_reuse(
+                item,
+                snapshot,
+                worker_plan,
+                allow_paused_reuse=allow_paused_reuse,
+            )
             return item
 
         item = WorkerItem.create(
@@ -160,6 +168,8 @@ class WorkerItemMaterializer:
         item: WorkerItem,
         snapshot: TaskPlanSnapshot,
         worker_plan: CanonicalWorkerItemPlan,
+        *,
+        allow_paused_reuse: bool,
     ) -> None:
         if item.workspace_id != snapshot.workspace_id:
             raise PlanValidationError(
@@ -181,7 +191,12 @@ class WorkerItemMaterializer:
                 "worker_item_responsibility_change_not_supported",
                 "changing WorkerItem responsibility requires a separate context workflow",
             )
-        if item.status is not WorkerItemStatus.ACTIVE:
+        if item.status is WorkerItemStatus.RETIRED:
+            raise PlanValidationError(
+                "worker_item_not_active",
+                "a retired WorkerItem cannot receive a new placement",
+            )
+        if not allow_paused_reuse and item.status is not WorkerItemStatus.ACTIVE:
             raise PlanValidationError(
                 "worker_item_not_active",
                 "only an active WorkerItem can receive a new placement",

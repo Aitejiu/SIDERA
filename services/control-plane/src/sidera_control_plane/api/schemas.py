@@ -255,6 +255,18 @@ class ConfirmPlanningProposalPayload(BaseModel):
     profile_version: int = Field(ge=1)
 
 
+class ConfirmPlanRevisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_proposal_revision: int = Field(ge=1)
+    expected_proposal_content_hash: NonEmptyString
+    expected_diff_hash: NonEmptyString
+    expected_base_snapshot_id: UUID
+    expected_base_content_hash: NonEmptyString
+    profile_id: UUID
+    profile_version: int = Field(ge=1)
+
+
 class RetryBlockedPlanningRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1303,6 +1315,7 @@ class CommandRequest(BaseModel):
             "RequestProposalRevision",
             "RejectPlanningProposal",
             "ConfirmPlanningProposal",
+            "ConfirmPlanRevision",
         }:
             self._require_mutation_target("planning_request")
             payload_types = {
@@ -1310,6 +1323,7 @@ class CommandRequest(BaseModel):
                 "RequestProposalRevision": RequestProposalRevisionPayload,
                 "RejectPlanningProposal": RejectPlanningProposalPayload,
                 "ConfirmPlanningProposal": ConfirmPlanningProposalPayload,
+                "ConfirmPlanRevision": ConfirmPlanRevisionPayload,
             }
             parsed = payload_types[self.command_type].model_validate(self.payload)
         elif self.command_type == "RetryBlockedPlanningRun":
@@ -1422,7 +1436,9 @@ class CommandRequest(BaseModel):
         if self.target_id is not None or self.expected_version is not None:
             raise ValueError("create commands cannot target an existing aggregate")
 
-    def _require_mutation_target(self, target_type: AggregateType | None = None) -> None:
+    def _require_mutation_target(
+        self, target_type: AggregateType | None = None
+    ) -> None:
         if target_type is not None and self.target_type != target_type:
             raise ValueError(f"mutation command requires target_type={target_type}")
         if self.target_id is None or self.expected_version is None:
@@ -2136,9 +2152,7 @@ class ExecutionInputStatusResponse(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_view(
-        cls, item: ExecutionInputView
-    ) -> "ExecutionInputStatusResponse":
+    def from_view(cls, item: ExecutionInputView) -> "ExecutionInputStatusResponse":
         return cls(
             id=item.id,
             workspace_id=item.workspace_id,
@@ -2743,7 +2757,9 @@ class ContextPackageAssemblyResponse(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_view(cls, view: ContextPackageAssemblyView) -> "ContextPackageAssemblyResponse":
+    def from_view(
+        cls, view: ContextPackageAssemblyView
+    ) -> "ContextPackageAssemblyResponse":
         return cls(
             request_id=view.request_id,
             status=view.status,
@@ -2983,9 +2999,13 @@ class KnowledgeSubmissionPageResponse(BaseModel):
     next_cursor: str | None
 
     @classmethod
-    def from_view(cls, view: KnowledgeSubmissionPageView) -> "KnowledgeSubmissionPageResponse":
+    def from_view(
+        cls, view: KnowledgeSubmissionPageView
+    ) -> "KnowledgeSubmissionPageResponse":
         return cls(
-            items=tuple(KnowledgeSubmissionResponse.from_view(item) for item in view.items),
+            items=tuple(
+                KnowledgeSubmissionResponse.from_view(item) for item in view.items
+            ),
             next_cursor=view.next_cursor,
         )
 
@@ -3117,7 +3137,9 @@ class ContextMaterializationResponse(BaseModel):
     input_token_count: int
 
     @classmethod
-    def from_materialization(cls, materialization: Any) -> "ContextMaterializationResponse":
+    def from_materialization(
+        cls, materialization: Any
+    ) -> "ContextMaterializationResponse":
         payload = materialization.to_mapping()
         payload["total_byte_count"] = materialization.total_byte_count
         payload["input_token_count"] = materialization.input_token_count

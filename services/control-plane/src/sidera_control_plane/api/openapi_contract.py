@@ -14,6 +14,7 @@ from sidera_control_plane.api.schemas import (
     ClearExecutionWorkerPinPayload,
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
+    ConfirmPlanRevisionPayload,
     ErrorBody,
     ErrorResponse,
     ExecutionContextAddressPayload,
@@ -43,6 +44,7 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RejectPlanningProposal", RejectPlanningProposalPayload),
     ("RetryBlockedPlanningRun", RetryBlockedPlanningRunPayload),
     ("ConfirmPlanningProposal", ConfirmPlanningProposalPayload),
+    ("ConfirmPlanRevision", ConfirmPlanRevisionPayload),
     ("ReviseWorkContext", ReviseWorkContextPayload),
     ("AttachKnowledgeRevision", AttachKnowledgeRevisionPayload),
     ("ArchiveWorkContext", ArchiveWorkContextPayload),
@@ -62,9 +64,7 @@ _COMMAND_PAYLOADS = _PLANNING_COMMAND_PAYLOADS + _RUNTIME_COMMAND_PAYLOADS
 
 def export_openapi(output: Path) -> dict[str, Any]:
     settings = Settings(
-        database_url=(
-            "postgresql+psycopg://openapi:openapi@127.0.0.1:1/openapi"
-        )
+        database_url=("postgresql+psycopg://openapi:openapi@127.0.0.1:1/openapi")
     )
     document = create_app(settings).openapi()
     schemas = document.setdefault("components", {}).setdefault("schemas", {})
@@ -88,9 +88,7 @@ def export_openapi(output: Path) -> dict[str, Any]:
     return document
 
 
-def _add_component_schema(
-    schemas: dict[str, Any], model: type[BaseModel]
-) -> None:
+def _add_component_schema(schemas: dict[str, Any], model: type[BaseModel]) -> None:
     schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
     definitions = schema.pop("$defs", {})
     for name, definition in definitions.items():

@@ -27,21 +27,32 @@ def execute_command(
             details={"actor_type": settings.local_actor_type},
         )
     result = service.handle(request.to_envelope())
-    is_new_create = request.command_type in {
-        "CreateTask",
-        "RegisterWorker",
-        "CreateExecution",
-        "RetryExecution",
-        "RegisterPlannerModule",
-        "RegisterPlanningProfile",
-        "SubmitPlanningRequest",
-        "SubmitPlanRevision",
-        "ConfirmPlanningProposal",
-    } and result.command_id == request.command_id
+    is_new_create = (
+        request.command_type
+        in {
+            "CreateTask",
+            "RegisterWorker",
+            "CreateExecution",
+            "RetryExecution",
+            "RegisterPlannerModule",
+            "RegisterPlanningProfile",
+            "SubmitPlanningRequest",
+            "SubmitPlanRevision",
+            "ConfirmPlanningProposal",
+            "ConfirmPlanRevision",
+        }
+        and result.command_id == request.command_id
+    )
     is_new_create = is_new_create or (
         request.command_type == "ConfigureWorkerRuntime"
         and request.expected_version is None
         and result.command_id == request.command_id
     )
-    response.status_code = 201 if is_new_create else 200
+    response.status_code = (
+        409
+        if result.data.get("status") == "conflicted"
+        else 201
+        if is_new_create
+        else 200
+    )
     return CommandResponse.from_result(result)

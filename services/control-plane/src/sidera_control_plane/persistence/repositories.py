@@ -94,6 +94,9 @@ class TaskRepository:
                 TaskModel.version == previous_version,
             )
             .values(
+                title=task.title,
+                description=task.description,
+                acceptance_criteria=list(task.acceptance_criteria),
                 status=task.status.value,
                 priority=task.priority,
                 version=task.version,

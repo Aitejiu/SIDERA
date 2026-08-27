@@ -100,6 +100,23 @@ class WorkerItem:
         self.status = WorkerItemStatus.RETIRED
         self._touch(now)
 
+    def update_specification(
+        self, *, title: str, responsibility: str, now: datetime
+    ) -> None:
+        self._assert_not_retired()
+        clean_title = title.strip()
+        clean_responsibility = responsibility.strip()
+        if not clean_title or not clean_responsibility:
+            raise ValidationError("title and responsibility are required")
+        if (
+            self.title == clean_title
+            and self.responsibility == clean_responsibility
+        ):
+            return
+        self.title = clean_title
+        self.responsibility = clean_responsibility
+        self._touch(now)
+
     def advance_context(self, *, now: datetime) -> None:
         self._assert_not_retired()
         self.context_version += 1

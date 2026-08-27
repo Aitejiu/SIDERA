@@ -1218,6 +1218,29 @@ export interface components {
              */
             workspace_module_instance_id: string;
         };
+        /** ConfirmPlanRevisionPayload */
+        ConfirmPlanRevisionPayload: {
+            /** Expected Base Content Hash */
+            expected_base_content_hash: string;
+            /**
+             * Expected Base Snapshot Id
+             * Format: uuid
+             */
+            expected_base_snapshot_id: string;
+            /** Expected Diff Hash */
+            expected_diff_hash: string;
+            /** Expected Proposal Content Hash */
+            expected_proposal_content_hash: string;
+            /** Expected Proposal Revision */
+            expected_proposal_revision: number;
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
+            /** Profile Version */
+            profile_version: number;
+        };
         /** ConfirmPlanningProposalPayload */
         ConfirmPlanningProposalPayload: {
             /**

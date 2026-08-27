@@ -80,6 +80,29 @@ class Task:
         self.priority = priority
         self.version += 1
 
+    def update_specification(
+        self,
+        *,
+        title: str,
+        description: str,
+        acceptance_criteria: tuple[str, ...],
+    ) -> None:
+        self._assert_mutable()
+        clean_title = title.strip()
+        clean_criteria = tuple(item.strip() for item in acceptance_criteria if item.strip())
+        if not clean_title or not clean_criteria:
+            raise ValidationError("title and acceptance_criteria are required")
+        if (
+            self.title == clean_title
+            and self.description == description.strip()
+            and self.acceptance_criteria == clean_criteria
+        ):
+            return
+        self.title = clean_title
+        self.description = description.strip()
+        self.acceptance_criteria = clean_criteria
+        self.version += 1
+
     def pause(self) -> None:
         self._assert_mutable()
         if self.status is TaskStatus.PAUSED:

@@ -15,6 +15,10 @@ from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.proposal_materializer import (
     ProposalMaterializer,
 )
+from sidera_control_plane.application.revision_materializer import (
+    RevisionMaterializer,
+    RevisionStaleBase,
+)
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
     work_context_event,
@@ -75,6 +79,7 @@ class PlanningCommandHandler:
             "RequestProposalRevision",
             "RejectPlanningProposal",
             "ConfirmPlanningProposal",
+            "ConfirmPlanRevision",
             "RetryBlockedPlanningRun",
         }
     )
@@ -86,6 +91,7 @@ class PlanningCommandHandler:
         local_actor_id: str,
         clock: Callable[[], datetime] | None = None,
         materializer: ProposalMaterializer | None = None,
+        revision_materializer: RevisionMaterializer | None = None,
         work_context_factory: WorkContextRevisionFactory | None = None,
         planning_context_ttl_seconds: int = 1_800,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
@@ -97,7 +103,10 @@ class PlanningCommandHandler:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._planning_context_ttl_seconds = planning_context_ttl_seconds
         self._materializer = materializer or ProposalMaterializer()
-        self._work_context_factory = work_context_factory or WorkContextRevisionFactory()
+        self._revision_materializer = revision_materializer or RevisionMaterializer()
+        self._work_context_factory = (
+            work_context_factory or WorkContextRevisionFactory()
+        )
         self._candidate_submission_service = candidate_submission_service
 
     def handle(
@@ -121,6 +130,8 @@ class PlanningCommandHandler:
             return self._reject_proposal(uow, envelope)
         if envelope.command_type == "ConfirmPlanningProposal":
             return self._confirm_proposal(uow, envelope)
+        if envelope.command_type == "ConfirmPlanRevision":
+            return self._confirm_plan_revision(uow, envelope)
         if envelope.command_type == "RetryBlockedPlanningRun":
             return self._retry_blocked_run(uow, envelope)
         raise ValidationError(f"unsupported planning command: {envelope.command_type}")
@@ -244,12 +255,8 @@ class PlanningCommandHandler:
             budget=_budget(payload.get("budget")),
             retry_policy=_retry_policy(payload.get("retry_policy")),
             default_priority=_bounded_int(payload, "default_priority", 0, 100),
-            execution_max_attempts=_positive_int(
-                payload, "execution_max_attempts"
-            ),
-            execution_budget_level=_required_string(
-                payload, "execution_budget_level"
-            ),
+            execution_max_attempts=_positive_int(payload, "execution_max_attempts"),
+            execution_budget_level=_required_string(payload, "execution_budget_level"),
             user_selectable=bool(payload.get("user_selectable", True)),
             status=PlanningProfileStatus.ACTIVE,
             planner_secret_refs=_string_tuple(
@@ -257,9 +264,13 @@ class PlanningCommandHandler:
             ),
         )
         if profile.planner_interface_version != definition.interface_version:
-            raise ValidationError("planning profile interface version does not match module")
+            raise ValidationError(
+                "planning profile interface version does not match module"
+            )
         if profile.planner_module_config_version != instance.config_version:
-            raise ValidationError("planning profile module config version does not match instance")
+            raise ValidationError(
+                "planning profile module config version does not match instance"
+            )
         _validate_secret_refs(profile.planner_secret_refs)
         profile.snapshot(definition.capabilities)
         uow.planning_profiles.add(profile)
@@ -325,9 +336,7 @@ class PlanningCommandHandler:
             acceptance_criteria=_string_tuple(
                 payload.get("acceptance_criteria", ()), "acceptance_criteria"
             ),
-            context_refs=_string_tuple(
-                payload.get("context_refs", ()), "context_refs"
-            ),
+            context_refs=_string_tuple(payload.get("context_refs", ()), "context_refs"),
             requested_outputs=_string_tuple(
                 payload.get("requested_outputs", ()), "requested_outputs"
             ),
@@ -418,11 +427,11 @@ class PlanningCommandHandler:
         payload = envelope.payload
         root_task_id = _uuid(payload, "root_task_id")
         if envelope.target_id != root_task_id:
-            raise ValidationError("SubmitPlanRevision root_task_id must match target_id")
+            raise ValidationError(
+                "SubmitPlanRevision root_task_id must match target_id"
+            )
 
-        root_task = uow.tasks.get(
-            root_task_id, envelope.workspace_id, for_update=True
-        )
+        root_task = uow.tasks.get(root_task_id, envelope.workspace_id, for_update=True)
         if root_task is None:
             raise NotFound("root task not found")
         if root_task.version != envelope.expected_version:
@@ -663,7 +672,8 @@ class PlanningCommandHandler:
         previous_run_versions = {
             run.id: run.version
             for run in request.runs
-            if run.status not in {
+            if run.status
+            not in {
                 PlanningRunStatus.SUCCEEDED,
                 PlanningRunStatus.NEEDS_CLARIFICATION,
                 PlanningRunStatus.FAILED,
@@ -708,7 +718,10 @@ class PlanningCommandHandler:
             aggregate_id=request.id,
             aggregate_version=request.version,
             event_ids=(event.id,),
-            data={"planning_request_id": str(request.id), "status": request.status.value},
+            data={
+                "planning_request_id": str(request.id),
+                "status": request.status.value,
+            },
         )
 
     def _answer_clarification(
@@ -736,12 +749,16 @@ class PlanningCommandHandler:
             if clarification_id in answers:
                 raise ValidationError("answers cannot contain duplicate clarifications")
             if clarification_id not in pending:
-                raise ValidationError("answer does not reference a pending clarification")
+                raise ValidationError(
+                    "answer does not reference a pending clarification"
+                )
             answer = _required_string(item, "answer")
             _validate_clarification_answer(pending[clarification_id], answer)
             answers[clarification_id] = answer
         if set(answers) != set(pending):
-            raise ValidationError("all pending clarifications must be answered together")
+            raise ValidationError(
+                "all pending clarifications must be answered together"
+            )
 
         work_context = uow.work_contexts.get_by_planning_request(
             request.id, envelope.workspace_id, for_update=True
@@ -790,7 +807,9 @@ class PlanningCommandHandler:
             tuple(pending.values()),
             answers,
             actor=envelope.actor_id,
-            ordinal_offset=len(current_context_revision.snapshot.clarification_decisions),
+            ordinal_offset=len(
+                current_context_revision.snapshot.clarification_decisions
+            ),
         )
         context_revision = self._work_context_factory.create(
             work_context_id=work_context.id,
@@ -879,9 +898,7 @@ class PlanningCommandHandler:
                 envelope.payload, "current_proposal_revision"
             ),
             expected_content_hash=_content_hash(
-                _required_string(
-                    envelope.payload, "current_proposal_content_hash"
-                )
+                _required_string(envelope.payload, "current_proposal_content_hash")
             ),
             feedback=feedback,
             brief=brief,
@@ -913,9 +930,7 @@ class PlanningCommandHandler:
                     envelope.payload, "current_proposal_revision"
                 ),
                 "previous_proposal_content_hash": _content_hash(
-                    _required_string(
-                        envelope.payload, "current_proposal_content_hash"
-                    )
+                    _required_string(envelope.payload, "current_proposal_content_hash")
                 ),
                 "brief_revision": brief.revision,
                 "planning_run_id": str(request.current_run_id),
@@ -972,9 +987,7 @@ class PlanningCommandHandler:
                     envelope.payload, "current_proposal_revision"
                 ),
                 "proposal_content_hash": _content_hash(
-                    _required_string(
-                        envelope.payload, "current_proposal_content_hash"
-                    )
+                    _required_string(envelope.payload, "current_proposal_content_hash")
                 ),
                 "reason": reason,
                 "status": request.status.value,
@@ -1066,6 +1079,97 @@ class PlanningCommandHandler:
             },
         )
 
+    def _confirm_plan_revision(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        request = self._request_for_mutation(uow, envelope)
+        proposal = uow.planning_records.get_current_proposal(
+            request.id, request.workspace_id
+        )
+        if proposal is None:
+            raise NotFound("current planning proposal not found")
+        profile_id = _uuid(envelope.payload, "profile_id")
+        profile_version = _positive_int(envelope.payload, "profile_version")
+        profile = uow.planning_profiles.get(
+            profile_id, envelope.workspace_id, version=profile_version
+        )
+        if profile is None:
+            raise NotFound("planning profile not found")
+        now = self._clock()
+        try:
+            result = self._revision_materializer.materialize(
+                uow,
+                request=request,
+                proposal=proposal,
+                profile=profile,
+                envelope=envelope,
+                now=now,
+            )
+        except RevisionStaleBase as exc:
+            previous_request_version = request.version
+            request.mark_conflicted(now=now, reason="stale_base")
+            uow.planning_requests.save(request, previous_request_version)
+            event = _event(
+                envelope,
+                aggregate_type="planning_request",
+                aggregate_id=request.id,
+                aggregate_version=request.version,
+                event_type="PlanningProposalConflicted",
+                payload={
+                    "planning_request_id": str(request.id),
+                    "proposal_revision": proposal.revision,
+                    "proposal_content_hash": proposal.content_hash,
+                    "reason": "stale_base",
+                    "details": dict(exc.details),
+                },
+            )
+            uow.events.append_with_outbox(event)
+            return CommandResult(
+                command_id=envelope.id,
+                aggregate_id=request.id,
+                aggregate_version=request.version,
+                event_ids=(event.id,),
+                data={
+                    "planning_request_id": str(request.id),
+                    "status": request.status.value,
+                    "reason": "stale_base",
+                    "proposal_revision": proposal.revision,
+                    "proposal_content_hash": proposal.content_hash,
+                    "details": dict(exc.details),
+                },
+            )
+
+        materialization = result.materialization
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_ids=result.event_ids,
+            data={
+                "planning_request_id": str(request.id),
+                "proposal_revision": proposal.revision,
+                "proposal_content_hash": proposal.content_hash,
+                "profile_id": str(profile.id),
+                "profile_version": profile.version,
+                "root_task_id": str(result.root_task_id),
+                "plan_snapshot_id": str(result.plan_snapshot_id),
+                "plan_generation": result.plan_generation,
+                "plan_transition_id": str(result.plan_transition_id),
+                "proposal_revision_id": str(result.proposal_revision_id),
+                "diff_hash": result.diff_hash,
+                "subtask_task_mapping": {
+                    key: str(value)
+                    for key, value in materialization.subtask_task_mapping.items()
+                },
+                "worker_item_mapping": {
+                    key: str(value)
+                    for key, value in materialization.worker_item_mapping.items()
+                },
+                "execution_request_mapping": {},
+                "deep_link": materialization.deep_link,
+            },
+        )
+
     def _retry_blocked_run(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
@@ -1122,7 +1226,9 @@ class PlanningCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> PlanningRequest:
         if envelope.target_id is None or envelope.expected_version is None:
-            raise ValidationError("planning request mutation requires target_id and expected_version")
+            raise ValidationError(
+                "planning request mutation requires target_id and expected_version"
+            )
         request = uow.planning_requests.get(
             envelope.target_id, envelope.workspace_id, for_update=True
         )
@@ -1163,7 +1269,9 @@ class PlanningCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> PlanningRun:
         if envelope.target_id is None or envelope.expected_version is None:
-            raise ValidationError("planning run mutation requires target_id and expected_version")
+            raise ValidationError(
+                "planning run mutation requires target_id and expected_version"
+            )
         run = uow.planning_runs.get(
             envelope.target_id, envelope.workspace_id, for_update=True
         )
@@ -1188,9 +1296,7 @@ class PlanningCommandHandler:
         if proposal is None:
             raise NotFound("current planning proposal not found")
         revision = _positive_int(payload, revision_key)
-        content_hash = _content_hash(
-            _required_string(payload, content_hash_key)
-        )
+        content_hash = _content_hash(_required_string(payload, content_hash_key))
         if proposal.revision != revision:
             raise _planning_conflict(request)
         if proposal.content_hash != content_hash:
@@ -1232,10 +1338,11 @@ class PlanningCommandHandler:
         previous_clarification_versions = previous_clarification_versions or {}
         for clarification in request.clarifications:
             previous_version = previous_clarification_versions.get(clarification.id)
-            if previous_version is not None and clarification.version != previous_version:
-                uow.planning_records.save_clarification(
-                    clarification, previous_version
-                )
+            if (
+                previous_version is not None
+                and clarification.version != previous_version
+            ):
+                uow.planning_records.save_clarification(clarification, previous_version)
 
     def _add_planning_context_assembly(
         self,
@@ -1346,7 +1453,9 @@ def _planner_capabilities(
         stability=_enum_string(value, "stability"),  # type: ignore[arg-type]
         interface_version=_required_string(value, "interface_version"),
         proposal_schema_versions=tuple(
-            _positive_ints(value.get("proposal_schema_versions"), "proposal_schema_versions")
+            _positive_ints(
+                value.get("proposal_schema_versions"), "proposal_schema_versions"
+            )
         ),
         context_package_versions=tuple(
             _positive_ints(
@@ -1429,7 +1538,9 @@ def _active_run_versions(request: PlanningRequest) -> dict[UUID, int]:
 
 
 def _content_hash(value: str) -> str:
-    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
         raise ValidationError("content hash must be a lowercase SHA-256 value")
     return value
 
@@ -1521,7 +1632,11 @@ def _non_negative_int(value: Mapping[str, object], name: str) -> int:
 
 def _bounded_int(value: Mapping[str, object], name: str, lower: int, upper: int) -> int:
     item = value.get(name)
-    if not isinstance(item, int) or isinstance(item, bool) or not lower <= item <= upper:
+    if (
+        not isinstance(item, int)
+        or isinstance(item, bool)
+        or not lower <= item <= upper
+    ):
         raise ValidationError(f"{name} must be between {lower} and {upper}")
     return item
 
