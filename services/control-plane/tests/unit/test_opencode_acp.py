@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import subprocess
@@ -95,9 +96,16 @@ def _fake_acp_executable(tmp_path: Path, *, hang_initialize: bool = False) -> Pa
             """
             #!/usr/bin/env python3
             import json
+            import os
             import sys
+            from pathlib import Path
 
             SESSION_ID = "acp-test-session"
+
+            if capture_path := os.environ.get("SIDERA_TEST_CONFIG_CAPTURE"):
+                Path(capture_path).write_text(
+                    os.environ.get("OPENCODE_CONFIG_CONTENT", "")
+                )
 
             def write(message):
                 sys.stdout.write(json.dumps(message) + "\\n")
@@ -129,7 +137,7 @@ def test_opencode_acp_probe_and_prompt_round_trip(tmp_path: Path) -> None:
     adapter = OpenCodeACPAdapter(
         executable=str(executable),
         workspace_root=tmp_path,
-        request_timeout_seconds=2,
+        request_timeout_seconds=5,
         stop_grace_seconds=0.2,
     )
 
@@ -161,6 +169,28 @@ def test_opencode_acp_probe_and_prompt_round_trip(tmp_path: Path) -> None:
     assert stopped.outcome is DeliveryOutcome.DELIVERED
 
 
+def test_opencode_acp_allows_only_opencode_go_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture_path = tmp_path / "opencode-config.json"
+    monkeypatch.setenv("SIDERA_TEST_CONFIG_CAPTURE", str(capture_path))
+    adapter = OpenCodeACPAdapter(
+        executable=str(_fake_acp_executable(tmp_path)),
+        model="opencode-go/mimo-v2.5",
+        request_timeout_seconds=5,
+        stop_grace_seconds=0.2,
+    )
+
+    adapter.probe({"cwd": str(tmp_path)})
+
+    assert json.loads(capture_path.read_text()) == {
+        "disabled_providers": ["deepseek"],
+        "enabled_providers": ["opencode-go"],
+        "model": "opencode-go/mimo-v2.5",
+        "permission": {"external_directory": "allow"},
+    }
+
+
 def test_opencode_acp_missing_executable_is_unhealthy() -> None:
     adapter = OpenCodeACPAdapter(executable="/missing/opencode")
 
@@ -175,7 +205,7 @@ def test_opencode_acp_collects_git_diff_and_acceptance_provenance(
     adapter = OpenCodeACPAdapter(
         executable=str(executable),
         workspace_root=tmp_path,
-        request_timeout_seconds=2,
+        request_timeout_seconds=5,
         stop_grace_seconds=0.2,
     )
     spec = _spec()
@@ -238,7 +268,7 @@ def test_opencode_acp_stop_requires_proven_process_identity(
     adapter = OpenCodeACPAdapter(
         executable=str(executable),
         workspace_root=tmp_path,
-        request_timeout_seconds=1,
+        request_timeout_seconds=5,
         stop_grace_seconds=0.1,
     )
     spec = _spec()

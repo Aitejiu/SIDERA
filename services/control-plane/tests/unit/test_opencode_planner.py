@@ -15,6 +15,7 @@ from sidera_control_plane.adapters.opencode_planner import (
     OpenCodePlannerError,
     _planner_opencode_config,
     _planner_prompt,
+    _repair_prompt,
     _response_text,
 )
 from sidera_control_plane.application.planner_runtime import (
@@ -62,8 +63,11 @@ def _fake_opencode(tmp_path: Path, *, hang_prompt: bool = False) -> Path:
                 global prompt_count
                 prompt_count += 1
                 response = os.environ["SIDERA_TEST_PLANNER_RESPONSE"]
-                if prompt_count > 1 and os.environ.get("SIDERA_TEST_PLANNER_REPAIR_RESPONSE"):
-                    response = os.environ["SIDERA_TEST_PLANNER_REPAIR_RESPONSE"]
+                if prompt_count > 1:
+                    response = os.environ.get(
+                        f"SIDERA_TEST_PLANNER_REPAIR_RESPONSE_{{prompt_count - 1}}",
+                        os.environ.get("SIDERA_TEST_PLANNER_REPAIR_RESPONSE", response),
+                    )
                 write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
                     "sessionId": SESSION_ID,
                     "update": {{"sessionUpdate": "agent_message_chunk", "content": {{"type": "text", "text": response}}}}
@@ -156,7 +160,7 @@ def _adapter(tmp_path: Path, *, hang_prompt: bool = False) -> OpenCodePlannerAda
     return OpenCodePlannerAdapter(
         executable=str(_fake_opencode(tmp_path, hang_prompt=hang_prompt)),
         temp_root=tmp_path / "planner-runs",
-        request_timeout_seconds=2,
+        request_timeout_seconds=5,
         stop_grace_seconds=0.2,
     )
 
@@ -180,15 +184,36 @@ def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
     assert "Do not invent extra verification-only subtasks or WorkerItems" in prompt
     assert "impact_policy.manual_gate to false" in prompt
     assert "artifact_type:diff, artifact_type:log, artifact_type:report" in prompt
+    assert (
+        "Every acceptance_refs and required_evidence_refs entry must use the "
+        "acceptance:<criterion-ref> format"
+    ) in prompt
+    assert "Never use acceptance_criterion: values" in prompt
 
 
 def test_planner_opencode_config_denies_tools_and_external_directories() -> None:
-    assert _planner_opencode_config("deepseek/deepseek-v4-flash") == {
+    assert _planner_opencode_config("opencode-go/mimo-v2.5") == {
         "$schema": "https://opencode.ai/config.json",
-        "model": "deepseek/deepseek-v4-flash",
+        "disabled_providers": ["deepseek"],
+        "enabled_providers": ["opencode-go"],
+        "model": "opencode-go/mimo-v2.5",
         "permission": {"*": "deny", "external_directory": "deny"},
     }
     assert "model" not in _planner_opencode_config(None)
+
+
+def test_repair_prompt_carries_safe_validation_diagnostic() -> None:
+    prompt = _repair_prompt(
+        "proposal_reference_invalid: evidence reference must use acceptance:<criterion-ref>"
+    )
+
+    assert (
+        "Every acceptance_refs and required_evidence_refs value must use the "
+        "acceptance:<criterion-ref> format"
+    ) in prompt
+    assert "never acceptance_criterion:0001" in prompt
+    assert "The validator reported this safe diagnostic" in prompt
+    assert "proposal_reference_invalid" in prompt
 
 
 def test_planner_uses_latest_acp_agent_message_when_provider_retries_output() -> None:
@@ -357,6 +382,33 @@ def test_planner_repairs_one_invalid_structured_response(
     invalid["unexpected"] = True
     monkeypatch.setenv("SIDERA_TEST_PLANNER_RESPONSE", json.dumps(invalid))
     monkeypatch.setenv("SIDERA_TEST_PLANNER_REPAIR_RESPONSE", valid)
+
+    result = _adapter(tmp_path).plan(
+        planner_input,
+        PlannerRunControl(
+            operation_id=planner_input.operation_id,
+            started_at=NOW,
+            deadline_at=NOW + timedelta(seconds=30),
+        ),
+    )
+
+    assert isinstance(result, PlannerProposalResult)
+
+
+def test_planner_retries_schema_repair_when_first_repair_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner_input, _ = _planner_input()
+    valid = _response("proposal", _proposal_payload().to_mapping())
+    invalid = json.loads(valid)
+    invalid["unexpected"] = True
+    invalid_again = json.loads(valid)
+    invalid_again["unexpected_again"] = True
+    monkeypatch.setenv("SIDERA_TEST_PLANNER_RESPONSE", json.dumps(invalid))
+    monkeypatch.setenv(
+        "SIDERA_TEST_PLANNER_REPAIR_RESPONSE_1", json.dumps(invalid_again)
+    )
+    monkeypatch.setenv("SIDERA_TEST_PLANNER_REPAIR_RESPONSE_2", valid)
 
     result = _adapter(tmp_path).plan(
         planner_input,

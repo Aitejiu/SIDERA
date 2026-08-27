@@ -53,6 +53,7 @@ from sidera_control_plane.domain.planning_proposals import (
 )
 
 _MAX_KNOWLEDGE_CANDIDATES = 16
+_MAX_SCHEMA_REPAIRS = 2
 
 
 class OpenCodePlannerError(RuntimeError):
@@ -241,24 +242,39 @@ class OpenCodePlannerAdapter:
             )
             try:
                 return _parse_result(response_text, planner_input, self.provider_ref)
-            except OpenCodePlannerError:
+            except OpenCodePlannerError as exc:
                 # Keep the same session so the model can correct its own schema
                 # response without rebuilding the full planning context.
-                repair_result = transport.request(
-                    "session/prompt",
-                    {
-                        "sessionId": session_id,
-                        "prompt": [{"type": "text", "text": _repair_prompt()}],
-                    },
-                    timeout=self._remaining_timeout(control),
-                )
-                transport.read_available(timeout=0)
-                repaired_text = _response_text(
-                    transport.drain_notifications(),
-                    session_id=session_id,
-                    prompt_result=repair_result,
-                )
-                return _parse_result(repaired_text, planner_input, self.provider_ref)
+                last_error = exc
+                for _ in range(_MAX_SCHEMA_REPAIRS):
+                    repair_result = transport.request(
+                        "session/prompt",
+                        {
+                            "sessionId": session_id,
+                            "prompt": [
+                                {
+                                    "type": "text",
+                                    "text": _repair_prompt(
+                                        _repair_diagnostic(last_error)
+                                    ),
+                                }
+                            ],
+                        },
+                        timeout=self._remaining_timeout(control),
+                    )
+                    transport.read_available(timeout=0)
+                    repaired_text = _response_text(
+                        transport.drain_notifications(),
+                        session_id=session_id,
+                        prompt_result=repair_result,
+                    )
+                    try:
+                        return _parse_result(
+                            repaired_text, planner_input, self.provider_ref
+                        )
+                    except OpenCodePlannerError as repair_error:
+                        last_error = repair_error
+                raise last_error
         except OpenCodePlannerError:
             raise
         except ACPProcessError as exc:
@@ -437,6 +453,12 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         "of these exact references: artifact_type:diff, artifact_type:log, "
         "artifact_type:report, artifact_type:screenshot, artifact_type:build, "
         "or artifact_type:external; do not invent artifact types. "
+        "Every acceptance_refs and required_evidence_refs entry must use the "
+        "acceptance:<criterion-ref> format, including the acceptance: prefix; "
+        "required_evidence_refs must reuse exact values from the related "
+        "acceptance_refs. Never use acceptance_criterion: values, bare "
+        "criterion values, artifact_type references, or free-form evidence "
+        "text for either field. "
         "Always include usage with integer input_tokens, output_tokens, "
         "cost_microunits, runtime_seconds, and context_bytes. For a proposal, copy "
         "the exact field names from this minimal valid shape, replace the example "
@@ -452,6 +474,8 @@ def _planner_opencode_config(model: str | None) -> dict[str, object]:
     """Run planning as a pure text transformation with no tool approvals."""
     config: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
+        "disabled_providers": ["deepseek"],
+        "enabled_providers": ["opencode-go"],
         "permission": {
             "*": "deny",
             "external_directory": "deny",
@@ -577,15 +601,35 @@ def _proposal_shape_hint() -> dict[str, object]:
     }
 
 
-def _repair_prompt() -> str:
+def _repair_diagnostic(error: OpenCodePlannerError) -> str | None:
+    cause = error.__cause__
+    if cause is None:
+        return None
+    diagnostic = " ".join(str(cause).split())
+    return diagnostic[:300] or None
+
+
+def _repair_prompt(diagnostic: str | None = None) -> str:
+    detail = (
+        f" The validator reported this safe diagnostic: {diagnostic}."
+        if diagnostic
+        else ""
+    )
     return (
         "Your previous response failed SIDERA strict schema validation. Return exactly "
         "one corrected JSON object now, with no Markdown or explanatory text. Re-read "
         "the original planner contract and the minimal valid shape. Do not add fields, "
         "invent artifact types, or flatten the proposal envelope. For a proposal use "
         "result_type, proposal, and usage; for a clarification use result_type, "
-        "clarifications, and usage. Keep the result directly executable and wait for "
-        "SIDERA to handle Proposal confirmation."
+        "clarifications, and usage. Every acceptance_refs and required_evidence_refs "
+        "value must use the acceptance:<criterion-ref> format, including the "
+        "acceptance: prefix; required_evidence_refs must reuse exact values from "
+        "acceptance_refs. For example, use acceptance:criterion-1 and never "
+        "acceptance_criterion:0001, bare criterion-1, evidence:criterion-1, or "
+        "free-form text. "
+        "Keep the result directly executable and wait for SIDERA to handle Proposal "
+        "confirmation."
+        + detail
     )
 
 

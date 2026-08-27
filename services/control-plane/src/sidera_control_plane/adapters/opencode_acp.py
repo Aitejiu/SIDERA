@@ -427,15 +427,18 @@ class OpenCodeACPAdapter:
 
     def _spawn(self, executable: str, cwd: Path, *, probe: bool) -> ACPProcessTransport:
         try:
-            env = (
-                {
-                    "OPENCODE_CONFIG_CONTENT": json.dumps(
-                        {"model": self._model}, separators=(",", ":")
-                    )
-                }
-                if self._model is not None
-                else None
-            )
+            opencode_config: dict[str, object] = {
+                "disabled_providers": ["deepseek"],
+                "enabled_providers": ["opencode-go"],
+                "permission": {"external_directory": "allow"},
+            }
+            if self._model is not None:
+                opencode_config["model"] = self._model
+            env = {
+                "OPENCODE_CONFIG_CONTENT": json.dumps(
+                    opencode_config, separators=(",", ":")
+                )
+            }
             return ACPProcessTransport.spawn(
                 executable,
                 cwd=cwd,
