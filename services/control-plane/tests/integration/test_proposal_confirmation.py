@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -132,7 +133,12 @@ def profile(workspace_id: UUID, instance_id: UUID) -> PlanningProfile:
     )
 
 
-def seed_proposal(uow_factory, workspace_id: UUID) -> tuple[UUID, UUID, str, UUID]:
+def seed_proposal(
+    uow_factory,
+    workspace_id: UUID,
+    *,
+    proposal_payload=None,
+) -> tuple[UUID, UUID, str, UUID]:
     definition_id = uuid4()
     instance_id = uuid4()
     definition = ModuleDefinition(
@@ -226,7 +232,7 @@ def seed_proposal(uow_factory, workspace_id: UUID) -> tuple[UUID, UUID, str, UUI
             brief_revision=1,
             planning_run_id=run.id,
             kind=request.kind,
-            payload=_proposal_payload(),
+            payload=proposal_payload or _proposal_payload(),
             profile_descriptor=PlanningProfileDescriptor.from_snapshot(
                 request.profile_snapshot
             ),
@@ -243,6 +249,27 @@ def seed_proposal(uow_factory, workspace_id: UUID) -> tuple[UUID, UUID, str, UUI
         uow.planning_runs.save(run, previous_run_version)
         uow.planning_requests.save(request, previous_request_version)
     return request.id, stored_profile.id, proposal.content_hash, proposal.id
+
+
+def _two_worker_proposal_payload():
+    payload = _proposal_payload()
+    first_worker = payload.worker_items[0]
+    second_worker = replace(
+        first_worker,
+        key="verification-worker",
+        title="Verification worker",
+        responsibility="Verify the requested change.",
+    )
+    second_intent = replace(
+        payload.execution_intents[0],
+        worker_item_key=second_worker.key,
+        purpose=second_worker.responsibility,
+    )
+    return replace(
+        payload,
+        worker_items=(first_worker, second_worker),
+        execution_intents=(payload.execution_intents[0], second_intent),
+    )
 
 
 def command(
@@ -372,6 +399,35 @@ def test_confirm_planning_proposal_materializes_atomic_task_first_graph(
         ]
         assert execution_requests[0] is not None
         assert execution_requests[0].status.value == "ready"
+
+
+def test_confirm_planning_proposal_flushes_snapshot_before_multiple_placements(
+    client: TestClient,
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    request_id, profile_id, content_hash, _proposal_id = seed_proposal(
+        uow_factory,
+        workspace_id,
+        proposal_payload=_two_worker_proposal_payload(),
+    )
+
+    response = client.post(
+        "/api/v1/commands",
+        json=command(
+            workspace_id,
+            request_id,
+            profile_id,
+            content_hash,
+            idempotency_key="confirm-multiple-placements",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(PlanSnapshotModel)) == 1
+        assert session.scalar(select(func.count()).select_from(WorkerItemPlacementModel)) == 2
 
 
 def test_confirm_replay_returns_same_mapping_without_second_root_task(

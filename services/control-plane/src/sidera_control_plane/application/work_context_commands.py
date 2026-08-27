@@ -188,7 +188,7 @@ class WorkContextRevisionFactory:
             ),
             acceptance_criteria=tuple(
                 ContextTextItem(
-                    key=f"acceptance_criterion:{ordinal:04d}",
+                    key=f"acceptance:{ordinal:04d}",
                     text=text,
                     ordinal=ordinal,
                 )
@@ -239,7 +239,7 @@ class WorkContextRevisionFactory:
                 else base_snapshot.constraints
             ),
             acceptance_criteria=(
-                _context_text_items("acceptance_criterion", patch.acceptance_criteria)
+                _context_text_items("acceptance", patch.acceptance_criteria)
                 if patch.acceptance_criteria is not None
                 else base_snapshot.acceptance_criteria
             ),

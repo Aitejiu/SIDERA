@@ -7,6 +7,10 @@ from uuid import uuid4
 import pytest
 
 from sidera_control_plane.application.planning_reconciler import PlanningReconciler
+from sidera_control_plane.application.work_context_commands import (
+    WorkContextRevisionFactory,
+)
+from sidera_control_plane.domain.context_packages import ContextPurpose
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
     IdempotencyCapability,
@@ -31,6 +35,10 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningProfileStatus,
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
+)
+from sidera_control_plane.domain.work_context import (
+    WorkContext,
+    WorkContextRevisionReason,
 )
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -194,3 +202,54 @@ def test_expired_lease_is_retried_as_a_new_attempt(
         assert len(request.runs) == 2
         assert request.runs[0].status.value == "failed"
         assert request.runs[1].status.value == "queued"
+
+
+def test_expired_lease_retry_rebuilds_planning_context_assembly(
+    uow_factory, workspace_id
+) -> None:
+    request_id = seed_expired_running_request(uow_factory, workspace_id)
+    context_id = uuid4()
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        brief = request.briefs[-1]
+        revision = WorkContextRevisionFactory().create(
+            work_context_id=context_id,
+            workspace_id=workspace_id,
+            brief=brief,
+            revision_number=1,
+            reason=WorkContextRevisionReason.REQUEST_CREATED,
+            actor="integration",
+            created_at=NOW,
+        )
+        context = WorkContext.create(
+            work_context_id=context_id,
+            workspace_id=workspace_id,
+            planning_request_id=request.id,
+            first_revision=revision,
+            created_at=NOW,
+        )
+        uow.work_contexts.add(context, revision)
+
+    reconciler = PlanningReconciler(
+        uow_factory=uow_factory,
+        owner_id="planning-reconciler:integration",
+        clock=lambda: NOW,
+        planning_context_ttl_seconds=3600,
+    )
+
+    result = reconciler.run_once(limit=10)
+
+    assert result.retried == 1
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        retry = request.runs[-1]
+        assembly = uow.context_assemblies.get_for_consumer(
+            ContextPurpose.PLANNING_RUN,
+            retry.id,
+            workspace_id,
+        )
+        assert assembly is not None
+        assert assembly.status.value == "queued"
+        assert assembly.work_context_revision_id == revision.revision_id

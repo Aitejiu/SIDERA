@@ -167,6 +167,7 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             uow_factory=uow_factory,
             owner_id=f"planning-reconciler:{settings.local_actor_id}",
             clock=lambda: datetime.now(UTC),
+            planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
         )
         return PlanningWorkerRuntime(
             worker=PlanningWorker(reconciler=reconciler, runner=runner),

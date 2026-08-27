@@ -110,7 +110,22 @@ class WorkerItemRepository(WorkerItemRepositoryPort):
             WorkerItemPlacementModel.plan_snapshot_id == placement.plan_snapshot_id,
             WorkerItemPlacementModel.worker_item_id == placement.worker_item_id,
         )
-        existing = self._session.scalar(statement)
+        # The snapshot and prior placements may still be pending in the same
+        # materialization transaction; the existence check must not flush them
+        # before their parent snapshot has been added.
+        existing = next(
+            (
+                candidate
+                for candidate in self._session.new
+                if isinstance(candidate, WorkerItemPlacementModel)
+                and candidate.plan_snapshot_id == placement.plan_snapshot_id
+                and candidate.worker_item_id == placement.worker_item_id
+            ),
+            None,
+        )
+        if existing is None:
+            with self._session.no_autoflush:
+                existing = self._session.scalar(statement)
         if existing is not None:
             if _to_placement(existing) != placement:
                 raise ValidationError("immutable placement cannot be changed")

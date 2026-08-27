@@ -51,6 +51,7 @@ def test_revision_factory_builds_typed_snapshot_without_raw_source_ref() -> None
     assert revision.snapshot.objective == brief.objective
     assert {item.text for item in revision.snapshot.constraints} == set(brief.constraints)
     assert revision.snapshot.acceptance_criteria[0].text == "The request is queued"
+    assert revision.snapshot.acceptance_criteria[0].key == "acceptance:0000"
     assert revision.snapshot.requested_outputs[0].text == "proposal"
     assert revision.snapshot.clarification_decisions == ()
     assert revision.created_by == "envelope-actor"
@@ -92,6 +93,7 @@ def test_semantic_patch_replaces_declared_text_and_appends_typed_facts() -> None
     )
 
     assert [item.text for item in patched.constraints] == ["Only typed context"]
+    assert patched.acceptance_criteria[0].key == "acceptance:0000"
     assert patched.accepted_decisions[-1].key == "decision:scope"
     assert patched.unresolved_questions[-1].key == "question:budget"
     assert patched.content_hash != base.content_hash

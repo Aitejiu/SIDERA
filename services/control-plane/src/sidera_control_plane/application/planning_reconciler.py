@@ -6,6 +6,10 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.context_requests import (
+    build_planning_context_assembly_request,
+)
+from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.events import EventData
@@ -38,12 +42,16 @@ class PlanningReconciler:
         uow_factory: Callable[[], ControlPlaneUnitOfWork],
         owner_id: str,
         clock: Callable[[], datetime] | None = None,
+        planning_context_ttl_seconds: int | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
+        if planning_context_ttl_seconds is not None and planning_context_ttl_seconds < 1:
+            raise ValueError("planning_context_ttl_seconds must be positive")
         self._uow_factory = uow_factory
         self._owner_id = owner_id
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._planning_context_ttl_seconds = planning_context_ttl_seconds
 
     def run_once(self, limit: int = 50) -> PlanningReconcileResult:
         if limit <= 0:
@@ -178,8 +186,39 @@ class PlanningReconciler:
         request.retry_failed(new_run_id=new_run_id, now=now)
         new_run = request.runs[-1]
         uow.planning_runs.add(new_run)
+        if self._planning_context_ttl_seconds is not None:
+            self._add_planning_context_assembly(uow, request, new_run)
         uow.planning_requests.save(request, previous_request_version)
         return new_run
+
+    def _add_planning_context_assembly(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: PlanningRequest,
+        run: PlanningRun,
+    ) -> None:
+        ttl_seconds = self._planning_context_ttl_seconds
+        if ttl_seconds is None:
+            return
+        context = uow.work_contexts.get_by_planning_request(
+            request.id, request.workspace_id
+        )
+        if context is None:
+            raise NotFound("work context not found for planning retry")
+        revision = uow.work_contexts.get_revision(
+            context.current_revision_id, request.workspace_id
+        )
+        if revision is None:
+            raise NotFound("work context revision not found for planning retry")
+        uow.context_assemblies.add(
+            build_planning_context_assembly_request(
+                run=run,
+                brief=request.briefs[-1],
+                work_context_revision=revision,
+                ttl_seconds=ttl_seconds,
+                created_at=run.queued_at,
+            )
+        )
 
     def _should_retry(
         self, run: PlanningRun, request: PlanningRequest, now: datetime
