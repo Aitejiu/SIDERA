@@ -94,6 +94,7 @@ write_env() {
     'SIDERA_KNOWLEDGE_DATABASE_URL=postgresql+psycopg://sidera:fake-db-password@127.0.0.1:55432/sidera_r53_knowledge_runtime' \
     'SIDERA_R5_3_KNOWLEDGE_TEST_DATABASE_URL=postgresql+psycopg://sidera:fake-db-password@127.0.0.1:55432/sidera_r53_knowledge_test' \
     "SIDERA_WORKSPACE_ID=$workspace_id" \
+    'SIDERA_R5_3_GATE_WORKSPACE_ID=20000000-0000-0000-0000-000000000099' \
     "SIDERA_CONTROL_PLANE_URL=$control_url" \
     'SIDERA_KNOWLEDGE_BASE_URL=http://127.0.0.1:8020' \
     'SIDERA_KNOWLEDGE_LOCAL_OWNER_TOKEN=fake-knowledge-local-owner-token' \

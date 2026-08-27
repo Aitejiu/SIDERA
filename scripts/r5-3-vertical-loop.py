@@ -96,6 +96,7 @@ ALLOWED_ENV_KEYS = frozenset(
         "SIDERA_CONTROL_PLANE_URL",
         "SIDERA_KNOWLEDGE_BASE_URL",
         "SIDERA_WORKSPACE_ID",
+        "SIDERA_R5_3_GATE_WORKSPACE_ID",
         "SIDERA_KNOWLEDGE_LOCAL_OWNER_TOKEN",
         "SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN",
         "SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN",
@@ -2032,10 +2033,13 @@ class VerticalLoopRunner:
 
     def _cp_list_executions(self, task_id: UUID) -> list[dict[str, Any]]:
         path = "/api/v1/executions"
-        path = f"{path}?{urlencode({
-            'workspace_id': str(self.config.workspace_id),
-            'task_id': str(task_id),
-        })}"
+        params = urlencode(
+            {
+                "workspace_id": str(self.config.workspace_id),
+                "task_id": str(task_id),
+            }
+        )
+        path = f"{path}?{params}"
         _, document = self.cp.request(
             "GET",
             path,

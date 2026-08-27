@@ -24,11 +24,11 @@ fail() {
 }
 
 assert_contains() {
-  grep -F "$1" "$2" >/dev/null 2>&1 || fail "expected text is missing: $3"
+  grep -F -- "$1" "$2" >/dev/null 2>&1 || fail "expected text is missing: $3"
 }
 
 assert_not_contains() {
-  if grep -F "$1" "$2" >/dev/null 2>&1; then
+  if grep -F -- "$1" "$2" >/dev/null 2>&1; then
     fail "unexpected text is present: $3"
   fi
 }
@@ -47,10 +47,13 @@ write_env() {
     'SIDERA_KNOWLEDGE_DATABASE_URL=postgresql://sidera@127.0.0.1:55432/sidera_r53_knowledge_runtime' \
     'SIDERA_R5_3_KNOWLEDGE_TEST_DATABASE_URL=postgresql://sidera@127.0.0.1:55432/sidera_r53_knowledge_test' \
     'SIDERA_WORKSPACE_ID=20000000-0000-0000-0000-000000000001' \
+    'SIDERA_R5_3_GATE_WORKSPACE_ID=20000000-0000-0000-0000-000000000099' \
+    'SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN=fake-knowledge-control-plane-token' \
     'SIDERA_CONTROL_PLANE_URL=http://127.0.0.1:8000' \
     'SIDERA_KNOWLEDGE_BASE_URL=http://127.0.0.1:8020' \
     'SIDERA_MAIN_AGENT_GATEWAY_URL=http://127.0.0.1:8010' \
     'SIDERA_WEB_URL=http://127.0.0.1:4173' \
+    'SIDERA_CONTEXT_PACKAGE_CUTOVER_AT=2026-08-27T00:00:00+08:00' \
     'SIDERA_PLANNING_PROFILE_ID=10000000-0000-0000-0000-000000000001' \
     'SIDERA_PLANNING_PROFILE_VERSION=1' \
     'SIDERA_OPENCODE_EXECUTABLE=/usr/bin/true' \
@@ -91,7 +94,7 @@ write_fakes() {
 
   write_executable "$FAKE_BIN/uv" \
     '#!/bin/sh' \
-    'printf "uv:%s:real-main=%s:real-opencode=%s:provider=%s:model=%s:token=%s\\n" "$*" "${SIDERA_RUN_REAL_MAIN_AGENT:-}" "${SIDERA_RUN_REAL_OPENCODE:-}" "${SIDERA_REAL_MAIN_AGENT_PROVIDER:+set}" "${SIDERA_OPENCODE_MODEL:+set}" "${SIDERA_AKASHIC_WORKSPACE_TOKEN:+set}" >> "$SIDERA_R5_3_GATE_LOG"' \
+    'printf "uv:%s:real-main=%s:real-opencode=%s:provider=%s:model=%s:token=%s:knowledge-token=%s:assignment-lease=%s:assignment-renew=%s\\n" "$*" "${SIDERA_RUN_REAL_MAIN_AGENT:-}" "${SIDERA_RUN_REAL_OPENCODE:-}" "${SIDERA_REAL_MAIN_AGENT_PROVIDER:+set}" "${SIDERA_OPENCODE_MODEL:+set}" "${SIDERA_AKASHIC_WORKSPACE_TOKEN:+set}" "${SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN:+set}" "${SIDERA_ASSIGNMENT_LEASE_SECONDS:+set}" "${SIDERA_ASSIGNMENT_LEASE_RENEW_INTERVAL_SECONDS:+set}" >> "$SIDERA_R5_3_GATE_LOG"' \
     'case "${SIDERA_R5_3_GATE_FAIL_MATCH:-}" in' \
     '  knowledge-unit) case "$*" in *services/knowledge-service/tests/unit*) exit 42 ;; esac ;;' \
     '  *) ;;' \
@@ -153,6 +156,8 @@ export SIDERA_R5_3_REAL_GATE_HELPER="$REAL_HELPER"
 export SIDERA_REAL_MAIN_AGENT_PROVIDER="test-provider"
 export SIDERA_REAL_GATE_HELPER="$REAL_HELPER"
 export SIDERA_AKASHIC_WORKSPACE_TOKEN="token-must-not-enter-gate-children"
+export SIDERA_ASSIGNMENT_LEASE_SECONDS=300
+export SIDERA_ASSIGNMENT_LEASE_RENEW_INTERVAL_SECONDS=30
 export SIDERA_R5_3_GATE_LOG="$LOG_FILE"
 
 if output=$(
@@ -192,12 +197,15 @@ if ! SIDERA_RUN_REAL_R5_3=1 \
 fi
 assert_contains 'r5-3 release gate: passed' "$OUTPUT_FILE" 'release success'
 assert_not_contains 'token-must-not-enter-gate-children' "$LOG_FILE" 'provider token leakage'
+assert_contains 'assignment-lease=:assignment-renew=' "$LOG_FILE" 'runtime lease settings leakage'
 assert_contains 'real-main=1' "$LOG_FILE" 'real Main Agent flag propagation'
 assert_contains 'real-opencode=1' "$LOG_FILE" 'real OpenCode flag propagation'
 assert_contains 'provider=set' "$LOG_FILE" 'provider identity propagation'
 assert_contains 'model=set' "$LOG_FILE" 'model propagation'
 assert_contains 'token=' "$LOG_FILE" 'token absence marker'
+assert_contains 'test_r5_1_real_planning_loop.py -q:real-main=:real-opencode=1:provider=set:model=set:token=:knowledge-token=set' "$LOG_FILE" 'real planning Knowledge token injection'
 assert_contains 'helper:restart-gateway' "$LOG_FILE" 'real helper propagation'
+assert_contains '--workspace-id 20000000-0000-0000-0000-000000000099' "$LOG_FILE" 'deterministic gate workspace propagation'
 
 previous=0
 for label in \
