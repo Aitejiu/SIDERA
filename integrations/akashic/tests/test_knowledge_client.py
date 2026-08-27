@@ -182,7 +182,11 @@ def command_status(status: str) -> dict[str, Any]:
     }
 
 
-def test_search_sends_workspace_bearer_and_correlation_and_parses_strict_hit() -> None:
+def test_search_sends_workspace_bearer_and_correlation_and_parses_strict_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SIDERA_KNOWLEDGE_BASE_URL", raising=False)
+
     async def scenario() -> None:
         seen: dict[str, Any] = {}
 

@@ -1543,6 +1543,7 @@ def _sha256_json(value: object) -> str:
 def _seed_runtime_routing(session, workspace_id: UUID) -> None:
     _seed_task_first(session, workspace_id)
     runtime_now = datetime.now(UTC)
+    execution_now = NOW
     session.add(
         WorkerModel(
             id=RUNTIME_WORKER_ID,
@@ -1581,7 +1582,7 @@ def _seed_runtime_routing(session, workspace_id: UUID) -> None:
             worker_item_id=IMPLEMENTER_WORKER_ITEM_ID,
             active_lease_id=None,
             last_fencing_token=0,
-            not_before=runtime_now - timedelta(seconds=1),
+            not_before=execution_now - timedelta(seconds=1),
             failure_code=None,
             started_at=None,
             finished_at=None,
@@ -1589,7 +1590,7 @@ def _seed_runtime_routing(session, workspace_id: UUID) -> None:
             stop_requested=False,
             source_execution_id=None,
             source_session_id=None,
-            created_at=runtime_now,
+            created_at=execution_now,
             updated_at=runtime_now,
         )
     )

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -201,8 +202,10 @@ def test_worker_task_source_uses_submission_scope_not_proposal_metadata() -> Non
     )
 
     payload = _candidate_payload(proposal, submission, uuid4())
-    source = payload["sources"][0]
+    sources = cast(list[dict[str, object]], payload["sources"])
+    source = sources[0]
     assert source["source_type"] == "task"
     assert source["metadata"] == {}
-    assert payload["provenance"]["task_id"] == str(task_id)
-    assert payload["provenance"]["subtask_id"] == str(subtask_task_id)
+    provenance = cast(dict[str, object], payload["provenance"])
+    assert provenance["task_id"] == str(task_id)
+    assert provenance["subtask_id"] == str(subtask_task_id)

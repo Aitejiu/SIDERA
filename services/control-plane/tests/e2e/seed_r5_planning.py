@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
@@ -37,6 +37,11 @@ from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     AttentionAcknowledgementModel,
     CommandModel,
+    ContextAssemblyRequestModel,
+    ContextPackageAcknowledgementModel,
+    ContextPackageKnowledgeRefModel,
+    ContextPackageMaterializationAuditModel,
+    ContextPackageModel,
     EventModel,
     EvidenceClaimModel,
     ExecutionBindingModel,
@@ -48,6 +53,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     ExecutionWorkspaceModel,
     GatewayOperationModel,
+    KnowledgeCandidateSubmissionModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
@@ -64,9 +70,12 @@ from sidera_control_plane.persistence.models import (
     ProposalMaterializationModel,
     SchedulingBlockModel,
     TaskModel,
+    WorkContextModel,
+    WorkContextRevisionModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
+    WorkerRuntimeConfigurationModel,
     WorkspaceModel,
     WorkspaceProjectionCursorModel,
 )
@@ -157,6 +166,21 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         )
     )
     session.execute(
+        delete(ContextPackageKnowledgeRefModel).where(
+            ContextPackageKnowledgeRefModel.package_id.in_(
+                select(ContextPackageModel.id).where(
+                    ContextPackageModel.workspace_id == workspace_id
+                )
+            )
+        )
+    )
+    session.execute(
+        text(
+            "ALTER TABLE work_contexts "
+            "DROP CONSTRAINT IF EXISTS fk_work_contexts_current_revision"
+        )
+    )
+    session.execute(
         update(ExecutionModel)
         .where(ExecutionModel.workspace_id == workspace_id)
         .values(
@@ -167,9 +191,17 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         )
     )
     models = (
-        ProjectionChangeModel,
         AttentionAcknowledgementModel,
+        SchedulingBlockModel,
+        ProjectionChangeModel,
         WorkspaceProjectionCursorModel,
+        ContextPackageAcknowledgementModel,
+        ContextPackageMaterializationAuditModel,
+        ContextPackageModel,
+        ContextAssemblyRequestModel,
+        KnowledgeCandidateSubmissionModel,
+        WorkContextRevisionModel,
+        WorkContextModel,
         ExecutionRequestDependencyModel,
         ExecutionRequestModel,
         ProposalMaterializationModel,
@@ -192,8 +224,8 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         ExecutionBindingModel,
         ExecutionSessionModel,
         AssignmentLeaseModel,
-        SchedulingBlockModel,
         ExecutionModel,
+        WorkerRuntimeConfigurationModel,
         ModuleInstanceModel,
         ModuleDefinitionModel,
         WorkerItemModel,
@@ -203,21 +235,31 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         CommandModel,
         TaskModel,
     )
-    for model in models:
-        if model is OutboxMessageModel:
-            session.execute(
-                delete(model).where(
-                    model.event_id.in_(
-                        select(EventModel.id).where(
-                            EventModel.workspace_id == workspace_id
+    try:
+        for model in models:
+            if model is OutboxMessageModel:
+                session.execute(
+                    delete(model).where(
+                        model.event_id.in_(
+                            select(EventModel.id).where(
+                                EventModel.workspace_id == workspace_id
+                            )
                         )
                     )
                 )
+            else:
+                session.execute(
+                    delete(model).where(cast(Any, model).workspace_id == workspace_id)
+                )
+    finally:
+        session.execute(
+            text(
+                "ALTER TABLE work_contexts "
+                "ADD CONSTRAINT fk_work_contexts_current_revision "
+                "FOREIGN KEY (current_revision_id) REFERENCES work_context_revisions (id) "
+                "ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             )
-        else:
-            session.execute(
-                delete(model).where(cast(Any, model).workspace_id == workspace_id)
-            )
+        )
     if existing is not None:
         session.execute(delete(WorkspaceModel).where(WorkspaceModel.id == workspace_id))
     session.flush()
@@ -249,6 +291,7 @@ def _planning_facts(
         stability=StabilityLevel.EXPERIMENTAL if is_real else StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
         proposal_schema_versions=(2,),
+        context_package_versions=(1,),
     )
     executable = os.environ.get("SIDERA_OPENCODE_EXECUTABLE", "opencode")
     model = os.environ.get("SIDERA_OPENCODE_MODEL", "deepseek/deepseek-chat")

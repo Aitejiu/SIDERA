@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
@@ -103,6 +104,23 @@ def _event_text(events: Sequence[Mapping[str, Any]]) -> str:
     return json.dumps(events, ensure_ascii=False, separators=(",", ":"))
 
 
+_PLANNING_RESOURCE_RE = re.compile(
+    r"planning:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _planning_request_id_from_events(
+    events: Sequence[Mapping[str, Any]],
+) -> str:
+    match = _PLANNING_RESOURCE_RE.search(_event_text(events))
+    if match is None:
+        raise AssertionError(
+            "sidera_submit_brief did not return a planning resource reference"
+        )
+    return match.group(1)
+
+
 async def _start_turn(
     client: httpx.AsyncClient,
     gateway_url: str,
@@ -144,51 +162,6 @@ async def _read_planning_detail(
     if not isinstance(detail, dict):
         raise TypeError("Planning detail is not an object")
     return detail
-
-
-async def _find_request(
-    client: httpx.AsyncClient,
-    control_plane_url: str,
-    workspace_id: str,
-    marker: str,
-) -> tuple[str, dict[str, Any]]:
-    response = await client.get(
-        f"{control_plane_url}/api/v1/workspaces/{workspace_id}/planning-requests",
-        params={"limit": 100},
-        timeout=20.0,
-    )
-    response.raise_for_status()
-    page = response.json()
-    if not isinstance(page, Mapping) or not isinstance(page.get("items"), list):
-        raise TypeError("Planning request list is not a page")
-    matches: list[tuple[str, dict[str, Any]]] = []
-    for summary in page["items"]:
-        if not isinstance(summary, Mapping) or not isinstance(summary.get("id"), str):
-            continue
-        request_id = str(summary["id"])
-        detail = await _read_planning_detail(
-            client, control_plane_url, workspace_id, request_id
-        )
-        if marker in json.dumps(detail, ensure_ascii=False):
-            matches.append((request_id, detail))
-            continue
-        briefs = await client.get(
-            f"{control_plane_url}/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/briefs",
-            timeout=20.0,
-        )
-        if briefs.is_success and marker in briefs.text:
-            matches.append((request_id, detail))
-    if matches:
-        terminal_failures = {"failed", "blocked", "cancelled", "rejected"}
-        matches.sort(
-            key=lambda item: (
-                str(item[1].get("status") or "") not in terminal_failures,
-                str(item[1].get("updated_at") or item[1].get("created_at") or ""),
-            ),
-            reverse=True,
-        )
-        return matches[0]
-    raise AssertionError("marker PlanningRequest was not found in the configured workspace")
 
 
 async def _wait_for_status(
@@ -244,8 +217,11 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
             gateway_url,
             thread_id,
             (
-                f"请创建一个真实的 SIDERA 任务，唯一标记是 {marker}。目标是交付一个小型可验证功能；"
-                "约束是只使用当前工作区和一个最小 WorkerItem；验收标准是有明确结果、测试和回滚说明；"
+                f"请创建一个真实的 SIDERA 任务，唯一标记是 {marker}。目标是在当前工作区新增 "
+                "scripts/sidera-r5-release-check.sh：当环境变量 SIDERA_R5_RELEASE=1 时输出 "
+                "SIDERA_R5_RELEASE_OK，否则以非零状态退出；同时提供一个 shell 测试和回滚说明。"
+                "约束是只使用当前工作区和一个最小 WorkerItem，不引入额外依赖或外部服务；"
+                "验收标准是脚本行为、测试和回滚步骤都明确；"
                 "输出要求是先形成 Planning Proposal，获得确认后再物化 Task。信息已经足够，"
                 "不要提出澄清问题，直接生成 Proposal 并等待确认。"
             ),
@@ -253,8 +229,9 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
         )
         assert initial_terminal.get("_event") == "completed"
         assert "sidera_submit_brief" in _tool_names(initial_events)
-        request_id, detail = await _find_request(
-            client, control_plane_url, workspace_id, marker
+        request_id = _planning_request_id_from_events(initial_events)
+        detail = await _read_planning_detail(
+            client, control_plane_url, workspace_id, request_id
         )
         assert detail.get("source_type") == "sidera_web_chat"
         assert detail.get("planning_profile_id") == config["SIDERA_PLANNING_PROFILE_ID"]
@@ -386,19 +363,25 @@ async def test_real_main_agent_stale_confirm_and_control_plane_offline_contract(
         created.raise_for_status()
         thread_id = created.json().get("id")
         assert isinstance(thread_id, str)
-        await _start_turn(
+        initial_events, initial_terminal = await _start_turn(
             client,
             gateway_url,
             thread_id,
             (
-                f"请为 {marker} 创建一个最小可执行 SIDERA 任务。目标是有一个可测试交付物，"
-                "约束是单个 WorkerItem，验收标准是测试、结果和回滚说明。信息已经足够，"
+                f"请为 {marker} 创建一个最小可执行 SIDERA 任务。目标是在当前工作区新增 "
+                "scripts/sidera-r5-conflict-check.sh：当环境变量 SIDERA_R5_RELEASE=1 时输出 "
+                "SIDERA_R5_RELEASE_OK，否则以非零状态退出，并附带一个 shell 测试。"
+                "约束是单个 WorkerItem、不引入额外依赖或外部服务，验收标准是测试、结果和回滚说明。"
+                "信息已经足够，"
                 "不要提出澄清问题，直接生成 Proposal 并等待确认。"
             ),
             timeout_seconds=timeout_seconds,
         )
-        request_id, proposal = await _find_request(
-            client, control_plane_url, workspace_id, marker
+        assert initial_terminal.get("_event") == "completed"
+        assert "sidera_submit_brief" in _tool_names(initial_events)
+        request_id = _planning_request_id_from_events(initial_events)
+        proposal = await _read_planning_detail(
+            client, control_plane_url, workspace_id, request_id
         )
         proposal = await _wait_for_status(
             client,

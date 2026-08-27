@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, overload
 from uuid import UUID
 
 import pytest
@@ -164,6 +164,16 @@ class FakeKnowledgeClient:
         if self.error is not None:
             raise self.error
         return self.search_result
+
+    @overload
+    async def get_page(
+        self, page_id: UUID, *, revision_id: None = None
+    ) -> KnowledgePageDetail: ...
+
+    @overload
+    async def get_page(
+        self, page_id: UUID, *, revision_id: UUID
+    ) -> KnowledgeRevisionDetail: ...
 
     async def get_page(
         self, page_id: UUID, *, revision_id: UUID | None = None
