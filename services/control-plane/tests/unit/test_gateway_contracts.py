@@ -9,6 +9,8 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperation,
     GatewayOperationStatus,
     GatewayOperationType,
+    RuntimeModuleOperation,
+    runtime_module_operation_allowed,
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
@@ -151,6 +153,14 @@ def test_gateway_operation_unknown_result_is_terminal_until_explicit_retry() -> 
     assert operation.status is GatewayOperationStatus.REQUESTED
     assert operation.operation_id == operation_id
     assert operation.attempt_count == 2
+
+
+def test_context_patch_is_a_gateway_operation_and_not_allowed_when_disabled() -> None:
+    assert GatewayOperationType.APPLY_CONTEXT_PATCH.value == "apply_context_patch"
+    assert not runtime_module_operation_allowed(
+        ModuleLifecycle.DISABLED,
+        RuntimeModuleOperation.PATCH,
+    )
 
 
 def test_evidence_claim_is_candidate_only() -> None:
