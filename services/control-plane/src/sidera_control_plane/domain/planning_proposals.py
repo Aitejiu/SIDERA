@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sidera_control_plane.domain.errors import ValidationError
@@ -20,6 +21,12 @@ from sidera_control_plane.domain.plans import (
     WorkerItemDependency,
     WorkItemKind,
 )
+
+if TYPE_CHECKING:
+    from sidera_control_plane.domain.planning_revision_proposals import (
+        PlanningRevisionProposalPayloadV3,
+    )
+    from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,8 +364,8 @@ class ProposalRevision:
     planning_run_id: UUID
     kind: PlanningRequestKind
     profile_descriptor: PlanningProfileDescriptor
-    payload: PlanningProposalPayload
-    derived_diff: ProposalDiff
+    payload: PlanningProposalPayload | PlanningRevisionProposalPayloadV3
+    derived_diff: ProposalDiff | NormalizedRevisionDiff
     canonical_payload: bytes
     content_hash: str
     created_at: datetime
@@ -373,18 +380,42 @@ class ProposalRevision:
         brief_revision: int,
         planning_run_id: UUID,
         kind: PlanningRequestKind,
-        payload: PlanningProposalPayload,
+        payload: PlanningProposalPayload | PlanningRevisionProposalPayloadV3,
         profile_descriptor: PlanningProfileDescriptor,
         profile_snapshot: PlanningProfileSnapshot,
         created_at: datetime,
+        derived_diff: ProposalDiff | NormalizedRevisionDiff | None = None,
     ) -> ProposalRevision:
-        from sidera_control_plane.domain.proposal_validation import validate_proposal
+        if isinstance(payload, PlanningProposalPayload):
+            from sidera_control_plane.domain.proposal_validation import (
+                validate_proposal,
+            )
 
-        validate_proposal(
-            payload,
-            profile_snapshot=profile_snapshot,
-            brief_revision=brief_revision,
-        )
+            validate_proposal(
+                payload,
+                profile_snapshot=profile_snapshot,
+                brief_revision=brief_revision,
+            )
+            resolved_diff = (
+                derived_diff
+                if derived_diff is not None
+                else derive_proposal_diff(payload)
+            )
+        else:
+            from sidera_control_plane.domain.planning_revision_proposals import (
+                validate_revision_proposal,
+            )
+
+            validate_revision_proposal(
+                payload,
+                profile_snapshot=profile_snapshot,
+                brief_revision=brief_revision,
+            )
+            if derived_diff is None:
+                raise ValidationError(
+                    "revision proposal requires a normalized revision diff"
+                )
+            resolved_diff = derived_diff
         if kind is not payload.kind:
             raise ValidationError("proposal kind does not match revision kind")
         canonical = canonical_proposal_bytes(
@@ -401,7 +432,7 @@ class ProposalRevision:
             kind=kind,
             profile_descriptor=profile_descriptor,
             payload=payload,
-            derived_diff=derive_proposal_diff(payload),
+            derived_diff=resolved_diff,
             canonical_payload=canonical,
             content_hash=hashlib.sha256(canonical).hexdigest(),
             created_at=created_at,
@@ -409,17 +440,25 @@ class ProposalRevision:
 
 
 def canonical_proposal_bytes(
-    payload: PlanningProposalPayload,
+    payload: PlanningProposalPayload | PlanningRevisionProposalPayloadV3,
     brief_revision: int,
     profile_descriptor: PlanningProfileDescriptor,
 ) -> bytes:
-    if not isinstance(payload, PlanningProposalPayload):
-        raise ValidationError("canonical proposal serializer requires typed payload")
+    if isinstance(payload, PlanningProposalPayload):
+        proposal_mapping = payload.to_mapping()
+    else:
+        from sidera_control_plane.domain.planning_revision_proposals import (
+            PlanningRevisionProposalPayloadV3,
+        )
+
+        if not isinstance(payload, PlanningRevisionProposalPayloadV3):
+            raise ValidationError("canonical proposal serializer requires typed payload")
+        proposal_mapping = payload.canonical_payload()
     _positive_int(brief_revision, "brief_revision")
     document = {
         "brief_revision": brief_revision,
         "profile_descriptor": profile_descriptor.to_mapping(),
-        "proposal": payload.to_mapping(),
+        "proposal": proposal_mapping,
     }
     try:
         return json.dumps(
@@ -434,7 +473,7 @@ def canonical_proposal_bytes(
 
 
 def proposal_content_hash(
-    payload: PlanningProposalPayload,
+    payload: PlanningProposalPayload | PlanningRevisionProposalPayloadV3,
     *,
     brief_revision: int,
     profile_descriptor: PlanningProfileDescriptor,
