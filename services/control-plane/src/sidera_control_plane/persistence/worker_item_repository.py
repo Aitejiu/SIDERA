@@ -17,6 +17,7 @@ from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
 from sidera_control_plane.persistence.models import (
     PlanSnapshotModel,
+    RootTaskPlanHeadModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
 )
@@ -196,13 +197,23 @@ class WorkerItemRepository(WorkerItemRepositoryPort):
                 PlanSnapshotModel,
                 PlanSnapshotModel.id == WorkerItemPlacementModel.plan_snapshot_id,
             )
+            .join(
+                RootTaskPlanHeadModel,
+                (RootTaskPlanHeadModel.active_snapshot_id == PlanSnapshotModel.id)
+                & (
+                    RootTaskPlanHeadModel.workspace_id
+                    == PlanSnapshotModel.workspace_id
+                )
+                & (
+                    RootTaskPlanHeadModel.root_task_id
+                    == PlanSnapshotModel.root_task_id
+                ),
+            )
             .where(
                 WorkerItemPlacementModel.worker_item_id == worker_item_id,
                 WorkerItemPlacementModel.workspace_id == workspace_id,
                 PlanSnapshotModel.workspace_id == workspace_id,
             )
-            .order_by(PlanSnapshotModel.generation.desc())
-            .limit(1)
         )
         return _to_placement(row) if row is not None else None
 

@@ -8,11 +8,13 @@ from sqlalchemy import update
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.plans import TaskPlanSnapshot, WorkItem, WorkItemKind
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     EventModel,
     PlanSnapshotModel,
+    RootTaskPlanHeadModel,
     TaskModel,
 )
 
@@ -112,6 +114,17 @@ def _seed(database: Database) -> None:
                 payload=snapshot.to_payload(),
                 published_by=snapshot.published_by,
                 published_at=snapshot.published_at,
+            )
+        )
+        session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=WORKSPACE_ID,
+                root_task_id=ROOT_TASK_ID,
+                active_snapshot_id=snapshot.id,
+                active_generation=snapshot.generation,
+                active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+                version=1,
+                updated_at=snapshot.published_at,
             )
         )
         session.commit()

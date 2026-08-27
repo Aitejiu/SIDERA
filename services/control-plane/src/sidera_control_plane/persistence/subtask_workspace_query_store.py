@@ -36,6 +36,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
+    RootTaskPlanHeadModel,
     SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
@@ -62,12 +63,22 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
             )
             plan_row = session.scalar(
                 select(PlanSnapshotModel)
+                .join(
+                    RootTaskPlanHeadModel,
+                    (RootTaskPlanHeadModel.active_snapshot_id == PlanSnapshotModel.id)
+                    & (
+                        RootTaskPlanHeadModel.workspace_id
+                        == PlanSnapshotModel.workspace_id
+                    )
+                    & (
+                        RootTaskPlanHeadModel.root_task_id
+                        == PlanSnapshotModel.root_task_id
+                    ),
+                )
                 .where(
                     PlanSnapshotModel.workspace_id == workspace_id,
                     PlanSnapshotModel.root_task_id == root_task_id,
                 )
-                .order_by(PlanSnapshotModel.generation.desc())
-                .limit(1)
             )
             if plan_row is None:
                 return None

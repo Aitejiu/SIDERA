@@ -15,6 +15,7 @@ from sidera_control_plane.domain.errors import (
     ExecutionContextChanged,
     InvalidTransition,
 )
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.plans import (
     SubtaskPlanItem,
     TaskPlanSnapshot,
@@ -32,6 +33,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     OutboxMessageModel,
     PlanSnapshotModel,
+    RootTaskPlanHeadModel,
     TaskModel,
     WorkContextRevisionModel,
     WorkerItemModel,
@@ -125,6 +127,17 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
                 payload=snapshot.to_payload(),
                 published_by=snapshot.published_by,
                 published_at=snapshot.published_at,
+            )
+        )
+        db_session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=workspace_id,
+                root_task_id=task_id,
+                active_snapshot_id=snapshot.id,
+                active_generation=snapshot.generation,
+                active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+                version=1,
+                updated_at=snapshot.published_at,
             )
         )
         db_session.add(

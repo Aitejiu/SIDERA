@@ -8,7 +8,11 @@ from sidera_control_plane.application.ports import WorkerItemPlacement
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.persistence.database import Database
-from sidera_control_plane.persistence.models import PlanSnapshotModel, TaskModel
+from sidera_control_plane.persistence.models import (
+    PlanSnapshotModel,
+    RootTaskPlanHeadModel,
+    TaskModel,
+)
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.integration
@@ -72,6 +76,17 @@ def seed_plan_records(database: Database, workspace_id: UUID) -> None:
                     published_at=NOW,
                 ),
             ]
+        )
+        session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=workspace_id,
+                root_task_id=ROOT_TASK_ID,
+                active_snapshot_id=SNAPSHOT_TWO_ID,
+                active_generation=2,
+                active_snapshot_hash="a" * 64,
+                version=2,
+                updated_at=NOW,
+            )
         )
         session.commit()
 

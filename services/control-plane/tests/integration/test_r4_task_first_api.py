@@ -8,6 +8,7 @@ from sqlalchemy import update
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.plans import (
     Dependency,
     DependencyEnforcement,
@@ -22,7 +23,6 @@ from sidera_control_plane.domain.plans import (
     WorkItem,
     WorkItemKind,
 )
-from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,

@@ -36,6 +36,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionSessionModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
+    RootTaskPlanHeadModel,
     TaskModel,
     WorkerModel,
     WorkspaceProjectionCursorModel,
@@ -130,12 +131,22 @@ class SqlAlchemyTaskFirstQueryStore:
             )
             plan_row = session.scalar(
                 select(PlanSnapshotModel)
+                .join(
+                    RootTaskPlanHeadModel,
+                    (RootTaskPlanHeadModel.active_snapshot_id == PlanSnapshotModel.id)
+                    & (
+                        RootTaskPlanHeadModel.workspace_id
+                        == PlanSnapshotModel.workspace_id
+                    )
+                    & (
+                        RootTaskPlanHeadModel.root_task_id
+                        == PlanSnapshotModel.root_task_id
+                    ),
+                )
                 .where(
                     PlanSnapshotModel.workspace_id == workspace_id,
                     PlanSnapshotModel.root_task_id == root_task_id,
                 )
-                .order_by(PlanSnapshotModel.generation.desc())
-                .limit(1)
             )
             if plan_row is None:
                 return None
@@ -308,24 +319,12 @@ class SqlAlchemyTaskFirstQueryStore:
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:
         with self._database.session() as session:
-            rows = session.execute(
-                select(
-                    PlanSnapshotModel.root_task_id,
-                    PlanSnapshotModel.generation,
-                )
-                .where(PlanSnapshotModel.workspace_id == workspace_id)
-                .order_by(
-                    PlanSnapshotModel.root_task_id.asc(),
-                    PlanSnapshotModel.generation.desc(),
-                )
+            rows = session.scalars(
+                select(RootTaskPlanHeadModel.root_task_id)
+                .where(RootTaskPlanHeadModel.workspace_id == workspace_id)
+                .order_by(RootTaskPlanHeadModel.root_task_id.asc())
             ).all()
-        seen: set[UUID] = set()
-        result: list[UUID] = []
-        for root_task_id, _generation in rows:
-            if root_task_id not in seen:
-                seen.add(root_task_id)
-                result.append(root_task_id)
-        return tuple(result)
+        return tuple(rows)
 
     def get_plan(
         self, workspace_id: UUID, root_task_id: UUID, generation: int
@@ -396,12 +395,22 @@ class SqlAlchemyTaskFirstQueryStore:
                 return None
             plan_row = session.scalar(
                 select(PlanSnapshotModel)
+                .join(
+                    RootTaskPlanHeadModel,
+                    (RootTaskPlanHeadModel.active_snapshot_id == PlanSnapshotModel.id)
+                    & (
+                        RootTaskPlanHeadModel.workspace_id
+                        == PlanSnapshotModel.workspace_id
+                    )
+                    & (
+                        RootTaskPlanHeadModel.root_task_id
+                        == PlanSnapshotModel.root_task_id
+                    ),
+                )
                 .where(
                     PlanSnapshotModel.workspace_id == workspace_id,
                     PlanSnapshotModel.root_task_id == root_task_id,
                 )
-                .order_by(PlanSnapshotModel.generation.desc())
-                .limit(1)
             )
             plan = _plan(plan_row) if plan_row is not None else None
             work_item_key: str | None = None
