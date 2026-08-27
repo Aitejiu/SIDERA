@@ -9,7 +9,7 @@ import {
   rewriteKnowledgeProxyPath,
 } from "./src/e2eConfig.js";
 
-const { controlPlanePort, knowledgeServicePort } = resolveE2eRuntime(process.env);
+const { controlPlanePort, knowledgeServicePort, mainAgentPort } = resolveE2eRuntime(process.env);
 
 export default defineConfig({
   plugins: [react()],
@@ -34,7 +34,7 @@ export default defineConfig({
           }
         },
       },
-      "/main-agent": "http://127.0.0.1:8010",
+      "/main-agent": `http://127.0.0.1:${mainAgentPort}`,
     },
   },
   preview: {

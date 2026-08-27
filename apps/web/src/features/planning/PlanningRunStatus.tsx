@@ -102,7 +102,7 @@ function PlanningRunContextSummary({
       <div className="planning-run-context__heading">
         <div>
           <span className="eyebrow">RUN CONTEXT</span>
-          <h3><PackageOpen size={15} aria-hidden="true" />本次运行上下文</h3>
+          <h2><PackageOpen size={15} aria-hidden="true" />本次运行上下文</h2>
         </div>
         <Link
           className="planning-run-context__link"

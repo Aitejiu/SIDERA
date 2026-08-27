@@ -14,7 +14,9 @@ const knowledgeDatabaseUrl = process.env.SIDERA_KNOWLEDGE_DATABASE_URL
 const knowledgeToken = process.env.SIDERA_E2E_KNOWLEDGE_TOKEN ?? "r5-e2e-owner-token";
 const controlPlaneToken = process.env.SIDERA_E2E_CONTROL_PLANE_TOKEN
   ?? "r5-e2e-control-plane-token";
-const { controlPlanePort, knowledgeServicePort, webPort } = resolveE2eRuntime(process.env);
+const contextPackageCutoverAt = process.env.SIDERA_CONTEXT_PACKAGE_CUTOVER_AT
+  ?? "2026-08-27T00:00:00+08:00";
+const { controlPlanePort, knowledgeServicePort, mainAgentPort, webPort } = resolveE2eRuntime(process.env);
 const webOrigin = `http://127.0.0.1:${webPort}`;
 
 export default defineConfig({
@@ -68,6 +70,7 @@ export default defineConfig({
         SIDERA_MAIN_AGENT_ENTRY_URI: "http://127.0.0.1:18080/main-agent",
         SIDERA_KNOWLEDGE_BASE_URL: `http://127.0.0.1:${knowledgeServicePort}`,
         SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN: controlPlaneToken,
+        SIDERA_CONTEXT_PACKAGE_CUTOVER_AT: contextPackageCutoverAt,
       },
     },
     {
@@ -92,7 +95,10 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       env: {
         SIDERA_WEB_KNOWLEDGE_TOKEN: knowledgeToken,
+        SIDERA_WEB_CONTROL_PLANE_PORT: String(controlPlanePort),
         SIDERA_E2E_KNOWLEDGE_SERVICE_PORT: String(knowledgeServicePort),
+        SIDERA_WEB_KNOWLEDGE_SERVICE_PORT: String(knowledgeServicePort),
+        SIDERA_WEB_MAIN_AGENT_PORT: String(mainAgentPort),
       },
     },
   ],

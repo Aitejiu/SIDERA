@@ -40,6 +40,7 @@ const defaultPython = resolve(controlPlaneRoot, ".venv/bin/python");
 const knowledgeServiceRoot = resolve(repositoryRoot, "services/knowledge-service");
 const knowledgeSeedScript = resolve(knowledgeServiceRoot, "tests/e2e/seed_r5_3_knowledge.py");
 const knowledgeDefaultPython = resolve(knowledgeServiceRoot, ".venv/bin/python");
+const defaultContextPackageCutoverAt = "2026-08-27T00:00:00+08:00";
 
 export function seedR4Workspace(scenario: SeedScenario = "task-first"): void {
   execFileSync(
@@ -88,7 +89,12 @@ export function seedKnowledge(workspaceId: string = WORKSPACE_ID): void {
 }
 
 export function runPlanningWorkerOnce(): Record<string, unknown> {
+  runContextPackageWorkerOnce();
   return runControlPlaneOnce("sidera_control_plane.planning_worker");
+}
+
+export function runContextPackageWorkerOnce(): Record<string, unknown> {
+  return runControlPlaneOnce("sidera_control_plane.context_package_worker");
 }
 
 export function runActivationWorkerOnce(): Record<string, unknown> {
@@ -122,11 +128,18 @@ function runControlPlaneOnce(moduleName: string): Record<string, unknown> {
 }
 
 function e2eEnvironment(): NodeJS.ProcessEnv {
+  const knowledgeBaseUrl = process.env.SIDERA_E2E_KNOWLEDGE_BASE_URL
+    ?? `http://127.0.0.1:${process.env.SIDERA_E2E_KNOWLEDGE_SERVICE_PORT ?? "8020"}`;
   return {
     ...process.env,
     SIDERA_ALLOW_E2E_SEED: "1",
     SIDERA_DATABASE_URL: process.env.SIDERA_DATABASE_URL
       ?? "postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_test",
+    SIDERA_KNOWLEDGE_BASE_URL: knowledgeBaseUrl,
+    SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN: process.env.SIDERA_E2E_CONTROL_PLANE_TOKEN
+      ?? "r5-e2e-control-plane-token",
+    SIDERA_CONTEXT_PACKAGE_CUTOVER_AT: process.env.SIDERA_CONTEXT_PACKAGE_CUTOVER_AT
+      ?? defaultContextPackageCutoverAt,
   };
 }
 

@@ -44,12 +44,14 @@ test.describe("responsive control room visuals", () => {
     expect(runPlanningWorkerOnce().succeeded).toBe(1);
     await page.reload();
     await expect(page.getByRole("heading", { name: "执行架构", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "本次运行上下文", exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot("planning-proposal.png", {
       fullPage: true,
       animations: "disabled",
       mask: [
         page.locator(".mono-label"),
         page.locator(".planning-run-status__facts"),
+        page.locator(".planning-run-context__facts"),
         page.locator(".workspace-tab__label").filter({ hasText: "规划" }),
         page.locator(".planning-inspector__section").nth(1).locator("dd").nth(2),
       ],

@@ -37,9 +37,13 @@ test.describe("real Main Agent Web journey", () => {
 
     const composer = page.getByRole("textbox", { name: "给 Main Agent 的消息" });
     await composer.fill(
-      `请创建一个真实的 SIDERA 任务，唯一标记是 ${marker}。目标是交付一个小型可验证功能；`
-      + "约束是当前工作区内的最小执行架构；验收标准是结果、测试和回滚说明；"
-      + "请先形成 Proposal，得到确认后再物化 Task。",
+      `请创建一个真实的 SIDERA 任务，唯一标记是 ${marker}。目标是在当前工作区新增 `
+      + "scripts/sidera-r5-web-check.sh：当环境变量 SIDERA_R5_RELEASE=1 时输出 "
+      + "SIDERA_R5_RELEASE_OK，否则以非零状态退出；同时提供一个 shell 测试和回滚说明。"
+      + "约束是只使用当前工作区和一个最小 WorkerItem，不引入额外依赖或外部服务；"
+      + "验收标准是脚本行为、测试和回滚步骤都明确；"
+      + "请先形成 Proposal，得到确认后再物化 Task。信息已经足够，"
+      + "不要提出澄清问题，直接调用 sidera_submit_brief 创建 Proposal 并等待确认。",
     );
     await page.getByRole("button", { name: "发送消息" }).click();
 

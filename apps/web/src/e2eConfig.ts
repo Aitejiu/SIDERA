@@ -3,14 +3,26 @@ export type E2eEnvironment = Readonly<Record<string, string | undefined>>;
 export type E2eRuntime = {
   controlPlanePort: number;
   knowledgeServicePort: number;
+  mainAgentPort: number;
   webPort: number;
 };
 
 export function resolveE2eRuntime(environment: E2eEnvironment): E2eRuntime {
   return {
-    controlPlanePort: parsePort(environment.SIDERA_E2E_CONTROL_PLANE_PORT, 8000),
-    knowledgeServicePort: parsePort(environment.SIDERA_E2E_KNOWLEDGE_SERVICE_PORT, 8020),
-    webPort: parsePort(environment.SIDERA_E2E_WEB_PORT, 4173),
+    controlPlanePort: parsePort(
+      environment.SIDERA_E2E_CONTROL_PLANE_PORT ?? environment.SIDERA_WEB_CONTROL_PLANE_PORT,
+      8000,
+    ),
+    knowledgeServicePort: parsePort(
+      environment.SIDERA_E2E_KNOWLEDGE_SERVICE_PORT
+        ?? environment.SIDERA_WEB_KNOWLEDGE_SERVICE_PORT,
+      8020,
+    ),
+    mainAgentPort: parsePort(
+      environment.SIDERA_E2E_MAIN_AGENT_PORT ?? environment.SIDERA_WEB_MAIN_AGENT_PORT,
+      8010,
+    ),
+    webPort: parsePort(environment.SIDERA_E2E_WEB_PORT ?? environment.SIDERA_WEB_PORT, 4173),
   };
 }
 
