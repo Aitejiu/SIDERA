@@ -11,6 +11,7 @@ from sidera_control_plane.application.ports import (
     CommandRepositoryPort,
     ContextAssemblyRepositoryPort,
     ContextPackageRepositoryPort,
+    ContextPatchRepositoryPort,
     EventStorePort,
     EvidenceClaimRepositoryPort,
     ExecutionBindingRepositoryPort,
@@ -22,12 +23,14 @@ from sidera_control_plane.application.ports import (
     KnowledgeCandidateSubmissionRepositoryPort,
     LeaseStorePort,
     ModuleRepositoryPort,
+    PlanEntityLineageRepositoryPort,
     PlanningLeaseRepositoryPort,
     PlanningProfileRepositoryPort,
     PlanningRecordRepositoryPort,
     PlanningRequestRepositoryPort,
     PlanningRunRepositoryPort,
     PlanRepositoryPort,
+    PlanTransitionRepositoryPort,
     ProjectionChangePublisherPort,
     ProposalMaterializationRepositoryPort,
     SchedulingBlockRepositoryPort,
@@ -37,6 +40,7 @@ from sidera_control_plane.application.ports import (
     WorkerItemRepositoryPort,
     WorkerRepositoryPort,
     WorkerRuntimeConfigurationRepositoryPort,
+    WorkerTransitionRepositoryPort,
     WorkspaceRepositoryPort,
 )
 from sidera_control_plane.application.projection_changes import (
@@ -48,6 +52,9 @@ from sidera_control_plane.persistence.attention_repository import (
 from sidera_control_plane.persistence.context_package_repository import (
     ContextAssemblyRepository,
     ContextPackageRepository,
+)
+from sidera_control_plane.persistence.context_patch_repository import (
+    ContextPatchRepository,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
@@ -70,6 +77,11 @@ from sidera_control_plane.persistence.module_repository import (
     ModuleRepository,
 )
 from sidera_control_plane.persistence.plan_repository import PlanRepository
+from sidera_control_plane.persistence.plan_transition_repository import (
+    PlanEntityLineageRepository,
+    PlanTransitionRepository,
+    WorkerTransitionRepository,
+)
 from sidera_control_plane.persistence.planning_repository import (
     PlanningProfileRepository,
     PlanningRecordRepository,
@@ -105,6 +117,10 @@ class SqlAlchemyUnitOfWork:
     session: Session
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
+    plan_transitions: PlanTransitionRepositoryPort
+    worker_transitions: WorkerTransitionRepositoryPort
+    plan_entity_lineages: PlanEntityLineageRepositoryPort
+    context_patches: ContextPatchRepositoryPort
     attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort
@@ -146,6 +162,10 @@ class SqlAlchemyUnitOfWork:
         self.session = Session(self._database.engine, expire_on_commit=False)
         self.tasks = TaskRepository(self.session)
         self.plans = PlanRepository(self.session)
+        self.plan_transitions = PlanTransitionRepository(self.session)
+        self.worker_transitions = WorkerTransitionRepository(self.session)
+        self.plan_entity_lineages = PlanEntityLineageRepository(self.session)
+        self.context_patches = ContextPatchRepository(self.session)
         self.attention = AttentionAcknowledgementRepository(self.session)
         self.projection_changes = ProjectionChangePublisher(
             ProjectionChangeRepository(

@@ -64,7 +64,7 @@ def test_plan_repository_round_trips_snapshot_and_current_generation(
         session.commit()
 
         repository = PlanRepository(session)
-        repository.add(snapshot)
+        repository.add_snapshot_and_advance_head(snapshot, expected_head=None)
         session.commit()
 
     with database.session() as session:

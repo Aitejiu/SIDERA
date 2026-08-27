@@ -36,6 +36,9 @@ from sidera_control_plane.domain.planning_proposals import (
     ProposalRevision,
     proposal_content_hash,
 )
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV3,
+)
 from sidera_control_plane.domain.plans import (
     DependencyKind,
     SubtaskPlanItem,
@@ -165,8 +168,9 @@ class ProposalMaterializer:
         materialized_plan = self._worker_item_materializer.materialize(
             uow, snapshot, now=now
         )
-        uow.plans.add(materialized_plan.snapshot)
-        uow.flush()
+        uow.plans.add_snapshot_and_advance_head(
+            materialized_plan.snapshot, expected_head=None
+        )
 
         execution_requests, dependencies = self._execution_requests(
             request=request,
@@ -719,7 +723,7 @@ class _DependencyAccumulator:
 
 
 def _plan_worker_dependencies(
-    payload: PlanningProposalPayload,
+    payload: PlanningProposalPayload | PlanningRevisionProposalPayloadV3,
 ) -> tuple[WorkerItemDependency, ...]:
     edges: dict[tuple[str, str], WorkerItemDependency] = {}
     for dependency in payload.worker_item_dependencies:

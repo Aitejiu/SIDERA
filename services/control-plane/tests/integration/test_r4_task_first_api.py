@@ -22,6 +22,7 @@ from sidera_control_plane.domain.plans import (
     WorkItem,
     WorkItemKind,
 )
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
@@ -35,6 +36,7 @@ from sidera_control_plane.persistence.models import (
     ModuleInstanceModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
+    RootTaskPlanHeadModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
@@ -321,6 +323,17 @@ def _seed(database: Database) -> None:
                 payload=second.to_payload(),
                 published_by=second.published_by,
                 published_at=second.published_at,
+            )
+        )
+        session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=WORKSPACE_ID,
+                root_task_id=ROOT_TASK_ID,
+                active_snapshot_id=second.id,
+                active_generation=second.generation,
+                active_snapshot_hash=plan_snapshot_content_hash(second),
+                version=2,
+                updated_at=second.published_at,
             )
         )
         session.add_all(
@@ -839,6 +852,17 @@ def _seed_console(database: Database) -> None:
                 payload=snapshot.to_payload(),
                 published_by=snapshot.published_by,
                 published_at=snapshot.published_at,
+            )
+        )
+        session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=WORKSPACE_ID,
+                root_task_id=CONSOLE_ROOT_TASK_ID,
+                active_snapshot_id=snapshot.id,
+                active_generation=snapshot.generation,
+                active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+                version=1,
+                updated_at=snapshot.published_at,
             )
         )
         session.flush()

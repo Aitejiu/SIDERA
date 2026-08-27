@@ -333,6 +333,7 @@ def test_r5_1_materialization_and_request_uniqueness_are_database_enforced(
         id=uuid4(),
         workspace_id=WORKSPACE_A,
         planning_request_id=ids["request"],
+        kind="create",
         proposal_revision_id=ids["proposal"],
         root_task_id=ids["root_task"],
         plan_snapshot_id=ids["plan"],

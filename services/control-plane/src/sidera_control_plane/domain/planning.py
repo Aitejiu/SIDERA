@@ -145,6 +145,9 @@ class ProposalMaterialization:
     deep_link: str
     confirmed_by: str
     created_at: datetime
+    kind: PlanningRequestKind = PlanningRequestKind.CREATE
+    diff_hash: str | None = None
+    plan_transition_id: UUID | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -179,6 +182,24 @@ class ProposalMaterialization:
             raise ValidationError("materialization deep_link is required")
         if not isinstance(self.confirmed_by, str) or not self.confirmed_by.strip():
             raise ValidationError("materialization confirmed_by is required")
+        try:
+            object.__setattr__(
+                self,
+                "kind",
+                self.kind
+                if isinstance(self.kind, PlanningRequestKind)
+                else PlanningRequestKind(self.kind),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"unsupported materialization kind: {self.kind!r}"
+            ) from exc
+        if self.diff_hash is not None:
+            _validate_content_hash(self.diff_hash)
+        if self.plan_transition_id is not None and not isinstance(
+            self.plan_transition_id, UUID
+        ):
+            raise ValidationError("materialization plan_transition_id must be a UUID")
         _aware(self.created_at, "materialization created_at")
 
 

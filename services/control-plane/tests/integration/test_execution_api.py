@@ -248,7 +248,7 @@ def seed_v2_worker_item_context(
         created_at=NOW,
     )
     with SqlAlchemyUnitOfWork(database) as uow:
-        uow.plans.add(snapshot)
+        uow.plans.add_snapshot_and_advance_head(snapshot, expected_head=None)
         uow.worker_items.add(item)
         uow.worker_items.add_placement(placement)
     return subtask_task_id, worker_item_id, root_task_id

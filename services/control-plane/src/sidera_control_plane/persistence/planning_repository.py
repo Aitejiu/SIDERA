@@ -118,6 +118,13 @@ class PlanningRequestRepository:
             workspace_id=request.workspace_id,
             kind=request.kind.value,
             status=request.status.value,
+            root_task_id=request.root_task_id,
+            base_plan_snapshot_id=request.base_plan_snapshot_id,
+            base_plan_generation=request.base_plan_generation,
+            base_plan_content_hash=request.base_plan_content_hash,
+            base_root_task_version=request.base_root_task_version,
+            base_captured_at=request.base_captured_at,
+            conflict_reason=request.conflict_reason,
             current_brief_revision=None,
             current_proposal_revision=None,
             current_proposal_content_hash=None,
@@ -184,6 +191,49 @@ class PlanningRequestRepository:
             ),
         )
 
+    def get_active_revision_for_root(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRequest | None:
+        statement = select(PlanningRequestModel).where(
+            PlanningRequestModel.root_task_id == root_task_id,
+            PlanningRequestModel.workspace_id == workspace_id,
+            PlanningRequestModel.kind == PlanningRequestKind.REVISION.value,
+            PlanningRequestModel.status.in_(
+                (
+                    PlanningRequestStatus.SUBMITTED.value,
+                    PlanningRequestStatus.PLANNING.value,
+                    PlanningRequestStatus.WAITING_FOR_USER.value,
+                    PlanningRequestStatus.PROPOSAL_READY.value,
+                    PlanningRequestStatus.FAILED.value,
+                )
+            ),
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        if row is None:
+            return None
+        return _to_request(
+            row,
+            briefs=_list_briefs(self._session, row.id, workspace_id),
+            runs=_list_runs(self._session, row.id, workspace_id, row.profile_snapshot),
+            clarifications=tuple(
+                _to_clarification(item)
+                for item in self._session.scalars(
+                    select(PlanningClarificationModel)
+                    .where(
+                        PlanningClarificationModel.planning_request_id == row.id,
+                        PlanningClarificationModel.workspace_id == workspace_id,
+                    )
+                    .order_by(PlanningClarificationModel.sequence.asc())
+                ).all()
+            ),
+        )
+
     def save(self, request: PlanningRequest, previous_version: int) -> None:
         result = self._session.execute(
             update(PlanningRequestModel)
@@ -197,6 +247,7 @@ class PlanningRequestRepository:
                 current_brief_revision=request.current_brief_revision,
                 current_proposal_revision=request.current_proposal_revision,
                 current_proposal_content_hash=request.current_proposal_content_hash,
+                conflict_reason=request.conflict_reason,
                 version=request.version,
                 updated_at=datetime.now(UTC),
             )
@@ -639,10 +690,13 @@ class ProposalMaterializationRepository:
                 id=materialization.id,
                 workspace_id=materialization.workspace_id,
                 planning_request_id=materialization.planning_request_id,
+                kind=materialization.kind.value,
                 proposal_revision_id=materialization.proposal_revision_id,
                 root_task_id=materialization.root_task_id,
                 plan_snapshot_id=materialization.plan_snapshot_id,
                 plan_generation=materialization.plan_generation,
+                diff_hash=materialization.diff_hash,
+                plan_transition_id=materialization.plan_transition_id,
                 subtask_task_mapping=_uuid_mapping_to_json(
                     materialization.subtask_task_mapping
                 ),
@@ -1014,6 +1068,13 @@ def _to_request(
         current_brief_revision=row.current_brief_revision or 0,
         current_proposal_revision=row.current_proposal_revision,
         current_proposal_content_hash=row.current_proposal_content_hash,
+        root_task_id=row.root_task_id,
+        base_plan_snapshot_id=row.base_plan_snapshot_id,
+        base_plan_generation=row.base_plan_generation,
+        base_plan_content_hash=row.base_plan_content_hash,
+        base_root_task_version=row.base_root_task_version,
+        base_captured_at=row.base_captured_at,
+        conflict_reason=row.conflict_reason,
         planning_profile_id=row.planning_profile_id,
         planning_profile_version=row.planning_profile_version,
         profile_snapshot=_snapshot_from_mapping(row.profile_snapshot),
@@ -1167,6 +1228,9 @@ def _to_materialization(row: ProposalMaterializationModel) -> ProposalMaterializ
         root_task_id=row.root_task_id,
         plan_snapshot_id=row.plan_snapshot_id,
         plan_generation=row.plan_generation,
+        kind=PlanningRequestKind(row.kind),
+        diff_hash=row.diff_hash,
+        plan_transition_id=row.plan_transition_id,
         subtask_task_mapping=_uuid_mapping_from_json(row.subtask_task_mapping),
         worker_item_mapping=_uuid_mapping_from_json(row.worker_item_mapping),
         execution_request_mapping=_uuid_mapping_from_json(

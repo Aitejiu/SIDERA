@@ -37,6 +37,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV1,
     ContextPurpose,
 )
+from sidera_control_plane.domain.context_patches import (
+    ContextPatchAcknowledgement,
+    ContextPatchV1,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionSession
 from sidera_control_plane.domain.execution_requests import (
@@ -58,6 +62,12 @@ from sidera_control_plane.domain.modules import (
     ModuleInstance,
     PlannerAdapterCapabilityProfile,
     WorkerAdapterCapabilityProfile,
+)
+from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
+from sidera_control_plane.domain.plan_transitions import (
+    PlanEntityLineage,
+    PlanTransition,
+    WorkerTransition,
 )
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
@@ -108,6 +118,32 @@ class PlanRepositoryPort(Protocol):
     def add(self, snapshot: TaskPlanSnapshot) -> None:
         raise NotImplementedError
 
+    def add_snapshot_and_advance_head(
+        self,
+        snapshot: TaskPlanSnapshot,
+        *,
+        expected_head: RootTaskPlanHead | None,
+    ) -> RootTaskPlanHead:
+        raise NotImplementedError
+
+    def get_head(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> RootTaskPlanHead | None:
+        raise NotImplementedError
+
+    def advance_head(
+        self,
+        head: RootTaskPlanHead,
+        *,
+        expected_snapshot_id: UUID,
+        target: TaskPlanSnapshot,
+    ) -> RootTaskPlanHead:
+        raise NotImplementedError
+
     def get(self, snapshot_id: UUID, workspace_id: UUID) -> TaskPlanSnapshot | None:
         raise NotImplementedError
 
@@ -121,12 +157,113 @@ class PlanRepositoryPort(Protocol):
     ) -> TaskPlanSnapshot | None:
         raise NotImplementedError
 
+    def get_for_generation(
+        self, root_task_id: UUID, workspace_id: UUID, generation: int
+    ) -> TaskPlanSnapshot | None:
+        raise NotImplementedError
+
     def list_for_root(
         self, root_task_id: UUID, workspace_id: UUID
     ) -> tuple[TaskPlanSnapshot, ...]:
         raise NotImplementedError
 
     def list_roots_with_snapshots(self, workspace_id: UUID) -> tuple[UUID, ...]:
+        raise NotImplementedError
+
+
+class PlanTransitionRepositoryPort(Protocol):
+    def add(self, transition: PlanTransition) -> None:
+        raise NotImplementedError
+
+    def get(
+        self, transition_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> PlanTransition | None:
+        raise NotImplementedError
+
+    def save(self, transition: PlanTransition, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def claim_converging(
+        self, *, now: datetime, limit: int
+    ) -> tuple[PlanTransition, ...]:
+        raise NotImplementedError
+
+    def list_for_root(
+        self, root_task_id: UUID, workspace_id: UUID
+    ) -> tuple[PlanTransition, ...]:
+        raise NotImplementedError
+
+
+class WorkerTransitionRepositoryPort(Protocol):
+    def add(self, transition: WorkerTransition) -> None:
+        raise NotImplementedError
+
+    def get(
+        self, transition_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkerTransition | None:
+        raise NotImplementedError
+
+    def save(self, transition: WorkerTransition, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def get_active_for_worker_item(
+        self,
+        worker_item_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> WorkerTransition | None:
+        raise NotImplementedError
+
+    def claim_pending(
+        self, *, now: datetime, limit: int
+    ) -> tuple[WorkerTransition, ...]:
+        raise NotImplementedError
+
+    def list_for_plan_transition(
+        self, plan_transition_id: UUID, workspace_id: UUID
+    ) -> tuple[WorkerTransition, ...]:
+        raise NotImplementedError
+
+
+class PlanEntityLineageRepositoryPort(Protocol):
+    def add(self, lineage: PlanEntityLineage) -> None:
+        raise NotImplementedError
+
+    def get(self, lineage_id: UUID, workspace_id: UUID) -> PlanEntityLineage | None:
+        raise NotImplementedError
+
+    def list_for_transition(
+        self, plan_transition_id: UUID, workspace_id: UUID
+    ) -> tuple[PlanEntityLineage, ...]:
+        raise NotImplementedError
+
+
+class ContextPatchRepositoryPort(Protocol):
+    def add(self, patch: ContextPatchV1) -> None:
+        raise NotImplementedError
+
+    def get(
+        self, patch_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ContextPatchV1 | None:
+        raise NotImplementedError
+
+    def get_by_hash(self, patch_hash: str, workspace_id: UUID) -> ContextPatchV1 | None:
+        raise NotImplementedError
+
+    def list_for_worker_item(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> tuple[ContextPatchV1, ...]:
+        raise NotImplementedError
+
+    def add_acknowledgement(
+        self, acknowledgement: ContextPatchAcknowledgement, workspace_id: UUID
+    ) -> None:
+        raise NotImplementedError
+
+    def get_acknowledgement(
+        self, patch_id: UUID, workspace_id: UUID
+    ) -> ContextPatchAcknowledgement | None:
         raise NotImplementedError
 
 
@@ -154,6 +291,15 @@ class PlanningRequestRepositoryPort(Protocol):
     def get(
         self,
         request_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> PlanningRequest | None:
+        raise NotImplementedError
+
+    def get_active_revision_for_root(
+        self,
+        root_task_id: UUID,
         workspace_id: UUID,
         *,
         for_update: bool = False,
@@ -1319,6 +1465,10 @@ class EventStorePort(Protocol):
 class ControlPlaneUnitOfWork(Protocol):
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
+    plan_transitions: PlanTransitionRepositoryPort
+    worker_transitions: WorkerTransitionRepositoryPort
+    plan_entity_lineages: PlanEntityLineageRepositoryPort
+    context_patches: ContextPatchRepositoryPort
     attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
     workers: WorkerRepositoryPort

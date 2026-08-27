@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -303,8 +303,8 @@ def _patch_values(value: ContextPatchV1) -> dict[str, object]:
         "unfinished_work": value.unfinished_work,
         "checkpoint_ref": value.checkpoint_ref,
         "proposer": value.proposer,
-        "expires_at": value.expires_at.isoformat(),
-        "created_at": value.created_at.isoformat(),
+        "expires_at": value.expires_at.astimezone(UTC).isoformat(),
+        "created_at": value.created_at.astimezone(UTC).isoformat(),
     }
 
 
@@ -324,7 +324,7 @@ def _canonical_value(value: object) -> object:
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        return value.astimezone(UTC).isoformat()
     if isinstance(value, dict):
         return {str(key): _canonical_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

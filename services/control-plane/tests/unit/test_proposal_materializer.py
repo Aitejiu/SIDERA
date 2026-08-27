@@ -28,6 +28,10 @@ from sidera_control_plane.domain.modules import (
     StructuredOutputCapability,
     UsageReportingCapability,
 )
+from sidera_control_plane.domain.plan_revisions import (
+    RootTaskPlanHead,
+    plan_snapshot_content_hash,
+)
 from sidera_control_plane.domain.planning import (
     PlanningRequest,
     PlanningRequestKind,
@@ -86,6 +90,19 @@ class FakePlanRepository:
 
     def add(self, snapshot) -> None:
         self.added.append(snapshot)
+
+    def add_snapshot_and_advance_head(self, snapshot, *, expected_head):
+        del expected_head
+        self.add(snapshot)
+        return RootTaskPlanHead(
+            workspace_id=snapshot.workspace_id,
+            root_task_id=snapshot.root_task_id,
+            active_snapshot_id=snapshot.id,
+            active_generation=snapshot.generation,
+            active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+            version=1,
+            updated_at=snapshot.published_at,
+        )
 
 
 class FakeWorkerItemRepository:

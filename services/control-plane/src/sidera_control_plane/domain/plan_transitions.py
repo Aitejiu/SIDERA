@@ -55,6 +55,34 @@ WORKER_TRANSITION_TERMINAL = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class PlanEntityLineage:
+    id: UUID
+    plan_transition_id: UUID
+    workspace_id: UUID
+    target_type: str
+    target_id: UUID
+    source_type: str
+    source_id: UUID
+    reason: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "id",
+            "plan_transition_id",
+            "workspace_id",
+            "target_id",
+            "source_id",
+        ):
+            if not isinstance(getattr(self, name), UUID):
+                raise ValidationError(f"plan entity lineage {name} must be a UUID")
+        for name in ("target_type", "source_type", "reason"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValidationError(f"plan entity lineage {name} is required")
+            object.__setattr__(self, name, value.strip())
+
+
 @dataclass(slots=True)
 class PlanTransition:
     id: UUID

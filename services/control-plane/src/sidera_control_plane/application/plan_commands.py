@@ -58,10 +58,13 @@ class PublishPlanSnapshotHandler:
         expected_generation = _required_non_negative_int(
             envelope.payload, "expected_current_generation"
         )
+        head = uow.plans.get_head(
+            root_task.id, envelope.workspace_id, for_update=True
+        )
         current = uow.plans.get_current_for_root(
             root_task.id, envelope.workspace_id
         )
-        actual_generation = current.generation if current is not None else 0
+        actual_generation = head.active_generation if head is not None else 0
         if expected_generation != actual_generation:
             raise PlanGenerationConflict(expected_generation, actual_generation)
         if snapshot.generation != expected_generation + 1:
@@ -93,7 +96,9 @@ class PublishPlanSnapshotHandler:
         materialized = self._materializer.materialize(
             uow, snapshot, now=datetime.now(UTC)
         )
-        uow.plans.add(materialized.snapshot)
+        uow.plans.add_snapshot_and_advance_head(
+            materialized.snapshot, expected_head=head
+        )
         events = [
             EventData(
                 id=uuid4(),

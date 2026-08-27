@@ -21,8 +21,16 @@ from sidera_control_plane.domain.commands import (
     CommandResult,
     StoredCommand,
 )
-from sidera_control_plane.domain.errors import PlanGenerationConflict, ValidationError
+from sidera_control_plane.domain.errors import (
+    PlanGenerationConflict,
+    ValidationError,
+    VersionConflict,
+)
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.plan_revisions import (
+    RootTaskPlanHead,
+    plan_snapshot_content_hash,
+)
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker_item import WorkerItem
@@ -70,9 +78,97 @@ class FakeTaskRepository:
 class FakePlanRepository:
     def __init__(self, snapshots: tuple[TaskPlanSnapshot, ...] = ()) -> None:
         self.snapshots = {snapshot.id: snapshot for snapshot in snapshots}
+        self.heads: dict[tuple[UUID, UUID], RootTaskPlanHead] = {}
+        for snapshot in snapshots:
+            key = (snapshot.root_task_id, snapshot.workspace_id)
+            current = self.heads.get(key)
+            if current is None or snapshot.generation > current.active_generation:
+                self.heads[key] = RootTaskPlanHead(
+                    workspace_id=snapshot.workspace_id,
+                    root_task_id=snapshot.root_task_id,
+                    active_snapshot_id=snapshot.id,
+                    active_generation=snapshot.generation,
+                    active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+                    version=snapshot.generation,
+                    updated_at=snapshot.published_at,
+                )
 
     def add(self, snapshot: TaskPlanSnapshot) -> None:
         self.snapshots[snapshot.id] = snapshot
+
+    def add_snapshot_and_advance_head(
+        self,
+        snapshot: TaskPlanSnapshot,
+        *,
+        expected_head: RootTaskPlanHead | None,
+    ) -> RootTaskPlanHead:
+        key = (snapshot.root_task_id, snapshot.workspace_id)
+        actual = self.heads.get(key)
+        if expected_head is None:
+            if actual is not None:
+                raise VersionConflict(0, actual.version)
+            self.add(snapshot)
+            head = RootTaskPlanHead(
+                workspace_id=snapshot.workspace_id,
+                root_task_id=snapshot.root_task_id,
+                active_snapshot_id=snapshot.id,
+                active_generation=snapshot.generation,
+                active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+                version=1,
+                updated_at=snapshot.published_at,
+            )
+            self.heads[key] = head
+            return deepcopy(head)
+
+        if actual is None or actual.version != expected_head.version:
+            raise VersionConflict(
+                expected_head.version, actual.version if actual is not None else 0
+            )
+        self.add(snapshot)
+        return self.advance_head(
+            expected_head,
+            expected_snapshot_id=expected_head.active_snapshot_id,
+            target=snapshot,
+        )
+
+    def get_head(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> RootTaskPlanHead | None:
+        del for_update
+        head = self.heads.get((root_task_id, workspace_id))
+        return deepcopy(head) if head is not None else None
+
+    def advance_head(
+        self,
+        head: RootTaskPlanHead,
+        *,
+        expected_snapshot_id: UUID,
+        target: TaskPlanSnapshot,
+    ) -> RootTaskPlanHead:
+        key = (head.root_task_id, head.workspace_id)
+        actual = self.heads.get(key)
+        if (
+            actual is None
+            or actual.version != head.version
+            or actual.active_snapshot_id != expected_snapshot_id
+        ):
+            raise VersionConflict(
+                head.version, actual.version if actual is not None else 0
+            )
+        head.advance(
+            expected_snapshot_id=expected_snapshot_id,
+            expected_version=head.version,
+            target_snapshot_id=target.id,
+            target_generation=target.generation,
+            target_snapshot_hash=plan_snapshot_content_hash(target),
+            now=target.published_at,
+        )
+        self.heads[key] = deepcopy(head)
+        return deepcopy(head)
 
     def get(self, snapshot_id: UUID, workspace_id: UUID) -> TaskPlanSnapshot | None:
         snapshot = self.snapshots.get(snapshot_id)
@@ -81,13 +177,24 @@ class FakePlanRepository:
     def get_current_for_root(
         self, root_task_id: UUID, workspace_id: UUID
     ) -> TaskPlanSnapshot | None:
-        candidates = [
-            snapshot
-            for snapshot in self.snapshots.values()
-            if snapshot.root_task_id == root_task_id
-            and snapshot.workspace_id == workspace_id
-        ]
-        return max(candidates, key=lambda snapshot: snapshot.generation, default=None)
+        head = self.heads.get((root_task_id, workspace_id))
+        if head is None:
+            return None
+        return self.get(head.active_snapshot_id, workspace_id)
+
+    def get_for_generation(
+        self, root_task_id: UUID, workspace_id: UUID, generation: int
+    ) -> TaskPlanSnapshot | None:
+        return next(
+            (
+                snapshot
+                for snapshot in self.snapshots.values()
+                if snapshot.root_task_id == root_task_id
+                and snapshot.workspace_id == workspace_id
+                and snapshot.generation == generation
+            ),
+            None,
+        )
 
     def list_for_root(
         self, root_task_id: UUID, workspace_id: UUID
@@ -322,6 +429,7 @@ class FakeUnitOfWork:
     @contextmanager
     def savepoint(self) -> Iterator[None]:
         plans = dict(self.plans.snapshots)
+        heads = deepcopy(self.plans.heads)
         events = list(self.events.events)
         worker_items = deepcopy(self.worker_items.items)
         added_worker_items = list(self.worker_items.added)
@@ -330,6 +438,7 @@ class FakeUnitOfWork:
             yield
         except Exception:
             self.plans.snapshots = plans
+            self.plans.heads = heads
             self.events.events = events
             self.worker_items.items = worker_items
             self.worker_items.added = added_worker_items

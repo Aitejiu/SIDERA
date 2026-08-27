@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.errors import VersionConflict
@@ -14,9 +15,12 @@ from sidera_control_plane.domain.modules import (
     StructuredOutputCapability,
     UsageReportingCapability,
 )
+from sidera_control_plane.domain.plan_revisions import RevisionBaseDescriptorV1
 from sidera_control_plane.domain.planning import (
     PlanningClarification,
     PlanningRequest,
+    PlanningRequestKind,
+    PlanningRequestStatus,
     PlanningRunLease,
     PlanningRunLeaseStatus,
     ProposalMaterialization,
@@ -44,6 +48,7 @@ from sidera_control_plane.domain.plans import WorkItemKind
 from sidera_control_plane.persistence.models import (
     ModuleDefinitionModel,
     ModuleInstanceModel,
+    PlanningRequestModel,
     PlanSnapshotModel,
     TaskModel,
 )
@@ -319,6 +324,127 @@ def test_request_round_trip_lock_and_optimistic_version(
 
         with pytest.raises(VersionConflict):
             repository.save(stored, previous_version)
+
+
+def test_revision_request_preserves_exact_base_and_active_lookup(
+    database, workspace_id: UUID
+) -> None:
+    module_instance_id = add_module_instance(database, workspace_id)
+    profile = make_profile(workspace_id, module_instance_id)
+    root_task_id = uuid4()
+    base_snapshot_id = uuid4()
+    base = RevisionBaseDescriptorV1(
+        schema_version=1,
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        plan_snapshot_id=base_snapshot_id,
+        plan_generation=4,
+        plan_content_hash="a" * 64,
+        root_task_version=7,
+        captured_at=NOW,
+    )
+    first = PlanningRequest.create_revision(
+        request_id=uuid4(),
+        workspace_id=workspace_id,
+        profile_snapshot=profile.snapshot(capabilities()),
+        objective="Revise the active task",
+        constraints=(),
+        acceptance_criteria=("Keep the exact base",),
+        context_refs=(),
+        requested_outputs=("revision",),
+        source_type="integration",
+        source_ref="test:revision:first",
+        actor="integration",
+        correlation_id=uuid4(),
+        run_id=uuid4(),
+        now=NOW,
+        base=base,
+    )
+    second = PlanningRequest.create_revision(
+        request_id=uuid4(),
+        workspace_id=workspace_id,
+        profile_snapshot=profile.snapshot(capabilities()),
+        objective="Revise the active task again",
+        constraints=(),
+        acceptance_criteria=("Keep the exact base",),
+        context_refs=(),
+        requested_outputs=("revision",),
+        source_type="integration",
+        source_ref="test:revision:second",
+        actor="integration",
+        correlation_id=uuid4(),
+        run_id=uuid4(),
+        now=NOW + timedelta(seconds=1),
+        base=base,
+    )
+    with database.session() as session:
+        session.add(
+            TaskModel(
+                id=root_task_id,
+                workspace_id=workspace_id,
+                title="Revision root",
+                description="Root for revision request tests.",
+                acceptance_criteria=["Keep the exact base"],
+                status="pending",
+                priority=50,
+                requested_by="integration",
+                version=7,
+            )
+        )
+        session.flush()
+        session.add(
+            PlanSnapshotModel(
+                id=base_snapshot_id,
+                schema_version=2,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                generation=4,
+                parent_snapshot_id=None,
+                source_type="integration",
+                source_ref="test:revision:base",
+                title="Revision base",
+                goal_summary="Base snapshot for revision request tests.",
+                payload={},
+                published_by="integration",
+                published_at=NOW,
+            )
+        )
+        session.flush()
+        PlanningProfileRepository(session).add(profile)
+        session.flush()
+        repository = PlanningRequestRepository(session)
+        repository.add(first)
+        session.commit()
+
+    with database.session() as session:
+        repository = PlanningRequestRepository(session)
+        loaded = repository.get_active_revision_for_root(
+            root_task_id, workspace_id, for_update=True
+        )
+        assert loaded is not None
+        assert loaded.id == first.id
+        assert loaded.kind is PlanningRequestKind.REVISION
+        assert loaded.base_descriptor == base
+
+        session.execute(
+            update(PlanningRequestModel)
+            .where(PlanningRequestModel.id == first.id)
+            .values(
+                status=PlanningRequestStatus.CONFLICTED.value,
+                conflict_reason="stale_base",
+                updated_at=NOW,
+            )
+        )
+        session.commit()
+
+    with database.session() as session:
+        repository = PlanningRequestRepository(session)
+        repository.add(second)
+        session.commit()
+        active = repository.get_active_revision_for_root(root_task_id, workspace_id)
+        assert active is not None
+        assert active.id == second.id
+        assert active.base_descriptor == base
 
 
 def test_run_claim_lease_fencing_clarification_and_immutable_records(
