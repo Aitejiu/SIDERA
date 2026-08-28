@@ -7,6 +7,36 @@ from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningMetricReasonView:
+    reason: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningWorkerTransitionMetricView:
+    action: str
+    outcome: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningContextPatchDeliveryMetricView:
+    adapter: str
+    outcome: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningRevisionMetricsView:
+    plan_revisions_active: int
+    plan_revision_conflicts_total: tuple[PlanningMetricReasonView, ...]
+    plan_transitions_active: int
+    worker_transitions_total: tuple[PlanningWorkerTransitionMetricView, ...]
+    context_patch_delivery_total: tuple[PlanningContextPatchDeliveryMetricView, ...]
+    revision_confirmation_blocked_total: tuple[PlanningMetricReasonView, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningRunMetricsView:
     queued: int
     running: int
@@ -65,6 +95,7 @@ class PlanningMetricsView:
     usage: PlanningUsageMetricsView
     planning: PlanningLifecycleMetricsView
     execution_requests: PlanningExecutionRequestMetricsView
+    revision: PlanningRevisionMetricsView
 
 
 class PlanningMetricsStore(Protocol):

@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
+from test_revision_confirmation import _seed_revision_confirmation
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
@@ -207,3 +208,26 @@ def test_attention_acknowledgement_is_actor_local_and_source_bound(
     assert stale.status_code == 422
     assert stale.json()["error"]["code"] == "validation_error"
     assert stale.json()["error"]["details"]["current_resource_version"] == 4
+
+
+def test_root_revision_attention_keeps_human_scope_and_confirmation_link(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    seed = _seed_revision_confirmation(database, workspace_id)
+
+    response = client.get(
+        f"/api/v1/tasks/{seed['root_task'].id}/overview",
+        params={"workspace_id": str(workspace_id)},
+    )
+
+    assert response.status_code == 200, response.text
+    revision_attention = response.json()["revision_attention"]
+    assert revision_attention["status"] == "proposal_ready"
+    assert revision_attention["subtask_path"]
+    assert revision_attention["action"] == "review_revision"
+    assert revision_attention["deep_link"].endswith(
+        f"/revisions/{seed['request'].id}"
+    )
+    assert revision_attention["correlation_id"] == str(seed["request"].correlation_id)

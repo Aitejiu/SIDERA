@@ -36,7 +36,9 @@ from sidera_control_plane.application.plan_revision_queries import (
     RevisionTransitionPreviewView,
     RevisionWorkerItemChangeView,
 )
-from sidera_control_plane.application.planning_metrics import PlanningMetricsView
+from sidera_control_plane.application.planning_metrics import (
+    PlanningMetricsView,
+)
 from sidera_control_plane.application.planning_queries import (
     PlanningBriefView,
     PlanningCapabilityView,
@@ -3871,6 +3873,34 @@ class PlanningExecutionRequestMetricsResponse(BaseModel):
     gate_wait_seconds: float
 
 
+class PlanningMetricReasonResponse(BaseModel):
+    reason: str
+    count: int
+
+
+class PlanningWorkerTransitionMetricResponse(BaseModel):
+    action: str
+    outcome: str
+    count: int
+
+
+class PlanningContextPatchDeliveryMetricResponse(BaseModel):
+    adapter: str
+    outcome: str
+    count: int
+
+
+class PlanningRevisionMetricsResponse(BaseModel):
+    plan_revisions_active: int
+    plan_revision_conflicts_total: tuple[PlanningMetricReasonResponse, ...]
+    plan_transitions_active: int
+    worker_transitions_total: tuple[PlanningWorkerTransitionMetricResponse, ...]
+    context_patch_delivery_total: tuple[
+        PlanningContextPatchDeliveryMetricResponse, ...
+    ]
+    revision_confirmation_blocked_total: tuple[PlanningMetricReasonResponse, ...]
+
+
 class PlanningMetricsResponse(BaseModel):
     workspace_id: UUID
     as_of: datetime
@@ -3880,6 +3910,7 @@ class PlanningMetricsResponse(BaseModel):
     usage: PlanningUsageMetricsResponse
     planning: PlanningLifecycleMetricsResponse
     execution_requests: PlanningExecutionRequestMetricsResponse
+    revision: PlanningRevisionMetricsResponse
 
     @classmethod
     def from_view(cls, view: PlanningMetricsView) -> "PlanningMetricsResponse":
@@ -3922,6 +3953,40 @@ class PlanningMetricsResponse(BaseModel):
                 blocked=view.execution_requests.blocked,
                 ready=view.execution_requests.ready,
                 gate_wait_seconds=view.execution_requests.gate_wait_seconds,
+            ),
+            revision=PlanningRevisionMetricsResponse(
+                plan_revisions_active=view.revision.plan_revisions_active,
+                plan_revision_conflicts_total=tuple(
+                    PlanningMetricReasonResponse(
+                        reason=item.reason,
+                        count=item.count,
+                    )
+                    for item in view.revision.plan_revision_conflicts_total
+                ),
+                plan_transitions_active=view.revision.plan_transitions_active,
+                worker_transitions_total=tuple(
+                    PlanningWorkerTransitionMetricResponse(
+                        action=item.action,
+                        outcome=item.outcome,
+                        count=item.count,
+                    )
+                    for item in view.revision.worker_transitions_total
+                ),
+                context_patch_delivery_total=tuple(
+                    PlanningContextPatchDeliveryMetricResponse(
+                        adapter=item.adapter,
+                        outcome=item.outcome,
+                        count=item.count,
+                    )
+                    for item in view.revision.context_patch_delivery_total
+                ),
+                revision_confirmation_blocked_total=tuple(
+                    PlanningMetricReasonResponse(
+                        reason=item.reason,
+                        count=item.count,
+                    )
+                    for item in view.revision.revision_confirmation_blocked_total
+                ),
             ),
         )
 

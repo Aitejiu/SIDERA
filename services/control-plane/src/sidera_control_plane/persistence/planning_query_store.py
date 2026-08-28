@@ -12,13 +12,17 @@ from sqlalchemy import and_, func, or_, select
 
 from sidera_control_plane.application.errors import InvalidCursor
 from sidera_control_plane.application.planning_metrics import (
+    PlanningContextPatchDeliveryMetricView,
     PlanningExecutionRequestMetricsView,
     PlanningLatencyMetricsView,
     PlanningLifecycleMetricsView,
+    PlanningMetricReasonView,
     PlanningMetricsView,
     PlanningOutcomeMetricsView,
+    PlanningRevisionMetricsView,
     PlanningRunMetricsView,
     PlanningUsageMetricsView,
+    PlanningWorkerTransitionMetricView,
 )
 from sidera_control_plane.application.planning_queries import (
     PlanningBriefView,
@@ -36,6 +40,8 @@ from sidera_control_plane.application.planning_queries import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ContextPatchAcknowledgementModel,
+    ContextPatchModel,
     ExecutionRequestModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
@@ -45,7 +51,9 @@ from sidera_control_plane.persistence.models import (
     PlanningProposalRevisionModel,
     PlanningRequestModel,
     PlanningRunModel,
+    PlanTransitionModel,
     ProposalMaterializationModel,
+    WorkerTransitionModel,
 )
 from sidera_control_plane.persistence.projection_change_repository import (
     ProjectionChangeRepository,
@@ -487,6 +495,148 @@ class SqlAlchemyPlanningMetricsStore:
                     )
                 )
             )
+            active_revisions = session.scalar(
+                select(func.count())
+                .select_from(PlanningRequestModel)
+                .where(
+                    PlanningRequestModel.workspace_id == workspace_id,
+                    PlanningRequestModel.kind == "revision",
+                    PlanningRequestModel.status.in_(
+                        (
+                            "submitted",
+                            "planning",
+                            "waiting_for_user",
+                            "proposal_ready",
+                            "failed",
+                        )
+                    ),
+                )
+            ) or 0
+            conflict_rows = session.execute(
+                select(
+                    func.coalesce(PlanningRequestModel.conflict_reason, "unknown"),
+                    func.count(),
+                )
+                .where(
+                    PlanningRequestModel.workspace_id == workspace_id,
+                    PlanningRequestModel.kind == "revision",
+                    PlanningRequestModel.status == "conflicted",
+                )
+                .group_by(PlanningRequestModel.conflict_reason)
+            ).all()
+            active_transitions = session.scalar(
+                select(func.count())
+                .select_from(PlanTransitionModel)
+                .where(
+                    PlanTransitionModel.workspace_id == workspace_id,
+                    PlanTransitionModel.status == "converging",
+                )
+            ) or 0
+            worker_transition_rows = session.execute(
+                select(
+                    WorkerTransitionModel.action,
+                    WorkerTransitionModel.status,
+                    func.count(),
+                )
+                .where(WorkerTransitionModel.workspace_id == workspace_id)
+                .group_by(WorkerTransitionModel.action, WorkerTransitionModel.status)
+            ).all()
+            patch_rows = session.execute(
+                select(ContextPatchModel.id, ContextPatchAcknowledgementModel.adapter_ref)
+                .select_from(ContextPatchModel)
+                .outerjoin(
+                    ContextPatchAcknowledgementModel,
+                    and_(
+                        ContextPatchAcknowledgementModel.patch_id == ContextPatchModel.id,
+                        ContextPatchAcknowledgementModel.workspace_id == workspace_id,
+                    ),
+                )
+                .where(ContextPatchModel.workspace_id == workspace_id)
+            ).all()
+            blocking_worker_rows = session.execute(
+                select(
+                    WorkerTransitionModel.status,
+                    WorkerTransitionModel.writer_state,
+                    func.count(),
+                )
+                .where(WorkerTransitionModel.workspace_id == workspace_id)
+                .group_by(
+                    WorkerTransitionModel.status,
+                    WorkerTransitionModel.writer_state,
+                )
+            ).all()
+            degraded_transitions = session.scalar(
+                select(func.count())
+                .select_from(PlanTransitionModel)
+                .where(
+                    PlanTransitionModel.workspace_id == workspace_id,
+                    PlanTransitionModel.status == "degraded",
+                )
+            ) or 0
+
+        conflict_metrics = tuple(
+            PlanningMetricReasonView(reason=str(reason), count=int(count))
+            for reason, count in sorted(
+                ((str(reason), int(count)) for reason, count in conflict_rows),
+                key=lambda item: item[0],
+            )
+        )
+        worker_metrics = tuple(
+            PlanningWorkerTransitionMetricView(
+                action=str(action),
+                outcome=_worker_transition_metric_outcome(str(status)),
+                count=int(count),
+            )
+            for action, status, count in sorted(
+                worker_transition_rows,
+                key=lambda item: (str(item[0]), _worker_transition_metric_outcome(str(item[1]))),
+            )
+        )
+        patch_counts: dict[tuple[str, str], int] = {}
+        for _patch_id, adapter_ref in patch_rows:
+            adapter = _adapter_metric_label(adapter_ref)
+            outcome = "acknowledged" if adapter_ref is not None else "pending"
+            key = (adapter, outcome)
+            patch_counts[key] = patch_counts.get(key, 0) + 1
+        patch_metrics = tuple(
+            PlanningContextPatchDeliveryMetricView(
+                adapter=adapter,
+                outcome=outcome,
+                count=count,
+            )
+            for (adapter, outcome), count in sorted(patch_counts.items())
+        )
+        blocked_counts: dict[str, int] = {}
+        if degraded_transitions:
+            blocked_counts["transition_degraded"] = int(degraded_transitions)
+        for status, writer_state, count in blocking_worker_rows:
+            count = int(count)
+            if status in {
+                "pending",
+                "waiting_safe_boundary",
+                "applying",
+                "waiting_activation",
+            }:
+                blocked_counts["in_flight"] = blocked_counts.get("in_flight", 0) + count
+            if status == "blocked_unknown":
+                blocked_counts["worker_blocked_unknown"] = (
+                    blocked_counts.get("worker_blocked_unknown", 0) + count
+                )
+            if writer_state == "unknown" and status != "blocked_unknown":
+                blocked_counts["writer_unknown"] = (
+                    blocked_counts.get("writer_unknown", 0) + count
+                )
+            if writer_state in {"active", "fenced"} and status not in {
+                "converged",
+                "failed",
+            }:
+                blocked_counts["active_fence"] = (
+                    blocked_counts.get("active_fence", 0) + count
+                )
+        blocked_metrics = tuple(
+            PlanningMetricReasonView(reason=reason, count=count)
+            for reason, count in sorted(blocked_counts.items())
+        )
 
         return PlanningMetricsView(
             workspace_id=workspace_id,
@@ -527,6 +677,14 @@ class SqlAlchemyPlanningMetricsStore:
                 blocked=_status_count(execution_counts, "blocked"),
                 ready=_status_count(execution_counts, "ready"),
                 gate_wait_seconds=gate_wait,
+            ),
+            revision=PlanningRevisionMetricsView(
+                plan_revisions_active=int(active_revisions),
+                plan_revision_conflicts_total=conflict_metrics,
+                plan_transitions_active=int(active_transitions),
+                worker_transitions_total=worker_metrics,
+                context_patch_delivery_total=patch_metrics,
+                revision_confirmation_blocked_total=blocked_metrics,
             ),
         )
 
@@ -895,3 +1053,18 @@ def _status_count(rows: object, status: str) -> int:
         for row in rows
         if len(row) >= 2 and row[0] == status
     )
+
+
+def _worker_transition_metric_outcome(status: str) -> str:
+    return {
+        "converged": "converged",
+        "failed": "failed",
+        "blocked_unknown": "unknown",
+    }.get(status, "in_flight")
+
+
+def _adapter_metric_label(adapter_ref: str | None) -> str:
+    if adapter_ref is None:
+        return "unknown"
+    prefix = adapter_ref.split(":", 1)[0].strip().lower()
+    return prefix if prefix in {"akashic", "dsh", "fake", "opencode", "session"} else "other"

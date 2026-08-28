@@ -209,6 +209,15 @@ class EventRepository:
         self._projection_changes = projection_changes
 
     def append_with_outbox(self, event: EventData) -> None:
+        worker_item_id: UUID | None = None
+        root_task_id: UUID | None = None
+        if self._projection_changes is not None:
+            # Resolve scope before adding the event so this read cannot flush an
+            # event whose causation command is recorded only after the handler.
+            with self._session.no_autoflush:
+                worker_item_id, root_task_id = _resolve_event_scope(
+                    self._session, event
+                )
         self._session.add(
             EventModel(
                 id=event.id,
@@ -243,7 +252,6 @@ class EventRepository:
             )
         )
         if self._projection_changes is not None:
-            worker_item_id, root_task_id = _resolve_event_scope(self._session, event)
             for target in projection_targets_for_event(
                 event,
                 worker_item_id=worker_item_id,
@@ -273,12 +281,23 @@ def _resolve_event_scope(
         if request_id is None and event.aggregate_type == "planning_request":
             request_id = event.aggregate_id
         if request_id is not None:
-            root_task_id = session.scalar(
-                select(PlanningRequestModel.root_task_id).where(
-                    PlanningRequestModel.workspace_id == event.workspace_id,
-                    PlanningRequestModel.id == request_id,
-                )
+            root_task_id = next(
+                (
+                    row.root_task_id
+                    for row in session.new
+                    if isinstance(row, PlanningRequestModel)
+                    and row.workspace_id == event.workspace_id
+                    and row.id == request_id
+                ),
+                None,
             )
+            if root_task_id is None:
+                root_task_id = session.scalar(
+                    select(PlanningRequestModel.root_task_id).where(
+                        PlanningRequestModel.workspace_id == event.workspace_id,
+                        PlanningRequestModel.id == request_id,
+                    )
+                )
     context = event.payload.get("execution_context")
     if worker_item_id is None and isinstance(context, dict):
         worker_item_id = _value_uuid(context.get("worker_item_id"))
