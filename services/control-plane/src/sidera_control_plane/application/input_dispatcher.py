@@ -27,7 +27,7 @@ class InputDispatchReport:
 
 
 _SAFE_BOUNDARY_FAILURE_CODES = frozenset(
-    {"prompt_busy", "safe_boundary_unavailable"}
+    {"prompt_busy", "safe_boundary_unavailable", "worker_transition_fence"}
 )
 
 
@@ -53,7 +53,15 @@ class InputDispatcher:
 
         delivered = deferred = blocked = unknown = failed = 0
         for item in claimed:
-            result = self._send(item)
+            if self._has_worker_transition_fence(item):
+                result = DeliveryResult(
+                    operation_id=item.operation_id or item.id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="worker_transition_fence",
+                )
+            else:
+                result = self._send(item)
             category = self._persist_result(item, result)
             if category == "delivered":
                 delivered += 1
@@ -74,6 +82,32 @@ class InputDispatcher:
             unknown=unknown,
             failed=failed,
         )
+
+    def _has_worker_transition_fence(self, item: ExecutionInput) -> bool:
+        """Re-read the authoritative WorkerItem fence after claiming input."""
+        with self._uow_factory() as uow:
+            executions = getattr(uow, "executions", None)
+            transitions = getattr(uow, "worker_transitions", None)
+            if executions is None or transitions is None:
+                return False
+            try:
+                execution = executions.get(
+                    item.execution_id, item.workspace_id, for_update=True
+                )
+                worker_item_id = getattr(execution, "worker_item_id", None)
+                if worker_item_id is None:
+                    return False
+                return (
+                    transitions.get_active_for_worker_item(
+                        worker_item_id,
+                        item.workspace_id,
+                        for_update=True,
+                    )
+                    is not None
+                )
+            except Exception:  # noqa: BLE001
+                # A failed fence read must not turn into an external write.
+                return True
 
     def _send(self, item: ExecutionInput) -> DeliveryResult:
         operation_id = item.operation_id

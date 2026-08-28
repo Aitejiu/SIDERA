@@ -242,7 +242,12 @@ class WorkerTransitionRepository:
         rows = self._session.scalars(
             select(WorkerTransitionModel)
             .where(
-                WorkerTransitionModel.status == WorkerTransitionStatus.PENDING.value,
+                WorkerTransitionModel.status.in_(
+                    (
+                        WorkerTransitionStatus.PENDING.value,
+                        WorkerTransitionStatus.WAITING_SAFE_BOUNDARY.value,
+                    )
+                ),
                 or_(
                     WorkerTransitionModel.next_attempt_at.is_(None),
                     WorkerTransitionModel.next_attempt_at <= now,

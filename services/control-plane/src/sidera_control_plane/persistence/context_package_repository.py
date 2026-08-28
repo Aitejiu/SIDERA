@@ -493,6 +493,27 @@ class ContextPackageRepository:
         row = self._session.scalar(statement)
         return self._to_manifest(row) if row is not None else None
 
+    def get_ack(
+        self,
+        package_id: UUID,
+        consumer_type: ContextConsumerType,
+        consumer_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ContextAcknowledgement | None:
+        statement = select(ContextPackageAcknowledgementModel).where(
+            ContextPackageAcknowledgementModel.package_id == package_id,
+            ContextPackageAcknowledgementModel.consumer_type
+            == ContextConsumerType(consumer_type).value,
+            ContextPackageAcknowledgementModel.consumer_id == consumer_id,
+            ContextPackageAcknowledgementModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_acknowledgement(row) if row is not None else None
+
     def get_for_consumer(
         self,
         purpose: ContextPurpose,

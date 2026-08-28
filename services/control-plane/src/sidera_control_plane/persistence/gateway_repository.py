@@ -406,6 +406,7 @@ class ExecutionInputRepository:
                 status=item.status.value,
                 operation_id=item.operation_id,
                 failure_code=item.failure_code,
+                superseded_reason=item.superseded_reason,
                 version=item.version,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
@@ -427,6 +428,7 @@ class ExecutionInputRepository:
                 status=item.status.value,
                 operation_id=item.operation_id,
                 failure_code=item.failure_code,
+                superseded_reason=item.superseded_reason,
                 version=item.version,
                 updated_at=datetime.now(UTC),
             )
@@ -541,4 +543,5 @@ def _to_domain_input(row: ExecutionInputModel) -> ExecutionInput:
         created_at=row.created_at,
         updated_at=row.updated_at,
         source_command_id=row.source_command_id,
+        superseded_reason=row.superseded_reason,
     )

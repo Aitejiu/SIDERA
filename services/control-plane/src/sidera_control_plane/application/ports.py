@@ -32,6 +32,7 @@ from sidera_control_plane.domain.commands import (
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextAssemblyRequest,
+    ContextConsumerType,
     ContextMaterializationAudit,
     ContextMaterializationV1,
     ContextPackageManifestV1,
@@ -722,6 +723,17 @@ class ContextPackageRepositoryPort(Protocol):
     def get(
         self, package_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ContextPackageManifestV1 | None:
+        raise NotImplementedError
+
+    def get_ack(
+        self,
+        package_id: UUID,
+        consumer_type: ContextConsumerType,
+        consumer_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ContextAcknowledgement | None:
         raise NotImplementedError
 
     def get_for_consumer(

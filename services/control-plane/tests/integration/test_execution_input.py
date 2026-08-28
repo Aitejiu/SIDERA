@@ -544,3 +544,48 @@ def test_send_input_rejects_non_active_session(
                 context=_context(ids),
             )
         )
+
+
+def test_superseded_input_is_retained_but_leaves_pending_slot(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    _service(database).handle(
+        _envelope(
+            workspace_id,
+            ids["session_id"],
+            ids["execution_id"],
+            "SendExecutionInput",
+            "superseded-input",
+            payload={"text": "keep this intervention", "attachment_refs": []},
+            context=_context(ids),
+        )
+    )
+
+    with database.session() as db_session:
+        stored = db_session.query(ExecutionInputModel).one()
+        input_id = stored.id
+
+    with SqlAlchemyUnitOfWork(database) as uow:
+        item = uow.execution_inputs.get(input_id, workspace_id, for_update=True)
+        assert item is not None
+        previous_version = item.version
+        item.supersede(
+            now=NOW + timedelta(seconds=1),
+            reason="plan_generation_changed",
+        )
+        uow.execution_inputs.save(item, previous_version)
+
+    with SqlAlchemyUnitOfWork(database) as uow:
+        item = uow.execution_inputs.get(input_id, workspace_id)
+        assert item is not None
+        assert item.status.value == "superseded"
+        assert item.superseded_reason == "plan_generation_changed"
+        assert item.text == "keep this intervention"
+        assert (
+            uow.execution_inputs.get_pending_for_session(
+                ids["session_id"], workspace_id
+            )
+            is None
+        )

@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from sidera_control_plane.domain.errors import ValidationError
@@ -105,7 +106,7 @@ class ContextPatchV1:
             "expires_at": expires_at,
             "created_at": created_at,
         }
-        patch_hash = _hash_payload(values)
+        patch_hash = _hash_payload(_patch_hash_values_from_mapping(values))
         return cls(**values, patch_hash=patch_hash)
 
     def __post_init__(self) -> None:
@@ -157,7 +158,7 @@ class ContextPatchV1:
 
     @property
     def content_hash(self) -> str:
-        return _hash_payload(_patch_values(self))
+        return _hash_payload(_patch_hash_values(self))
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -306,6 +307,49 @@ def _patch_values(value: ContextPatchV1) -> dict[str, object]:
         "expires_at": value.expires_at.astimezone(UTC).isoformat(),
         "created_at": value.created_at.astimezone(UTC).isoformat(),
     }
+
+
+def _patch_hash_values(value: ContextPatchV1) -> dict[str, object]:
+    """Hash only the immutable patch content, not storage/timing metadata."""
+    return _patch_hash_values_from_mapping(
+        {field: getattr(value, field) for field in value.__dataclass_fields__}
+    )
+
+
+def _patch_hash_values_from_mapping(value: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "workspace_id": str(value["workspace_id"]),
+        "root_task_id": str(value["root_task_id"]),
+        "worker_item_id": str(value["worker_item_id"]),
+        "plan_transition_id": str(value["plan_transition_id"]),
+        "worker_transition_id": str(value["worker_transition_id"]),
+        "base_plan_snapshot_id": str(value["base_plan_snapshot_id"]),
+        "base_generation": value["base_generation"],
+        "target_plan_snapshot_id": str(value["target_plan_snapshot_id"]),
+        "target_generation": value["target_generation"],
+        "base_context_package_id": str(value["base_context_package_id"]),
+        "base_package_hash": value["base_package_hash"],
+        "base_work_context_revision_id": str(value["base_work_context_revision_id"]),
+        "base_context_hash": value["base_context_hash"],
+        "target_context_version": value["target_context_version"],
+        "scope": value["scope"],
+        "change_set": {
+            "changed_requirements": _normalized_refs(value["changed_requirements"]),
+            "changed_acceptance_refs": _normalized_refs(value["changed_acceptance_refs"]),
+            "changed_dependency_refs": _normalized_refs(value["changed_dependency_refs"]),
+            "decision_refs": _normalized_refs(value["decision_refs"]),
+            "artifact_refs": _normalized_refs(value["artifact_refs"]),
+            "evidence_refs": _normalized_refs(value["evidence_refs"]),
+            "intervention_refs": _normalized_refs(value["intervention_refs"]),
+            "unfinished_work": value["unfinished_work"],
+            "checkpoint_ref": value["checkpoint_ref"],
+        },
+    }
+
+
+def _normalized_refs(value: object) -> list[str]:
+    return sorted(set(cast(Iterable[str], value)))
 
 
 def _hash_payload(value: dict[str, object]) -> str:

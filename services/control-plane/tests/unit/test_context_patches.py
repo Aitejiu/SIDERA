@@ -78,6 +78,41 @@ def test_context_patch_hash_and_materialization_are_exact() -> None:
         )
 
 
+def test_context_patch_hash_does_not_change_when_created_at_changes() -> None:
+    first = patch()
+    second = ContextPatchV1.create(
+        id=first.id,
+        workspace_id=first.workspace_id,
+        root_task_id=first.root_task_id,
+        worker_item_id=first.worker_item_id,
+        plan_transition_id=first.plan_transition_id,
+        worker_transition_id=first.worker_transition_id,
+        base_plan_snapshot_id=first.base_plan_snapshot_id,
+        base_generation=first.base_generation,
+        target_plan_snapshot_id=first.target_plan_snapshot_id,
+        target_generation=first.target_generation,
+        base_context_package_id=first.base_context_package_id,
+        base_package_hash=first.base_package_hash,
+        base_work_context_revision_id=first.base_work_context_revision_id,
+        base_context_hash=first.base_context_hash,
+        target_context_version=first.target_context_version,
+        changed_requirements=first.changed_requirements,
+        changed_acceptance_refs=first.changed_acceptance_refs,
+        changed_dependency_refs=first.changed_dependency_refs,
+        decision_refs=first.decision_refs,
+        artifact_refs=first.artifact_refs,
+        evidence_refs=first.evidence_refs,
+        intervention_refs=first.intervention_refs,
+        unfinished_work=first.unfinished_work,
+        checkpoint_ref=first.checkpoint_ref,
+        proposer=first.proposer,
+        expires_at=first.expires_at,
+        created_at=NOW + timedelta(minutes=1),
+    )
+
+    assert second.patch_hash == first.patch_hash
+
+
 def test_context_patch_checks_expiry_and_exact_base_package() -> None:
     value = patch()
     value.assert_deliverable(

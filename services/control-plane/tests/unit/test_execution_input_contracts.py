@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -56,3 +56,26 @@ def test_blocked_input_requires_explicit_retry_before_delivery() -> None:
     item.deliver()
 
     assert item.status is ExecutionInputStatus.DELIVERED
+
+
+def test_accepted_or_queued_input_can_be_superseded_without_replay() -> None:
+    accepted = make_input()
+    accepted.supersede(now=NOW + timedelta(seconds=1), reason="plan_generation_changed")
+    assert accepted.status is ExecutionInputStatus.SUPERSEDED
+    assert accepted.superseded_reason == "plan_generation_changed"
+    assert accepted.text == "Please fix the failing test"
+
+    queued = make_input()
+    queued.queue()
+    queued.supersede(now=NOW + timedelta(seconds=1), reason="session_superseded")
+    assert queued.status is ExecutionInputStatus.SUPERSEDED
+    assert queued.superseded_reason == "session_superseded"
+
+
+def test_dispatching_input_cannot_be_superseded() -> None:
+    item = make_input()
+    item.queue()
+    item.begin_dispatch(operation_id=uuid4())
+
+    with pytest.raises(InvalidTransition):
+        item.supersede(now=NOW, reason="plan_generation_changed")

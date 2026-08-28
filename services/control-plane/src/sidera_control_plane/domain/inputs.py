@@ -14,6 +14,7 @@ class ExecutionInputStatus(StrEnum):
     BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SUPERSEDED = "superseded"
 
 
 EDITABLE_INPUT_STATUSES = {
@@ -38,6 +39,7 @@ class ExecutionInput:
     created_at: datetime
     updated_at: datetime
     source_command_id: UUID | None = None
+    superseded_reason: str | None = None
 
     @classmethod
     def accept(
@@ -76,6 +78,7 @@ class ExecutionInput:
             created_at=now,
             updated_at=now,
             source_command_id=source_command_id,
+            superseded_reason=None,
         )
 
     def update_text(self, text: str) -> None:
@@ -127,6 +130,21 @@ class ExecutionInput:
         if self.status not in EDITABLE_INPUT_STATUSES:
             raise InvalidTransition("only accepted or queued input can be cancelled")
         self.status = ExecutionInputStatus.CANCELLED
+        self.updated_at = now
+        self.version += 1
+
+    def supersede(self, *, now: datetime, reason: str) -> None:
+        if self.status not in EDITABLE_INPUT_STATUSES:
+            raise InvalidTransition("only accepted or queued input can be superseded")
+        if now.tzinfo is None:
+            raise ValidationError("input timestamp must be timezone-aware")
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ValidationError("superseded reason is required")
+        self.status = ExecutionInputStatus.SUPERSEDED
+        self.superseded_reason = clean_reason
+        self.operation_id = None
+        self.failure_code = None
         self.updated_at = now
         self.version += 1
 

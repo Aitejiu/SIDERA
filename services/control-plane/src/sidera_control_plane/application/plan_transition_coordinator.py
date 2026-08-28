@@ -7,7 +7,16 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
+from sidera_control_plane.application.context_patch_delivery import (
+    ContextPatchDeliveryService,
+    ContextPatchGateway,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.domain.context_packages import (
+    ContextConsumerType,
+    ContextPackageStatus,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.errors import StaleFencingToken
 from sidera_control_plane.domain.execution import (
     TERMINAL_EXECUTION_STATUSES,
@@ -21,8 +30,8 @@ from sidera_control_plane.domain.plan_transitions import (
 )
 
 
-class TransitionRuntimeGateway(Protocol):
-    """Reserved runtime boundary for patch/continuation actions."""
+class TransitionRuntimeGateway(ContextPatchGateway, Protocol):
+    """Runtime boundary for patch/continuation actions."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,15 +51,15 @@ class _ClaimedWorkerTransition:
     version: int
     lease_id: UUID | None
     fencing_token: int
+    action: WorkerTransitionAction
 
 
 class PlanTransitionCoordinator:
-    """Advance the non-invasive part of a confirmed plan transition.
+    """Advance safe parts of a confirmed plan transition.
 
-    The coordinator deliberately handles only preserve and move in this task.
-    Both actions retain the existing Execution/Session and therefore need no
-    adapter call. More invasive actions are left pending for the later runtime
-    stages instead of being guessed at here.
+    Preserve and move retain the existing Execution/Session and need no adapter
+    call. Patch uses the separate ContextPatch delivery service; continuation,
+    create, and retire remain explicit later runtime actions.
     """
 
     def __init__(
@@ -73,6 +82,17 @@ class PlanTransitionCoordinator:
         self._lease_ttl_seconds = lease_ttl_seconds
         self._backoff_max_seconds = backoff_max_seconds
         self._gateway = gateway
+        self._patch_delivery = (
+            ContextPatchDeliveryService(
+                uow_factory=uow_factory,
+                gateway=gateway,
+                clock=self._clock,
+                backoff_max_seconds=backoff_max_seconds,
+            )
+            if gateway is not None
+            and callable(getattr(gateway, "apply_context_patch", None))
+            else None
+        )
 
     def run_once(self, limit: int = 20) -> PlanTransitionRunResult:
         if limit < 1:
@@ -85,7 +105,15 @@ class PlanTransitionCoordinator:
         for item in claimed:
             touched_plan_ids.add(item.plan_transition_id)
             try:
-                if self._converge_preserve_or_move(item, now=self._clock()):
+                if item.action is WorkerTransitionAction.PATCH:
+                    outcome = self._converge_patch(item)
+                    if outcome == "converged":
+                        converged += 1
+                    elif outcome == "unknown":
+                        failed += 1
+                    else:
+                        deferred += 1
+                elif self._converge_preserve_or_move(item, now=self._clock()):
                     converged += 1
                 else:
                     deferred += 1
@@ -113,6 +141,7 @@ class PlanTransitionCoordinator:
                 if transition.action not in {
                     WorkerTransitionAction.PRESERVE,
                     WorkerTransitionAction.MOVE,
+                    WorkerTransitionAction.PATCH,
                 }:
                     continue
                 if not self._head_matches(uow, transition):
@@ -121,19 +150,35 @@ class PlanTransitionCoordinator:
                 if not self._dependencies_ready(uow, transition):
                     deferred += 1
                     continue
-                lease = self._resolve_claim_lease(uow, transition, now=now)
+                if transition.action is WorkerTransitionAction.PATCH:
+                    if self._patch_delivery is None or not self._patch_ready(
+                        uow, transition, now=now
+                    ):
+                        deferred += 1
+                        continue
+                    lease = self._resolve_patch_lease(uow, transition, now=now)
+                else:
+                    lease = self._resolve_claim_lease(uow, transition, now=now)
                 if lease is None:
                     deferred += 1
                     continue
                 previous_version = transition.version
                 try:
-                    transition.claim(
-                        lease_id=lease[0],
-                        fencing_token=lease[1],
-                        now=now,
-                    )
-                    transition.wait_for_safe_boundary(now=now)
-                    uow.worker_transitions.save(transition, previous_version)
+                    if transition.status is WorkerTransitionStatus.PENDING:
+                        transition.claim(
+                            lease_id=lease[0],
+                            fencing_token=lease[1],
+                            now=now,
+                        )
+                        transition.wait_for_safe_boundary(now=now)
+                        uow.worker_transitions.save(transition, previous_version)
+                    elif (
+                        transition.lease_id != lease[0]
+                        or transition.fencing_token != lease[1]
+                    ):
+                        raise StaleFencingToken(
+                            "waiting worker transition is owned by another fence"
+                        )
                 except StaleFencingToken:
                     deferred += 1
                     continue
@@ -145,6 +190,7 @@ class PlanTransitionCoordinator:
                         version=transition.version,
                         lease_id=transition.lease_id,
                         fencing_token=transition.fencing_token,
+                        action=transition.action,
                     )
                 )
         return tuple(claimed), deferred
@@ -175,6 +221,18 @@ class PlanTransitionCoordinator:
             transition.converge(now=now)
             uow.worker_transitions.save(transition, previous_version)
             return True
+
+    def _converge_patch(self, claimed: _ClaimedWorkerTransition) -> str:
+        if self._patch_delivery is None or claimed.lease_id is None:
+            return "deferred"
+        result = self._patch_delivery.deliver(
+            transition_id=claimed.id,
+            workspace_id=claimed.workspace_id,
+            expected_version=claimed.version,
+            lease_id=claimed.lease_id,
+            fencing_token=claimed.fencing_token,
+        )
+        return result.outcome
 
     def _reconcile_plans(self, *, now: datetime, limit: int) -> int:
         reconciled = 0
@@ -224,6 +282,127 @@ class PlanTransitionCoordinator:
         if transition.fencing_token > lease.fencing_token:
             return None
         return lease.id, lease.fencing_token
+
+    def _resolve_patch_lease(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        transition: WorkerTransition,
+        *,
+        now: datetime,
+    ) -> tuple[UUID, int] | None:
+        if transition.source_execution_id is None:
+            return None
+        execution = uow.executions.get(
+            transition.source_execution_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if execution is None or execution.active_lease_id is None:
+            return None
+        lease = uow.leases.get(
+            execution.active_lease_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if (
+            lease is None
+            or lease.status is not LeaseStatus.ACTIVE
+            or now >= lease.expires_at
+        ):
+            return None
+        if transition.lease_id is not None and transition.lease_id != lease.id:
+            return None
+        if transition.fencing_token > lease.fencing_token:
+            return None
+        return lease.id, lease.fencing_token
+
+    @staticmethod
+    def _patch_ready(
+        uow: ControlPlaneUnitOfWork,
+        transition: WorkerTransition,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Check durable patch prerequisites before taking the transition fence."""
+        if transition.source_execution_id is None:
+            return False
+        execution = uow.executions.get(
+            transition.source_execution_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if execution is None or execution.active_lease_id is None:
+            return False
+        lease = uow.leases.get(
+            execution.active_lease_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if (
+            lease is None
+            or lease.status is not LeaseStatus.ACTIVE
+            or now >= lease.expires_at
+            or lease.fencing_token < transition.fencing_token
+        ):
+            return False
+        if execution.worker_item_id != transition.worker_item_id:
+            return False
+        session = uow.sessions.get_active_for_execution(
+            execution.id, for_update=True
+        )
+        if session is None:
+            return False
+        worker_item = uow.worker_items.get(
+            transition.worker_item_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if (
+            worker_item is None
+            or worker_item.context_version != transition.target_context_version
+            or worker_item.acknowledged_context_version
+            >= transition.target_context_version
+        ):
+            return False
+        binding = uow.bindings.get_for_execution(
+            execution.id, transition.workspace_id, for_update=True
+        )
+        if (
+            binding is None
+            or binding.lease_id != lease.id
+            or binding.fencing_token != lease.fencing_token
+            or 1 not in binding.capability_snapshot.context_patch_versions
+        ):
+            return False
+        package = uow.context_packages.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            execution.id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if (
+            package is None
+            or package.status is not ContextPackageStatus.ACTIVE
+            or package.worker_item_id != worker_item.id
+            or package.context_version is None
+            or package.context_version >= transition.target_context_version
+            or now >= package.expires_at
+        ):
+            return False
+        package_ack = uow.context_packages.get_ack(
+            package.package_id,
+            ContextConsumerType.WORKER,
+            execution.id,
+            transition.workspace_id,
+        )
+        return bool(
+            package_ack is not None
+            and package_ack.package_hash == package.package_hash
+            and package_ack.context_version == package.context_version
+            and package_ack.consumer_id == execution.id
+            and package_ack.adapter_module_id == binding.adapter_module_id
+            and package_ack.adapter_config_version == binding.adapter_config_version
+        )
 
     def _runtime_is_safe(
         self,

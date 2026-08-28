@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Self, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -58,16 +59,53 @@ class RecordingEvents:
 
 class FakeUnitOfWork(AbstractContextManager["FakeUnitOfWork"]):
     def __init__(
-        self, repository: RecordingInputRepository, events: RecordingEvents
+        self,
+        repository: RecordingInputRepository,
+        events: RecordingEvents,
+        *,
+        worker_item_id: UUID | None = None,
+        active_transition: object | None = None,
     ) -> None:
         self.execution_inputs = repository
         self.events = events
+        self.executions = _ExecutionRepository(worker_item_id)
+        self.worker_transitions = _WorkerTransitionRepository(active_transition)
 
     def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+class _ExecutionRepository:
+    def __init__(self, worker_item_id: UUID | None) -> None:
+        self.worker_item_id = worker_item_id
+
+    def get(
+        self,
+        execution_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> object:
+        del execution_id, workspace_id, for_update
+        return SimpleNamespace(worker_item_id=self.worker_item_id)
+
+
+class _WorkerTransitionRepository:
+    def __init__(self, active_transition: object | None) -> None:
+        self.active_transition = active_transition
+
+    def get_active_for_worker_item(
+        self,
+        worker_item_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> object | None:
+        del worker_item_id, workspace_id, for_update
+        return self.active_transition
 
 
 class RecordingGateway:
@@ -104,12 +142,19 @@ def _input() -> ExecutionInput:
 
 
 def _dispatcher(
-    item: ExecutionInput, gateway: RecordingGateway
+    item: ExecutionInput,
+    gateway: RecordingGateway,
+    *,
+    worker_item_id: UUID | None = None,
+    active_transition: object | None = None,
 ) -> tuple[InputDispatcher, RecordingInputRepository, RecordingEvents]:
     repository = RecordingInputRepository([item])
     events = RecordingEvents()
     uow_factory: Callable[[], FakeUnitOfWork] = lambda: FakeUnitOfWork(
-        repository, events
+        repository,
+        events,
+        worker_item_id=worker_item_id,
+        active_transition=active_transition,
     )
     return (
         InputDispatcher(
@@ -200,3 +245,28 @@ def test_gateway_recovery_error_is_conservatively_blocked() -> None:
 
     assert repository.items[item.id].status is ExecutionInputStatus.BLOCKED
     assert repository.items[item.id].failure_code == "gateway_recovery_required"
+
+
+def test_claimed_input_is_requeued_when_worker_transition_holds_the_fence() -> None:
+    item = _input()
+    gateway = RecordingGateway(
+        DeliveryResult(
+            operation_id=uuid4(),
+            outcome=DeliveryOutcome.DELIVERED,
+            accepted_sequence=9,
+            failure_code=None,
+        )
+    )
+    transition = SimpleNamespace(status="waiting_safe_boundary")
+    dispatcher, repository, _events = _dispatcher(
+        item,
+        gateway,
+        worker_item_id=uuid4(),
+        active_transition=transition,
+    )
+
+    report = dispatcher.run_once()
+
+    assert report.deferred == 1
+    assert repository.items[item.id].status is ExecutionInputStatus.QUEUED
+    assert gateway.calls == []

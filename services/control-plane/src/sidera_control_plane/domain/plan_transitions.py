@@ -284,6 +284,31 @@ class WorkerTransition:
     def wait_for_safe_boundary(self, *, now: datetime) -> None:
         self._move(WorkerTransitionStatus.WAITING_SAFE_BOUNDARY, now=now)
 
+    def defer_safe_boundary(
+        self,
+        *,
+        failure_code: str,
+        next_attempt_at: datetime,
+        now: datetime,
+    ) -> None:
+        if self.status not in {
+            WorkerTransitionStatus.WAITING_SAFE_BOUNDARY,
+            WorkerTransitionStatus.APPLYING,
+        }:
+            raise InvalidTransition(
+                "only an active worker transition can defer at a safe boundary"
+            )
+        self.failure_code = _required(failure_code, "failure_code")
+        _aware(now, "worker transition safe-boundary time")
+        _aware(next_attempt_at, "worker transition next attempt time")
+        if next_attempt_at < now:
+            raise ValidationError("worker transition next attempt cannot be in the past")
+        self.status = WorkerTransitionStatus.WAITING_SAFE_BOUNDARY
+        self.writer_state = WriterState.FENCED
+        self.next_attempt_at = next_attempt_at
+        self.completed_at = None
+        self.version += 1
+
     def begin_apply(self, *, now: datetime) -> None:
         self._move(WorkerTransitionStatus.APPLYING, now=now)
         self.attempt_count += 1
@@ -309,6 +334,7 @@ class WorkerTransition:
 
     def mark_unknown(self, *, failure_code: str, now: datetime) -> None:
         if self.status not in {
+            WorkerTransitionStatus.WAITING_SAFE_BOUNDARY,
             WorkerTransitionStatus.APPLYING,
             WorkerTransitionStatus.WAITING_ACTIVATION,
         }:
