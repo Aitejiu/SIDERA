@@ -240,6 +240,8 @@ class ExecutionRequest:
     updated_at: datetime
     expected_outputs: tuple[str, ...] = ()
     adapter_forbidden: frozenset[str] = frozenset()
+    source_execution_id: UUID | None = None
+    source_session_id: UUID | None = None
 
     @classmethod
     def create(
@@ -267,6 +269,8 @@ class ExecutionRequest:
         now: datetime,
         expected_outputs: tuple[str, ...] | Iterable[str] = (),
         adapter_forbidden: tuple[str, ...] | Iterable[str] = (),
+        source_execution_id: UUID | None = None,
+        source_session_id: UUID | None = None,
     ) -> ExecutionRequest:
         for name, value in (
             ("request_id", request_id),
@@ -280,6 +284,16 @@ class ExecutionRequest:
         ):
             if not isinstance(value, UUID):
                 raise ValidationError(f"{name} must be a UUID")
+        for name, value in (
+            ("source_execution_id", source_execution_id),
+            ("source_session_id", source_session_id),
+        ):
+            if value is not None and not isinstance(value, UUID):
+                raise ValidationError(f"{name} must be a UUID")
+        if source_session_id is not None and source_execution_id is None:
+            raise ValidationError(
+                "source_session_id requires source_execution_id"
+            )
         if plan_generation < 1:
             raise ValidationError("plan_generation must be positive")
         clean_key = _required_text(worker_item_key, "worker_item_key")
@@ -338,6 +352,8 @@ class ExecutionRequest:
             updated_at=now,
             expected_outputs=outputs,
             adapter_forbidden=forbidden,
+            source_execution_id=source_execution_id,
+            source_session_id=source_session_id,
         )
 
     @property

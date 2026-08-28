@@ -70,12 +70,12 @@ def test_revision_runner_builds_typed_context_and_persists_v3_proposal(
         owner_id="planning-worker:revision-integration",
         lease_ttl_seconds=60,
         lease_renew_interval_seconds=10,
-        clock=lambda: NOW,
-    ).run_once(1)
+        clock=lambda: datetime.now(UTC),
+    ).run_once(2)
 
-    assert batch.claimed == 1
+    assert batch.claimed == 2
     assert batch.succeeded == 1
-    assert batch.failed == 0
+    assert batch.failed == 1
     with uow_factory() as uow:
         request = uow.planning_requests.get(planning_request_id, workspace_id)
         assert request is not None

@@ -37,6 +37,31 @@ class SessionRepository:
         row = self._session.scalar(statement)
         return _to_domain_session(row) if row is not None else None
 
+    def get_latest_for_execution(
+        self,
+        execution_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionSession | None:
+        statement = (
+            select(ExecutionSessionModel)
+            .where(
+                ExecutionSessionModel.execution_id == execution_id,
+                ExecutionSessionModel.workspace_id == workspace_id,
+            )
+            .order_by(
+                ExecutionSessionModel.last_activity_at.desc(),
+                ExecutionSessionModel.updated_at.desc(),
+                ExecutionSessionModel.id.desc(),
+            )
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_session(row) if row is not None else None
+
     def get(
         self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionSession | None:

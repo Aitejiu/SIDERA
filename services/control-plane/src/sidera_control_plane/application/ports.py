@@ -879,6 +879,16 @@ class ExecutionRequestRepositoryPort(Protocol):
     ) -> ExecutionRequest | None:
         raise NotImplementedError
 
+    def get_by_proposal_worker_item(
+        self,
+        proposal_revision_id: UUID,
+        worker_item_key: str,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        raise NotImplementedError
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         raise NotImplementedError
 
@@ -1123,6 +1133,15 @@ class SessionRepositoryPort(Protocol):
 
     def get_active_for_execution(
         self, execution_id: UUID, *, for_update: bool = False
+    ) -> ExecutionSession | None:
+        raise NotImplementedError
+
+    def get_latest_for_execution(
+        self,
+        execution_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
     ) -> ExecutionSession | None:
         raise NotImplementedError
 

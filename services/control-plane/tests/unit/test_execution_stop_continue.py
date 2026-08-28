@@ -4,7 +4,10 @@ from uuid import UUID, uuid4
 import pytest
 
 from sidera_control_plane.api.schemas import CommandRequest
-from sidera_control_plane.application.execution_commands import _continuation_worker_id
+from sidera_control_plane.application.execution_commands import (
+    _continuation_worker_id,
+    build_continuation_execution,
+)
 from sidera_control_plane.domain.errors import InvalidTransition
 from sidera_control_plane.domain.execution import (
     Execution,
@@ -117,3 +120,53 @@ def test_continuation_source_keeps_worker_item_binding() -> None:
     execution = _execution()
 
     assert execution.worker_item_id == WORKER_ITEM_ID
+
+
+def test_continuation_factory_preserves_worker_item_and_source_lineage() -> None:
+    execution = _execution()
+    session = ExecutionSession.start(
+        session_id=uuid4(),
+        workspace_id=execution.workspace_id,
+        execution_id=execution.id,
+        worker_id=uuid4(),
+        adapter_session_id="source-session",
+        now=NOW,
+    )
+    session.close(lost=False, now=NOW)
+    execution.succeed(
+        lease_id=execution.active_lease_id or uuid4(),
+        fencing_token=execution.last_fencing_token,
+        now=NOW,
+    )
+
+    continuation = build_continuation_execution(
+        execution,
+        session,
+        not_before=NOW,
+        execution_id=uuid4(),
+    )
+
+    assert continuation.worker_item_id == execution.worker_item_id
+    assert continuation.source_execution_id == execution.id
+    assert continuation.source_session_id == session.id
+    assert continuation.lineage_id == continuation.id
+
+
+def test_continuation_factory_rejects_a_live_source() -> None:
+    execution = _execution()
+    session = ExecutionSession.start(
+        session_id=uuid4(),
+        workspace_id=execution.workspace_id,
+        execution_id=execution.id,
+        worker_id=uuid4(),
+        adapter_session_id="live-source-session",
+        now=NOW,
+    )
+
+    with pytest.raises(InvalidTransition, match="terminal"):
+        build_continuation_execution(
+            execution,
+            session,
+            not_before=NOW,
+            execution_id=uuid4(),
+        )

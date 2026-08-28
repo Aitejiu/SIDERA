@@ -21,7 +21,12 @@ SUBTASK_ID = UUID("25000000-0000-0000-0000-000000000001")
 WORKER_ITEM_ID = UUID("26000000-0000-0000-0000-000000000001")
 
 
-def make_request(*, request_id: UUID = REQUEST_ID) -> ExecutionRequest:
+def make_request(
+    *,
+    request_id: UUID = REQUEST_ID,
+    source_execution_id: UUID | None = None,
+    source_session_id: UUID | None = None,
+) -> ExecutionRequest:
     return ExecutionRequest.create(
         request_id=request_id,
         workspace_id=WORKSPACE_ID,
@@ -44,6 +49,8 @@ def make_request(*, request_id: UUID = REQUEST_ID) -> ExecutionRequest:
         expected_artifact_refs=("artifact_type:diff",),
         expected_evidence_refs=("acceptance:tests-pass",),
         now=NOW,
+        source_execution_id=source_execution_id,
+        source_session_id=source_session_id,
     )
 
 
@@ -91,6 +98,20 @@ def test_execution_request_starts_blocked_and_materializes_once() -> None:
             first_execution_id=uuid4(),
             now=NOW,
         )
+
+
+def test_continuation_request_keeps_exact_source_lineage() -> None:
+    source_execution_id = uuid4()
+    source_session_id = uuid4()
+
+    request = make_request(
+        request_id=uuid4(),
+        source_execution_id=source_execution_id,
+        source_session_id=source_session_id,
+    )
+
+    assert request.source_execution_id == source_execution_id
+    assert request.source_session_id == source_session_id
 
 
 def test_cancelled_and_obsolete_requests_cannot_reopen() -> None:

@@ -281,6 +281,15 @@ class WorkerTransition:
         self.fencing_token = fencing_token
         self.version += 1
 
+    def remember_source_session(self, session_id: UUID) -> None:
+        if not isinstance(session_id, UUID):
+            raise ValidationError("source session id must be a UUID")
+        if self.source_session_id is not None and self.source_session_id != session_id:
+            raise StaleFencingToken("worker transition source Session changed")
+        if self.source_session_id is None:
+            self.source_session_id = session_id
+            self.version += 1
+
     def wait_for_safe_boundary(self, *, now: datetime) -> None:
         self._move(WorkerTransitionStatus.WAITING_SAFE_BOUNDARY, now=now)
 
@@ -317,6 +326,21 @@ class WorkerTransition:
 
     def wait_for_activation(self, *, now: datetime) -> None:
         self._move(WorkerTransitionStatus.WAITING_ACTIVATION, now=now)
+
+    def use_fallback(self) -> None:
+        if self.fallback_action is None:
+            raise InvalidTransition("worker transition has no fallback action")
+        if self.action is self.fallback_action:
+            return
+        if self.action is not WorkerTransitionAction.PATCH:
+            raise InvalidTransition("fallback is only available for patch transitions")
+        if self.status not in {
+            WorkerTransitionStatus.PENDING,
+            WorkerTransitionStatus.WAITING_SAFE_BOUNDARY,
+        }:
+            raise InvalidTransition("worker transition fallback is no longer selectable")
+        self.action = self.fallback_action
+        self.version += 1
 
     def converge(self, *, now: datetime) -> None:
         if self.status not in {

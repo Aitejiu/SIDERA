@@ -2902,6 +2902,18 @@ class ExecutionRequestModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_execution_requests_first_execution_workspace",
         ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_source_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_source_session_workspace",
+        ),
         UniqueConstraint(
             "id", "workspace_id", name="uq_execution_requests_identity"
         ),
@@ -2983,6 +2995,12 @@ class ExecutionRequestModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True)
     )
     first_execution_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_execution_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_session_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)

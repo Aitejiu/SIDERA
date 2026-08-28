@@ -45,6 +45,24 @@ class ExecutionRequestRepository:
         row = self._session.scalar(statement)
         return _to_request(row) if row is not None else None
 
+    def get_by_proposal_worker_item(
+        self,
+        proposal_revision_id: UUID,
+        worker_item_key: str,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        statement = select(ExecutionRequestModel).where(
+            ExecutionRequestModel.proposal_revision_id == proposal_revision_id,
+            ExecutionRequestModel.worker_item_key == worker_item_key,
+            ExecutionRequestModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_request(row) if row is not None else None
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         result = self._session.execute(
             update(ExecutionRequestModel)
@@ -73,6 +91,8 @@ class ExecutionRequestRepository:
                 status_changed_at=request.status_changed_at,
                 execution_lineage_id=request.execution_lineage_id,
                 first_execution_id=request.first_execution_id,
+                source_execution_id=request.source_execution_id,
+                source_session_id=request.source_session_id,
                 version=request.version,
                 updated_at=datetime.now(UTC),
             )
@@ -209,6 +229,8 @@ def _request_model(request: ExecutionRequest) -> ExecutionRequestModel:
         status_changed_at=request.status_changed_at,
         execution_lineage_id=request.execution_lineage_id,
         first_execution_id=request.first_execution_id,
+        source_execution_id=request.source_execution_id,
+        source_session_id=request.source_session_id,
         version=request.version,
     )
 
@@ -242,6 +264,8 @@ def _to_request(row: ExecutionRequestModel) -> ExecutionRequest:
         status_changed_at=row.status_changed_at,
         execution_lineage_id=row.execution_lineage_id,
         first_execution_id=row.first_execution_id,
+        source_execution_id=row.source_execution_id,
+        source_session_id=row.source_session_id,
         version=row.version,
         created_at=row.created_at,
         updated_at=row.updated_at,

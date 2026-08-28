@@ -43,6 +43,61 @@ def _continuation_worker_id(execution: Execution, session: ExecutionSession) -> 
     return session.worker_id
 
 
+def build_continuation_execution(
+    source: Execution,
+    source_session: ExecutionSession,
+    *,
+    not_before: datetime,
+    execution_id: UUID,
+    task_id: UUID | None = None,
+    max_attempts: int | None = None,
+    purpose: str | None = None,
+    capability_requirements: frozenset[str] | None = None,
+    adapter_preferences: tuple[str, ...] | None = None,
+    adapter_forbidden: frozenset[str] | None = None,
+) -> Execution:
+    """Build a new attempt that keeps the WorkerItem and source lineage."""
+    if source_session.execution_id != source.id:
+        raise ValidationError("source Session does not belong to the source execution")
+    if source_session.workspace_id != source.workspace_id:
+        raise ValidationError("source Session belongs to another workspace")
+    if source_session.status is ExecutionSessionStatus.ACTIVE:
+        raise InvalidTransition("only a terminal Session can be continued")
+    if source.status not in TERMINAL_EXECUTION_STATUSES:
+        raise InvalidTransition("source execution is not terminal")
+    if source.active_lease_id is not None:
+        raise InvalidTransition("source execution still has an active lease")
+    return Execution.create(
+        execution_id=execution_id,
+        workspace_id=source.workspace_id,
+        task_id=task_id if task_id is not None else source.task_id,
+        worker_item_id=source.worker_item_id,
+        lineage_id=execution_id,
+        attempt=1,
+        max_attempts=max_attempts if max_attempts is not None else source.max_attempts,
+        purpose=purpose if purpose is not None else source.purpose,
+        capability_requirements=(
+            capability_requirements
+            if capability_requirements is not None
+            else source.capability_requirements
+        ),
+        pinned_worker_id=_continuation_worker_id(source, source_session),
+        not_before=not_before,
+        source_execution_id=source.id,
+        source_session_id=source_session.id,
+        adapter_preferences=(
+            adapter_preferences
+            if adapter_preferences is not None
+            else source.adapter_preferences
+        ),
+        adapter_forbidden=(
+            adapter_forbidden
+            if adapter_forbidden is not None
+            else source.adapter_forbidden
+        ),
+    )
+
+
 class ExecutionCommandHandler:
     command_types = frozenset(
         {
@@ -251,23 +306,11 @@ class ExecutionCommandHandler:
         }:
             raise InvalidTransition(f"task cannot receive a continuation from {task.status}")
 
-        continuation_id = uuid4()
-        continuation = Execution.create(
-            execution_id=continuation_id,
-            workspace_id=execution.workspace_id,
-            task_id=execution.task_id,
-            worker_item_id=execution.worker_item_id,
-            lineage_id=continuation_id,
-            attempt=1,
-            max_attempts=execution.max_attempts,
-            purpose=execution.purpose,
-            capability_requirements=execution.capability_requirements,
-            pinned_worker_id=_continuation_worker_id(execution, session),
+        continuation = build_continuation_execution(
+            execution,
+            session,
             not_before=_required_datetime(envelope.payload, "not_before"),
-            source_execution_id=execution.id,
-            source_session_id=session.id,
-            adapter_preferences=execution.adapter_preferences,
-            adapter_forbidden=execution.adapter_forbidden,
+            execution_id=uuid4(),
         )
         events: list[EventData] = []
         if task.status in {TaskStatus.PENDING, TaskStatus.WAITING}:

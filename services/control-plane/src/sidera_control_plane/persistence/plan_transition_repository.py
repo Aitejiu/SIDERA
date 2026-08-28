@@ -246,6 +246,7 @@ class WorkerTransitionRepository:
                     (
                         WorkerTransitionStatus.PENDING.value,
                         WorkerTransitionStatus.WAITING_SAFE_BOUNDARY.value,
+                        WorkerTransitionStatus.WAITING_ACTIVATION.value,
                     )
                 ),
                 or_(

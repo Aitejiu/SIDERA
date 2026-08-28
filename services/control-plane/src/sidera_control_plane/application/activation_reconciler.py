@@ -10,6 +10,9 @@ from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
 )
+from sidera_control_plane.application.execution_commands import (
+    build_continuation_execution,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import InvalidTransition
@@ -27,6 +30,8 @@ from sidera_control_plane.domain.execution_requests import (
     ExecutionRequestStatus,
     UpstreamActivationFact,
 )
+from sidera_control_plane.domain.plan_revisions import WorkerTransitionAction
+from sidera_control_plane.domain.plan_transitions import WorkerTransitionStatus
 from sidera_control_plane.domain.planning import (
     PlanningRequest,
     PlanningRequestStatus,
@@ -214,21 +219,51 @@ class ActivationReconciler:
             return None, True
 
         execution_id = uuid4()
-        execution = Execution.create(
-            execution_id=execution_id,
-            workspace_id=request.workspace_id,
-            task_id=request.subtask_id,
-            worker_item_id=request.worker_item_id,
-            lineage_id=execution_id,
-            attempt=1,
-            max_attempts=request.max_attempts,
-            purpose=request.purpose,
-            capability_requirements=request.capability_requirements,
-            pinned_worker_id=None,
-            not_before=request.not_before,
-            adapter_preferences=request.adapter_preferences,
-            adapter_forbidden=request.adapter_forbidden,
-        )
+        if request.source_execution_id is not None:
+            source = uow.executions.get(
+                request.source_execution_id,
+                request.workspace_id,
+            )
+            source_session = (
+                uow.sessions.get_any(
+                    request.source_session_id,
+                    request.workspace_id,
+                )
+                if request.source_session_id is not None
+                else None
+            )
+            if source is None or source_session is None:
+                raise InvalidTransition(
+                    "continuation request source lineage is unavailable"
+                )
+            execution = build_continuation_execution(
+                source,
+                source_session,
+                execution_id=execution_id,
+                task_id=request.subtask_id,
+                max_attempts=request.max_attempts,
+                purpose=request.purpose,
+                capability_requirements=request.capability_requirements,
+                adapter_preferences=request.adapter_preferences,
+                adapter_forbidden=request.adapter_forbidden,
+                not_before=request.not_before,
+            )
+        else:
+            execution = Execution.create(
+                execution_id=execution_id,
+                workspace_id=request.workspace_id,
+                task_id=request.subtask_id,
+                worker_item_id=request.worker_item_id,
+                lineage_id=execution_id,
+                attempt=1,
+                max_attempts=request.max_attempts,
+                purpose=request.purpose,
+                capability_requirements=request.capability_requirements,
+                pinned_worker_id=None,
+                not_before=request.not_before,
+                adapter_preferences=request.adapter_preferences,
+                adapter_forbidden=request.adapter_forbidden,
+            )
         task_event: EventData | None = None
         previous_request_version = request.version
         envelope = self._envelope(
@@ -271,6 +306,9 @@ class ActivationReconciler:
             now=now,
         )
         uow.execution_requests.save(request, previous_request_version)
+        transition_event = self._bind_worker_transition(
+            uow, request, execution, now=now, envelope=envelope
+        )
 
         events = [
             _event(
@@ -307,8 +345,61 @@ class ActivationReconciler:
         ]
         if task_event is not None:
             events.insert(0, task_event)
+        if transition_event is not None:
+            events.append(transition_event)
         self._record_events(uow, envelope, request, tuple(events))
         return execution.id, False
+
+    def _bind_worker_transition(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: ExecutionRequest,
+        execution: Execution,
+        *,
+        now: datetime,
+        envelope: CommandEnvelope,
+    ) -> EventData | None:
+        transitions = getattr(uow, "worker_transitions", None)
+        if transitions is None:
+            return None
+        transition = transitions.get_active_for_worker_item(
+            request.worker_item_id,
+            request.workspace_id,
+            for_update=True,
+        )
+        if transition is None or transition.status is not WorkerTransitionStatus.WAITING_ACTIVATION:
+            return None
+        if transition.action not in {
+            WorkerTransitionAction.CONTINUE,
+            WorkerTransitionAction.CREATE,
+        }:
+            return None
+        plan = uow.plan_transitions.get(
+            transition.plan_transition_id, request.workspace_id
+        )
+        if (
+            plan is None
+            or plan.to_snapshot_id != request.plan_snapshot_id
+            or plan.to_generation != request.plan_generation
+        ):
+            return None
+        previous_version = transition.version
+        transition.bind_target(execution_id=execution.id, session_id=None, now=now)
+        transitions.save(transition, previous_version)
+        return _event(
+            envelope,
+            aggregate_type="worker_transition",
+            aggregate_id=transition.id,
+            aggregate_version=transition.version,
+            event_type="WorkerTransitionWaitingForActivation",
+            payload={
+                "worker_transition_id": str(transition.id),
+                "worker_item_id": str(transition.worker_item_id),
+                "execution_request_id": str(request.id),
+                "target_execution_id": str(execution.id),
+                "status": transition.status.value,
+            },
+        )
 
     def _current_context(
         self, uow: ControlPlaneUnitOfWork, request: ExecutionRequest
