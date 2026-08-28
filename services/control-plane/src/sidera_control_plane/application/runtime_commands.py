@@ -5,13 +5,21 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateOperation,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_runtime import (
     ResolvedWorkerRuntime,
     WorkerRuntimeResolver,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
-from sidera_control_plane.domain.errors import ValidationError, VersionConflict
+from sidera_control_plane.domain.errors import (
+    InvalidTransition,
+    ValidationError,
+    VersionConflict,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.modules import ModuleLifecycle
@@ -54,6 +62,7 @@ class RuntimeCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         execution = _get_target_execution(uow, envelope)
+        _require_execution_transition_gate(uow, execution)
         worker_id = _required_uuid(envelope.payload, "worker_id")
         worker = uow.workers.get(
             worker_id,
@@ -110,6 +119,7 @@ class RuntimeCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         execution = _get_target_execution(uow, envelope)
+        _require_execution_transition_gate(uow, execution)
         previous_worker_id = execution.pinned_worker_id
         previous_version = execution.version
         execution.clear_worker_pin()
@@ -382,6 +392,32 @@ def _raise_runtime_issue(issue: SchedulingIssue) -> None:
         "worker runtime configuration is invalid",
         details={"reason_code": issue.reason_code.value, **dict(issue.reason_details)},
     )
+
+
+def _require_execution_transition_gate(
+    uow: ControlPlaneUnitOfWork, execution: Execution
+) -> None:
+    if execution.worker_item_id is None:
+        return
+    worker_items = getattr(uow, "worker_items", None)
+    if worker_items is None:
+        return
+    placement = worker_items.get_current_placement(
+        execution.worker_item_id,
+        execution.workspace_id,
+    )
+    if placement is None:
+        return
+    result = PlanTransitionGate(uow).evaluate(
+        worker_item_id=execution.worker_item_id,
+        workspace_id=execution.workspace_id,
+        plan_generation=placement.plan_generation,
+        operation=PlanTransitionGateOperation.MUTATE,
+    )
+    if not result.allowed:
+        raise InvalidTransition(
+            f"execution routing mutation is blocked by {result.reason}"
+        )
 
 
 def _get_target_execution(

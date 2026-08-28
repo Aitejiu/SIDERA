@@ -11,6 +11,10 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateOperation,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.scheduling_blocks import (
     SchedulingBlockService,
@@ -140,6 +144,32 @@ class Scheduler:
                     return 0, 0, 0, None
                 execution = claimed[0]
                 execution_id = execution.id
+                if execution.worker_item_id is not None:
+                    transition_gate = PlanTransitionGate(uow).evaluate(
+                        worker_item_id=execution.worker_item_id,
+                        workspace_id=execution.workspace_id,
+                        plan_generation=None,
+                        operation=PlanTransitionGateOperation.SCHEDULE,
+                        target_id=execution.id,
+                    )
+                    if not transition_gate.allowed:
+                        reason_code = (
+                            SchedulingBlockReason.PLAN_GENERATION_STALE
+                            if transition_gate.obsolete
+                            else SchedulingBlockReason.PLAN_TRANSITION_BLOCKED
+                        )
+                        return self._commit_deferred(
+                            uow=uow,
+                            execution=execution,
+                            issue=SchedulingIssue(
+                                reason_code=reason_code,
+                                reason_details=dict(transition_gate.details),
+                                requires_operator=transition_gate.reason
+                                != "worker_transition_in_flight",
+                            ),
+                            now=now,
+                            execution_id=execution_id,
+                        )
                 context_package = None
                 if self._context_required(execution):
                     context_package, context_issue = self._context_gate_issue(

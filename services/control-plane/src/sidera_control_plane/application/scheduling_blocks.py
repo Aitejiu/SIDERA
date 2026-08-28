@@ -27,14 +27,19 @@ _SAFE_DETAIL_KEYS = frozenset(
         "candidate_issue_counts",
         "candidate_worker_ids",
         "context_assembly_request_id",
+        "current_generation",
         "expected",
         "field",
         "forbidden_worker_ids",
+        "gate_reason",
         "lifecycle",
         "provider",
+        "requested_generation",
         "reason",
         "worker_count",
         "worker_id",
+        "worker_transition_id",
+        "worker_transition_status",
     }
 )
 

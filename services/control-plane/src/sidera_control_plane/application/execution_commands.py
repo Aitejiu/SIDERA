@@ -4,6 +4,10 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateOperation,
+)
 from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     WorkerItemPlacement,
@@ -306,6 +310,12 @@ class ExecutionCommandHandler:
         }:
             raise InvalidTransition(f"task cannot receive a continuation from {task.status}")
 
+        _require_worker_item_transition_gate(
+            uow,
+            execution.worker_item_id,
+            envelope.workspace_id,
+        )
+
         continuation = build_continuation_execution(
             execution,
             session,
@@ -367,6 +377,11 @@ class ExecutionCommandHandler:
         task = uow.tasks.get(source.task_id, envelope.workspace_id)
         if task is None:
             raise NotFound("task not found")
+        _require_worker_item_transition_gate(
+            uow,
+            source.worker_item_id,
+            envelope.workspace_id,
+        )
         execution = Execution.create(
             execution_id=uuid4(),
             workspace_id=source.workspace_id,
@@ -1138,7 +1153,44 @@ def _validate_execution_worker_item(
         raise ValidationError("WorkerItem placement identity does not match")
     if placement.subtask_task_id != task_id:
         raise ValidationError("WorkerItem placement Task does not match execution")
+    _require_worker_item_transition_gate(
+        uow,
+        worker_item_id,
+        envelope.workspace_id,
+        plan_generation=placement.plan_generation,
+    )
     return worker_item_id
+
+
+def _require_worker_item_transition_gate(
+    uow: ControlPlaneUnitOfWork,
+    worker_item_id: UUID | None,
+    workspace_id: UUID,
+    *,
+    plan_generation: int | None = None,
+) -> None:
+    if worker_item_id is None:
+        return
+    worker_items = getattr(uow, "worker_items", None)
+    if worker_items is None:
+        return
+    if plan_generation is None:
+        placement = worker_items.get_current_placement(worker_item_id, workspace_id)
+        if placement is None:
+            # Legacy executions may carry a WorkerItem id without a materialized
+            # Task First placement. The v2 create path validates this explicitly.
+            return
+        plan_generation = placement.plan_generation
+    result = PlanTransitionGate(uow).evaluate(
+        worker_item_id=worker_item_id,
+        workspace_id=workspace_id,
+        plan_generation=plan_generation,
+        operation=PlanTransitionGateOperation.MUTATE,
+    )
+    if not result.allowed:
+        raise InvalidTransition(
+            f"execution mutation is blocked by {result.reason}"
+        )
 
 
 def _get_target_session(

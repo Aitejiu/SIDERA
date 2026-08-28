@@ -4,6 +4,10 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateOperation,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_gateway import GatewayRecoveryRequired
 from sidera_control_plane.domain.events import EventData
@@ -27,7 +31,12 @@ class InputDispatchReport:
 
 
 _SAFE_BOUNDARY_FAILURE_CODES = frozenset(
-    {"prompt_busy", "safe_boundary_unavailable", "worker_transition_fence"}
+    {
+        "prompt_busy",
+        "safe_boundary_unavailable",
+        "worker_transition_fence",
+        "worker_transition_in_flight",
+    }
 )
 
 
@@ -53,12 +62,13 @@ class InputDispatcher:
 
         delivered = deferred = blocked = unknown = failed = 0
         for item in claimed:
-            if self._has_worker_transition_fence(item):
+            transition_fence_reason = self._transition_fence_reason(item)
+            if transition_fence_reason is not None:
                 result = DeliveryResult(
                     operation_id=item.operation_id or item.id,
                     outcome=DeliveryOutcome.BLOCKED,
                     accepted_sequence=None,
-                    failure_code="worker_transition_fence",
+                    failure_code=transition_fence_reason,
                 )
             else:
                 result = self._send(item)
@@ -83,31 +93,29 @@ class InputDispatcher:
             failed=failed,
         )
 
-    def _has_worker_transition_fence(self, item: ExecutionInput) -> bool:
+    def _transition_fence_reason(self, item: ExecutionInput) -> str | None:
         """Re-read the authoritative WorkerItem fence after claiming input."""
         with self._uow_factory() as uow:
             executions = getattr(uow, "executions", None)
-            transitions = getattr(uow, "worker_transitions", None)
-            if executions is None or transitions is None:
-                return False
+            if executions is None:
+                return None
             try:
                 execution = executions.get(
                     item.execution_id, item.workspace_id, for_update=True
                 )
                 worker_item_id = getattr(execution, "worker_item_id", None)
                 if worker_item_id is None:
-                    return False
-                return (
-                    transitions.get_active_for_worker_item(
-                        worker_item_id,
-                        item.workspace_id,
-                        for_update=True,
-                    )
-                    is not None
+                    return None
+                gate = PlanTransitionGate(uow).evaluate(
+                    worker_item_id=worker_item_id,
+                    workspace_id=item.workspace_id,
+                    plan_generation=None,
+                    operation=PlanTransitionGateOperation.INPUT,
                 )
+                return None if gate.allowed else gate.reason
             except Exception:  # noqa: BLE001
                 # A failed fence read must not turn into an external write.
-                return True
+                return "worker_transition_fence"
 
     def _send(self, item: ExecutionInput) -> DeliveryResult:
         operation_id = item.operation_id

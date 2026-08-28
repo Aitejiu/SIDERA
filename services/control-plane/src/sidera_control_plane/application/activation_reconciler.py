@@ -13,6 +13,11 @@ from sidera_control_plane.application.context_requests import (
 from sidera_control_plane.application.execution_commands import (
     build_continuation_execution,
 )
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateOperation,
+    PlanTransitionGateResult,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import InvalidTransition
@@ -164,6 +169,26 @@ class ActivationReconciler:
             self._obsolete(uow, request, reason=stale_reason or "stale_context", now=now)
             return False, True
 
+        transition_gate = self._transition_gate(uow, request)
+        if transition_gate.obsolete:
+            self._obsolete(uow, request, reason=transition_gate.reason, now=now)
+            return False, True
+        if transition_gate.blocked:
+            transition_decision = ActivationDecision(
+                ready=False,
+                reason=transition_gate.reason,
+                details=transition_gate.details,
+            )
+            self._log_decision(request, transition_decision, now=now)
+            self._apply_gate(
+                uow,
+                request,
+                transition_decision,
+                now=now,
+                envelope_action="gate-transition-blocked",
+            )
+            return False, True
+
         decision = self._decision(uow, request, context, now=now)
         self._log_decision(request, decision, now=now)
         if decision.ready:
@@ -186,6 +211,26 @@ class ActivationReconciler:
         context, stale_reason = self._current_context(uow, request)
         if context is None:
             self._obsolete(uow, request, reason=stale_reason or "stale_context", now=now)
+            return None, True
+
+        transition_gate = self._transition_gate(uow, request)
+        if transition_gate.obsolete:
+            self._obsolete(uow, request, reason=transition_gate.reason, now=now)
+            return None, True
+        if transition_gate.blocked:
+            transition_decision = ActivationDecision(
+                ready=False,
+                reason=transition_gate.reason,
+                details=transition_gate.details,
+            )
+            self._log_decision(request, transition_decision, now=now)
+            self._apply_gate(
+                uow,
+                request,
+                transition_decision,
+                now=now,
+                envelope_action="gate-transition-blocked",
+            )
             return None, True
 
         decision = self._decision(uow, request, context, now=now)
@@ -450,6 +495,64 @@ class ActivationReconciler:
             work_context_revision,
             worker_item,
         ), None
+
+    def _transition_gate(
+        self, uow: ControlPlaneUnitOfWork, request: ExecutionRequest
+    ) -> PlanTransitionGateResult:
+        allow_transition_id = self._activation_transition_id(uow, request)
+        return PlanTransitionGate(uow).evaluate(
+            worker_item_id=request.worker_item_id,
+            workspace_id=request.workspace_id,
+            plan_generation=request.plan_generation,
+            operation=PlanTransitionGateOperation.ACTIVATE,
+            allow_transition_id=allow_transition_id,
+        )
+
+    @staticmethod
+    def _activation_transition_id(
+        uow: ControlPlaneUnitOfWork, request: ExecutionRequest
+    ) -> UUID | None:
+        transitions = getattr(uow, "worker_transitions", None)
+        plan_transitions = getattr(uow, "plan_transitions", None)
+        if transitions is None or plan_transitions is None:
+            return None
+        transition = transitions.get_active_for_worker_item(
+            request.worker_item_id,
+            request.workspace_id,
+            for_update=True,
+        )
+        if transition is None or transition.status is not WorkerTransitionStatus.WAITING_ACTIVATION:
+            return None
+        if transition.action not in {
+            WorkerTransitionAction.CONTINUE,
+            WorkerTransitionAction.CREATE,
+        }:
+            return None
+        plan = plan_transitions.get(
+            transition.plan_transition_id,
+            request.workspace_id,
+        )
+        if (
+            plan is None
+            or plan.to_snapshot_id != request.plan_snapshot_id
+            or plan.to_generation != request.plan_generation
+        ):
+            return None
+        if transition.action is WorkerTransitionAction.CONTINUE and (
+            request.source_execution_id != transition.source_execution_id
+            or request.source_session_id != transition.source_session_id
+        ):
+            return None
+        if transition.action is WorkerTransitionAction.CREATE and (
+            request.source_execution_id is not None
+            or request.source_session_id is not None
+        ):
+            return None
+        expected_request_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.plan-transition.execution-request:{transition.id}:{request.worker_item_key}",
+        )
+        return transition.id if request.id == expected_request_id else None
 
     @staticmethod
     def _request_matches_current_plan(
