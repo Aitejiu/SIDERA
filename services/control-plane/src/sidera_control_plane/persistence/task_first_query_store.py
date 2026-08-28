@@ -23,6 +23,10 @@ from sidera_control_plane.application.task_first_queries import (
 )
 from sidera_control_plane.application.worker_trace_queries import RawTraceFact
 from sidera_control_plane.domain.attention import AttentionAcknowledgement
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+)
+from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -40,6 +44,9 @@ from sidera_control_plane.persistence.models import (
     TaskModel,
     WorkerModel,
     WorkspaceProjectionCursorModel,
+)
+from sidera_control_plane.persistence.plan_convergence_query import (
+    load_plan_convergence_facts,
 )
 
 
@@ -60,6 +67,7 @@ class TaskFirstQuerySnapshot:
     acknowledgements: tuple[AttentionAcknowledgement, ...]
     last_change_cursor: int
     as_of: datetime
+    convergence_facts: PlanConvergenceFacts | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +124,7 @@ class TaskFirstQueryStore(Protocol):
 class SqlAlchemyTaskFirstQueryStore:
     def __init__(self, database: Database) -> None:
         self._database = database
+        self._normalizer = PlanNormalizer()
 
     def load(
         self,
@@ -151,6 +160,7 @@ class SqlAlchemyTaskFirstQueryStore:
             if plan_row is None:
                 return None
             plan = _plan(plan_row)
+            canonical_plan = self._normalizer.normalize(plan)
             task_ids = {item.task_id for item in plan.work_items if item.task_id}
             task_ids.add(root_task_id)
             task_rows = session.scalars(
@@ -315,6 +325,12 @@ class SqlAlchemyTaskFirstQueryStore:
                 acknowledgements=acknowledgements,
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
+                convergence_facts=load_plan_convergence_facts(
+                    session,
+                    workspace_id=workspace_id,
+                    root_task_id=root_task_id,
+                    plan=canonical_plan,
+                ),
             )
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:

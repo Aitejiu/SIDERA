@@ -11,6 +11,15 @@ from sidera_control_plane.domain.attention import (
     AttentionAcknowledgement,
     AttentionSource,
 )
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+    PlanConvergenceProjection,
+    PlanConvergenceProjectionService,
+    PlanHeadProjection,
+    PlanRevisionAttentionProjection,
+    PlanRevisionProjection,
+    PlanRootProjection,
+)
 from sidera_control_plane.domain.plan_normalization import CanonicalTaskPlan
 from sidera_control_plane.domain.plans import SubtaskPlanItem
 
@@ -160,6 +169,10 @@ class TaskConsoleOverviewProjection:
     attention_items: tuple[TaskConsoleAttentionProjection, ...]
     last_change_cursor: int
     as_of: datetime
+    plan_head: PlanHeadProjection | None = None
+    active_revision: PlanRevisionProjection | None = None
+    convergence: PlanConvergenceProjection | None = None
+    revision_attention: PlanRevisionAttentionProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +208,9 @@ class TaskConsoleActivityProjection:
 class TaskConsoleProjectionService:
     """Project a root Task around Subtasks and WorkerItem aggregate facts."""
 
+    def __init__(self) -> None:
+        self._convergence_service = PlanConvergenceProjectionService()
+
     def compose(
         self,
         plan: CanonicalTaskPlan,
@@ -208,6 +224,7 @@ class TaskConsoleProjectionService:
         last_change_cursor: int,
         as_of: datetime,
         acknowledgements: Iterable[AttentionAcknowledgement] = (),
+        convergence_facts: PlanConvergenceFacts | None = None,
     ) -> TaskConsoleGraphProjection:
         placement_values = tuple(
             placement
@@ -321,6 +338,11 @@ class TaskConsoleProjectionService:
             for dependency in plan.subtask_dependencies
         )
         milestones = self._milestones(plan, node_by_key)
+        convergence = (
+            self._convergence_service.compose_root(plan, convergence_facts)
+            if convergence_facts is not None
+            else None
+        )
         overview = self._overview(
             plan,
             nodes,
@@ -331,6 +353,7 @@ class TaskConsoleProjectionService:
             last_change_cursor=last_change_cursor,
             as_of=as_of,
             acknowledgements=tuple(acknowledgements),
+            convergence=convergence,
         )
         return TaskConsoleGraphProjection(
             schema_version=1,
@@ -461,6 +484,7 @@ class TaskConsoleProjectionService:
         last_change_cursor: int,
         as_of: datetime,
         acknowledgements: tuple[AttentionAcknowledgement, ...],
+        convergence: PlanRootProjection | None,
     ) -> TaskConsoleOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
@@ -580,6 +604,14 @@ class TaskConsoleProjectionService:
             attention_items=tuple(attention),
             last_change_cursor=last_change_cursor,
             as_of=as_of,
+            plan_head=convergence.plan_head if convergence is not None else None,
+            active_revision=(
+                convergence.active_revision if convergence is not None else None
+            ),
+            convergence=convergence.convergence if convergence is not None else None,
+            revision_attention=(
+                convergence.revision_attention if convergence is not None else None
+            ),
         )
 
 

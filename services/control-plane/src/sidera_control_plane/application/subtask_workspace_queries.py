@@ -6,6 +6,9 @@ from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+)
 from sidera_control_plane.domain.plan_normalization import CanonicalTaskPlan
 from sidera_control_plane.domain.subtask_projections import (
     SubtaskActivityFact,
@@ -39,6 +42,7 @@ class SubtaskWorkspaceQuerySnapshot:
     activity: tuple[SubtaskActivityFact, ...]
     last_change_cursor: int
     as_of: datetime
+    convergence_facts: PlanConvergenceFacts | None = None
 
 
 class SubtaskWorkspaceQueryStore(Protocol):
@@ -81,6 +85,7 @@ class SubtaskWorkspaceQueryService:
                 activity=loaded.activity,
                 last_change_cursor=loaded.last_change_cursor,
                 as_of=loaded.as_of,
+                convergence_facts=loaded.convergence_facts,
             )
         except KeyError as exc:
             raise NotFound("subtask not found") from exc

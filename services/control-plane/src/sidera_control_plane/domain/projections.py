@@ -5,6 +5,13 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceProjection,
+    PlanHeadProjection,
+    PlanRevisionAttentionProjection,
+    PlanRevisionProjection,
+    WorkerPlanSyncProjection,
+)
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
     DependencyKind,
@@ -102,6 +109,7 @@ class TaskNodeProjection:
     evidence_satisfied: int
     evidence_required: int
     updated_at: datetime | None
+    plan_sync: WorkerPlanSyncProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +143,10 @@ class TaskOverviewProjection:
     attention_items: tuple[AttentionItemProjection, ...]
     last_change_cursor: int
     as_of: datetime
+    plan_head: PlanHeadProjection | None = None
+    active_revision: PlanRevisionProjection | None = None
+    convergence: PlanConvergenceProjection | None = None
+    revision_attention: PlanRevisionAttentionProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +206,7 @@ class TaskDetailProjection:
     artifacts: tuple[ArtifactSummaryProjection, ...]
     evidence: tuple[EvidenceSummaryProjection, ...]
     checkpoints: tuple[CheckpointSummaryProjection, ...]
+    plan_sync: WorkerPlanSyncProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,6 +9,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+    PlanConvergenceProjectionService,
+    WorkerPlanSyncProjection,
+)
+
 
 class InvalidActivityCursor(ValueError):
     pass
@@ -360,6 +366,7 @@ class WorkerWorkspaceProjection:
     trace_descriptor: TraceDescriptorProjection | None
     last_change_cursor: int
     as_of: datetime
+    plan_sync: WorkerPlanSyncProjection | None = None
 
 
 class WorkerItemProjectionService:
@@ -380,6 +387,7 @@ class WorkerItemProjectionService:
         last_change_cursor: int,
         as_of: datetime,
         projection_stale: bool = False,
+        convergence_facts: PlanConvergenceFacts | None = None,
     ) -> None:
         self.worker_item = worker_item
         self.placements = tuple(placements)
@@ -395,6 +403,8 @@ class WorkerItemProjectionService:
         self.last_change_cursor = last_change_cursor
         self.as_of = as_of
         self.projection_stale = projection_stale
+        self.convergence_facts = convergence_facts
+        self._convergence_service = PlanConvergenceProjectionService()
 
     def compose_workspace(self) -> WorkerWorkspaceProjection:
         placement_values = tuple(
@@ -459,6 +469,13 @@ class WorkerItemProjectionService:
         trace_descriptor = _trace_descriptor(
             self.worker_item.root_task_id, current_runtime, raw_ref=None
         )
+        plan_sync = (
+            self._convergence_service.compose_worker(
+                None, self.worker_item.id, self.convergence_facts
+            )
+            if self.convergence_facts is not None
+            else None
+        )
         return WorkerWorkspaceProjection(
             workspace_id=self.worker_item.workspace_id,
             worker_item=_worker_item_projection(self.worker_item),
@@ -491,6 +508,7 @@ class WorkerItemProjectionService:
             trace_descriptor=trace_descriptor,
             last_change_cursor=self.last_change_cursor,
             as_of=self.as_of,
+            plan_sync=plan_sync,
         )
 
     def activity_facts(self) -> tuple[WorkerActivityFact, ...]:

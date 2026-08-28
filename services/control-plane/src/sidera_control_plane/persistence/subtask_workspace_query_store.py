@@ -44,6 +44,9 @@ from sidera_control_plane.persistence.models import (
     WorkerModel,
     WorkspaceProjectionCursorModel,
 )
+from sidera_control_plane.persistence.plan_convergence_query import (
+    load_plan_convergence_facts,
+)
 
 
 class SqlAlchemySubtaskWorkspaceQueryStore:
@@ -275,6 +278,12 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
                 *(fact.updated_at for fact in worker_items.values()),
                 *(fact.updated_at for fact in tasks.values()),
             )
+            convergence_facts = load_plan_convergence_facts(
+                session,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                plan=plan,
+            )
             return SubtaskWorkspaceQuerySnapshot(
                 workspace_id=workspace_id,
                 plan=plan,
@@ -290,6 +299,7 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
                 activity=tuple(activity),
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
+                convergence_facts=convergence_facts,
             )
 
 

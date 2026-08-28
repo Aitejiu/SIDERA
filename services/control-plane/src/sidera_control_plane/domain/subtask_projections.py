@@ -7,6 +7,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+    PlanConvergenceProjectionService,
+    SubtaskConvergenceProjection,
+    WorkerPlanSyncProjection,
+)
 from sidera_control_plane.domain.plan_normalization import CanonicalTaskPlan
 from sidera_control_plane.domain.plans import SubtaskPlanItem
 
@@ -132,6 +138,7 @@ class SubtaskSummaryProjection:
     evidence_required: int
     evidence_satisfied: int
     current_action: str | None
+    convergence: SubtaskConvergenceProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +161,7 @@ class WorkerItemSummaryProjection:
     blocker: str | None
     current_agent_summary: str | None
     recent_activity_at: datetime | None
+    plan_sync: WorkerPlanSyncProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,9 +247,13 @@ class SubtaskWorkspaceProjection:
     recent_activity: tuple[SubtaskActivityProjection, ...]
     last_change_cursor: int
     as_of: datetime
+    convergence: SubtaskConvergenceProjection | None = None
 
 
 class SubtaskWorkspaceProjectionService:
+    def __init__(self) -> None:
+        self._convergence_service = PlanConvergenceProjectionService()
+
     def compose(
         self,
         plan: CanonicalTaskPlan,
@@ -259,6 +271,7 @@ class SubtaskWorkspaceProjectionService:
         activity: Iterable[SubtaskActivityFact],
         last_change_cursor: int,
         as_of: datetime,
+        convergence_facts: PlanConvergenceFacts | None = None,
     ) -> SubtaskWorkspaceProjection:
         subtask = _find_subtask(plan, subtask_key)
         task = tasks.get(subtask.task_id) if subtask.task_id else None
@@ -323,6 +336,13 @@ class SubtaskWorkspaceProjectionService:
             ),
         )
         current_state = state_by_subtask[subtask_key]
+        convergence = (
+            self._convergence_service.compose_subtask(
+                plan, subtask_key, convergence_facts
+            )
+            if convergence_facts is not None
+            else None
+        )
         latest_task_activity = (
             _latest(activity_by_task.get(subtask.task_id, ()))
             if subtask.task_id is not None
@@ -373,6 +393,13 @@ class SubtaskWorkspaceProjectionService:
                     current_agent_summary=current_agent_summary,
                     recent_activity_at=(
                         latest_activity.occurred_at if latest_activity else None
+                    ),
+                    plan_sync=(
+                        self._convergence_service.compose_worker(
+                            plan, item.id, convergence_facts
+                        )
+                        if convergence_facts is not None
+                        else None
                     ),
                 )
             )
@@ -458,6 +485,7 @@ class SubtaskWorkspaceProjectionService:
             evidence_required=len(subtask.acceptance_refs),
             evidence_satisfied=_evidence_satisfied(subtask, evidence_values),
             current_action=current_action,
+            convergence=convergence,
         )
         execution_ids = {execution.id for execution in execution_values}
         checkpoint_values = tuple(
@@ -528,6 +556,7 @@ class SubtaskWorkspaceProjectionService:
             recent_activity=recent_activity,
             last_change_cursor=last_change_cursor,
             as_of=as_of,
+            convergence=convergence,
         )
 
 

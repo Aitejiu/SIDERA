@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -12,6 +12,13 @@ from sidera_control_plane.domain.attention import (
     AttentionAcknowledgement,
     AttentionSource,
 )
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+    PlanConvergenceProjectionService,
+    PlanRootProjection,
+    WorkerPlanSyncProjection,
+)
+from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import (
     TaskPlanSnapshot,
     WorkItem,
@@ -160,6 +167,10 @@ class TaskFirstProjectionService:
     planned nodes and informational dependencies are display facts only.
     """
 
+    def __init__(self) -> None:
+        self._normalizer = PlanNormalizer()
+        self._convergence_service = PlanConvergenceProjectionService()
+
     def compose(
         self,
         snapshot: TaskPlanSnapshot,
@@ -175,6 +186,7 @@ class TaskFirstProjectionService:
         last_change_cursor: int,
         as_of: datetime,
         acknowledgements: Iterable[AttentionAcknowledgement] = (),
+        convergence_facts: PlanConvergenceFacts | None = None,
     ) -> TaskGraphProjection:
         nodes = [
             self._node_for_item(
@@ -192,6 +204,28 @@ class TaskFirstProjectionService:
             for item in snapshot.work_items
         ]
         nodes = self._apply_dependency_overlay(snapshot, nodes)
+        root_convergence: PlanRootProjection | None = None
+        if convergence_facts is not None:
+            canonical_plan = self._normalizer.normalize(snapshot)
+            root_convergence = self._convergence_service.compose_root(
+                canonical_plan, convergence_facts
+            )
+            worker_key_by_id = {
+                item.worker_item_id: item.key
+                for item in canonical_plan.worker_items
+                if item.worker_item_id is not None
+            }
+            sync_by_worker_key = {
+                worker_key_by_id[item.worker_item_id]: self._convergence_service.compose_worker(
+                    canonical_plan, item.worker_item_id, convergence_facts
+                )
+                for item in convergence_facts.workers
+                if item.worker_item_id in worker_key_by_id
+            }
+            nodes = [
+                _with_plan_sync(node, sync_by_worker_key.get(node.work_item_key))
+                for node in nodes
+            ]
         edges = tuple(
             self._edge_projection(dependency) for dependency in snapshot.dependencies
         )
@@ -207,6 +241,7 @@ class TaskFirstProjectionService:
             last_change_cursor=last_change_cursor,
             as_of=as_of,
             acknowledgements=acknowledgements,
+            convergence=root_convergence,
         )
         return TaskGraphProjection(
             schema_version=1,
@@ -293,6 +328,7 @@ class TaskFirstProjectionService:
                     key=lambda value: (value.occurred_at, value.sequence),
                 )
             ),
+            plan_sync=node.plan_sync,
         )
 
     def compose_activity(
@@ -639,6 +675,7 @@ class TaskFirstProjectionService:
         last_change_cursor: int,
         as_of: datetime,
         acknowledgements: Iterable[AttentionAcknowledgement],
+        convergence: PlanRootProjection | None,
     ) -> TaskOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
@@ -708,6 +745,14 @@ class TaskFirstProjectionService:
             attention_items=attention,
             last_change_cursor=last_change_cursor,
             as_of=as_of,
+            plan_head=convergence.plan_head if convergence is not None else None,
+            active_revision=(
+                convergence.active_revision if convergence is not None else None
+            ),
+            convergence=convergence.convergence if convergence is not None else None,
+            revision_attention=(
+                convergence.revision_attention if convergence is not None else None
+            ),
         )
 
     @staticmethod
@@ -749,6 +794,12 @@ class TaskFirstProjectionService:
                 else node.updated_at or datetime.min.replace(tzinfo=UTC)
             ),
         )
+
+
+def _with_plan_sync(
+    node: TaskNodeProjection, plan_sync: WorkerPlanSyncProjection | None
+) -> TaskNodeProjection:
+    return replace(node, plan_sync=plan_sync)
 
 
 def _state_for(
@@ -1048,4 +1099,5 @@ class TaskFirstQueryService:
             acknowledgements=loaded.acknowledgements,
             last_change_cursor=loaded.last_change_cursor,
             as_of=loaded.as_of,
+            convergence_facts=loaded.convergence_facts,
         )

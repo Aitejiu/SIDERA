@@ -23,6 +23,7 @@ from sidera_control_plane.persistence.models import (
     CommandModel,
     EventModel,
     OutboxMessageModel,
+    PlanningRequestModel,
     TaskModel,
     WorkspaceModel,
 )
@@ -263,6 +264,21 @@ def _resolve_event_scope(
 ) -> tuple[UUID | None, UUID | None]:
     worker_item_id = _payload_uuid(event.payload, "worker_item_id")
     root_task_id = _payload_uuid(event.payload, "root_task_id")
+    if root_task_id is None and event.aggregate_type in {
+        "planning_request",
+        "planning_proposal",
+        "planning_run",
+    }:
+        request_id = _payload_uuid(event.payload, "planning_request_id")
+        if request_id is None and event.aggregate_type == "planning_request":
+            request_id = event.aggregate_id
+        if request_id is not None:
+            root_task_id = session.scalar(
+                select(PlanningRequestModel.root_task_id).where(
+                    PlanningRequestModel.workspace_id == event.workspace_id,
+                    PlanningRequestModel.id == request_id,
+                )
+            )
     context = event.payload.get("execution_context")
     if worker_item_id is None and isinstance(context, dict):
         worker_item_id = _value_uuid(context.get("worker_item_id"))

@@ -11,6 +11,8 @@ from sidera_control_plane.domain.events import EventData
 WORKSPACE_ID = UUID("21000000-0000-0000-0000-000000000001")
 REQUEST_ID = UUID("31000000-0000-0000-0000-000000000001")
 WORK_CONTEXT_ID = UUID("32000000-0000-0000-0000-000000000001")
+ROOT_TASK_ID = UUID("33000000-0000-0000-0000-000000000001")
+WORKER_ITEM_ID = UUID("34000000-0000-0000-0000-000000000001")
 
 
 def _event(event_type: str, *, aggregate_type: str = "planning_request") -> EventData:
@@ -82,6 +84,67 @@ def test_planning_run_events_scope_to_request_from_payload() -> None:
 
 def test_planning_projection_type_is_public() -> None:
     assert "planning_request" in PROJECTION_TYPES
+
+
+def test_scoped_planning_event_invalidates_root_task_surfaces() -> None:
+    targets = projection_targets_for_event(
+        _event("PlanningProposalReady"), root_task_id=ROOT_TASK_ID
+    )
+
+    assert targets == (
+        type(targets[0])("planning_request", REQUEST_ID, "planning_proposal_ready"),
+        type(targets[0])("task_overview", ROOT_TASK_ID, "planning_proposal_ready"),
+        type(targets[0])("task_graph", ROOT_TASK_ID, "planning_proposal_ready"),
+        type(targets[0])(
+            "subtask_workspace", ROOT_TASK_ID, "planning_proposal_ready"
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("aggregate_type", "event_type"),
+    [
+        ("plan_transition", "PlanTransitionCreated"),
+        ("worker_transition", "WorkerTransitionBlockedUnknown"),
+        ("worker_transition_recovery", "WorkerTransitionRecovered"),
+        ("execution_input", "ExecutionInputSuperseded"),
+    ],
+)
+def test_transition_events_invalidate_root_and_worker_surfaces(
+    aggregate_type: str, event_type: str
+) -> None:
+    event = EventData(
+        id=UUID("41000000-0000-0000-0000-000000000004"),
+        workspace_id=WORKSPACE_ID,
+        aggregate_type=aggregate_type,
+        aggregate_id=UUID("42000000-0000-0000-0000-000000000001"),
+        aggregate_version=2,
+        event_type=event_type,
+        payload={
+            "root_task_id": str(ROOT_TASK_ID),
+            "worker_item_id": str(WORKER_ITEM_ID),
+        },
+        actor_type="test",
+        actor_id="projection-test",
+        causation_id=UUID("51000000-0000-0000-0000-000000000004"),
+        correlation_id=UUID("61000000-0000-0000-0000-000000000004"),
+    )
+
+    targets = projection_targets_for_event(event)
+    projection_types = [target.projection_type for target in targets]
+
+    assert "task_overview" in projection_types
+    assert "task_graph" in projection_types
+    assert "subtask_workspace" in projection_types
+    if aggregate_type != "plan_transition":
+        assert "worker_item_workspace" in projection_types
+        assert "worker_item_activity" in projection_types
+        assert all(
+            target.resource_id == WORKER_ITEM_ID
+            for target in targets
+            if target.projection_type
+            in {"worker_item_workspace", "worker_item_activity"}
+        )
 
 
 @pytest.mark.parametrize(

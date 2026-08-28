@@ -441,6 +441,111 @@ class AttentionItemProjectionResponse(BaseModel):
     occurred_at: datetime
 
 
+class PlanHeadProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active_snapshot_id: UUID
+    active_generation: int
+    active_snapshot_hash: str
+    version: int
+    updated_at: datetime
+
+
+class PlanRevisionProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    planning_request_id: UUID
+    status: str
+    proposal_revision: int | None
+    proposal_content_hash: str | None
+    base_generation: int | None
+    target_generation: int | None
+    version: int
+    correlation_id: UUID
+    updated_at: datetime
+    subtask_path: tuple[str, ...]
+    summary: str | None
+    action: str | None
+
+
+class PlanRevisionAttentionProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    planning_request_id: UUID
+    status: str
+    subtask_path: tuple[str, ...]
+    summary: str
+    action: str
+    deep_link: str
+    correlation_id: UUID
+    resource_version: int
+    occurred_at: datetime
+
+
+class PlanConvergenceProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_transition_id: UUID | None
+    from_generation: int | None
+    target_generation: int | None
+    status: str
+    total_count: int
+    converged_count: int
+    blocked_count: int
+    unknown_count: int
+    in_flight_count: int
+    has_in_flight: bool
+    has_unknown: bool
+    has_active_fence: bool
+    confirmation_blocked: bool
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class SubtaskConvergenceProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtask_key: str
+    status: str
+    plan_transition_id: UUID | None
+    source_generation: int | None
+    target_generation: int | None
+    total_count: int
+    converged_count: int
+    blocked_count: int
+    unknown_count: int
+    blocked_predecessor_paths: tuple[tuple[str, ...], ...]
+
+
+class WorkerPlanSyncProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_transition_id: UUID
+    plan_transition_id: UUID
+    action: str
+    status: str
+    writer_state: str
+    source_generation: int
+    target_generation: int
+    current_context_version: int
+    acknowledged_context_version: int
+    target_context_version: int
+    patch_id: UUID | None
+    patch_acknowledged: bool
+    source_execution_id: UUID | None
+    source_session_id: UUID | None
+    target_execution_id: UUID | None
+    target_session_id: UUID | None
+    continuation_execution_id: UUID | None
+    continuation_session_id: UUID | None
+    queued_input_ids: tuple[UUID, ...]
+    superseded_input_ids: tuple[UUID, ...]
+    failure_code: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    trace_href: str | None
+
+
 class TaskOverviewProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -462,6 +567,10 @@ class TaskOverviewProjectionResponse(BaseModel):
     attention_items: tuple[AttentionItemProjectionResponse, ...]
     last_change_cursor: int
     as_of: datetime
+    plan_head: PlanHeadProjectionResponse | None = None
+    active_revision: PlanRevisionProjectionResponse | None = None
+    convergence: PlanConvergenceProjectionResponse | None = None
+    revision_attention: PlanRevisionAttentionProjectionResponse | None = None
 
 
 class TaskNodeProjectionResponse(BaseModel):
@@ -488,6 +597,7 @@ class TaskNodeProjectionResponse(BaseModel):
     evidence_satisfied: int
     evidence_required: int
     updated_at: datetime | None
+    plan_sync: WorkerPlanSyncProjectionResponse | None = None
 
 
 class TaskEdgeProjectionResponse(BaseModel):
@@ -563,6 +673,10 @@ class TaskConsoleOverviewProjectionResponse(BaseModel):
     attention_items: tuple[TaskConsoleAttentionProjectionResponse, ...]
     last_change_cursor: int
     as_of: datetime
+    plan_head: PlanHeadProjectionResponse | None = None
+    active_revision: PlanRevisionProjectionResponse | None = None
+    convergence: PlanConvergenceProjectionResponse | None = None
+    revision_attention: PlanRevisionAttentionProjectionResponse | None = None
 
 
 class SubtaskNodeProjectionResponse(BaseModel):
@@ -631,6 +745,7 @@ class SubtaskSummaryProjectionResponse(BaseModel):
     evidence_required: int
     evidence_satisfied: int
     current_action: str | None
+    convergence: SubtaskConvergenceProjectionResponse | None = None
 
 
 class RelatedSubtaskProjectionResponse(BaseModel):
@@ -655,6 +770,7 @@ class WorkerItemSummaryProjectionResponse(BaseModel):
     blocker: str | None
     current_agent_summary: str | None
     recent_activity_at: datetime | None
+    plan_sync: WorkerPlanSyncProjectionResponse | None = None
 
 
 class WorkerItemGraphEdgeProjectionResponse(BaseModel):
@@ -748,6 +864,7 @@ class SubtaskWorkspaceProjectionResponse(BaseModel):
     recent_activity: tuple[SubtaskActivityProjectionResponse, ...]
     last_change_cursor: int
     as_of: datetime
+    convergence: SubtaskConvergenceProjectionResponse | None = None
 
 
 class WorkerItemIdentityProjectionResponse(BaseModel):
@@ -931,6 +1048,7 @@ class WorkerWorkspaceProjectionResponse(BaseModel):
     trace_descriptor: TraceDescriptorProjectionResponse | None
     last_change_cursor: int
     as_of: datetime
+    plan_sync: WorkerPlanSyncProjectionResponse | None = None
 
 
 class WorkerItemActivityPageResponse(BaseModel):
@@ -994,6 +1112,7 @@ class TaskDetailProjectionResponse(BaseModel):
     artifacts: tuple[ArtifactSummaryProjectionResponse, ...]
     evidence: tuple[EvidenceSummaryProjectionResponse, ...]
     checkpoints: tuple[CheckpointSummaryProjectionResponse, ...]
+    plan_sync: WorkerPlanSyncProjectionResponse | None = None
 
 
 class ActivityItemProjectionResponse(BaseModel):

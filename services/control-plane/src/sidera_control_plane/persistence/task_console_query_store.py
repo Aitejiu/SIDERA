@@ -38,6 +38,9 @@ from sidera_control_plane.persistence.models import (
     WorkerItemPlacementModel,
     WorkspaceProjectionCursorModel,
 )
+from sidera_control_plane.persistence.plan_convergence_query import (
+    load_plan_convergence_facts,
+)
 
 
 class SqlAlchemyTaskConsoleQueryStore:
@@ -232,6 +235,12 @@ class SqlAlchemyTaskConsoleQueryStore:
                     for value in tasks.values()
                 ),
             )
+            convergence_facts = load_plan_convergence_facts(
+                session,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                plan=plan,
+            )
             return TaskConsoleQuerySnapshot(
                 workspace_id=workspace_id,
                 plan=plan,
@@ -244,6 +253,7 @@ class SqlAlchemyTaskConsoleQueryStore:
                 acknowledgements=acknowledgements,
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
+                convergence_facts=convergence_facts,
             )
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:

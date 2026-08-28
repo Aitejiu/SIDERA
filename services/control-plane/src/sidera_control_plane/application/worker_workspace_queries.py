@@ -6,6 +6,9 @@ from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.errors import InvalidCursor, NotFound
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+)
 from sidera_control_plane.domain.worker_item_projections import (
     ArtifactSummaryProjection,
     BindingFact,
@@ -41,6 +44,7 @@ class WorkerWorkspaceQuerySnapshot:
     last_change_cursor: int
     as_of: datetime
     projection_stale: bool = False
+    convergence_facts: PlanConvergenceFacts | None = None
 
 
 class WorkerWorkspaceQueryStore(Protocol):
@@ -107,4 +111,5 @@ class WorkerWorkspaceQueryService:
             last_change_cursor=snapshot.last_change_cursor,
             as_of=snapshot.as_of,
             projection_stale=snapshot.projection_stale,
+            convergence_facts=snapshot.convergence_facts,
         )

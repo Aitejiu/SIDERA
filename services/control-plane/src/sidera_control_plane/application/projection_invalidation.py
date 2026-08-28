@@ -152,32 +152,29 @@ def projection_targets_for_event(
         return tuple(targets)
     planning_change_type = _planning_change_type(event.event_type)
     if event.aggregate_type == "planning_request":
-        return (
-            ProjectionInvalidationTarget(
-                "planning_request",
-                event.aggregate_id,
-                planning_change_type or "planning_request_updated",
-            ),
+        return _planning_targets(
+            event,
+            request_id=event.aggregate_id,
+            root_task_id=root_task_id,
+            change_type=planning_change_type or "planning_request_updated",
         )
     if event.aggregate_type == "planning_proposal":
         request_id = _payload_uuid(payload, "planning_request_id")
         if request_id is not None:
-            return (
-                ProjectionInvalidationTarget(
-                    "planning_request",
-                    request_id,
-                    planning_change_type or "planning_request_updated",
-                ),
+            return _planning_targets(
+                event,
+                request_id=request_id,
+                root_task_id=root_task_id,
+                change_type=planning_change_type or "planning_request_updated",
             )
     if event.aggregate_type == "planning_run":
         request_id = _payload_uuid(payload, "planning_request_id")
         if request_id is not None:
-            return (
-                ProjectionInvalidationTarget(
-                    "planning_request",
-                    request_id,
-                    planning_change_type or "planning_run_updated",
-                ),
+            return _planning_targets(
+                event,
+                request_id=request_id,
+                root_task_id=root_task_id,
+                change_type=planning_change_type or "planning_run_updated",
             )
     worker_item_id = worker_item_id or _payload_uuid(payload, "worker_item_id")
     root_task_id = root_task_id or _payload_uuid(payload, "root_task_id")
@@ -297,6 +294,35 @@ def projection_targets_for_event(
         return _targets(("task_overview", "task_graph"), worker_item_id, root_task_id or event.aggregate_id)
     if event.aggregate_type == "attention":
         return _targets(("task_overview",), worker_item_id, root_task_id)
+    if event.aggregate_type == "plan_transition":
+        return _targets(
+            ("task_overview", "task_graph", "subtask_workspace"),
+            worker_item_id,
+            root_task_id,
+        )
+    if event.aggregate_type in {
+        "worker_transition",
+        "worker_transition_recovery",
+        "execution_input",
+    } or event.event_type in {
+        "WorkerTransitionCreated",
+        "WorkerTransitionActivated",
+        "WorkerTransitionBlockedUnknown",
+        "WorkerTransitionFailed",
+        "WorkerTransitionRecovered",
+        "ExecutionInputSuperseded",
+    }:
+        return _targets(
+            (
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+                "worker_item_activity",
+            ),
+            worker_item_id,
+            root_task_id,
+        )
     return ()
 
 
@@ -408,6 +434,23 @@ def _planning_change_type(event_type: str) -> str | None:
         "PlanningMaterialized": "planning_materialized",
         "PlanningProposalConfirmed": "planning_materialized",
     }.get(event_type)
+
+
+def _planning_targets(
+    event: EventData,
+    *,
+    request_id: UUID,
+    root_task_id: UUID | None,
+    change_type: str,
+) -> tuple[ProjectionInvalidationTarget, ...]:
+    targets = [ProjectionInvalidationTarget("planning_request", request_id, change_type)]
+    root_task_id = root_task_id or _payload_uuid(event.payload, "root_task_id")
+    if root_task_id is not None:
+        targets.extend(
+            ProjectionInvalidationTarget(projection_type, root_task_id, change_type)
+            for projection_type in ("task_overview", "task_graph", "subtask_workspace")
+        )
+    return tuple(targets)
 
 
 def _aggregate_worker_item_id(event: EventData) -> UUID | None:

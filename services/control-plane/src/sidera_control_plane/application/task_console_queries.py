@@ -7,6 +7,9 @@ from uuid import UUID
 
 from sidera_control_plane.application.errors import NoCurrentPlan
 from sidera_control_plane.domain.attention import AttentionAcknowledgement
+from sidera_control_plane.domain.plan_convergence_projections import (
+    PlanConvergenceFacts,
+)
 from sidera_control_plane.domain.plan_normalization import CanonicalTaskPlan
 from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleActivityFact,
@@ -35,6 +38,7 @@ class TaskConsoleQuerySnapshot:
     acknowledgements: tuple[AttentionAcknowledgement, ...]
     last_change_cursor: int
     as_of: datetime
+    convergence_facts: PlanConvergenceFacts | None = None
 
 
 class TaskConsoleQueryStore(Protocol):
@@ -98,6 +102,7 @@ class TaskConsoleQueryService:
             last_change_cursor=loaded.last_change_cursor,
             as_of=loaded.as_of,
             acknowledgements=loaded.acknowledgements,
+            convergence_facts=loaded.convergence_facts,
         )
 
     def get_activity(
