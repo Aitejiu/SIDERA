@@ -133,6 +133,15 @@ def test_worker_transition_rejects_stale_fencing_token() -> None:
         transition.claim(lease_id=lease_id, fencing_token=1, now=NOW)
 
 
+def test_worker_transition_can_fence_without_an_assignment_lease() -> None:
+    transition = worker_transition()
+
+    transition.claim(lease_id=None, fencing_token=1, now=NOW)
+
+    assert transition.lease_id is None
+    assert transition.fencing_token == 1
+
+
 def test_plan_transition_status_is_derived_from_worker_outcomes() -> None:
     plan = plan_transition()
     first = worker_transition()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, update
@@ -76,7 +76,6 @@ class PlanTransitionRepository:
                 status=transition.status.value,
                 completed_at=transition.completed_at,
                 version=transition.version,
-                updated_at=datetime.now(UTC),
             )
         )
         if not isinstance(result, CursorResult) or result.rowcount != 1:
@@ -229,7 +228,6 @@ class WorkerTransitionRepository:
                 started_at=transition.started_at,
                 completed_at=transition.completed_at,
                 version=transition.version,
-                updated_at=datetime.now(UTC),
             )
         )
         if not isinstance(result, CursorResult) or result.rowcount != 1:

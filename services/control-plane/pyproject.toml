@@ -12,6 +12,9 @@ dependencies = [
     "uvicorn>=0.41,<1",
 ]
 
+[project.scripts]
+sidera-plan-transition-worker = "sidera_control_plane.plan_transition_worker:main"
+
 [dependency-groups]
 dev = [
     "httpx2>=2.3,<3",

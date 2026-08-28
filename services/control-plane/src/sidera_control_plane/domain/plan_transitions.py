@@ -266,8 +266,10 @@ class WorkerTransition:
             WorkerTransitionStatus.FAILED,
         }
 
-    def claim(self, *, lease_id: UUID, fencing_token: int, now: datetime) -> None:
-        if not isinstance(lease_id, UUID) or fencing_token < 1:
+    def claim(
+        self, *, lease_id: UUID | None, fencing_token: int, now: datetime
+    ) -> None:
+        if (lease_id is not None and not isinstance(lease_id, UUID)) or fencing_token < 1:
             raise StaleFencingToken("worker transition lease and fencing token are invalid")
         _aware(now, "worker transition claim time")
         if self.lease_id is not None:

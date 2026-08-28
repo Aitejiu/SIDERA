@@ -41,6 +41,10 @@ def test_scheduler_settings_are_positive():
         reconciler_poll_interval_seconds=2.0,
         gateway_batch_size=15,
         gateway_poll_interval_seconds=1.5,
+        plan_transition_batch_size=12,
+        plan_transition_poll_interval_seconds=1.25,
+        plan_transition_lease_ttl_seconds=45,
+        plan_transition_backoff_max_seconds=90,
         opencode_executable="opencode",
     )
 
@@ -53,6 +57,10 @@ def test_scheduler_settings_are_positive():
     assert settings.reconciler_poll_interval_seconds == 2.0
     assert settings.gateway_batch_size == 15
     assert settings.gateway_poll_interval_seconds == 1.5
+    assert settings.plan_transition_batch_size == 12
+    assert settings.plan_transition_poll_interval_seconds == 1.25
+    assert settings.plan_transition_lease_ttl_seconds == 45
+    assert settings.plan_transition_backoff_max_seconds == 90
     assert settings.opencode_executable == "opencode"
     assert settings.opencode_request_timeout_seconds == 60.0
     assert settings.opencode_stop_grace_seconds == 5.0
