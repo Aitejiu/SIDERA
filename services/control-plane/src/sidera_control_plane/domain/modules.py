@@ -86,6 +86,7 @@ class WorkerAdapterCapabilityProfile:
     sandbox: SandboxCapability
     stability: StabilityLevel
     context_package_versions: tuple[int, ...] = ()
+    context_patch_versions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -125,6 +126,13 @@ class WorkerAdapterCapabilityProfile:
             "context_package_versions",
             _positive_version_tuple(
                 self.context_package_versions, "context_package_versions"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "context_patch_versions",
+            _positive_version_tuple(
+                self.context_patch_versions, "context_patch_versions"
             ),
         )
 

@@ -622,6 +622,7 @@ def _worker_capability_mapping(session: ExecutionSession) -> Mapping[str, object
         "sandbox": profile.sandbox.value,
         "stability": profile.stability.value,
         "context_package_versions": list(profile.context_package_versions),
+        "context_patch_versions": list(profile.context_patch_versions),
     }
 
 

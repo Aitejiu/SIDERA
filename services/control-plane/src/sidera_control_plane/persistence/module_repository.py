@@ -311,6 +311,7 @@ def capability_profile_to_payload(
             "sandbox": profile.sandbox.value,
             "stability": profile.stability.value,
             "context_package_versions": list(profile.context_package_versions),
+            "context_patch_versions": list(profile.context_patch_versions),
         }
     if isinstance(profile, WorkspaceProviderCapabilityProfile):
         return {
@@ -353,10 +354,16 @@ def capability_profile_from_payload(
             sandbox=_enum_capability(payload, "sandbox", SandboxCapability),
             stability=_enum_capability(payload, "stability", StabilityLevel),
             context_package_versions=_version_tuple_capability(payload),
+            context_patch_versions=_version_tuple_capability(
+                payload, "context_patch_versions"
+            ),
         )
 
     if canonical_type == WORKSPACE_PROVIDER_MODULE_TYPE:
-        if frozenset(payload) in {_LEGACY_WORKER_FIELDS, _WORKER_FIELDS}:
+        if (
+            _LEGACY_WORKER_FIELDS.issubset(payload)
+            and set(payload).issubset(_WORKER_FIELDS)
+        ):
             legacy = capability_profile_from_payload(
                 WORKER_ADAPTER_MODULE_TYPE, payload
             )
@@ -463,6 +470,7 @@ _WORKER_FIELDS = frozenset(
         "sandbox",
         "stability",
         "context_package_versions",
+        "context_patch_versions",
     }
 )
 _LEGACY_WORKER_FIELDS = frozenset(
@@ -527,17 +535,25 @@ def _positive_int_capability(payload: Mapping[str, object], name: str) -> int:
     return value
 
 
-def _version_tuple_capability(payload: Mapping[str, object]) -> tuple[int, ...]:
-    value = payload.get("context_package_versions", ())
+def _version_tuple_capability(
+    payload: Mapping[str, object], field_name: str = "context_package_versions"
+) -> tuple[int, ...]:
+    return _version_tuple_capability_named(payload, field_name)
+
+
+def _version_tuple_capability_named(
+    payload: Mapping[str, object], field_name: str
+) -> tuple[int, ...]:
+    value = payload.get(field_name, ())
     if not isinstance(value, (list, tuple)):
         raise ValidationError(
-            "capability field 'context_package_versions' must be an array"
+            f"capability field {field_name!r} must be an array"
         )
     if any(
         not isinstance(version, int) or isinstance(version, bool) or version < 1
         for version in value
     ):
         raise ValidationError(
-            "capability field 'context_package_versions' must contain positive integers"
+            f"capability field {field_name!r} must contain positive integers"
         )
     return tuple(sorted(set(value)))

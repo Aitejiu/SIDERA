@@ -36,6 +36,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationV1,
     ContextPurpose,
 )
+from sidera_control_plane.domain.context_patches import (
+    ContextPatchDeliveryResult,
+    ContextPatchMaterializationV1,
+)
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
     AdapterSessionHandle,
@@ -73,6 +77,7 @@ class OpenCodeACPAdapter:
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.EXPERIMENTAL,
         context_package_versions=(1,),
+        context_patch_versions=(),
     )
 
     def __init__(
@@ -310,6 +315,18 @@ class OpenCodeACPAdapter:
                 )
             finally:
                 session.prompt_busy = False
+
+    def apply_context_patch(
+        self,
+        handle: AdapterSessionHandle,
+        materialization: ContextPatchMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextPatchDeliveryResult:
+        del handle, materialization, operation_id
+        raise OpenCodeAdapterError(
+            "OpenCode ACP adapter does not support context patch delivery"
+        )
 
     def stop_session(
         self, handle: AdapterSessionHandle, *, operation_id: UUID

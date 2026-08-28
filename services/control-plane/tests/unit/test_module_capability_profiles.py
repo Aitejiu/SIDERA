@@ -156,15 +156,32 @@ def test_planner_profile_normalizes_schema_versions_and_requires_context() -> No
 
 def test_context_package_versions_are_optional_and_normalized() -> None:
     worker = replace(worker_capabilities(), context_package_versions=(2, 1, 2))
+    patch_capable_worker = replace(
+        worker_capabilities(), context_patch_versions=(2, 1, 2)
+    )
     planner = replace(planner_capabilities(), context_package_versions=(2, 1, 2))
 
     assert worker.context_package_versions == (1, 2)
+    assert patch_capable_worker.context_patch_versions == (1, 2)
     assert planner.context_package_versions == (1, 2)
     assert worker_capabilities().context_package_versions == ()
+    assert worker_capabilities().context_patch_versions == ()
     assert planner_capabilities().context_package_versions == ()
 
     with pytest.raises(ValidationError, match="context_package_versions"):
         replace(worker_capabilities(), context_package_versions=(0,))
+    with pytest.raises(ValidationError, match="context_patch_versions"):
+        replace(worker_capabilities(), context_patch_versions=(0,))
+
+
+def test_context_patch_capability_round_trips_through_module_payload() -> None:
+    profile = replace(worker_capabilities(), context_patch_versions=(1,))
+
+    payload = capability_profile_to_payload(profile)
+    restored = capability_profile_from_payload("worker_adapter", payload)
+
+    assert payload["context_patch_versions"] == [1]
+    assert restored == profile
 
 
 def test_module_type_alias_is_stored_as_canonical_value() -> None:

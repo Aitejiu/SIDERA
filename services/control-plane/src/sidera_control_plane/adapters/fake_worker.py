@@ -14,6 +14,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationV1,
     ContextPurpose,
 )
+from sidera_control_plane.domain.context_patches import (
+    ContextPatchDeliveryResult,
+    ContextPatchMaterializationV1,
+)
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
     AdapterSessionHandle,
@@ -50,6 +54,7 @@ class FakeWorkerAdapter:
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.STABLE,
         context_package_versions=(1,),
+        context_patch_versions=(1,),
     )
 
     def __init__(
@@ -67,6 +72,9 @@ class FakeWorkerAdapter:
             raise TypeError("knowledge_candidates must be typed proposals")
         self._knowledge_candidates = tuple(knowledge_candidates)
         self._failures = dict(failures or {})
+        self._patch_outcomes: deque[tuple[DeliveryOutcome, str | None]] = deque()
+        self._patch_results: dict[UUID, ContextPatchDeliveryResult] = {}
+        self._applied_context_patches: list[ContextPatchMaterializationV1] = []
         self._sessions: dict[str, _FakeSession] = {}
         self._lock = RLock()
 
@@ -196,6 +204,100 @@ class FakeWorkerAdapter:
                 failure_code=None,
             )
 
+    def apply_context_patch(
+        self,
+        handle: AdapterSessionHandle,
+        materialization: ContextPatchMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextPatchDeliveryResult:
+        if not isinstance(materialization, ContextPatchMaterializationV1):
+            raise TypeError("materialization must be a ContextPatchMaterializationV1")
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        patch_hash = materialization.patch.patch_hash
+        previous = self._patch_results.get(operation_id)
+        if previous is not None:
+            if previous.patch_hash != patch_hash:
+                raise FakeAdapterError("patch_operation_id_reused")
+            return previous
+        self._maybe_fail("apply_context_patch")
+        session = self._session(handle)
+        with self._lock:
+            if session.handle.execution_session_id != handle.execution_session_id:
+                return self._remember_patch_result(
+                    ContextPatchDeliveryResult(
+                        outcome="failed",
+                        operation_id=operation_id,
+                        patch_hash=patch_hash,
+                        accepted_sequence=None,
+                        error_code="session_identity_mismatch",
+                    )
+                )
+            if session.stopped:
+                return self._remember_patch_result(
+                    ContextPatchDeliveryResult(
+                        outcome="failed",
+                        operation_id=operation_id,
+                        patch_hash=patch_hash,
+                        accepted_sequence=None,
+                        error_code="session_stopped",
+                    )
+                )
+            if materialization.patch.expires_at <= datetime.now(UTC):
+                return self._remember_patch_result(
+                    ContextPatchDeliveryResult(
+                        outcome="failed",
+                        operation_id=operation_id,
+                        patch_hash=patch_hash,
+                        accepted_sequence=None,
+                        error_code="context_patch_expired",
+                    )
+                )
+            if self._patch_outcomes:
+                outcome, error_code = self._patch_outcomes.popleft()
+                if outcome is not DeliveryOutcome.DELIVERED:
+                    return self._remember_patch_result(
+                        ContextPatchDeliveryResult(
+                            outcome=outcome.value,
+                            operation_id=operation_id,
+                            patch_hash=patch_hash,
+                            accepted_sequence=None,
+                            error_code=error_code or outcome.value,
+                        )
+                    )
+            if session.prompt_busy:
+                return self._remember_patch_result(
+                    ContextPatchDeliveryResult(
+                        outcome="blocked",
+                        operation_id=operation_id,
+                        patch_hash=patch_hash,
+                        accepted_sequence=None,
+                        error_code="prompt_busy",
+                    )
+                )
+            sequence = session.next_sequence
+            session.next_sequence += 1
+            session.prompt_busy = True
+            session.events.append(
+                AdapterEvent(
+                    event_type="context.patch.accepted",
+                    sequence=sequence,
+                    payload={"patch_hash": patch_hash},
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            self._applied_context_patches.append(materialization)
+            return self._remember_patch_result(
+                ContextPatchDeliveryResult(
+                    outcome="delivered",
+                    operation_id=operation_id,
+                    patch_hash=patch_hash,
+                    accepted_sequence=sequence,
+                    error_code=None,
+                )
+            )
+
     def stop_session(
         self, handle: AdapterSessionHandle, *, operation_id: UUID
     ) -> DeliveryResult:
@@ -272,6 +374,31 @@ class FakeWorkerAdapter:
                 if not session.stopped
             )
 
+    @property
+    def applied_context_patches(self) -> tuple[ContextPatchMaterializationV1, ...]:
+        with self._lock:
+            return tuple(self._applied_context_patches)
+
+    def inject_patch_outcome(
+        self,
+        outcome: DeliveryOutcome | str,
+        *,
+        error_code: str | None = None,
+    ) -> None:
+        try:
+            normalized = (
+                outcome
+                if isinstance(outcome, DeliveryOutcome)
+                else DeliveryOutcome(outcome)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unsupported patch outcome: {outcome!r}") from exc
+        if normalized is DeliveryOutcome.DELIVERED and error_code is not None:
+            raise ValueError("delivered patch outcome cannot have an error_code")
+        if error_code is not None and not error_code.strip():
+            raise ValueError("error_code is required when provided")
+        self._patch_outcomes.append((normalized, error_code))
+
     def inject_failure(self, operation: str, failure_code: str) -> None:
         clean_code = failure_code.strip()
         if not clean_code:
@@ -288,6 +415,12 @@ class FakeWorkerAdapter:
         failure_code = self._failures.get(operation)
         if failure_code is not None:
             raise FakeAdapterError(failure_code)
+
+    def _remember_patch_result(
+        self, result: ContextPatchDeliveryResult
+    ) -> ContextPatchDeliveryResult:
+        self._patch_results[result.operation_id] = result
+        return result
 
 
 class _FakeSession:

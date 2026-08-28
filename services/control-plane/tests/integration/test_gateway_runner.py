@@ -19,12 +19,17 @@ from sidera_control_plane.application.worker_gateway import (
     _operation_id,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
+from sidera_control_plane.domain.context_patches import (
+    ContextPatchMaterializationV1,
+    ContextPatchV1,
+)
 from sidera_control_plane.domain.errors import InvalidTransition
 from sidera_control_plane.domain.gateway import (
     AdapterSessionHandle,
     DeliveryOutcome,
     DeliveryResult,
     GatewayOperationType,
+    context_patch_operation_id,
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
@@ -72,6 +77,7 @@ def _capabilities() -> CapabilityProfile:
         stop=StopCapability.EXACT_EXECUTION,
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.STABLE,
+        context_patch_versions=(1,),
     )
 
 
@@ -242,6 +248,9 @@ def _seed_assignment(
                         "stop": capabilities.stop.value,
                         "sandbox": capabilities.sandbox.value,
                         "stability": capabilities.stability.value,
+                        "context_patch_versions": list(
+                            capabilities.context_patch_versions
+                        ),
                     },
                     lifecycle="active",
                 ),
@@ -259,6 +268,9 @@ def _seed_assignment(
                         "stop": capabilities.stop.value,
                         "sandbox": capabilities.sandbox.value,
                         "stability": capabilities.stability.value,
+                        "context_patch_versions": list(
+                            capabilities.context_patch_versions
+                        ),
                     },
                     lifecycle="active",
                 ),
@@ -348,6 +360,9 @@ def _seed_assignment(
                     "stop": capabilities.stop.value,
                     "sandbox": capabilities.sandbox.value,
                     "stability": capabilities.stability.value,
+                    "context_patch_versions": list(
+                        capabilities.context_patch_versions
+                    ),
                 },
                 lease_id=lease_id,
                 fencing_token=1,
@@ -387,6 +402,44 @@ def _message(workspace_id: UUID, execution_id: UUID, lease_id: UUID) -> OutboxMe
         },
         attempts=1,
         claim_token=uuid4(),
+    )
+
+
+def _patch_materialization(
+    workspace_id: UUID, worker_transition_id: UUID
+) -> ContextPatchMaterializationV1:
+    now = datetime.now(UTC).replace(microsecond=0)
+    return ContextPatchMaterializationV1(
+        schema_version=1,
+        patch=ContextPatchV1.create(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            root_task_id=uuid4(),
+            worker_item_id=uuid4(),
+            plan_transition_id=uuid4(),
+            worker_transition_id=worker_transition_id,
+            base_plan_snapshot_id=uuid4(),
+            base_generation=1,
+            target_plan_snapshot_id=uuid4(),
+            target_generation=2,
+            base_context_package_id=uuid4(),
+            base_package_hash="a" * 64,
+            base_work_context_revision_id=uuid4(),
+            base_context_hash="b" * 64,
+            target_context_version=2,
+            changed_requirements=("updated requirement",),
+            changed_acceptance_refs=("acceptance:updated",),
+            changed_dependency_refs=(),
+            decision_refs=(),
+            artifact_refs=(),
+            evidence_refs=(),
+            intervention_refs=(),
+            unfinished_work="Continue from the checkpoint.",
+            checkpoint_ref="checkpoint://integration/1",
+            proposer="integration",
+            expires_at=now + timedelta(minutes=10),
+            created_at=now,
+        ),
     )
 
 
@@ -484,6 +537,56 @@ def test_gateway_starts_once_and_replays_duplicate_assignment(
         assert session.query(ExecutionEventModel).count() == 2
         assert session.query(GatewayOperationModel).count() == 3
         assert session.query(GatewayOperationModel).filter_by(status="succeeded").count() == 3
+
+
+def test_gateway_delivers_patch_as_independent_idempotent_operation(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+    started = gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+    adapter.release_boundary(adapter.active_sessions()[0])
+    worker_transition_id = uuid4()
+    materialization = _patch_materialization(workspace_id, worker_transition_id)
+    kwargs = {
+        "workspace_id": workspace_id,
+        "execution_id": ids["execution_id"],
+        "session_id": started.session_id,
+        "lease_id": ids["lease_id"],
+        "fencing_token": 1,
+        "worker_transition_id": worker_transition_id,
+        "action_step": "apply_patch",
+        "logical_attempt": 1,
+        "materialization": materialization,
+    }
+
+    first = gateway.apply_context_patch(**kwargs)
+    duplicate = gateway.apply_context_patch(**kwargs)
+
+    expected_operation_id = context_patch_operation_id(
+        worker_transition_id, "apply_patch", logical_attempt=1
+    )
+    assert first.outcome == "delivered"
+    assert first.operation_id == expected_operation_id
+    assert first.patch_hash == materialization.patch.patch_hash
+    assert duplicate == first
+    assert adapter.applied_context_patches == (materialization,)
+    with database.session() as session:
+        operation = session.query(GatewayOperationModel).filter_by(
+            operation_type=GatewayOperationType.APPLY_CONTEXT_PATCH.value
+        ).one()
+        assert operation.status == "succeeded"
+        assert operation.result_ref == (
+            f"patch:{materialization.patch.patch_hash}:sequence:{first.accepted_sequence}"
+        )
 
 
 def test_assignment_lease_keeper_persists_command_for_audited_renewal(

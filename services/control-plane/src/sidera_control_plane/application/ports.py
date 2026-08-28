@@ -39,6 +39,8 @@ from sidera_control_plane.domain.context_packages import (
 )
 from sidera_control_plane.domain.context_patches import (
     ContextPatchAcknowledgement,
+    ContextPatchDeliveryResult,
+    ContextPatchMaterializationV1,
     ContextPatchV1,
 )
 from sidera_control_plane.domain.events import EventData
@@ -1360,6 +1362,15 @@ class WorkerAdapter(Protocol):
         *,
         operation_id: UUID,
     ) -> DeliveryResult:
+        raise NotImplementedError
+
+    def apply_context_patch(
+        self,
+        handle: AdapterSessionHandle,
+        materialization: ContextPatchMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextPatchDeliveryResult:
         raise NotImplementedError
 
     def stop_session(

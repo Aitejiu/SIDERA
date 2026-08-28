@@ -283,3 +283,28 @@ def gateway_operation_id(
     execution_id: UUID, operation_type: GatewayOperationType
 ) -> UUID:
     return uuid5(NAMESPACE_URL, f"sidera.gateway:{operation_type.value}:{execution_id}")
+
+
+def context_patch_operation_id(
+    worker_transition_id: UUID,
+    action_step: str,
+    *,
+    logical_attempt: int,
+) -> UUID:
+    """Return the stable idempotency key for one transition patch step."""
+
+    if not isinstance(worker_transition_id, UUID):
+        raise ValidationError("worker_transition_id must be a UUID")
+    step = action_step.strip()
+    if not step:
+        raise ValidationError("context patch action_step is required")
+    if (
+        not isinstance(logical_attempt, int)
+        or isinstance(logical_attempt, bool)
+        or logical_attempt < 1
+    ):
+        raise ValidationError("context patch logical_attempt must be positive")
+    return uuid5(
+        NAMESPACE_URL,
+        f"sidera.gateway:context-patch:{worker_transition_id}:{step}:{logical_attempt}",
+    )

@@ -51,6 +51,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextPurpose,
     context_package_reference,
 )
+from sidera_control_plane.domain.context_patches import (
+    ContextPatchDeliveryResult,
+    ContextPatchMaterializationV1,
+)
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
@@ -65,6 +69,7 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperationStatus,
     GatewayOperationType,
     RuntimeModuleOperation,
+    context_patch_operation_id,
     gateway_operation_id,
     runtime_module_operation_allowed,
 )
@@ -1661,6 +1666,213 @@ class WorkerGateway:
             operation=RuntimeModuleOperation.INPUT,
         )
 
+    def apply_context_patch(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        session_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+        worker_transition_id: UUID,
+        action_step: str,
+        logical_attempt: int,
+        materialization: ContextPatchMaterializationV1,
+    ) -> ContextPatchDeliveryResult:
+        """Deliver one immutable patch without mutating transition state."""
+
+        if not isinstance(materialization, ContextPatchMaterializationV1):
+            raise TypeError("materialization must be a ContextPatchMaterializationV1")
+        operation_id = context_patch_operation_id(
+            worker_transition_id,
+            action_step,
+            logical_attempt=logical_attempt,
+        )
+        patch_hash = materialization.patch.patch_hash
+        try:
+            context = self._load_context_by_ids(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+                operation=RuntimeModuleOperation.PATCH,
+            )
+        except (GatewayError, DomainError) as exc:
+            return ContextPatchDeliveryResult(
+                outcome="blocked",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code=_failure_code(exc),
+            )
+
+        patch = materialization.patch
+        if patch.workspace_id != workspace_id:
+            return _blocked_patch_result(operation_id, patch_hash, "workspace_mismatch")
+        if patch.worker_transition_id != worker_transition_id:
+            return _blocked_patch_result(
+                operation_id, patch_hash, "worker_transition_mismatch"
+            )
+        if (
+            context.execution.worker_item_id is not None
+            and patch.worker_item_id != context.execution.worker_item_id
+        ):
+            return _blocked_patch_result(
+                operation_id, patch_hash, "worker_item_mismatch"
+            )
+        if (
+            materialization.schema_version
+            not in context.binding.capability_snapshot.context_patch_versions
+        ):
+            return _blocked_patch_result(
+                operation_id, patch_hash, "context_patch_unsupported"
+            )
+
+        adapter = self._adapter(
+            context.adapter_definition,
+            context.adapter_instance,
+            operation=RuntimeModuleOperation.PATCH,
+        )
+        apply_patch = getattr(adapter, "apply_context_patch", None)
+        if not callable(apply_patch):
+            return _blocked_patch_result(
+                operation_id, patch_hash, "context_patch_unsupported"
+            )
+
+        handle: AdapterSessionHandle | None = None
+        operation_state: _OperationState
+        with self._uow_factory() as uow:
+            session = uow.sessions.get(session_id, workspace_id, for_update=True)
+            if session is None or session.execution_id != execution_id:
+                return _blocked_patch_result(
+                    operation_id, patch_hash, "active_session_mismatch"
+                )
+            if session.status.value != "active":
+                return _blocked_patch_result(
+                    operation_id, patch_hash, "active_session_mismatch"
+                )
+            operation_state = self._begin_operation(
+                uow,
+                context,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.APPLY_CONTEXT_PATCH,
+                session_id=session.id,
+            )
+            if not operation_state.completed and not operation_state.recovery_required:
+                handle = _session_handle(session)
+
+        if operation_state.completed:
+            return _patch_delivery_from_operation(
+                operation_id,
+                operation_state.result_ref,
+                patch_hash,
+            )
+        if operation_state.recovery_required:
+            return ContextPatchDeliveryResult(
+                outcome="unknown",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code="gateway_restart_requires_reconciliation",
+            )
+        if handle is None:
+            self._mark_operation_unknown(
+                operation_id, context, "session_handle_unavailable"
+            )
+            return ContextPatchDeliveryResult(
+                outcome="unknown",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code="session_handle_unavailable",
+            )
+
+        try:
+            delivery = apply_patch(
+                handle,
+                materialization,
+                operation_id=operation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            return ContextPatchDeliveryResult(
+                outcome="unknown",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code=failure_code,
+            )
+
+        if not isinstance(delivery, ContextPatchDeliveryResult):
+            failure_code = "adapter_patch_result_invalid"
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            return ContextPatchDeliveryResult(
+                outcome="unknown",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code=failure_code,
+            )
+        if delivery.operation_id != operation_id:
+            failure_code = "adapter_operation_id_mismatch"
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            return ContextPatchDeliveryResult(
+                outcome="unknown",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code=failure_code,
+            )
+        if delivery.patch_hash != patch_hash:
+            failure_code = "adapter_patch_hash_mismatch"
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            return ContextPatchDeliveryResult(
+                outcome="unknown",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code=failure_code,
+            )
+        if delivery.outcome == DeliveryOutcome.DELIVERED.value:
+            if delivery.accepted_sequence is None:
+                failure_code = "patch_sequence_missing"
+                self._mark_operation_unknown(operation_id, context, failure_code)
+                return ContextPatchDeliveryResult(
+                    outcome="unknown",
+                    operation_id=operation_id,
+                    patch_hash=patch_hash,
+                    accepted_sequence=None,
+                    error_code=failure_code,
+                )
+            try:
+                with self._uow_factory() as uow:
+                    self._succeed_operation(
+                        uow,
+                        operation_id,
+                        context,
+                        _patch_result_ref(patch_hash, delivery.accepted_sequence),
+                        session_id=session_id,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failure_code = _failure_code(exc)
+                self._mark_operation_unknown(operation_id, context, failure_code)
+                return ContextPatchDeliveryResult(
+                    outcome="unknown",
+                    operation_id=operation_id,
+                    patch_hash=patch_hash,
+                    accepted_sequence=None,
+                    error_code=failure_code,
+                )
+            return delivery
+
+        failure_code = delivery.error_code or delivery.outcome
+        if delivery.outcome == DeliveryOutcome.UNKNOWN.value:
+            self._mark_operation_unknown(operation_id, context, failure_code)
+        else:
+            self._fail_operation(operation_id, context, failure_code)
+        return delivery
+
     def _ensure_workspace(
         self,
         context: _AssignmentContext,
@@ -2353,6 +2565,47 @@ def _delivery_from_operation(
         outcome=DeliveryOutcome.DELIVERED,
         accepted_sequence=accepted_sequence,
         failure_code=None,
+    )
+
+
+def _patch_result_ref(patch_hash: str, accepted_sequence: int) -> str:
+    return f"patch:{patch_hash}:sequence:{accepted_sequence}"
+
+
+def _patch_delivery_from_operation(
+    operation_id: UUID,
+    result_ref: str | None,
+    patch_hash: str,
+) -> ContextPatchDeliveryResult:
+    prefix = f"patch:{patch_hash}:sequence:"
+    if result_ref is None or not result_ref.startswith(prefix):
+        raise GatewayRecoveryRequired(
+            "succeeded context patch operation has no matching sequence result"
+        )
+    try:
+        accepted_sequence = int(result_ref.removeprefix(prefix))
+    except ValueError as exc:
+        raise GatewayRecoveryRequired(
+            "succeeded context patch operation has an invalid sequence result"
+        ) from exc
+    return ContextPatchDeliveryResult(
+        outcome="delivered",
+        operation_id=operation_id,
+        patch_hash=patch_hash,
+        accepted_sequence=accepted_sequence,
+        error_code=None,
+    )
+
+
+def _blocked_patch_result(
+    operation_id: UUID, patch_hash: str, error_code: str
+) -> ContextPatchDeliveryResult:
+    return ContextPatchDeliveryResult(
+        outcome="blocked",
+        operation_id=operation_id,
+        patch_hash=patch_hash,
+        accepted_sequence=None,
+        error_code=error_code,
     )
 
 
