@@ -26,6 +26,23 @@ class LeaseStore:
         row = self._session.scalar(statement)
         return _to_domain_lease(row) if row is not None else None
 
+    def get_active_for_execution(
+        self,
+        execution_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> AssignmentLease | None:
+        statement = select(AssignmentLeaseModel).where(
+            AssignmentLeaseModel.execution_id == execution_id,
+            AssignmentLeaseModel.workspace_id == workspace_id,
+            AssignmentLeaseModel.status == LeaseStatus.ACTIVE.value,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_lease(row) if row is not None else None
+
     def add(self, lease: AssignmentLease) -> None:
         self._session.add(
             AssignmentLeaseModel(

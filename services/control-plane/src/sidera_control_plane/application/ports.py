@@ -1108,6 +1108,15 @@ class LeaseStorePort(Protocol):
     ) -> AssignmentLease | None:
         raise NotImplementedError
 
+    def get_active_for_execution(
+        self,
+        execution_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> AssignmentLease | None:
+        raise NotImplementedError
+
     def add(self, lease: AssignmentLease) -> None:
         raise NotImplementedError
 

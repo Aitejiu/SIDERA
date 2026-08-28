@@ -97,6 +97,7 @@ AggregateType = Literal[
     "module_instance",
     "context_assembly",
     "context_package",
+    "worker_transition",
 ]
 
 
@@ -1064,6 +1065,122 @@ class PlanDiffResponse(BaseModel):
     entries: tuple[PlanDiffEntryResponse, ...]
 
 
+class TransitionNodeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    key: str | None
+    title: str
+    path: str
+
+
+class TransitionOperationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: UUID
+    operation_type: str
+    status: str
+    failure_code: str | None
+
+
+class TransitionContextResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_context_version: int
+    acknowledged_context_version: int
+    target_context_version: int
+    patch_id: UUID | None
+    patch_hash: str | None
+    patch_acknowledged: bool
+
+
+class TransitionInputDispositionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policy: str
+    queued_input_ids: tuple[UUID, ...]
+    superseded_input_ids: tuple[UUID, ...]
+    queued_count: int
+    superseded_count: int
+
+
+class TransitionDependencyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upstream_worker_item_id: UUID
+    downstream_worker_item_id: UUID
+    upstream_path: str
+    downstream_path: str
+    enforcement: str
+    upstream_status: str | None
+    blocked: bool
+    required_artifact_refs: tuple[str, ...]
+    required_evidence_refs: tuple[str, ...]
+
+
+class WorkerTransitionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_transition_id: UUID
+    plan_transition_id: UUID
+    root_task: TransitionNodeResponse
+    subtask: TransitionNodeResponse | None
+    worker_item: TransitionNodeResponse
+    path: str
+    action: str
+    fallback_action: str | None
+    status: str
+    writer_state: str
+    failure_code: str | None
+    source_execution_id: UUID | None
+    source_session_id: UUID | None
+    target_execution_id: UUID | None
+    target_session_id: UUID | None
+    from_subtask_id: UUID | None
+    to_subtask_id: UUID | None
+    context: TransitionContextResponse
+    operations: tuple[TransitionOperationResponse, ...]
+    queued_input_disposition: TransitionInputDispositionResponse
+    blocked_dependencies: tuple[TransitionDependencyResponse, ...]
+    started_at: datetime | None
+    completed_at: datetime | None
+    version: int
+
+
+class PlanTransitionSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_transition_id: UUID
+    workspace_id: UUID
+    root_task: TransitionNodeResponse
+    from_generation: int
+    to_generation: int
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    version: int
+    worker_count: int
+    blocked_worker_count: int
+    unknown_worker_count: int
+
+
+class PlanTransitionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_transition_id: UUID
+    workspace_id: UUID
+    root_task: TransitionNodeResponse
+    from_generation: int
+    to_generation: int
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    version: int
+    workers: tuple[WorkerTransitionResponse, ...]
+    blocked_dependencies: tuple[TransitionDependencyResponse, ...]
+    as_of: datetime
+
+
 class TraceUsageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1268,6 +1385,39 @@ class RetryBlockedExecutionInputPayload(ExecutionInputTargetPayload):
     pass
 
 
+class ReconcileWorkerTransitionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: NonEmptyString
+    evidence_refs: tuple[NonEmptyString, ...] = Field(min_length=1)
+    operation_id: UUID | None = None
+    patch_hash: NonEmptyString | None = None
+
+
+class ConfirmWorkerTransitionStoppedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: NonEmptyString
+    evidence_refs: tuple[NonEmptyString, ...] = Field(min_length=1)
+    source_execution_id: UUID | None = None
+    source_session_id: UUID | None = None
+
+
+class RecoverWorkerTransitionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal[
+        "reconcile_adapter",
+        "continue_after_confirmed_stop",
+        "fail_closed_branch",
+        "continue_after_confirmed_patch_absence",
+    ]
+    reason: NonEmptyString
+    evidence_refs: tuple[NonEmptyString, ...] = Field(min_length=1)
+    operation_id: UUID | None = None
+    patch_hash: NonEmptyString | None = None
+
+
 class ContinueExecutionSessionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1439,6 +1589,18 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryBlockedExecutionInput":
             self._require_mutation_target("execution_session")
             parsed = RetryBlockedExecutionInputPayload.model_validate(self.payload)
+        elif self.command_type in {
+            "ReconcileWorkerTransition",
+            "ConfirmWorkerTransitionStopped",
+            "RecoverWorkerTransition",
+        }:
+            self._require_mutation_target("worker_transition")
+            payload_types = {
+                "ReconcileWorkerTransition": ReconcileWorkerTransitionPayload,
+                "ConfirmWorkerTransitionStopped": ConfirmWorkerTransitionStoppedPayload,
+                "RecoverWorkerTransition": RecoverWorkerTransitionPayload,
+            }
+            parsed = payload_types[self.command_type].model_validate(self.payload)
         else:
             return self
         self.payload = dict(parsed.model_dump(mode="json"))

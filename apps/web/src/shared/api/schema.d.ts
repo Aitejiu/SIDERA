@@ -599,6 +599,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/plan-transitions/{plan_transition_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Plan Transition */
+        get: operations["get_plan_transition"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/planning-metrics": {
         parameters: {
             query?: never;
@@ -888,6 +905,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/plan-transitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Plan Transitions */
+        get: operations["list_plan_transitions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/work-context": {
         parameters: {
             query?: never;
@@ -984,6 +1018,74 @@ export interface paths {
         get: operations["get_worker_item_workspace"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Worker Transition */
+        get: operations["get_worker_transition"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/confirm-stopped": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Worker Transition Stopped */
+        post: operations["confirm_worker_transition_stopped"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reconcile Worker Transition */
+        post: operations["reconcile_worker_transition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/recover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recover Worker Transition */
+        post: operations["recover_worker_transition"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1234,7 +1336,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition";
             /**
              * Workspace Id
              * Format: uuid
@@ -1331,6 +1433,23 @@ export interface components {
             proposal_content_hash: string;
             /** Proposal Revision */
             proposal_revision: number;
+        };
+        /** ConfirmWorkerTransitionStoppedPayload */
+        ConfirmWorkerTransitionStoppedPayload: {
+            /** Evidence Refs */
+            evidence_refs: string[];
+            /** Reason */
+            reason: string;
+            /**
+             * Source Execution Id
+             * @default null
+             */
+            source_execution_id: string | null;
+            /**
+             * Source Session Id
+             * @default null
+             */
+            source_session_id: string | null;
         };
         /** ContextMaterializationResponse */
         ContextMaterializationResponse: {
@@ -2530,6 +2649,79 @@ export interface components {
             /** Schema Version */
             schema_version: number;
         };
+        /** PlanTransitionResponse */
+        PlanTransitionResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Blocked Dependencies */
+            blocked_dependencies: components["schemas"]["TransitionDependencyResponse"][];
+            /** Completed At */
+            completed_at: string | null;
+            /** From Generation */
+            from_generation: number;
+            /**
+             * Plan Transition Id
+             * Format: uuid
+             */
+            plan_transition_id: string;
+            root_task: components["schemas"]["TransitionNodeResponse"];
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Status */
+            status: string;
+            /** To Generation */
+            to_generation: number;
+            /** Version */
+            version: number;
+            /** Workers */
+            workers: components["schemas"]["WorkerTransitionResponse"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** PlanTransitionSummaryResponse */
+        PlanTransitionSummaryResponse: {
+            /** Blocked Worker Count */
+            blocked_worker_count: number;
+            /** Completed At */
+            completed_at: string | null;
+            /** From Generation */
+            from_generation: number;
+            /**
+             * Plan Transition Id
+             * Format: uuid
+             */
+            plan_transition_id: string;
+            root_task: components["schemas"]["TransitionNodeResponse"];
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Status */
+            status: string;
+            /** To Generation */
+            to_generation: number;
+            /** Unknown Worker Count */
+            unknown_worker_count: number;
+            /** Version */
+            version: number;
+            /** Worker Count */
+            worker_count: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
         /** PlannerCapabilityPayload */
         PlannerCapabilityPayload: {
             /** Cancellation */
@@ -3121,6 +3313,45 @@ export interface components {
             output_tokens: number;
             /** Runtime Seconds */
             runtime_seconds: number;
+        };
+        /** ReconcileWorkerTransitionPayload */
+        ReconcileWorkerTransitionPayload: {
+            /** Evidence Refs */
+            evidence_refs: string[];
+            /**
+             * Operation Id
+             * @default null
+             */
+            operation_id: string | null;
+            /**
+             * Patch Hash
+             * @default null
+             */
+            patch_hash: string | null;
+            /** Reason */
+            reason: string;
+        };
+        /** RecoverWorkerTransitionPayload */
+        RecoverWorkerTransitionPayload: {
+            /** Evidence Refs */
+            evidence_refs: string[];
+            /**
+             * Operation Id
+             * @default null
+             */
+            operation_id: string | null;
+            /**
+             * Patch Hash
+             * @default null
+             */
+            patch_hash: string | null;
+            /** Reason */
+            reason: string;
+            /**
+             * Strategy
+             * @enum {string}
+             */
+            strategy: "reconcile_adapter" | "continue_after_confirmed_stop" | "fail_closed_branch" | "continue_after_confirmed_patch_absence";
         };
         /** RegisterPlannerModulePayload */
         RegisterPlannerModulePayload: {
@@ -4216,6 +4447,89 @@ export interface components {
             /** Output Tokens */
             output_tokens: number | null;
         };
+        /** TransitionContextResponse */
+        TransitionContextResponse: {
+            /** Acknowledged Context Version */
+            acknowledged_context_version: number;
+            /** Current Context Version */
+            current_context_version: number;
+            /** Patch Acknowledged */
+            patch_acknowledged: boolean;
+            /** Patch Hash */
+            patch_hash: string | null;
+            /** Patch Id */
+            patch_id: string | null;
+            /** Target Context Version */
+            target_context_version: number;
+        };
+        /** TransitionDependencyResponse */
+        TransitionDependencyResponse: {
+            /** Blocked */
+            blocked: boolean;
+            /** Downstream Path */
+            downstream_path: string;
+            /**
+             * Downstream Worker Item Id
+             * Format: uuid
+             */
+            downstream_worker_item_id: string;
+            /** Enforcement */
+            enforcement: string;
+            /** Required Artifact Refs */
+            required_artifact_refs: string[];
+            /** Required Evidence Refs */
+            required_evidence_refs: string[];
+            /** Upstream Path */
+            upstream_path: string;
+            /** Upstream Status */
+            upstream_status: string | null;
+            /**
+             * Upstream Worker Item Id
+             * Format: uuid
+             */
+            upstream_worker_item_id: string;
+        };
+        /** TransitionInputDispositionResponse */
+        TransitionInputDispositionResponse: {
+            /** Policy */
+            policy: string;
+            /** Queued Count */
+            queued_count: number;
+            /** Queued Input Ids */
+            queued_input_ids: string[];
+            /** Superseded Count */
+            superseded_count: number;
+            /** Superseded Input Ids */
+            superseded_input_ids: string[];
+        };
+        /** TransitionNodeResponse */
+        TransitionNodeResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Key */
+            key: string | null;
+            /** Path */
+            path: string;
+            /** Title */
+            title: string;
+        };
+        /** TransitionOperationResponse */
+        TransitionOperationResponse: {
+            /** Failure Code */
+            failure_code: string | null;
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /** Operation Type */
+            operation_type: string;
+            /** Status */
+            status: string;
+        };
         /** UnresolvedQuestionPayload */
         UnresolvedQuestionPayload: {
             /** Blocking */
@@ -5142,6 +5456,58 @@ export interface components {
             timing: components["schemas"]["TraceTimingResponse"];
             /** Worker Id */
             worker_id: string | null;
+        };
+        /** WorkerTransitionResponse */
+        WorkerTransitionResponse: {
+            /** Action */
+            action: string;
+            /** Blocked Dependencies */
+            blocked_dependencies: components["schemas"]["TransitionDependencyResponse"][];
+            /** Completed At */
+            completed_at: string | null;
+            context: components["schemas"]["TransitionContextResponse"];
+            /** Failure Code */
+            failure_code: string | null;
+            /** Fallback Action */
+            fallback_action: string | null;
+            /** From Subtask Id */
+            from_subtask_id: string | null;
+            /** Operations */
+            operations: components["schemas"]["TransitionOperationResponse"][];
+            /** Path */
+            path: string;
+            /**
+             * Plan Transition Id
+             * Format: uuid
+             */
+            plan_transition_id: string;
+            queued_input_disposition: components["schemas"]["TransitionInputDispositionResponse"];
+            root_task: components["schemas"]["TransitionNodeResponse"];
+            /** Source Execution Id */
+            source_execution_id: string | null;
+            /** Source Session Id */
+            source_session_id: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            subtask: components["schemas"]["TransitionNodeResponse"] | null;
+            /** Target Execution Id */
+            target_execution_id: string | null;
+            /** Target Session Id */
+            target_session_id: string | null;
+            /** To Subtask Id */
+            to_subtask_id: string | null;
+            /** Version */
+            version: number;
+            worker_item: components["schemas"]["TransitionNodeResponse"];
+            /**
+             * Worker Transition Id
+             * Format: uuid
+             */
+            worker_transition_id: string;
+            /** Writer State */
+            writer_state: string;
         };
         /** WorkerWorkspaceProjectionResponse */
         WorkerWorkspaceProjectionResponse: {
@@ -6366,6 +6732,38 @@ export interface operations {
             };
         };
     };
+    get_plan_transition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                plan_transition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanTransitionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_planning_metrics_api_v1_workspaces__workspace_id__planning_metrics_get: {
         parameters: {
             query?: never;
@@ -6925,6 +7323,38 @@ export interface operations {
             };
         };
     };
+    list_plan_transitions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanTransitionSummaryResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_work_context_by_root_task_api_v1_workspaces__workspace_id__tasks__root_task_id__work_context_get: {
         parameters: {
             query?: {
@@ -7117,6 +7547,146 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkerWorkspaceProjectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_worker_transition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_transition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerTransitionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_worker_transition_stopped: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_transition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommandRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reconcile_worker_transition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_transition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommandRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recover_worker_transition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_transition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommandRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandResponse"];
                 };
             };
             /** @description Validation Error */

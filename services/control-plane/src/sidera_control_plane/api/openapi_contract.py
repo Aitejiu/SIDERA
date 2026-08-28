@@ -15,10 +15,13 @@ from sidera_control_plane.api.schemas import (
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ConfirmPlanRevisionPayload,
+    ConfirmWorkerTransitionStoppedPayload,
     ErrorBody,
     ErrorResponse,
     ExecutionContextAddressPayload,
     PinExecutionWorkerPayload,
+    ReconcileWorkerTransitionPayload,
+    RecoverWorkerTransitionPayload,
     RegisterPlannerModulePayload,
     RegisterPlanningProfilePayload,
     RejectPlanningProposalPayload,
@@ -59,7 +62,17 @@ _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("ClearExecutionWorkerPin", ClearExecutionWorkerPinPayload),
 )
 
-_COMMAND_PAYLOADS = _PLANNING_COMMAND_PAYLOADS + _RUNTIME_COMMAND_PAYLOADS
+_TRANSITION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("ReconcileWorkerTransition", ReconcileWorkerTransitionPayload),
+    ("ConfirmWorkerTransitionStopped", ConfirmWorkerTransitionStoppedPayload),
+    ("RecoverWorkerTransition", RecoverWorkerTransitionPayload),
+)
+
+_COMMAND_PAYLOADS = (
+    _PLANNING_COMMAND_PAYLOADS
+    + _RUNTIME_COMMAND_PAYLOADS
+    + _TRANSITION_COMMAND_PAYLOADS
+)
 
 
 def export_openapi(output: Path) -> dict[str, Any]:

@@ -28,6 +28,12 @@ from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHa
 from sidera_control_plane.application.plan_revision_queries import (
     PlanRevisionQueryService,
 )
+from sidera_control_plane.application.plan_transition_commands import (
+    PlanTransitionCommandHandler,
+)
+from sidera_control_plane.application.plan_transition_queries import (
+    PlanTransitionQueryService,
+)
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.planning_metrics import PlanningMetricsService
 from sidera_control_plane.application.planning_queries import PlanningQueryService
@@ -71,6 +77,9 @@ from sidera_control_plane.persistence.context_package_query_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.plan_revision_query_store import (
     SqlAlchemyPlanRevisionQueryStore,
+)
+from sidera_control_plane.persistence.plan_transition_query_store import (
+    SqlAlchemyPlanTransitionQueryStore,
 )
 from sidera_control_plane.persistence.planning_query_store import (
     SqlAlchemyPlanningMetricsStore,
@@ -155,6 +164,7 @@ def get_command_service(
                 local_actor_id=settings.local_actor_id,
                 clock=lambda: datetime.now(UTC),
             ),
+            PlanTransitionCommandHandler(lambda: datetime.now(UTC)),
         ),
     )
 
@@ -181,6 +191,12 @@ def get_plan_revision_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> PlanRevisionQueryService:
     return PlanRevisionQueryService(SqlAlchemyPlanRevisionQueryStore(database))
+
+
+def get_plan_transition_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> PlanTransitionQueryService:
+    return PlanTransitionQueryService(SqlAlchemyPlanTransitionQueryStore(database))
 
 
 def get_work_context_query_service(

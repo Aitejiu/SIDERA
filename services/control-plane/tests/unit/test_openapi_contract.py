@@ -35,6 +35,12 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/knowledge-submissions",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions",
     "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}/materialize",
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/plan-transitions",
+    "/api/v1/workspaces/{workspace_id}/plan-transitions/{plan_transition_id}",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/reconcile",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/confirm-stopped",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/recover",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -56,10 +62,15 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/planning-runs/{run_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
+    "/api/v1/workspaces/{workspace_id}/plan-transitions/{plan_transition_id}": "PlanTransitionResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}": "WorkerTransitionResponse",
 }
 
 EXPECTED_TYPED_POST_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/context-packages/{package_id}/materialize": "ContextMaterializationResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/reconcile": "CommandResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/confirm-stopped": "CommandResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/recover": "CommandResponse",
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
@@ -83,6 +94,9 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "ClearExecutionWorkerPin": "ClearExecutionWorkerPinPayload",
     "RetryContextAssembly": "RetryContextAssemblyPayload",
     "RevokeContextPackage": "RevokeContextPackagePayload",
+    "ReconcileWorkerTransition": "ReconcileWorkerTransitionPayload",
+    "ConfirmWorkerTransitionStopped": "ConfirmWorkerTransitionStoppedPayload",
+    "RecoverWorkerTransition": "RecoverWorkerTransitionPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {

@@ -403,6 +403,60 @@ class WorkerTransition:
         self.next_attempt_at = now
         self.version += 1
 
+    def recover_after_confirmed_stop(self, *, now: datetime) -> None:
+        if self.status is not WorkerTransitionStatus.BLOCKED_UNKNOWN:
+            raise InvalidTransition(
+                "only an unknown worker transition can recover after a stop"
+            )
+        if self.action not in {
+            WorkerTransitionAction.CONTINUE,
+            WorkerTransitionAction.RETIRE,
+        }:
+            raise InvalidTransition(
+                "confirmed-stop recovery only applies to continuation or retirement"
+            )
+        _aware(now, "worker transition recovery time")
+        self.status = WorkerTransitionStatus.PENDING
+        self.writer_state = WriterState.FENCED
+        self.failure_code = None
+        self.completed_at = None
+        self.next_attempt_at = now
+        self.version += 1
+
+    def recover_after_confirmed_patch_absence(self, *, now: datetime) -> None:
+        if self.status is not WorkerTransitionStatus.BLOCKED_UNKNOWN:
+            raise InvalidTransition(
+                "only an unknown worker transition can recover after patch absence"
+            )
+        if (
+            self.action is not WorkerTransitionAction.PATCH
+            or self.fallback_action is not WorkerTransitionAction.CONTINUE
+        ):
+            raise InvalidTransition(
+                "patch-absence recovery requires a patch with continue fallback"
+            )
+        _aware(now, "worker transition recovery time")
+        self.action = WorkerTransitionAction.CONTINUE
+        self.status = WorkerTransitionStatus.PENDING
+        self.writer_state = WriterState.FENCED
+        self.failure_code = None
+        self.completed_at = None
+        self.next_attempt_at = now
+        self.version += 1
+
+    def fail_closed(self, *, failure_code: str, now: datetime) -> None:
+        if self.status is not WorkerTransitionStatus.BLOCKED_UNKNOWN:
+            raise InvalidTransition(
+                "only an unknown worker transition can fail closed"
+            )
+        self.failure_code = _required(failure_code, "failure_code")
+        _aware(now, "worker transition completed_at")
+        self.status = WorkerTransitionStatus.FAILED
+        self.writer_state = WriterState.CLOSED
+        self.completed_at = now
+        self.next_attempt_at = None
+        self.version += 1
+
     def bind_target(
         self, *, execution_id: UUID, session_id: UUID | None, now: datetime
     ) -> None:

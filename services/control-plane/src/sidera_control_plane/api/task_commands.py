@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response
 
@@ -17,6 +18,81 @@ def execute_command(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+) -> CommandResponse:
+    return _execute_command(request, response, service, settings)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/reconcile",
+    response_model=CommandResponse,
+    operation_id="reconcile_worker_transition",
+)
+def reconcile_worker_transition(
+    workspace_id: UUID,
+    worker_transition_id: UUID,
+    request: CommandRequest,
+    response: Response,
+    service: Annotated[CommandService, Depends(get_command_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CommandResponse:
+    _require_transition_route(
+        request,
+        workspace_id=workspace_id,
+        worker_transition_id=worker_transition_id,
+        command_type="ReconcileWorkerTransition",
+    )
+    return _execute_command(request, response, service, settings)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/confirm-stopped",
+    response_model=CommandResponse,
+    operation_id="confirm_worker_transition_stopped",
+)
+def confirm_worker_transition_stopped(
+    workspace_id: UUID,
+    worker_transition_id: UUID,
+    request: CommandRequest,
+    response: Response,
+    service: Annotated[CommandService, Depends(get_command_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CommandResponse:
+    _require_transition_route(
+        request,
+        workspace_id=workspace_id,
+        worker_transition_id=worker_transition_id,
+        command_type="ConfirmWorkerTransitionStopped",
+    )
+    return _execute_command(request, response, service, settings)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/recover",
+    response_model=CommandResponse,
+    operation_id="recover_worker_transition",
+)
+def recover_worker_transition(
+    workspace_id: UUID,
+    worker_transition_id: UUID,
+    request: CommandRequest,
+    response: Response,
+    service: Annotated[CommandService, Depends(get_command_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CommandResponse:
+    _require_transition_route(
+        request,
+        workspace_id=workspace_id,
+        worker_transition_id=worker_transition_id,
+        command_type="RecoverWorkerTransition",
+    )
+    return _execute_command(request, response, service, settings)
+
+
+def _execute_command(
+    request: CommandRequest,
+    response: Response,
+    service: CommandService,
+    settings: Settings,
 ) -> CommandResponse:
     if (
         request.actor.type == settings.local_actor_type
@@ -56,3 +132,31 @@ def execute_command(
         else 200
     )
     return CommandResponse.from_result(result)
+
+
+def _require_transition_route(
+    request: CommandRequest,
+    *,
+    workspace_id: UUID,
+    worker_transition_id: UUID,
+    command_type: str,
+) -> None:
+    if request.workspace_id != workspace_id:
+        raise ValidationError(
+            "worker transition route workspace does not match command workspace",
+            details={"workspace_id": str(workspace_id)},
+        )
+    if request.command_type != command_type:
+        raise ValidationError(
+            "worker transition route does not match command type",
+            details={"command_type": command_type},
+        )
+    if request.target_type != "worker_transition":
+        raise ValidationError(
+            "worker transition route requires target_type=worker_transition"
+        )
+    if request.target_id != worker_transition_id:
+        raise ValidationError(
+            "worker transition route target does not match command target",
+            details={"worker_transition_id": str(worker_transition_id)},
+        )
