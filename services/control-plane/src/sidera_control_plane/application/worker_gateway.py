@@ -1936,6 +1936,11 @@ class WorkerGateway:
             raise blocked_error
 
         if operation_state.recovery_required:
+            self._mark_operation_unknown(
+                operation_id,
+                context,
+                "gateway_restart_requires_reconciliation",
+            )
             raise GatewayRecoveryRequired(
                 f"Gateway operation {operation_id} requires reconciliation"
             )
@@ -2044,8 +2049,10 @@ class WorkerGateway:
             result = self._persist_session_success(context, handle, operation_id)
             return result
         except Exception as exc:
-            self._fail_operation(operation_id, context, _failure_code(exc))
-            raise GatewayError("session startup failed") from exc
+            # The adapter may have started a process before persistence failed;
+            # an unknown start outcome must never be replayed automatically.
+            self._mark_operation_unknown(operation_id, context, _failure_code(exc))
+            raise GatewayRecoveryRequired("session startup outcome is unknown") from exc
 
     def _ensure_initial_prompt(
         self,
