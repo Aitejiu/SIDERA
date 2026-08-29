@@ -23,6 +23,7 @@ import { TaskBoard } from "./TaskBoard";
 import { TaskGraph } from "./TaskGraph";
 import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
 import { PlanConvergenceStrip } from "./PlanConvergenceStrip";
+import { PlanRevisionAttention } from "./PlanRevisionAttention";
 import type { TaskActivity as TaskActivityProjection, TaskGraph as TaskGraphProjection } from "./types";
 
 export function TaskDetailPage() {
@@ -197,6 +198,10 @@ function TaskDeliveryContent({
           convergence={graph.overview.convergence}
           blockedItems={blockedSubtasks}
         />
+        <PlanRevisionAttention
+          attention={graph.overview.revision_attention}
+          rootTaskTitle={graph.overview.title}
+        />
         <AttentionPanel
           workspaceId={workspaceId}
           rootTaskId={rootTaskId}
@@ -307,7 +312,11 @@ function taskStatus(graph: TaskGraphProjection): { kind: StatusMarkKind; label: 
   if (graph.overview.failed_subtask_count > 0) {
     return { kind: "failed", label: "有失败子任务" };
   }
-  if (graph.overview.attention_items.length > 0) {
+  if (
+    graph.overview.attention_items.length > 0
+    || graph.overview.revision_attention !== null
+    && graph.overview.revision_attention !== undefined
+  ) {
     return { kind: "stale", label: "需要处理" };
   }
   if (graph.overview.completed_subtask_count === graph.overview.subtask_count && graph.overview.subtask_count > 0) {

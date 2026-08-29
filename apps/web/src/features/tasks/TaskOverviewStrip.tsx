@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, Check, CirclePlay, Clock3, Layers3 } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, CirclePlay, Clock3, GitBranch, Layers3 } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import type { TaskOverview } from "./api";
@@ -55,6 +55,15 @@ export function TaskOverviewStrip({
                 || overview.attention_items[0].reason}
             </span>
             {overview.attention_items.length > 1 ? <span>另有 {overview.attention_items.length - 1} 项待处理</span> : null}
+          </>
+        ) : overview.revision_attention ? (
+          <>
+            <strong className="attention-value">
+              <GitBranch size={14} aria-hidden="true" />
+              {overview.title} / {overview.revision_attention.subtask_path.join(" / ") || "计划调整"}
+            </strong>
+            <span className="task-row__attention-label">计划调整</span>
+            <span>{overview.revision_attention.summary}</span>
           </>
         ) : <strong className="metric-muted"><Check size={14} aria-hidden="true" />当前没有卡点</strong>}
         <ArrowRight className="task-row__arrow" size={17} aria-hidden="true" />

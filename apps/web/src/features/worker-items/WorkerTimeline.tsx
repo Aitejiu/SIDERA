@@ -105,6 +105,7 @@ export function WorkerTimeline({
           className="worker-timeline__scroll"
           ref={scrollRef}
           tabIndex={0}
+          role="region"
           aria-label="WorkerItem 活动时间线"
           onScroll={(event) => {
             const element = event.currentTarget;

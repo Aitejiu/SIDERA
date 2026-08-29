@@ -33,6 +33,18 @@ const attentionItem = {
   blocked_since: "2026-08-22T07:55:00Z",
 };
 
+const revisionAttention = {
+  planning_request_id: "96000000-0000-0000-0000-000000000001",
+  status: "proposal_ready",
+  subtask_path: ["回调幂等"],
+  summary: "新的计划方案已就绪",
+  action: "review_revision",
+  deep_link: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/revisions/96000000-0000-0000-0000-000000000001`,
+  correlation_id: "97000000-0000-0000-0000-000000000001",
+  resource_version: 2,
+  occurred_at: "2026-08-22T08:04:00Z",
+};
+
 const graph = {
   schema_version: 1,
   overview: {
@@ -427,6 +439,25 @@ describe("TaskDetailPage", () => {
       "href",
       `/workspaces/${WORKSPACE_ID}/chat?context_ref=task:${ROOT_TASK_ID}`,
     );
+  });
+
+  it("surfaces a concrete plan revision without exposing worker details", async () => {
+    server.use(
+      http.get(`/api/v1/tasks/${ROOT_TASK_ID}/graph`, () => HttpResponse.json({
+        ...graph,
+        overview: { ...graph.overview, attention_items: [], revision_attention: revisionAttention },
+      })),
+    );
+    renderPage();
+
+    const revision = await screen.findByRole("region", { name: "计划调整待处理" });
+    expect(within(revision).getByText("支付重构 / 回调幂等")).toBeVisible();
+    expect(within(revision).getByText("新的计划方案已就绪")).toBeVisible();
+    expect(within(revision).getByRole("link", { name: "查看计划调整" })).toHaveAttribute(
+      "href",
+      revisionAttention.deep_link,
+    );
+    expect(screen.getAllByText("需要处理", { exact: true }).at(0)).toBeVisible();
   });
 
   it("defaults to the Subtask board and keeps DAG optional", async () => {

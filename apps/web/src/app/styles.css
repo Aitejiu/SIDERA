@@ -1376,6 +1376,76 @@ h1 {
   font-size: 16px;
 }
 
+.plan-revision-attention {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid #dfc39d;
+  border-left: 3px solid var(--attention);
+  background: #fffaf2;
+}
+
+.plan-revision-attention__marker {
+  padding-top: 2px;
+  color: var(--attention);
+}
+
+.plan-revision-attention__body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.plan-revision-attention__heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plan-revision-attention__heading .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.plan-revision-attention__heading h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+}
+
+.plan-revision-attention__body > strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.plan-revision-attention__body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.plan-revision-attention__status {
+  flex: 0 0 auto;
+  padding-top: 3px;
+  color: var(--attention);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.plan-revision-attention__action {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .plan-convergence-strip__status {
   display: inline-flex;
   align-items: center;
@@ -4018,6 +4088,7 @@ h1 {
 .task-board-card__meta {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 9px;
+  padding-right: 22px;
 }
 
 .task-board-card__worker {
@@ -6282,6 +6353,22 @@ h1 {
 }
 
 @media (max-width: 639px) {
+  .plan-revision-attention {
+    grid-template-columns: 20px minmax(0, 1fr);
+    padding: 13px 14px;
+  }
+
+  .plan-revision-attention__heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .plan-revision-attention__action {
+    grid-column: 2;
+    justify-self: start;
+  }
+
   .workspace-tabs {
     padding: 0 8px;
   }
@@ -6380,6 +6467,11 @@ h1 {
   .worker-timeline__scroll {
     height: 560px;
     min-height: 360px;
+  }
+
+  .worker-composer {
+    position: static;
+    box-shadow: none;
   }
 
   .worker-timeline-item {

@@ -606,21 +606,9 @@ def _revision_proposal_payload(
             enforcement=DependencyEnforcement.CONTROL_PLANE,
         ),
     )
-    worker_dependencies = (
-        *base_plan.worker_item_dependencies,
-        WorkerItemDependency(
-            upstream_worker_item_key="revision-worker-a",
-            downstream_worker_item_key="revision-worker-merge",
-            kind="hard",
-            required_artifact_refs=("artifact_type:diff",),
-        ),
-        WorkerItemDependency(
-            upstream_worker_item_key="revision-worker-b",
-            downstream_worker_item_key="revision-worker-merge",
-            kind="hard",
-            required_artifact_refs=("artifact_type:diff",),
-        ),
-    )
+    # Cross-branch ordering belongs to the Subtask DAG; WorkerItem edges stay
+    # within one Subtask so the worker workspace remains locally scoped.
+    worker_dependencies = tuple(base_plan.worker_item_dependencies)
     subtask_by_key = {item.key: item for item in subtasks}
     intents = tuple(
         ExecutionIntent(
