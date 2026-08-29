@@ -14,6 +14,10 @@ import {
   planningRequestQueryKey,
 } from "./api";
 import { getTask, taskGraphQueryKey, taskQueryKey } from "@/features/tasks/api";
+import { RevisionDagDiff } from "./RevisionDagDiff";
+import { RevisionDecisionSummary } from "./RevisionDecisionSummary";
+import { RevisionHierarchyDiff } from "./RevisionHierarchyDiff";
+import { RevisionImpactPanel } from "./RevisionImpactPanel";
 import type { ConfirmPlanRevisionPayload, PlanningRequest, RevisionDiff } from "./types";
 
 export function PlanRevisionPage() {
@@ -196,12 +200,22 @@ export function PlanRevisionPage() {
               </button>
             </div>
           ) : diff !== undefined ? (
-            <RevisionOverview diff={diff} />
+            <div className="plan-revision-page__review">
+              <RevisionDecisionSummary
+                rootTitle={rootTitle}
+                rootDescription={taskQuery.data?.description}
+                diff={diff}
+              />
+              <RevisionImpactPanel diff={diff} />
+              <RevisionHierarchyDiff diff={diff} />
+              <RevisionDagDiff diff={diff} />
+            </div>
           ) : (
             <div className="plan-revision-page__loading" role="status">当前状态没有可审阅的变更范围。</div>
           )}
 
           <div className="plan-revision-page__actions">
+            <p className="plan-revision-page__actions-note">新计划会立即成为活动目标，Worker 随后异步同步。</p>
             <button
               className="primary-button"
               type="button"
@@ -235,44 +249,6 @@ export function PlanRevisionPage() {
             <span className="mono-label">{isStale ? "STALE" : "FRESH"}</span>
           </section>
         </aside>
-      </div>
-    </section>
-  );
-}
-
-function RevisionOverview({ diff }: { diff: RevisionDiff }) {
-  const entries = [
-    ...diff.root_changes.map((change) => ({ path: "根任务", strategy: "修改", reason: change.field_path })),
-    ...diff.subtask_changes.map((change) => ({ path: change.path, strategy: change.strategy, reason: change.reason })),
-    ...diff.worker_item_changes.map((change) => ({ path: change.path, strategy: change.strategy, reason: change.reasons[0] ?? change.context_disposition })),
-  ];
-  return (
-    <section className="plan-revision-page__overview" aria-labelledby="revision-overview-title">
-      <div className="section-heading">
-        <div>
-          <span className="eyebrow">CHANGE SURFACE</span>
-          <h2 id="revision-overview-title">这次会改变什么</h2>
-        </div>
-        <span className="mono-label">{entries.length} 个结构项</span>
-      </div>
-      <div className="plan-revision-page__impact-grid">
-        {(["preserve", "patch", "continue", "create", "derive", "move", "retire"] as const).map((key) => (
-          <div key={key}>
-            <span>{impactLabel(key)}</span>
-            <strong>{diff.impact_counts[key]}</strong>
-          </div>
-        ))}
-      </div>
-      <div className="plan-revision-page__change-list">
-        {entries.length === 0 ? <p>没有可展示的结构变化。</p> : entries.map((entry) => (
-          <article key={`${entry.path}:${entry.strategy}`}>
-            <div>
-              <strong>{entry.path}</strong>
-              <span>{entry.strategy}</span>
-            </div>
-            <p>{entry.reason}</p>
-          </article>
-        ))}
       </div>
     </section>
   );
@@ -368,18 +344,5 @@ function generationLabel(diff: RevisionDiff | undefined, request: PlanningReques
 
 function rootTitleFromDiff(diff: RevisionDiff | undefined): string | undefined {
   const path = diff?.affected_branch_paths[0];
-  return path?.split(" /")[0] || undefined;
-}
-
-function impactLabel(key: string): string {
-  const labels: Record<string, string> = {
-    preserve: "复用",
-    patch: "补丁",
-    continue: "续接",
-    create: "新增",
-    derive: "派生",
-    move: "移动",
-    retire: "退出",
-  };
-  return labels[key] ?? key;
+  return path?.split(" / ")[0] || undefined;
 }

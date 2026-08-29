@@ -26,7 +26,8 @@ export function ProposalActions({
     <section className="planning-proposal__actions" aria-labelledby="proposal-actions-title">
       <div>
         <span className="eyebrow">CONFIRMATION GATE</span>
-        <h2 id="proposal-actions-title">确认后才会创建任务事实</h2>
+        <h2 id="proposal-actions-title">确认后启用新的活动计划</h2>
+        <p>新计划会立即成为活动目标，Worker 随后异步同步</p>
         <p>确认会按当前审阅的 revision 创建 Root Task、Subtask、WorkerItem 和 ExecutionRequest。</p>
       </div>
       {isStale ? (

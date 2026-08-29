@@ -208,8 +208,8 @@ describe("PlanRevisionPage", () => {
 
     expect(await screen.findByRole("heading", { name: "调整任务计划" })).toBeVisible();
     expect(screen.getByText("支付重构")).toBeVisible();
-    expect(await screen.findByText(/Generation 2 → 3/)).toBeVisible();
-    expect(await screen.findByText("支付重构 / API / Backend")).toBeVisible();
+    expect((await screen.findAllByText(/Generation 2 → 3/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("支付重构 / API / Backend")).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: "确认并启用新计划" }));
 
