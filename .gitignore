@@ -33,6 +33,7 @@ test-results/
 data/
 logs/
 /.sidera/
+/.sidera/r6-1.local.env
 /workspace/
 *.db
 *.db-shm
