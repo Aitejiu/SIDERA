@@ -71,6 +71,13 @@ function TaskBoardCard({ node, onOpen }: { node: SubtaskNode; onOpen: (subtaskKe
       <span className="task-board-card__topline"><span className="eyebrow">{node.subtask_key}</span><StatusMark kind={statusKind(node.state)} /></span>
       <strong>{node.title}</strong>
       <span className="task-board-card__action">{action}</span>
+      <span className="task-board-card__worker">
+        {node.attention_worker_item_count > 0
+          ? `${node.attention_worker_item_count} 个 WorkerItem 需要处理`
+          : node.running_worker_item_count > 0
+            ? `${node.running_worker_item_count} 个 WorkerItem 执行中`
+            : "没有活动中的 WorkerItem"}
+      </span>
       <span className="task-board-card__meta">
         <span>{hasWorkerItems ? `${node.worker_item_count} 个 WorkerItem` : "待配置 WorkerItem"}</span>
         <span>{node.evidence_satisfied}/{node.evidence_required}</span>

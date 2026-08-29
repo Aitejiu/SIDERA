@@ -7,3 +7,4 @@ export type WorkerItemGraph = components["schemas"]["WorkerItemGraphProjectionRe
 export type WorkerItemGraphEdge = components["schemas"]["WorkerItemGraphEdgeProjectionResponse"];
 export type RelatedSubtask = components["schemas"]["RelatedSubtaskProjectionResponse"];
 export type SubtaskActivity = components["schemas"]["SubtaskActivityProjectionResponse"];
+export type SubtaskConvergence = components["schemas"]["SubtaskConvergenceProjectionResponse"];

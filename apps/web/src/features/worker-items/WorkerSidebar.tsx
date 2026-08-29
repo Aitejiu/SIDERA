@@ -2,6 +2,7 @@ import {
   Activity,
   CheckCircle2,
   CircleAlert,
+  GitBranch,
   Gauge,
   History,
   PackageCheck,
@@ -94,6 +95,18 @@ export function WorkerSidebar({
         </div>
         {!contextSynchronized ? <span className="muted-copy">Agent 尚未确认最新工作上下文</span> : null}
       </section>
+
+      {workspace.plan_sync ? (
+        <section className="worker-item-sidebar__section">
+          <h3><GitBranch size={15} aria-hidden="true" />计划同步</h3>
+          <dl className="worker-item-facts">
+            <div><dt>Action</dt><dd>{planActionLabel(workspace.plan_sync.action)}</dd></div>
+            <div><dt>Generation</dt><dd>GEN {workspace.plan_sync.source_generation} → GEN {workspace.plan_sync.target_generation}</dd></div>
+            <div><dt>Context</dt><dd>V{workspace.plan_sync.current_context_version} → V{workspace.plan_sync.target_context_version}</dd></div>
+          </dl>
+          {workspace.plan_sync.failure_code ? <span className="muted-copy">冻结原因：{workspace.plan_sync.failure_code}</span> : null}
+        </section>
+      ) : null}
 
       <section className="worker-item-sidebar__section">
         <h3><Puzzle size={15} aria-hidden="true" />Usage</h3>
@@ -194,6 +207,17 @@ function readOnlyReason(reason: string | null): string {
     stream_stale: "实时状态过期，恢复同步后才能写入",
   };
   return reason === null ? "当前工作区只读" : labels[reason] ?? "当前工作区只读，暂不能介入";
+}
+
+function planActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    preserve: "保留当前 Worker",
+    patch: "应用 Context Patch",
+    continue: "续接当前 Worker",
+    move: "迁移到新 Worker",
+    retire: "退役并保留历史",
+  };
+  return labels[action] ?? action;
 }
 
 function shortId(value: string): string {

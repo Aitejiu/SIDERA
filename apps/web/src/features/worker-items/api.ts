@@ -8,7 +8,9 @@ import type { paths } from "@/shared/api/schema";
 import type {
   CommandRequest,
   CommandResponse,
+  RecoverWorkerTransitionPayload,
   WorkerActivityPage,
+  WorkerTransition,
   WorkerWorkspace,
 } from "./types";
 
@@ -52,6 +54,45 @@ export async function listWorkerItemActivity(
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity" as keyof paths,
     init,
   );
+}
+
+export async function getWorkerTransition(
+  workspaceId: string,
+  workerTransitionId: string,
+  signal?: AbortSignal,
+): Promise<WorkerTransition> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/worker-transitions/${encodeURIComponent(workerTransitionId)}`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(
+    path,
+    "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}" as keyof paths,
+    init,
+  );
+}
+
+export async function recoverWorkerTransition(
+  workspaceId: string,
+  transition: Pick<WorkerTransition, "worker_transition_id" | "version">,
+  payload: Pick<RecoverWorkerTransitionPayload, "strategy" | "reason" | "evidence_refs">,
+): Promise<CommandResponse> {
+  const identity = createCommandIdentity();
+  const command: CommandRequest = {
+    command_id: identity.commandId,
+    workspace_id: workspaceId,
+    command_type: "RecoverWorkerTransition",
+    actor: { type: "local", id: "aitejiu" },
+    target_type: "worker_transition",
+    target_id: transition.worker_transition_id,
+    expected_version: transition.version,
+    idempotency_key: identity.idempotencyKey,
+    correlation_id: crypto.randomUUID(),
+    payload,
+  };
+  return apiCommand<CommandResponse>("/api/v1/commands", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(command),
+  });
 }
 
 export async function pinExecutionWorker(

@@ -10,3 +10,4 @@ export type ActivityItem = components["schemas"]["TaskConsoleActivityItemProject
 export type TaskView = components["schemas"]["TaskResponse"];
 export type PlanSnapshot = components["schemas"]["TaskPlanSnapshotResponse"];
 export type PlanDiff = components["schemas"]["PlanDiffResponse"];
+export type PlanConvergence = components["schemas"]["PlanConvergenceProjectionResponse"];

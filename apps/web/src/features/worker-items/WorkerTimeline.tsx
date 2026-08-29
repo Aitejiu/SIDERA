@@ -2,8 +2,10 @@ import {
   CheckCircle2,
   CircleDot,
   FileCheck2,
+  GitBranch,
   MessageSquareText,
   PackageCheck,
+  RefreshCcw,
   SearchCode,
   ShieldAlert,
   Timer,
@@ -192,7 +194,9 @@ function WorkerActivityRow({
 }
 
 function isBoundary(kind: string | undefined): boolean {
-  return kind?.startsWith("session.") === true || kind?.startsWith("execution.") === true;
+  return kind?.startsWith("session.") === true
+    || kind?.startsWith("execution.") === true
+    || kind === "plan.generation";
 }
 
 function activityVariant(kind: string): string {
@@ -200,6 +204,8 @@ function activityVariant(kind: string): string {
   if (kind === "checkpoint") return "checkpoint";
   if (kind === "artifact" || kind === "evidence") return "delivery";
   if (kind === "error" || kind.startsWith("error.")) return "error";
+  if (kind === "plan.recovery") return "error";
+  if (kind.startsWith("plan.")) return "plan";
   if (isBoundary(kind)) return "boundary";
   return "step";
 }
@@ -209,6 +215,10 @@ function activityLabel(kind: string): string {
   if (kind === "checkpoint") return "CHECKPOINT";
   if (kind === "artifact" || kind === "evidence") return "DELIVERY";
   if (kind === "error" || kind.startsWith("error.")) return "LIFECYCLE / ERROR";
+  if (kind === "plan.generation") return "PLAN GENERATION";
+  if (kind === "plan.patch") return "CONTEXT PATCH";
+  if (kind === "plan.continuation") return "CONTINUATION";
+  if (kind === "plan.recovery") return "RECOVERY";
   if (isBoundary(kind)) return "SESSION / EXECUTION";
   return "WORKER STEP";
 }
@@ -219,6 +229,10 @@ function activityIcon(kind: string) {
   if (kind === "artifact") return <PackageCheck size={16} />;
   if (kind === "evidence") return <FileCheck2 size={16} />;
   if (kind === "error" || kind.startsWith("error.")) return <TriangleAlert size={16} />;
+  if (kind === "plan.generation") return <GitBranch size={16} />;
+  if (kind === "plan.patch") return <RefreshCcw size={16} />;
+  if (kind === "plan.continuation") return <GitBranch size={16} />;
+  if (kind === "plan.recovery") return <TriangleAlert size={16} />;
   if (isBoundary(kind)) return <CircleDot size={16} />;
   return <ShieldAlert size={16} />;
 }

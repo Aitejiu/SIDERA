@@ -17,6 +17,9 @@ const EXECUTION_TWO_ID = "60000000-0000-0000-0000-000000000002";
 const SESSION_TWO_ID = "70000000-0000-0000-0000-000000000002";
 const CONTEXT_PACKAGE_ONE_ID = "90000000-0000-0000-0000-000000000001";
 const CONTEXT_PACKAGE_TWO_ID = "90000000-0000-0000-0000-000000000002";
+const WORKER_TRANSITION_ID = "a0000000-0000-0000-0000-000000000001";
+const PLAN_TRANSITION_ID = "b0000000-0000-0000-0000-000000000001";
+const PATCH_ID = "c0000000-0000-0000-0000-000000000001";
 
 const workspace = {
   workspace_id: WORKSPACE_ID,
@@ -183,6 +186,32 @@ const workspace = {
   },
   last_change_cursor: 42,
   as_of: "2026-08-23T08:05:00Z",
+  plan_sync: {
+    worker_transition_id: WORKER_TRANSITION_ID,
+    plan_transition_id: PLAN_TRANSITION_ID,
+    action: "continue",
+    status: "blocked_unknown",
+    writer_state: "unknown",
+    source_generation: 1,
+    target_generation: 2,
+    current_context_version: 3,
+    acknowledged_context_version: 3,
+    target_context_version: 4,
+    patch_id: PATCH_ID,
+    patch_acknowledged: false,
+    source_execution_id: EXECUTION_ONE_ID,
+    source_session_id: "70000000-0000-0000-0000-000000000001",
+    target_execution_id: EXECUTION_TWO_ID,
+    target_session_id: SESSION_TWO_ID,
+    continuation_execution_id: EXECUTION_TWO_ID,
+    continuation_session_id: SESSION_TWO_ID,
+    queued_input_ids: [],
+    superseded_input_ids: ["d0000000-0000-0000-0000-000000000001"],
+    failure_code: "adapter_result_unknown",
+    started_at: "2026-08-23T07:50:00Z",
+    completed_at: null,
+    trace_href: null,
+  },
 };
 
 function makeExecutionContextPackage(packageId: string, executionId: string, contextVersion: number) {
@@ -278,6 +307,38 @@ const firstActivityPage = {
       correlation_id: "b0000000-0000-0000-0000-000000000002",
       body: "只修改这个回调重试规则",
       delivery_status: "delivered",
+      artifact_ids: [],
+      trace_descriptor: null,
+    },
+    {
+      activity_id: "a0000000-0000-0000-0000-000000000005",
+      source_type: "execution_input",
+      source_id: "d0000000-0000-0000-0000-000000000001",
+      execution_id: EXECUTION_ONE_ID,
+      session_id: "70000000-0000-0000-0000-000000000001",
+      occurred_at: "2026-08-23T07:45:00Z",
+      kind: "user_input",
+      title: "已失效输入",
+      summary: "旧 Session 上的重试提示",
+      correlation_id: "b0000000-0000-0000-0000-000000000005",
+      body: "旧 Session 上的重试提示",
+      delivery_status: "superseded",
+      artifact_ids: [],
+      trace_descriptor: null,
+    },
+    {
+      activity_id: "a0000000-0000-0000-0000-000000000006",
+      source_type: "execution_event",
+      source_id: "e0000000-0000-0000-0000-000000000001",
+      execution_id: EXECUTION_TWO_ID,
+      session_id: SESSION_TWO_ID,
+      occurred_at: "2026-08-23T08:00:00Z",
+      kind: "checkpoint",
+      title: "回调测试通过",
+      summary: "回调测试通过",
+      correlation_id: "b0000000-0000-0000-0000-000000000006",
+      body: null,
+      delivery_status: null,
       artifact_ids: [],
       trace_descriptor: null,
     },
@@ -440,6 +501,52 @@ describe("WorkerItemPage", () => {
     expect(screen.getByText("当前执行已绑定；更换节点需要停止并创建新的执行尝试")).toBeVisible();
     expect(screen.getByText("运行回调测试")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
+  });
+
+  it("shows plan sync state and keeps transition facts separate from Agent Trace", async () => {
+    renderPage();
+
+    const sync = await screen.findByRole("region", { name: "计划同步" });
+    expect(within(sync).getByText("GEN 1 → GEN 2")).toBeVisible();
+    expect(within(sync).getByText("未知结果")).toBeVisible();
+    expect(within(sync).getByRole("button", { name: "恢复计划同步" })).toBeVisible();
+    expect(screen.getByText("PLAN GENERATION")).toBeVisible();
+    expect(screen.getByText("CONTEXT PATCH")).toBeVisible();
+    expect(screen.getByText("CONTINUATION")).toBeVisible();
+    expect(screen.getByText("RECOVERY")).toBeVisible();
+    expect(screen.getByText("CHECKPOINT")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /查看.*计划同步/ })).not.toBeInTheDocument();
+  });
+
+  it("offers bounded recovery details only for blocked unknown transitions", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "恢复计划同步" }));
+    const dialog = screen.getByRole("dialog", { name: "恢复计划同步" });
+    expect(within(dialog).getByText("影响范围")).toBeVisible();
+    expect(within(dialog).getByText("adapter_result_unknown")).toBeVisible();
+    expect(within(dialog).getByRole("textbox", { name: "恢复原因" })).toBeVisible();
+    expect(within(dialog).getByRole("textbox", { name: "证据引用" })).toBeVisible();
+    expect(within(dialog).getByRole("radio", { name: /重新核对 Adapter 状态/ })).toBeVisible();
+    expect(within(dialog).getByRole("radio", { name: /将分支安全关闭/ })).toBeVisible();
+    expect(within(dialog).queryByText("强制成功")).not.toBeInTheDocument();
+  });
+
+  it("does not expose recovery for a converging transition", async () => {
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+        () => HttpResponse.json({
+          ...workspace,
+          plan_sync: { ...workspace.plan_sync, status: "converging", writer_state: "active" },
+        }),
+      ),
+    );
+    renderPage();
+
+    await screen.findByRole("heading", { name: "实现回调幂等" });
+    expect(screen.queryByRole("button", { name: "恢复计划同步" })).not.toBeInTheDocument();
   });
 
   it("loads older activity without duplicating an existing item", async () => {

@@ -6,6 +6,7 @@ import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
 import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
+import { PlanConvergenceStrip } from "../tasks/PlanConvergenceStrip";
 import { getSubtaskWorkspace, subtaskWorkspaceQueryKey } from "./api";
 import { WorkerBoard } from "./WorkerBoard";
 import { WorkerGraph } from "./WorkerGraph";
@@ -133,6 +134,11 @@ function SubtaskContent({
         upstream={workspace.upstream_subtasks}
         downstream={workspace.downstream_subtasks}
         onOpen={onOpenSubtask}
+      />
+
+      <PlanConvergenceStrip
+        label="分支收敛"
+        convergence={workspace.convergence}
       />
 
       <TaskKnowledgeSummary

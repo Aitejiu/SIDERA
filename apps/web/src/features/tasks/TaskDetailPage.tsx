@@ -22,6 +22,7 @@ import { TaskActivity } from "./TaskActivity";
 import { TaskBoard } from "./TaskBoard";
 import { TaskGraph } from "./TaskGraph";
 import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
+import { PlanConvergenceStrip } from "./PlanConvergenceStrip";
 import type { TaskActivity as TaskActivityProjection, TaskGraph as TaskGraphProjection } from "./types";
 
 export function TaskDetailPage() {
@@ -157,6 +158,13 @@ function TaskDeliveryContent({
 }) {
   const status = taskStatus(graph);
   const schedulingWaits = graph.overview.attention_items.filter(isSchedulingWait);
+  const blockedSubtasks = graph.nodes
+    .filter((node) => node.requires_operator || node.attention_worker_item_count > 0 || ["blocked", "failed", "waiting_user"].includes(node.state))
+    .map((node) => ({
+      key: node.subtask_key,
+      title: node.title,
+      detail: node.waiting_details_summary || node.current_action || node.waiting_reason || null,
+    }));
 
   return (
     <>
@@ -185,6 +193,10 @@ function TaskDeliveryContent({
       </header>
 
       <div className="task-detail-main">
+        <PlanConvergenceStrip
+          convergence={graph.overview.convergence}
+          blockedItems={blockedSubtasks}
+        />
         <AttentionPanel
           workspaceId={workspaceId}
           rootTaskId={rootTaskId}

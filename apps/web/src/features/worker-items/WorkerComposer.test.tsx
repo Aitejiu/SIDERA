@@ -8,12 +8,13 @@ import { server } from "@/test/server";
 
 import { WorkerComposer } from "./WorkerComposer";
 import { workerItemDraftKey } from "../trace/draftStore";
-import type { WorkerWorkspace } from "./types";
+import type { WorkerActivity, WorkerWorkspace } from "./types";
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const WORKER_ITEM_ID = "40000000-0000-0000-0000-000000000001";
 const EXECUTION_ID = "60000000-0000-0000-0000-000000000002";
 const SESSION_ID = "70000000-0000-0000-0000-000000000002";
+const OLD_SESSION_ID = "70000000-0000-0000-0000-000000000001";
 const WORKER_ID = "80000000-0000-0000-0000-000000000001";
 
 const context = {
@@ -48,6 +49,7 @@ const workspace = {
 function renderComposer(
   currentWorkspace: WorkerWorkspace = workspace,
   onRefresh = vi.fn(async () => undefined),
+  activities: readonly WorkerActivity[] = [],
 ) {
   return render(
     <MemoryRouter>
@@ -56,6 +58,7 @@ function renderComposer(
         workerItemId={WORKER_ITEM_ID}
         workspace={currentWorkspace}
         execution={undefined}
+        activities={activities}
         onRefresh={onRefresh}
       />
     </MemoryRouter>,
@@ -132,5 +135,41 @@ describe("WorkerComposer", () => {
     expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeDisabled();
     expect(screen.getByText("这个 WorkerItem 已退役，只能查看历史上下文")).toBeVisible();
     expect(screen.getByRole("button", { name: "发送到当前 Session" })).toBeDisabled();
+  });
+
+  it("resends a superseded input as a new input on the current Session", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> = {};
+    server.use(
+      http.post("/api/v1/commands", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ command_id: "2", aggregate_id: "new-input", aggregate_version: 1, event_ids: [] });
+      }),
+    );
+    renderComposer(workspace, undefined, [{
+      activity_id: "a0000000-0000-0000-0000-000000000010",
+      source_type: "execution_input",
+      source_id: "d0000000-0000-0000-0000-000000000010",
+      execution_id: EXECUTION_ID,
+      session_id: OLD_SESSION_ID,
+      occurred_at: "2026-08-23T07:45:00Z",
+      kind: "user_input",
+      title: "用户介入",
+      summary: "旧 Session 上的补充要求",
+      correlation_id: "b0000000-0000-0000-0000-000000000010",
+      body: "旧 Session 上的补充要求",
+      delivery_status: "superseded",
+      artifact_ids: [],
+      trace_descriptor: null,
+    }]);
+
+    await user.click(screen.getByRole("button", { name: "重新发送" }));
+
+    await waitFor(() => expect(requestBody.target_id).toBe(SESSION_ID));
+    const payload = requestBody.payload as Record<string, unknown>;
+    expect(payload.text).toBe("旧 Session 上的补充要求");
+    expect(payload.client_idempotency_key).not.toBe("d0000000-0000-0000-0000-000000000010");
+    expect(payload.context).toEqual(context);
+    expect(requestBody.target_id).not.toBe(OLD_SESSION_ID);
   });
 });

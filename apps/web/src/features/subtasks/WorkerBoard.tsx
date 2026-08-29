@@ -111,6 +111,11 @@ function WorkerCard({
         <span className="eyebrow">当前步骤</span>
         {worker.current_step ?? "尚未开始"}
       </span>
+      {worker.plan_sync ? (
+        <span className="worker-board-card__sync">
+          计划 {syncStatusLabel(worker.plan_sync.status)} · GEN {worker.plan_sync.target_generation}
+        </span>
+      ) : null}
       {worker.blocker ? <span className="worker-board-card__blocker"><CircleAlert size={13} aria-hidden="true" />{worker.blocker}</span> : null}
       <span className="worker-board-card__meta">
         <span>Agent</span>
@@ -123,6 +128,17 @@ function WorkerCard({
       <span className="worker-board-card__chevron" aria-hidden="true"><ArrowRight size={14} /></span>
     </button>
   );
+}
+
+function syncStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    converged: "已收敛",
+    converging: "同步中",
+    blocked_unknown: "未知结果",
+    degraded: "部分失败",
+    waiting: "等待",
+  };
+  return labels[status] ?? status;
 }
 
 function columnFor(status: string): WorkerColumnKey {

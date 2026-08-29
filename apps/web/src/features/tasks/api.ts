@@ -13,6 +13,7 @@ import type {
 } from "./types";
 
 export type TaskOverview = components["schemas"]["TaskConsoleOverviewProjectionResponse"];
+export type TaskConvergence = components["schemas"]["PlanConvergenceProjectionResponse"];
 
 export const TASK_ACTIVITY_PAGE_SIZE = 8;
 

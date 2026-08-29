@@ -14,19 +14,21 @@ import {
 } from "../trace/draftStore";
 import { sendExecutionInput, stopExecution } from "../trace/api";
 import type { Execution } from "../trace/types";
-import type { WorkerWorkspace } from "./types";
+import type { WorkerActivity, WorkerWorkspace } from "./types";
 
 export function WorkerComposer({
   workspaceId,
   workerItemId,
   workspace,
   execution,
+  activities = [],
   onRefresh,
 }: {
   workspaceId: string;
   workerItemId: string;
   workspace: WorkerWorkspace;
   execution: Execution | undefined;
+  activities?: readonly WorkerActivity[];
   onRefresh: () => Promise<void>;
 }) {
   const stream = useWorkspaceStreamOptional();
@@ -40,6 +42,11 @@ export function WorkerComposer({
   const [draft, setDraft] = useState(() => loadWorkerItemDraft(draftKey));
   const [status, setStatus] = useState("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const supersededInputs = activities.filter(
+    (activity) => activity.kind === "user_input"
+      && activity.delivery_status === "superseded"
+      && activity.body?.trim(),
+  );
   const streamReady = stream === null
     || stream.streamState.status === "live"
     || stream.streamState.status === "connecting";
@@ -106,6 +113,30 @@ export function WorkerComposer({
     }
   };
 
+  const handleResend = async (text: string) => {
+    if (!writable || context === null || text.trim() === "") return;
+    setStatus("sending");
+    setErrorMessage(null);
+    try {
+      await sendExecutionInput(
+        workspaceId,
+        { id: context.session_id, version: context.session_version },
+        context,
+        crypto.randomUUID(),
+        text,
+      );
+      setStatus("accepted");
+      try {
+        await onRefresh();
+      } catch {
+        setErrorMessage("输入已重新发送，但工作区刷新失败，请稍后重试刷新。");
+      }
+    } catch (error) {
+      setStatus("rejected");
+      setErrorMessage(describeError(error));
+    }
+  };
+
   return (
     <section className="worker-composer" aria-labelledby="worker-composer-title">
       <div className="section-heading worker-composer__heading">
@@ -132,6 +163,31 @@ export function WorkerComposer({
           ) : <span>当前没有可验证的 Session context</span>}
         </details>
       </div>
+      {supersededInputs.length > 0 ? (
+        <section className="worker-composer__superseded" aria-labelledby="worker-composer-superseded-title">
+          <div className="worker-composer__superseded-heading">
+            <div>
+              <span className="eyebrow">SUPERSEDED INPUTS</span>
+              <h3 id="worker-composer-superseded-title">已失效的用户介入</h3>
+            </div>
+            <span className="composer-state">需明确重新发送</span>
+          </div>
+          {supersededInputs.map((input) => (
+            <div className="worker-composer__superseded-item" key={input.activity_id}>
+              <blockquote>{input.body}</blockquote>
+              <button
+                className="quiet-button"
+                type="button"
+                title="以当前 context 重新发送，不复用旧 Session"
+                onClick={() => void handleResend(input.body ?? "")}
+                disabled={!writable || status === "sending"}
+              >
+                <Send size={14} aria-hidden="true" />重新发送
+              </button>
+            </div>
+          ))}
+        </section>
+      ) : null}
       <textarea
         className="worker-composer__input"
         rows={2}
