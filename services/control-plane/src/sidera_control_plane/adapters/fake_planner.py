@@ -795,6 +795,10 @@ def _revision_control_room_payload(
         target_worker(key)
         for key in ("worker-a", "worker-b", "worker-c", "worker-e")
     )
+    retired_subtask_id = base_subtasks["subtask-d"].task_id
+    retired_worker_item_id = base_workers["worker-d"].worker_item_id
+    if retired_subtask_id is None or retired_worker_item_id is None:
+        raise ValueError("revision fixture requires materialized retired identities")
     subtask_decisions = tuple(
         SubtaskIdentityDecision(
             target_subtask_key=key,
@@ -911,8 +915,8 @@ def _revision_control_room_payload(
         execution_intents=intents,
         subtask_identity_decisions=subtask_decisions,
         worker_item_identity_decisions=worker_decisions,
-        retired_subtask_ids=(base_subtasks["subtask-d"].task_id,),
-        retired_worker_item_ids=(base_workers["worker-d"].worker_item_id,),
+        retired_subtask_ids=(retired_subtask_id,),
+        retired_worker_item_ids=(retired_worker_item_id,),
         decision_summary=DecisionSummary(
             understanding="Preserve the running graph and revise one branch.",
             assumptions=("A and B remain parallel.",),
