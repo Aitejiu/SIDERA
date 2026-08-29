@@ -482,6 +482,11 @@ class ActivationReconciler:
             request.planning_request_id, request.workspace_id
         )
         if work_context is None:
+            # Revision requests share the root task's WorkContext aggregate.
+            work_context = uow.work_contexts.get_by_root_task(
+                request.root_task_id, request.workspace_id
+            )
+        if work_context is None:
             return None, "work_context_missing"
         work_context_revision = uow.work_contexts.get_revision(
             work_context.current_revision_id, request.workspace_id

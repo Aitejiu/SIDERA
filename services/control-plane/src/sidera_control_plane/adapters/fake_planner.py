@@ -45,6 +45,7 @@ from sidera_control_plane.domain.planning import (
     PlanningRequestKind,
 )
 from sidera_control_plane.domain.planning_proposals import (
+    ActivationDependency,
     DecisionSummary,
     ExecutionIntent,
     ImpactPolicy,
@@ -64,6 +65,7 @@ from sidera_control_plane.domain.plans import (
     SubtaskDependency,
     TaskPlanSnapshot,
     WorkerItemDependency,
+    WorkerItemPlanItem,
     WorkItemKind,
 )
 from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
@@ -71,6 +73,7 @@ from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 FakeScenario = Literal[
     "proposal",
     "revision",
+    "revision_control_room",
     "clarification",
     "scale",
     "invalid_schema",
@@ -88,6 +91,7 @@ class FakePlannerConfig:
         if self.scenario not in {
             "proposal",
             "revision",
+            "revision_control_room",
             "clarification",
             "scale",
             "invalid_schema",
@@ -227,10 +231,12 @@ class FakePlannerAdapter:
                 base_plan = TaskPlanSnapshot.from_payload(
                     dict(planner_input.planning_context.plan_snapshot_payload)
                 )
-                payload = _revision_proposal_payload(
-                    planner_input.planning_context,
-                    base_plan,
+                payload_builder = (
+                    _revision_control_room_payload
+                    if self.config.scenario == "revision_control_room"
+                    else _revision_proposal_payload
                 )
+                payload = payload_builder(planner_input.planning_context, base_plan)
                 derived_diff = RevisionDiffNormalizer().normalize(base_plan, payload)
             except (DomainError, TypeError, ValueError):
                 return self._failure(
@@ -716,4 +722,232 @@ def _revision_proposal_payload(
             failure_policy="block_affected_branch",
             revision_operation="revise",
         ),
+    )
+
+
+def _revision_control_room_payload(
+    context: RevisionPlanningContextV1,
+    base_plan: TaskPlanSnapshot,
+) -> PlanningRevisionProposalPayloadV3:
+    """Build the deterministic preserve/patch/create/retire release fixture."""
+    base_subtasks = {item.key: item for item in base_plan.subtasks}
+    base_workers = {item.key: item for item in base_plan.worker_item_plans}
+    target_subtask_keys = ("subtask-a", "subtask-b", "subtask-c", "subtask-e")
+
+    def target_subtask(key: str) -> ProposedSubtask:
+        if key == "subtask-e":
+            return ProposedSubtask(
+                key=key,
+                kind=WorkItemKind.CHILD,
+                title="Subtask E",
+                goal_summary="Add the revised verification branch.",
+                acceptance_refs=("acceptance:subtask-e",),
+                expected_outputs=("artifact_type:diff",),
+                milestone_key=None,
+                source_refs=("brief:current", "revision:control-room"),
+            )
+        item = base_subtasks[key]
+        return ProposedSubtask(
+            key=item.key,
+            kind=item.kind,
+            title=item.title,
+            goal_summary=item.goal_summary,
+            acceptance_refs=item.acceptance_refs,
+            expected_outputs=item.expected_outputs,
+            milestone_key=item.milestone_key,
+            source_refs=item.source_refs,
+        )
+
+    def target_worker(key: str) -> ProposedWorkerItem:
+        if key == "worker-e":
+            return ProposedWorkerItem(
+                key=key,
+                subtask_key="subtask-e",
+                title="Worker E",
+                role="developer",
+                responsibility="Produce the new verification branch.",
+                capability_requirements=("code",),
+                worker_policy_ref="policy:r6.1-fake",
+                configuration_ref=None,
+                concurrency_limit=1,
+                source_refs=("brief:current", "revision:control-room"),
+            )
+        item = base_workers[key]
+        return ProposedWorkerItem(
+            key=item.key,
+            subtask_key=item.subtask_key,
+            title=item.title,
+            role=item.role,
+            responsibility=(
+                "Produce the revised branch B evidence."
+                if key == "worker-b"
+                else item.responsibility
+            ),
+            capability_requirements=item.capability_requirements,
+            worker_policy_ref=item.worker_policy_ref,
+            configuration_ref=item.configuration_ref,
+            concurrency_limit=item.concurrency_limit,
+            source_refs=item.source_refs,
+        )
+
+    subtasks = tuple(target_subtask(key) for key in target_subtask_keys)
+    workers = tuple(
+        target_worker(key)
+        for key in ("worker-a", "worker-b", "worker-c", "worker-e")
+    )
+    subtask_decisions = tuple(
+        SubtaskIdentityDecision(
+            target_subtask_key=key,
+            strategy=IdentityStrategy.REUSE,
+            existing_subtask_task_id=base_subtasks[key].task_id,
+            derived_from_subtask_task_ids=(),
+            reason="preserve the existing subtask identity",
+        )
+        for key in ("subtask-a", "subtask-b", "subtask-c")
+    ) + (
+        SubtaskIdentityDecision(
+            target_subtask_key="subtask-e",
+            strategy=IdentityStrategy.CREATE,
+            existing_subtask_task_id=None,
+            derived_from_subtask_task_ids=(),
+            reason="new verification branch",
+        ),
+    )
+    worker_decisions = (
+        _reuse_worker_decision(
+            key="worker-a",
+            worker=base_workers["worker-a"],
+            target_subtask_key="subtask-a",
+            disposition=ContextDisposition.UNCHANGED,
+            reasons=("stable parallel branch",),
+        ),
+        _reuse_worker_decision(
+            key="worker-b",
+            worker=base_workers["worker-b"],
+            target_subtask_key="subtask-b",
+            disposition=ContextDisposition.PATCH_REQUIRED,
+            reasons=("updated branch requirement",),
+        ),
+        _reuse_worker_decision(
+            key="worker-c",
+            worker=base_workers["worker-c"],
+            target_subtask_key="subtask-c",
+            disposition=ContextDisposition.UNCHANGED,
+            reasons=("preserve fan-in branch",),
+        ),
+        WorkerItemIdentityDecision(
+            target_worker_item_key="worker-e",
+            strategy=IdentityStrategy.CREATE,
+            existing_worker_item_id=None,
+            derived_from_worker_item_ids=(),
+            target_subtask_key="subtask-e",
+            context_disposition=ContextDisposition.UNCHANGED,
+            change_reasons=("new verification branch",),
+        ),
+    )
+    intents = tuple(
+        ExecutionIntent(
+            worker_item_key=worker.key,
+            purpose=worker.responsibility,
+            context_refs=("context:running-plan",),
+            expected_artifact_refs=("artifact_type:diff",),
+            required_evidence_refs=(
+                f"acceptance:{worker.subtask_key.removeprefix('subtask-')}",
+            ),
+            capability_requirements=worker.capability_requirements,
+            adapter_preferences=("fake",),
+            budget_class="standard",
+            deadline_seconds=60,
+            not_before_seconds=None,
+            max_attempts=2,
+            activation_dependencies=(
+                ActivationDependency(
+                    upstream_worker_item_key="worker-a",
+                    downstream_worker_item_key="worker-c",
+                    kind="hard",
+                    required_artifact_refs=("artifact_type:diff",),
+                ),
+                ActivationDependency(
+                    upstream_worker_item_key="worker-b",
+                    downstream_worker_item_key="worker-c",
+                    kind="hard",
+                    required_artifact_refs=("artifact_type:diff",),
+                ),
+            )
+            if worker.key == "worker-c"
+            else (),
+        )
+        for worker in workers
+    )
+    return PlanningRevisionProposalPayloadV3(
+        schema_version=3,
+        kind=PlanningRequestKind.REVISION,
+        base_descriptor=context.base_descriptor,
+        root_task=ProposedRootTask(
+            title=base_plan.title,
+            goal_summary=base_plan.goal_summary,
+            acceptance_refs=base_plan.acceptance_refs,
+        ),
+        subtasks=subtasks,
+        worker_items=workers,
+        subtask_milestones=(),
+        subtask_dependencies=(
+            SubtaskDependency(
+                upstream_subtask_key="subtask-a",
+                downstream_subtask_key="subtask-c",
+                kind=DependencyKind.HARD,
+                required_evidence_refs=(),
+                enforcement=DependencyEnforcement.CONTROL_PLANE,
+            ),
+            SubtaskDependency(
+                upstream_subtask_key="subtask-b",
+                downstream_subtask_key="subtask-c",
+                kind=DependencyKind.HARD,
+                required_evidence_refs=(),
+                enforcement=DependencyEnforcement.CONTROL_PLANE,
+            ),
+        ),
+        worker_item_dependencies=(),
+        execution_intents=intents,
+        subtask_identity_decisions=subtask_decisions,
+        worker_item_identity_decisions=worker_decisions,
+        retired_subtask_ids=(base_subtasks["subtask-d"].task_id,),
+        retired_worker_item_ids=(base_workers["worker-d"].worker_item_id,),
+        decision_summary=DecisionSummary(
+            understanding="Preserve the running graph and revise one branch.",
+            assumptions=("A and B remain parallel.",),
+            risks=("C remains blocked until both upstream branches provide evidence.",),
+            estimated_cost_microunits=400,
+            estimated_runtime_seconds=120,
+            estimated_concurrency=2,
+            scope_includes=("worker-b patch", "worker-e creation"),
+            scope_excludes=("worker-a replacement",),
+            metadata={"fixture": "r6.1-control-room"},
+            estimated_tokens=400,
+        ),
+        impact_policy=ImpactPolicy(
+            activate_immediately=True,
+            budget_level="standard",
+            failure_policy="block_affected_branch",
+            revision_operation="revise",
+        ),
+    )
+
+
+def _reuse_worker_decision(
+    *,
+    key: str,
+    worker: WorkerItemPlanItem,
+    target_subtask_key: str,
+    disposition: ContextDisposition,
+    reasons: tuple[str, ...],
+) -> WorkerItemIdentityDecision:
+    return WorkerItemIdentityDecision(
+        target_worker_item_key=key,
+        strategy=IdentityStrategy.REUSE,
+        existing_worker_item_id=worker.worker_item_id,
+        derived_from_worker_item_ids=(),
+        target_subtask_key=target_subtask_key,
+        context_disposition=disposition,
+        change_reasons=reasons,
     )

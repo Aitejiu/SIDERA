@@ -5,6 +5,7 @@ import { test as base } from "@playwright/test";
 
 export const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 export const R5_WORKSPACE_ID = "20000000-0000-0000-0000-000000000002";
+export const R6_1_WORKSPACE_ID = "20000000-0000-0000-0000-000000000003";
 export const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 export const SUBTASK_TASK_ID = "30000000-0000-0000-0000-000000000002";
 export const SECOND_ROOT_TASK_ID = "30000000-0000-0000-0000-000000000005";
@@ -36,6 +37,7 @@ const repositoryRoot = resolve(webRoot, "../..");
 const controlPlaneRoot = resolve(repositoryRoot, "services/control-plane");
 const seedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r4_workspace.py");
 const planningSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r5_planning.py");
+const revisionSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_1_revision.py");
 const defaultPython = resolve(controlPlaneRoot, ".venv/bin/python");
 const knowledgeServiceRoot = resolve(repositoryRoot, "services/knowledge-service");
 const knowledgeSeedScript = resolve(knowledgeServiceRoot, "tests/e2e/seed_r5_3_knowledge.py");
@@ -63,6 +65,18 @@ export function seedR5Planning(scenario: PlanningSeedScenario = "proposal"): voi
   execFileSync(
     process.env.SIDERA_E2E_PYTHON ?? defaultPython,
     [planningSeedScript, "--scenario", scenario, "--workspace-id", R5_WORKSPACE_ID],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: e2eEnvironment(),
+    },
+  );
+}
+
+export function seedR6Revision(): void {
+  execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    [revisionSeedScript, "--workspace-id", R6_1_WORKSPACE_ID, "--reset"],
     {
       cwd: controlPlaneRoot,
       stdio: "pipe",
@@ -146,6 +160,7 @@ function e2eEnvironment(): NodeJS.ProcessEnv {
 type Fixtures = {
   seedR4: (scenario?: SeedScenario) => void;
   seedR5: (scenario?: PlanningSeedScenario) => void;
+  seedR6Revision: () => void;
   seedKnowledge: (workspaceId?: string) => void;
 };
 
@@ -161,6 +176,12 @@ export const test = base.extend<Fixtures>({
     // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(seedR5Planning);
+  },
+  seedR6Revision: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(seedR6Revision);
   },
   seedKnowledge: async ({ browserName }, use) => {
     void browserName;
