@@ -259,6 +259,25 @@ class ControlPlaneClient:
             f"/api/v1/workspaces/{self._config.workspace_id}/plan-transitions/{plan_transition_id}"
         )
 
+    async def list_plan_transitions(
+        self, task_id: UUID
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """List plan transitions for one root Task during notification resync."""
+
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/tasks/{task_id}/plan-transitions",
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            raise ControlPlaneRejected("invalid_control_plane_response", {}) from None
+        if response.status_code >= 400:
+            self._raise_rejected_body(body if isinstance(body, dict) else {})
+        if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+            raise ControlPlaneRejected("invalid_control_plane_response", {})
+        return tuple(cast(dict[str, JsonValue], item) for item in body)
+
     async def list_clarifications(
         self, request_id: UUID
     ) -> tuple[dict[str, JsonValue], ...]:

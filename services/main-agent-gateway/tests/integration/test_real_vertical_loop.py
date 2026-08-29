@@ -34,6 +34,17 @@ def _require_real_environment() -> dict[str, str]:
     return {key: os.environ[key] for key in REQUIRED_ENV}
 
 
+def _require_real_revision_environment() -> dict[str, str]:
+    config = _require_real_environment()
+    root_task_id = os.environ.get("SIDERA_R6_1_REAL_ROOT_TASK_ID")
+    if not root_task_id:
+        pytest.fail(
+            "SIDERA_R6_1_REAL_ROOT_TASK_ID is required for the real revision gate"
+        )
+    config["root_task_id"] = root_task_id
+    return config
+
+
 def _json(value: str) -> dict[str, Any]:
     parsed = json.loads(value)
     if not isinstance(parsed, dict):
@@ -108,6 +119,10 @@ _PLANNING_RESOURCE_RE = re.compile(
     r"planning:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.IGNORECASE,
 )
+_REVISION_RESOURCE_RE = re.compile(
+    r"revision:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
 
 
 def _planning_request_id_from_events(
@@ -117,6 +132,17 @@ def _planning_request_id_from_events(
     if match is None:
         raise AssertionError(
             "sidera_submit_brief did not return a planning resource reference"
+        )
+    return match.group(1)
+
+
+def _revision_request_id_from_events(
+    events: Sequence[Mapping[str, Any]],
+) -> str:
+    match = _REVISION_RESOURCE_RE.search(_event_text(events))
+    if match is None:
+        raise AssertionError(
+            "sidera_create_plan_revision did not return a revision resource reference"
         )
     return match.group(1)
 
@@ -328,6 +354,73 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
         assert status_terminal.get("_event") == "completed"
         assert "sidera_get_task_status" in _tool_names(status_events)
         assert root_task_id in _event_text(status_events)
+
+
+async def test_real_main_agent_revision_stays_pending_until_user_confirmation() -> None:
+    config = _require_real_revision_environment()
+    gateway_url = config["SIDERA_MAIN_AGENT_GATEWAY_URL"].rstrip("/")
+    control_plane_url = config["SIDERA_CONTROL_PLANE_URL"].rstrip("/")
+    workspace_id = config["SIDERA_WORKSPACE_ID"]
+    root_task_id = config["root_task_id"]
+    marker = f"SIDERA-R6-1-REVISION-{uuid4().hex[:12]}"
+    timeout_seconds = float(os.environ.get("SIDERA_REAL_MAIN_AGENT_TIMEOUT_SECONDS", "300"))
+
+    async with httpx.AsyncClient(trust_env=False) as client:
+        created = await client.post(
+            f"{gateway_url}/main-agent/v1/threads",
+            json={
+                "title": marker,
+                "context_refs": [f"task:{root_task_id}", f"release:{marker}"],
+            },
+            timeout=20.0,
+        )
+        created.raise_for_status()
+        thread_id = created.json().get("id")
+        assert isinstance(thread_id, str)
+
+        events, terminal = await _start_turn(
+            client,
+            gateway_url,
+            thread_id,
+            (
+                f"请针对已经存在的 SIDERA 根任务 {root_task_id} 创建一个计划 Revision，"
+                f"本次验证标记是 {marker}。目标是只调整受影响分支，同时复用可以复用的 WorkerItem 上下文；"
+                "约束是保留未受影响分支、确认前不改变活动计划；验收标准是能够在 Web 控制室审阅"
+                "具体的子任务变化和依赖影响。请直接调用 sidera_create_plan_revision，"
+                "调用完成后只返回 Revision 引用并等待用户确认。"
+                "这是控制面权限边界测试：不要调用 sidera_confirm_plan_revision，"
+                "不要物化 Task，也不要替用户确认。"
+            ),
+            timeout_seconds=timeout_seconds,
+        )
+        assert terminal.get("_event") == "completed"
+        names = _tool_names(events)
+        assert "sidera_create_plan_revision" in names
+        assert "sidera_confirm_plan_revision" not in names
+        assert "sidera_submit_brief" not in names
+
+        request_id = _revision_request_id_from_events(events)
+        detail = await _read_planning_detail(
+            client, control_plane_url, workspace_id, request_id
+        )
+        assert detail.get("source_type") == "sidera_web_chat"
+        assert detail.get("source_ref")
+        assert detail.get("status") not in {
+            "materialized",
+            "executing",
+            "completed",
+        }
+
+        materialization = await client.get(
+            f"{control_plane_url}/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/materialization",
+            timeout=20.0,
+        )
+        if materialization.status_code == 404:
+            materialization_body: object = {}
+        else:
+            materialization.raise_for_status()
+            materialization_body = materialization.json()
+        assert not isinstance(materialization_body, Mapping) or "root_task_id" not in materialization_body
 
 
 async def test_real_main_agent_stale_confirm_and_control_plane_offline_contract() -> None:

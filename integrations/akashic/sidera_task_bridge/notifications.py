@@ -30,6 +30,8 @@ type NoticeKind = Literal[
     "planning_clarification",
     "planning_proposal_ready",
     "planning_materialized",
+    "plan_transition_degraded",
+    "plan_transition_converged",
     "task_needs_user",
     "task_blocked",
     "task_failed",
@@ -298,12 +300,36 @@ class NotificationRunner:
                 ),
                 mode="resync",
             )
-            if evaluation is None:
-                continue
-            max_cursor = max(max_cursor, evaluation.cursor)
-            self._require_delivery(
-                await self._delivery.deliver(evaluation, advance_cursor=False)
-            )
+            if evaluation is not None:
+                max_cursor = max(max_cursor, evaluation.cursor)
+                self._require_delivery(
+                    await self._delivery.deliver(evaluation, advance_cursor=False)
+                )
+
+            list_transitions = getattr(self._client, "list_plan_transitions", None)
+            if callable(list_transitions):
+                transitions = await list_transitions(binding.resource_id)
+                for transition in transitions:
+                    transition_id = _uuid_value(transition.get("plan_transition_id"))
+                    if transition_id is None:
+                        continue
+                    transition_evaluation = await self._evaluator.evaluate(
+                        _synthetic_change(
+                            workspace_id=self._config.workspace_id,
+                            cursor=seed_cursor,
+                            projection_type="plan_transition",
+                            resource_id=transition_id,
+                        ),
+                        mode="resync",
+                    )
+                    if transition_evaluation is None:
+                        continue
+                    max_cursor = max(max_cursor, transition_evaluation.cursor)
+                    self._require_delivery(
+                        await self._delivery.deliver(
+                            transition_evaluation, advance_cursor=False
+                        )
+                    )
 
         await self._state.advance_notification_cursor(max_cursor)
         return max_cursor
@@ -329,9 +355,11 @@ class NotificationRunner:
             resource_id = UUID(resource_id_value)
         except ValueError:
             resource_id = UUID(int=0)
-        projection_type = (
-            "planning_request" if kind == "planning_request" else "task_overview"
-        )
+        projection_type = {
+            "planning_request": "planning_request",
+            "plan_transition": "plan_transition",
+            "task": "task_overview",
+        }.get(kind, "task_overview")
         current = await self._evaluator.evaluate(
             _synthetic_change(
                 workspace_id=self._config.workspace_id,
@@ -460,6 +488,8 @@ class NotificationEvaluator:
             return await self._evaluate_planning(change, mode=mode)
         if change.projection_type == "task_overview":
             return await self._evaluate_task(change, mode=mode)
+        if change.projection_type == "plan_transition":
+            return await self._evaluate_transition(change, mode=mode)
         return None
 
     async def _evaluate_planning(
@@ -500,12 +530,21 @@ class NotificationEvaluator:
             else self._planning_url(request_id)
         )
         previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
+        affected_branch_paths: tuple[str, ...] = ()
+        if is_revision and status.lower() in {
+            "proposal_ready",
+            "awaiting_confirmation",
+            "needs_confirmation",
+        }:
+            diff = await self._read_revision_diff(request_id)
+            affected_branch_paths = _branch_paths(diff)
         fact = await self._planning_fact(
             detail,
             request_id=request_id,
             status=status,
             version=version,
             web_url=web_url,
+            affected_branch_paths=affected_branch_paths,
         )
         if fact.kind == "planning_materialized":
             materialization = await self._read_materialization(request_id)
@@ -531,6 +570,49 @@ class NotificationEvaluator:
             resource_key=resource_key,
             source_ref=binding.source_ref,
             cursor=cursor,
+            snapshot=fact.snapshot,
+            notice=notice,
+        )
+
+    async def _evaluate_transition(
+        self,
+        change: ProjectionChange,
+        *,
+        mode: NotificationMode,
+    ) -> NotificationEvaluation | None:
+        transition_id = change.resource_id
+        assert transition_id is not None
+        transition = await self._read_plan_transition(transition_id)
+        if transition is None:
+            return None
+        root_task_id = _transition_root_id(transition)
+        if root_task_id is None:
+            return None
+        binding = await self._private_binding("task", root_task_id)
+        if binding is None:
+            return None
+        status = _text(transition.get("status")) or "unknown"
+        version = _non_negative_int(transition.get("version"), change.resource_version)
+        resource_key = f"plan_transition:{transition_id}"
+        previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
+        fact = _transition_fact(
+            transition,
+            status=status,
+            version=version,
+            web_url=self._task_url(root_task_id),
+        )
+        notice = _notice_for_fact(
+            fact,
+            previous=previous,
+            source_ref=binding.source_ref,
+            cursor=change.cursor,
+            resource_key=resource_key,
+            mode=mode,
+        )
+        return NotificationEvaluation(
+            resource_key=resource_key,
+            source_ref=binding.source_ref,
+            cursor=change.cursor,
             snapshot=fact.snapshot,
             notice=notice,
         )
@@ -616,6 +698,31 @@ class NotificationEvaluator:
                 return None
             raise
 
+    async def _read_revision_diff(self, request_id: UUID) -> dict[str, Any]:
+        reader = getattr(self._client, "get_revision_diff", None)
+        if not callable(reader):
+            return {}
+        try:
+            return await reader(request_id)
+        except TransportUnavailable:
+            raise NotificationQueryUnavailable from None
+        except ControlPlaneRejected as exc:
+            if exc.code == "not_found":
+                return {}
+            raise
+
+    async def _read_plan_transition(
+        self, transition_id: UUID
+    ) -> dict[str, Any] | None:
+        try:
+            return await self._client.get_plan_transition(transition_id)
+        except TransportUnavailable:
+            raise NotificationQueryUnavailable from None
+        except ControlPlaneRejected as exc:
+            if exc.code == "not_found":
+                return None
+            raise
+
     async def _planning_fact(
         self,
         detail: Mapping[str, Any],
@@ -624,6 +731,7 @@ class NotificationEvaluator:
         status: str,
         version: int | None,
         web_url: str,
+        affected_branch_paths: tuple[str, ...] = (),
     ) -> _Fact:
         normalized = status.lower()
         title = _text(detail.get("title")) or "任务规划"
@@ -685,7 +793,11 @@ class NotificationEvaluator:
                 fingerprint=fingerprint,
                 snapshot=snapshot,
                 title=title,
-                subtitle=None,
+                subtitle=(
+                    f"涉及分支：{_branch_summary(affected_branch_paths)}"
+                    if affected_branch_paths
+                    else None
+                ),
                 fact_text="新的 Proposal 已准备好，等待你的确认。",
                 next_step="查看并确认方案",
                 web_url=web_url,
@@ -990,6 +1102,112 @@ def _revision_root_id(detail: Mapping[str, Any]) -> UUID | None:
                 except ValueError:
                     continue
     return None
+
+
+def _branch_paths(diff: Mapping[str, Any]) -> tuple[str, ...]:
+    values = diff.get("affected_branch_paths")
+    if not isinstance(values, (list, tuple)):
+        return ()
+    return tuple(
+        path
+        for path in values[:3]
+        if isinstance(path, str) and _safe_text(path, 240)
+    )
+
+
+def _branch_summary(paths: tuple[str, ...]) -> str:
+    if len(paths) <= 2:
+        return "；".join(paths)
+    return f"{paths[0]}；{paths[1]} 等 {len(paths)} 条分支"
+
+
+def _transition_root_id(transition: Mapping[str, Any]) -> UUID | None:
+    root = transition.get("root_task")
+    if isinstance(root, Mapping):
+        root_id = _uuid_value(root.get("id"))
+        if root_id is not None:
+            return root_id
+    return _uuid_value(transition.get("root_task_id"))
+
+
+def _transition_path(
+    transition: Mapping[str, Any], *, degraded: bool
+) -> str | None:
+    workers = transition.get("workers")
+    if not isinstance(workers, (list, tuple)):
+        return None
+    candidates = [item for item in workers if isinstance(item, Mapping)]
+    if degraded:
+        candidates = [
+            item
+            for item in candidates
+            if _text(item.get("status")) in {"failed", "blocked_unknown"}
+        ] or candidates
+    for worker in candidates:
+        path = _text(worker.get("path"))
+        if path is not None:
+            return path
+        worker_item = worker.get("worker_item")
+        if isinstance(worker_item, Mapping):
+            path = _text(worker_item.get("path"))
+            if path is not None:
+                return path
+    return None
+
+
+def _transition_fact(
+    transition: Mapping[str, Any],
+    *,
+    status: str,
+    version: int | None,
+    web_url: str,
+) -> _Fact:
+    normalized = status.lower()
+    root = transition.get("root_task")
+    title = (
+        _text(root.get("title"))
+        if isinstance(root, Mapping)
+        else None
+    ) or "计划切换"
+    path = _transition_path(transition, degraded=normalized == "degraded")
+    worker_fingerprint = []
+    workers = transition.get("workers")
+    if isinstance(workers, (list, tuple)):
+        worker_fingerprint = [
+            (
+                _text(item.get("path")),
+                _text(item.get("status")),
+                _text(item.get("failure_code")),
+            )
+            for item in workers
+            if isinstance(item, Mapping)
+        ]
+    kind: NoticeKind | None = None
+    fact_text: str | None = None
+    next_step = "打开任务查看收敛结果"
+    if normalized == "degraded":
+        kind = "plan_transition_degraded"
+        fact_text = "计划切换出现降级，受影响分支保持可见并等待处理。"
+        next_step = "打开任务查看并处理受影响分支"
+    elif normalized == "converged":
+        kind = "plan_transition_converged"
+        fact_text = "计划切换已完成，受影响分支已经收敛。"
+    snapshot = NotificationSnapshot(
+        status=normalized if kind is None else kind,
+        version=version,
+        attention_fingerprint=_fingerprint([normalized, worker_fingerprint]),
+    )
+    return _Fact(
+        kind=kind,
+        version=version,
+        fingerprint=_fingerprint([normalized, version, worker_fingerprint]),
+        snapshot=snapshot,
+        title=title,
+        subtitle=f"涉及分支：{path}" if path is not None else None,
+        fact_text=fact_text,
+        next_step=next_step,
+        web_url=web_url,
+    )
 
 
 def _fingerprint(value: object) -> str:

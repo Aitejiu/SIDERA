@@ -97,6 +97,8 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             raise TypeError("fake planner requires planning.scenario")
         allowed = {
             "proposal",
+            "revision",
+            "revision_control_room",
             "clarification",
             "scale",
             "invalid_schema",

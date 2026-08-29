@@ -119,6 +119,10 @@ export function runSchedulerOnce(): Record<string, unknown> {
   return runControlPlaneOnce("sidera_control_plane.scheduler_worker");
 }
 
+export function runPlanTransitionWorkerOnce(): Record<string, unknown> {
+  return runControlPlaneOnce("sidera_control_plane.plan_transition_worker");
+}
+
 function runControlPlaneOnce(moduleName: string): Record<string, unknown> {
   const output = execFileSync(
     process.env.SIDERA_E2E_PYTHON ?? defaultPython,
