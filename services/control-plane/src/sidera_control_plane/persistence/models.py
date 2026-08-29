@@ -65,15 +65,11 @@ class PlanSnapshotModel(TimestampMixin, Base):
             name="fk_plan_snapshots_parent",
         ),
         CheckConstraint("generation >= 1", name="ck_plan_snapshots_generation"),
-        CheckConstraint(
-            "schema_version >= 1", name="ck_plan_snapshots_schema_version"
-        ),
+        CheckConstraint("schema_version >= 1", name="ck_plan_snapshots_schema_version"),
         UniqueConstraint(
             "root_task_id", "generation", name="uq_plan_snapshots_root_generation"
         ),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_plan_snapshots_id_workspace"
-        ),
+        UniqueConstraint("id", "workspace_id", name="uq_plan_snapshots_id_workspace"),
         Index(
             "ix_plan_snapshots_workspace_root_generation",
             "workspace_id",
@@ -220,9 +216,7 @@ class PlanTransitionModel(TimestampMixin, Base):
             name="fk_plan_transitions_to_snapshot_workspace",
         ),
         PrimaryKeyConstraint("id"),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_plan_transitions_identity"
-        ),
+        UniqueConstraint("id", "workspace_id", name="uq_plan_transitions_identity"),
         UniqueConstraint(
             "planning_request_id",
             "proposal_revision_id",
@@ -373,9 +367,7 @@ class WorkerTransitionModel(TimestampMixin, Base):
             name="fk_worker_transitions_lease_source_execution_workspace",
         ),
         PrimaryKeyConstraint("id"),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_worker_transitions_identity"
-        ),
+        UniqueConstraint("id", "workspace_id", name="uq_worker_transitions_identity"),
         Index(
             "uq_worker_transitions_active_worker_item",
             "worker_item_id",
@@ -413,15 +405,11 @@ class WorkerTransitionModel(TimestampMixin, Base):
     source_execution_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    source_session_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    source_session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     target_execution_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    target_session_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    target_session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     writer_state: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     failure_code: Mapped[str | None] = mapped_column(String(100))
@@ -506,9 +494,7 @@ class ContextPatchModel(TimestampMixin, Base):
             "target_context_version >= 1",
             name="ck_context_patches_target_context_version",
         ),
-        CheckConstraint(
-            "scope = 'worker_item'", name="ck_context_patches_scope"
-        ),
+        CheckConstraint("scope = 'worker_item'", name="ck_context_patches_scope"),
         CheckConstraint(
             "base_package_hash ~ '^[0-9a-f]{64}$' AND "
             "base_context_hash ~ '^[0-9a-f]{64}$' AND "
@@ -525,9 +511,7 @@ class ContextPatchModel(TimestampMixin, Base):
             "jsonb_typeof(intervention_refs) = 'array'",
             name="ck_context_patches_refs_arrays",
         ),
-        CheckConstraint(
-            "expires_at > created_at", name="ck_context_patches_expiry"
-        ),
+        CheckConstraint("expires_at > created_at", name="ck_context_patches_expiry"),
         ForeignKeyConstraint(
             ["workspace_id"],
             ["workspaces.id"],
@@ -940,9 +924,7 @@ class WorkerRuntimeConfigurationModel(TimestampMixin, Base):
     adapter_module_instance_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    adapter_module_config_version: Mapped[int] = mapped_column(
-        Integer, nullable=False
-    )
+    adapter_module_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
     workspace_module_instance_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
@@ -1008,9 +990,7 @@ class WorkerItemModel(TimestampMixin, Base):
     responsibility: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     context_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    acknowledged_context_version: Mapped[int] = mapped_column(
-        Integer, nullable=False
-    )
+    acknowledged_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
     derived_from_worker_item_ids: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
@@ -1026,7 +1006,9 @@ class WorkerItemModel(TimestampMixin, Base):
 class WorkerItemPlacementModel(TimestampMixin, Base):
     __tablename__ = "worker_item_placements"
     __table_args__ = (
-        CheckConstraint("plan_generation >= 1", name="ck_worker_item_placements_generation"),
+        CheckConstraint(
+            "plan_generation >= 1", name="ck_worker_item_placements_generation"
+        ),
         ForeignKeyConstraint(
             ["plan_snapshot_id"],
             ["task_plan_snapshots.id"],
@@ -1092,9 +1074,7 @@ class WorkerItemPlacementModel(TimestampMixin, Base):
     )
     worker_item_key: Mapped[str] = mapped_column(String(500), nullable=False)
     subtask_key: Mapped[str] = mapped_column(String(500), nullable=False)
-    subtask_task_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    subtask_task_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     role: Mapped[str] = mapped_column(String(255), nullable=False)
     capability_requirements: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     worker_policy_ref: Mapped[str | None] = mapped_column(String(500))
@@ -1105,9 +1085,7 @@ class ExecutionModel(TimestampMixin, Base):
     __tablename__ = "executions"
     __table_args__ = (
         CheckConstraint("attempt >= 1", name="ck_executions_attempt"),
-        CheckConstraint(
-            "max_attempts >= attempt", name="ck_executions_max_attempts"
-        ),
+        CheckConstraint("max_attempts >= attempt", name="ck_executions_max_attempts"),
         CheckConstraint(
             "last_fencing_token >= 0", name="ck_executions_last_fencing_token"
         ),
@@ -1152,16 +1130,26 @@ class ExecutionModel(TimestampMixin, Base):
         ),
         ForeignKeyConstraint(
             ["active_lease_id", "id", "workspace_id"],
-            ["assignment_leases.id", "assignment_leases.execution_id", "assignment_leases.workspace_id"],
+            [
+                "assignment_leases.id",
+                "assignment_leases.execution_id",
+                "assignment_leases.workspace_id",
+            ],
             ondelete="RESTRICT",
             deferrable=True,
             initially="DEFERRED",
             name="fk_executions_active_lease",
         ),
-        UniqueConstraint("id", "workspace_id", name="uq_executions_id_workspace"),
-        UniqueConstraint(
-            "lineage_id", "attempt", name="uq_executions_lineage_attempt"
+        ForeignKeyConstraint(
+            ["handoff_transition_id", "workspace_id"],
+            ["handoff_transitions.id", "handoff_transitions.workspace_id"],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_executions_handoff_transition_workspace",
         ),
+        UniqueConstraint("id", "workspace_id", name="uq_executions_id_workspace"),
+        UniqueConstraint("lineage_id", "attempt", name="uq_executions_lineage_attempt"),
         Index(
             "ix_executions_schedulable",
             "status",
@@ -1191,18 +1179,12 @@ class ExecutionModel(TimestampMixin, Base):
     adapter_forbidden: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
-    pinned_worker_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    pinned_worker_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     assigned_worker_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    active_lease_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
-    worker_item_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    active_lease_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    worker_item_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     last_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
     not_before: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -1220,6 +1202,9 @@ class ExecutionModel(TimestampMixin, Base):
     source_session_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("execution_sessions.id", ondelete="RESTRICT"),
+    )
+    handoff_transition_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -1356,11 +1341,11 @@ class AssignmentLeaseModel(TimestampMixin, Base):
     execution_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    worker_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    issued_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+    worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
     )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -1417,7 +1402,9 @@ class ExecutionSessionModel(TimestampMixin, Base):
     execution_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    worker_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     adapter_session_id: Mapped[str] = mapped_column(String(500), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     last_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -1427,7 +1414,9 @@ class ExecutionSessionModel(TimestampMixin, Base):
     input_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     adapter_module_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     adapter_config_version: Mapped[int | None] = mapped_column(Integer)
-    workspace_module_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    workspace_module_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
     workspace_config_version: Mapped[int | None] = mapped_column(Integer)
     capability_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     process_ref: Mapped[str | None] = mapped_column(String(500))
@@ -1587,7 +1576,9 @@ class ModuleDefinitionModel(TimestampMixin, Base):
 class ModuleInstanceModel(TimestampMixin, Base):
     __tablename__ = "module_instances"
     __table_args__ = (
-        CheckConstraint("config_version >= 1", name="ck_module_instances_config_version"),
+        CheckConstraint(
+            "config_version >= 1", name="ck_module_instances_config_version"
+        ),
         CheckConstraint(
             "resource_version >= 1", name="ck_module_instances_resource_version"
         ),
@@ -1603,7 +1594,9 @@ class ModuleInstanceModel(TimestampMixin, Base):
         ),
         UniqueConstraint("id", "workspace_id", name="uq_module_instances_identity"),
         UniqueConstraint(
-            "workspace_id", "instance_name", "config_version",
+            "workspace_id",
+            "instance_name",
+            "config_version",
             name="uq_module_instances_name_version",
         ),
     )
@@ -1637,8 +1630,12 @@ class ModuleInstanceModel(TimestampMixin, Base):
 class ExecutionBindingModel(TimestampMixin, Base):
     __tablename__ = "execution_bindings"
     __table_args__ = (
-        CheckConstraint("adapter_config_version >= 1", name="ck_bindings_adapter_config"),
-        CheckConstraint("workspace_config_version >= 1", name="ck_bindings_workspace_config"),
+        CheckConstraint(
+            "adapter_config_version >= 1", name="ck_bindings_adapter_config"
+        ),
+        CheckConstraint(
+            "workspace_config_version >= 1", name="ck_bindings_workspace_config"
+        ),
         CheckConstraint("fencing_token >= 1", name="ck_bindings_fencing_token"),
         CheckConstraint("version >= 1", name="ck_bindings_version"),
         ForeignKeyConstraint(
@@ -1676,9 +1673,7 @@ class ExecutionBindingModel(TimestampMixin, Base):
             name="fk_bindings_lease_execution_workspace",
         ),
         UniqueConstraint("id", "workspace_id", name="uq_bindings_identity"),
-        UniqueConstraint(
-            "execution_id", "workspace_id", name="uq_bindings_execution"
-        ),
+        UniqueConstraint("execution_id", "workspace_id", name="uq_bindings_execution"),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -1687,8 +1682,12 @@ class ExecutionBindingModel(TimestampMixin, Base):
         ForeignKey("workspaces.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    worker_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     adapter_module_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
@@ -1717,7 +1716,9 @@ class ExecutionWorkspaceModel(TimestampMixin, Base):
             "'retained', 'cleaning', 'released', 'quarantined')",
             name="ck_execution_workspaces_lifecycle",
         ),
-        CheckConstraint("retention_seconds > 0", name="ck_execution_workspaces_retention"),
+        CheckConstraint(
+            "retention_seconds > 0", name="ck_execution_workspaces_retention"
+        ),
         CheckConstraint("fencing_token >= 1", name="ck_execution_workspaces_fencing"),
         CheckConstraint("version >= 1", name="ck_execution_workspaces_version"),
         ForeignKeyConstraint(
@@ -1737,7 +1738,16 @@ class ExecutionWorkspaceModel(TimestampMixin, Base):
             "uq_execution_workspaces_active_execution",
             "execution_id",
             unique=True,
-            postgresql_where=text("lifecycle IN ('requested', 'preparing', 'ready', 'active')"),
+            postgresql_where=text(
+                "lifecycle IN ('requested', 'preparing', 'ready', 'active')"
+            ),
+        ),
+        Index(
+            "uq_execution_workspaces_active_location",
+            "workspace_id",
+            "location_ref",
+            unique=True,
+            postgresql_where=text("lifecycle = 'active'"),
         ),
     )
 
@@ -1748,7 +1758,9 @@ class ExecutionWorkspaceModel(TimestampMixin, Base):
         nullable=False,
     )
     task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     checkouts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     location_ref: Mapped[str] = mapped_column(String(500), nullable=False)
     lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1792,10 +1804,14 @@ class ProcessDescriptorModel(TimestampMixin, Base):
         ForeignKey("workspaces.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     pid: Mapped[int] = mapped_column(Integer, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     nonce: Mapped[str] = mapped_column(String(255), nullable=False)
     process_group_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -1845,7 +1861,9 @@ class GatewayOperationModel(TimestampMixin, Base):
             name="fk_gateway_operations_lease_execution_workspace",
         ),
         UniqueConstraint(
-            "workspace_id", "operation_type", "operation_id",
+            "workspace_id",
+            "operation_type",
+            "operation_id",
             name="uq_gateway_operations_idempotency",
         ),
         Index("ix_gateway_operations_recovery", "status", "next_attempt_at"),
@@ -1857,12 +1875,18 @@ class GatewayOperationModel(TimestampMixin, Base):
         ForeignKey("workspaces.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    operation_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     operation_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    module_instance_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    module_instance_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
     config_version: Mapped[int | None] = mapped_column(Integer)
     lease_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -1908,12 +1932,18 @@ class ExecutionEventModel(TimestampMixin, Base):
         ForeignKey("workspaces.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    session_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     raw_ref: Mapped[str | None] = mapped_column(String(500))
 
 
@@ -1943,7 +1973,9 @@ class ArtifactModel(TimestampMixin, Base):
             name="fk_artifacts_session_workspace",
         ),
         UniqueConstraint(
-            "workspace_id", "storage_ref", "content_hash",
+            "workspace_id",
+            "storage_ref",
+            "content_hash",
             name="uq_artifacts_storage_hash",
         ),
     )
@@ -1955,7 +1987,9 @@ class ArtifactModel(TimestampMixin, Base):
         nullable=False,
     )
     task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
     storage_ref: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -1992,7 +2026,9 @@ class EvidenceClaimModel(TimestampMixin, Base):
         nullable=False,
     )
     task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     acceptance_criterion_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     conclusion: Mapped[str] = mapped_column(Text, nullable=False)
     environment_ref: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -2013,6 +2049,14 @@ class ExecutionInputModel(TimestampMixin, Base):
             "status <> 'superseded' OR superseded_reason IS NOT NULL",
             name="ck_execution_inputs_superseded_reason",
         ),
+        CheckConstraint(
+            "(source_input_id IS NULL) = (handoff_transition_id IS NULL)",
+            name="ck_execution_inputs_handoff_lineage_pair",
+        ),
+        CheckConstraint(
+            "source_input_id IS NULL OR source_input_id <> id",
+            name="ck_execution_inputs_source_distinct",
+        ),
         CheckConstraint("version >= 1", name="ck_execution_inputs_version"),
         ForeignKeyConstraint(
             ["execution_id", "workspace_id"],
@@ -2026,8 +2070,25 @@ class ExecutionInputModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_execution_inputs_session_workspace",
         ),
+        ForeignKeyConstraint(
+            ["source_input_id", "workspace_id"],
+            ["execution_inputs.id", "execution_inputs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_inputs_source_input_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["handoff_transition_id", "workspace_id"],
+            ["handoff_transitions.id", "handoff_transitions.workspace_id"],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_execution_inputs_handoff_transition_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_execution_inputs_identity"),
         UniqueConstraint(
-            "workspace_id", "session_id", "client_idempotency_key",
+            "workspace_id",
+            "session_id",
+            "client_idempotency_key",
             name="uq_execution_inputs_idempotency",
         ),
         Index(
@@ -2038,6 +2099,14 @@ class ExecutionInputModel(TimestampMixin, Base):
                 "status IN ('accepted', 'queued', 'dispatching', 'blocked')"
             ),
         ),
+        Index(
+            "uq_execution_inputs_handoff_source",
+            "workspace_id",
+            "handoff_transition_id",
+            "source_input_id",
+            unique=True,
+            postgresql_where=text("source_input_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -2046,8 +2115,12 @@ class ExecutionInputModel(TimestampMixin, Base):
         ForeignKey("workspaces.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    execution_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    session_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
     client_idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     attachment_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
@@ -2058,6 +2131,10 @@ class ExecutionInputModel(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     source_command_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True), ForeignKey("commands.id", ondelete="RESTRICT")
+    )
+    source_input_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    handoff_transition_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2095,9 +2172,7 @@ class PlanningProfileModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_planning_profiles_module_workspace",
         ),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_planning_profiles_identity"
-        ),
+        UniqueConstraint("id", "workspace_id", name="uq_planning_profiles_identity"),
         UniqueConstraint(
             "workspace_id",
             "profile_key",
@@ -2122,12 +2197,8 @@ class PlanningProfileModel(TimestampMixin, Base):
     planner_module_instance_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    planner_module_config_version: Mapped[int] = mapped_column(
-        Integer, nullable=False
-    )
-    planner_interface_version: Mapped[str] = mapped_column(
-        String(100), nullable=False
-    )
+    planner_module_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    planner_interface_version: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     user_selectable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -2227,9 +2298,7 @@ class PlanningRequestModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_planning_requests_current_proposal",
         ),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_planning_requests_identity"
-        ),
+        UniqueConstraint("id", "workspace_id", name="uq_planning_requests_identity"),
         Index("ix_planning_requests_workspace_status", "workspace_id", "status"),
         Index(
             "uq_planning_requests_active_revision",
@@ -2323,9 +2392,7 @@ class PlanningRunModel(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("attempt >= 1", name="ck_planning_runs_attempt"),
         CheckConstraint("version >= 1", name="ck_planning_runs_version"),
-        CheckConstraint(
-            "brief_revision >= 1", name="ck_planning_runs_brief_revision"
-        ),
+        CheckConstraint("brief_revision >= 1", name="ck_planning_runs_brief_revision"),
         CheckConstraint(
             "planning_profile_version >= 1",
             name="ck_planning_runs_profile_version",
@@ -2380,9 +2447,7 @@ class PlanningRunModel(TimestampMixin, Base):
             name="fk_planning_runs_module_workspace",
         ),
         UniqueConstraint("id", "workspace_id", name="uq_planning_runs_identity"),
-        UniqueConstraint(
-            "operation_id", name="uq_planning_runs_operation_id"
-        ),
+        UniqueConstraint("operation_id", name="uq_planning_runs_operation_id"),
         UniqueConstraint(
             "planning_request_id",
             "attempt",
@@ -2406,9 +2471,7 @@ class PlanningRunModel(TimestampMixin, Base):
     planner_module_instance_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    planner_module_config_version: Mapped[int] = mapped_column(
-        Integer, nullable=False
-    )
+    planner_module_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     operation_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
@@ -2451,9 +2514,7 @@ class PlanningRunLeaseModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_planning_run_leases_run_workspace",
         ),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_planning_run_leases_identity"
-        ),
+        UniqueConstraint("id", "workspace_id", name="uq_planning_run_leases_identity"),
         Index(
             "uq_planning_run_leases_active_run",
             "planning_run_id",
@@ -2496,9 +2557,7 @@ class PlanningRunLeaseModel(TimestampMixin, Base):
 class PlanningClarificationModel(TimestampMixin, Base):
     __tablename__ = "planning_clarifications"
     __table_args__ = (
-        CheckConstraint(
-            "sequence >= 1", name="ck_planning_clarifications_sequence"
-        ),
+        CheckConstraint("sequence >= 1", name="ck_planning_clarifications_sequence"),
         CheckConstraint("version >= 1", name="ck_planning_clarifications_version"),
         CheckConstraint(
             "jsonb_typeof(options) = 'array'",
@@ -2681,9 +2740,7 @@ class PlanningProposalRevisionModel(Base):
     planner_module_instance_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    planner_module_config_version: Mapped[int] = mapped_column(
-        Integer, nullable=False
-    )
+    planner_module_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
     decision_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     plan_template: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     execution_intents: Mapped[list[dict[str, Any]]] = mapped_column(
@@ -2793,9 +2850,7 @@ class ProposalMaterializationModel(TimestampMixin, Base):
     plan_transition_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    subtask_task_mapping: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False
-    )
+    subtask_task_mapping: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     worker_item_mapping: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     execution_request_mapping: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
@@ -2850,6 +2905,11 @@ class ExecutionRequestModel(TimestampMixin, Base):
             "(status <> 'materialized' AND execution_lineage_id IS NULL "
             "AND first_execution_id IS NULL)",
             name="ck_execution_requests_materialized_lineage",
+        ),
+        CheckConstraint(
+            "handoff_transition_id IS NULL OR "
+            "(source_execution_id IS NOT NULL AND source_session_id IS NOT NULL)",
+            name="ck_execution_requests_handoff_lineage",
         ),
         ForeignKeyConstraint(
             ["planning_request_id", "workspace_id"],
@@ -2914,13 +2974,28 @@ class ExecutionRequestModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_execution_requests_source_session_workspace",
         ),
-        UniqueConstraint(
-            "id", "workspace_id", name="uq_execution_requests_identity"
+        ForeignKeyConstraint(
+            ["handoff_transition_id", "workspace_id"],
+            ["handoff_transitions.id", "handoff_transitions.workspace_id"],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_execution_requests_handoff_transition_workspace",
         ),
-        UniqueConstraint(
+        UniqueConstraint("id", "workspace_id", name="uq_execution_requests_identity"),
+        Index(
+            "uq_execution_requests_proposal_worker_item",
             "proposal_revision_id",
             "worker_item_key",
-            name="uq_execution_requests_proposal_worker_item",
+            unique=True,
+            postgresql_where=text("handoff_transition_id IS NULL"),
+        ),
+        Index(
+            "uq_execution_requests_handoff_transition",
+            "workspace_id",
+            "handoff_transition_id",
+            unique=True,
+            postgresql_where=text("handoff_transition_id IS NOT NULL"),
         ),
         Index(
             "uq_execution_requests_lineage",
@@ -2963,9 +3038,7 @@ class ExecutionRequestModel(TimestampMixin, Base):
     worker_item_key: Mapped[str] = mapped_column(String(500), nullable=False)
     intent_key: Mapped[str] = mapped_column(String(500), nullable=False)
     purpose: Mapped[str] = mapped_column(Text, nullable=False)
-    capability_requirements: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False
-    )
+    capability_requirements: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     adapter_preferences: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     adapter_forbidden: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
@@ -2976,18 +3049,12 @@ class ExecutionRequestModel(TimestampMixin, Base):
     )
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     expected_outputs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
-    expected_artifact_refs: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False
-    )
-    expected_evidence_refs: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False
-    )
+    expected_artifact_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    expected_evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     gate_reason: Mapped[str] = mapped_column(String(255), nullable=False)
     gate_details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    gate_evaluated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    gate_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status_changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -3000,7 +3067,8 @@ class ExecutionRequestModel(TimestampMixin, Base):
     source_execution_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    source_session_id: Mapped[UUID | None] = mapped_column(
+    source_session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    handoff_transition_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -3063,12 +3131,8 @@ class ExecutionRequestDependencyModel(Base):
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
     enforcement: Mapped[str] = mapped_column(String(32), nullable=False)
-    required_artifact_refs: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False
-    )
-    required_evidence_refs: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False
-    )
+    required_artifact_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    required_evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -3215,7 +3279,9 @@ class WorkContextRevisionModel(Base):
             "revision_number",
             name="uq_work_context_revisions_context_revision",
         ),
-        UniqueConstraint("id", "workspace_id", name="uq_work_context_revisions_identity"),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_work_context_revisions_identity"
+        ),
         Index(
             "ix_work_context_revisions_workspace_context_number",
             "workspace_id",
@@ -3239,9 +3305,7 @@ class WorkContextRevisionModel(Base):
     proposal_revision_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    plan_snapshot_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    plan_snapshot_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -3319,7 +3383,9 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_context_assembly_requests_context_revision",
         ),
-        UniqueConstraint("id", "workspace_id", name="uq_context_assembly_requests_identity"),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_context_assembly_requests_identity"
+        ),
         UniqueConstraint(
             "purpose",
             "consumer_id",
@@ -3341,18 +3407,20 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
     consumer_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    worker_item_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    worker_item_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     work_context_revision_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
     context_version: Mapped[int | None] = mapped_column(Integer)
-    knowledge_search_scope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    knowledge_search_scope: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
     knowledge_filter_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     fact_scope_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     budget: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     lease_owner: Mapped[str | None] = mapped_column(String(255))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -3470,9 +3538,7 @@ class ContextPackageModel(TimestampMixin, Base):
     consumer_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    worker_item_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    worker_item_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     work_context_revision_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
@@ -3483,7 +3549,9 @@ class ContextPackageModel(TimestampMixin, Base):
     artifact_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     budget: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -3774,17 +3842,11 @@ class KnowledgeCandidateSubmissionModel(TimestampMixin, Base):
     producer_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    planning_run_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    planning_run_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     execution_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
-    worker_item_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    worker_item_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     task_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
-    subtask_task_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    subtask_task_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     artifact_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     proposal_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -3802,6 +3864,813 @@ class KnowledgeCandidateSubmissionModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True)
     )
     error_code: Mapped[str | None] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class HandoffProposalModel(TimestampMixin, Base):
+    __tablename__ = "handoff_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "proposal_schema_version >= 1",
+            name="ck_handoff_proposals_schema_version",
+        ),
+        CheckConstraint(
+            "source_execution_version >= 1 AND source_session_version >= 1 "
+            "AND source_worker_version >= 1 "
+            "AND source_workspace_manifest_version >= 1 "
+            "AND source_worker_context_version >= 1 "
+            "AND observed_plan_generation >= 1 "
+            "AND observed_plan_head_version >= 1 "
+            "AND target_worker_version >= 1",
+            name="ck_handoff_proposals_positive_versions",
+        ),
+        CheckConstraint(
+            "source_session_last_sequence >= 0",
+            name="ck_handoff_proposals_source_sequence",
+        ),
+        CheckConstraint(
+            "transfer_mode = 'reuse_exact'",
+            name="ck_handoff_proposals_transfer_mode",
+        ),
+        CheckConstraint(
+            "status IN ('prepared', 'confirmed', 'stale', 'cancelled', 'expired')",
+            name="ck_handoff_proposals_status",
+        ),
+        CheckConstraint(
+            "source_channel = 'web'",
+            name="ck_handoff_proposals_source_channel",
+        ),
+        CheckConstraint(
+            "proposal_hash ~ '^[0-9a-f]{64}$' AND "
+            "source_context_package_hash ~ '^[0-9a-f]{64}$' AND "
+            "target_capability_snapshot_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_handoff_proposals_hashes",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload) = 'object' AND "
+            "jsonb_typeof(source_runtime_snapshot) = 'object' AND "
+            "jsonb_typeof(target_runtime_snapshot) = 'object' AND "
+            "jsonb_typeof(target_policy_reason) = 'object' AND "
+            "jsonb_typeof(target_policy_facts) = 'object' AND "
+            "jsonb_typeof(input_plan) = 'object' AND "
+            "jsonb_typeof(impact_summary) = 'object'",
+            name="ck_handoff_proposals_json_objects",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_handoff_proposals_version",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["subtask_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_subtask_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_source_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_source_session_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_worker_id", "workspace_id"],
+            ["workers.id", "workers.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_source_worker_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_workspace_manifest_id", "workspace_id"],
+            ["execution_workspaces.id", "execution_workspaces.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_source_manifest_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_context_package_id", "workspace_id"],
+            ["context_packages.id", "context_packages.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_source_package_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["observed_plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_plan_snapshot_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_worker_id", "workspace_id"],
+            ["workers.id", "workers.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_proposals_target_worker_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_handoff_proposals_identity"),
+        Index(
+            "uq_handoff_proposals_prepared_worker_item",
+            "workspace_id",
+            "worker_item_id",
+            unique=True,
+            postgresql_where=text("status = 'prepared'"),
+        ),
+        Index(
+            "ix_handoff_proposals_workspace_status",
+            "workspace_id",
+            "status",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    subtask_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_execution_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_session_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_session_last_sequence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    source_worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_worker_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_runtime_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    source_workspace_manifest_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_workspace_manifest_version: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    source_context_package_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_context_package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_worker_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    observed_plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_plan_head_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_worker_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_runtime_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    target_capability_snapshot_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    target_policy_reason: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    target_policy_facts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    transfer_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    handoff_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    handoff_instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    input_plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    impact_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    proposal_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    proposal_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    stale_reason: Mapped[str | None] = mapped_column(String(255))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_by_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class HandoffTransitionModel(TimestampMixin, Base):
+    __tablename__ = "handoff_transitions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'blocked', 'blocked_unknown', 'failed', 'converged')",
+            name="ck_handoff_transitions_status",
+        ),
+        CheckConstraint(
+            "phase IN ('checkpoint_source', 'stop_source', 'freeze_source_workspace', "
+            "'create_target_execution', 'assemble_bundle', 'transfer_workspace', "
+            "'start_target_session', 'acknowledge_context', 'transfer_safe_inputs', "
+            "'activate_target', 'complete')",
+            name="ck_handoff_transitions_phase",
+        ),
+        CheckConstraint(
+            "writer_state IN ('source_active', 'source_stop_requested', 'writer_none', "
+            "'target_starting', 'target_active', 'unknown')",
+            name="ck_handoff_transitions_writer_state",
+        ),
+        CheckConstraint(
+            "target_context_version >= 1 AND source_input_cutoff_sequence >= 0 "
+            "AND logical_attempt >= 1 AND version >= 1",
+            name="ck_handoff_transitions_positive_fields",
+        ),
+        CheckConstraint(
+            "(source_checkpoint_sequence IS NULL OR source_checkpoint_sequence >= 0) AND "
+            "(source_stop_sequence IS NULL OR source_stop_sequence >= 0)",
+            name="ck_handoff_transitions_source_sequences",
+        ),
+        CheckConstraint(
+            "confirmed_source_channel = 'web'",
+            name="ck_handoff_transitions_source_channel",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(target_runtime_snapshot) = 'object' AND "
+            "(source_checkpoint_facts IS NULL OR jsonb_typeof(source_checkpoint_facts) = 'object') AND "
+            "(source_stop_facts IS NULL OR jsonb_typeof(source_stop_facts) = 'object') AND "
+            "(source_workspace_freeze_facts IS NULL OR jsonb_typeof(source_workspace_freeze_facts) = 'object')",
+            name="ck_handoff_transitions_json_objects",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["proposal_id", "workspace_id"],
+            ["handoff_proposals.id", "handoff_proposals.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_proposal_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_source_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_source_session_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_workspace_manifest_id", "workspace_id"],
+            ["execution_workspaces.id", "execution_workspaces.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_source_manifest_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_worker_id", "workspace_id"],
+            ["workers.id", "workers.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_target_worker_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_target_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_target_session_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_workspace_manifest_id", "workspace_id"],
+            ["execution_workspaces.id", "execution_workspaces.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_target_manifest_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["handoff_context_bundle_id", "workspace_id"],
+            ["handoff_context_bundles.id", "handoff_context_bundles.workspace_id"],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_handoff_transitions_context_bundle_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_context_package_id", "workspace_id"],
+            ["context_packages.id", "context_packages.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_transitions_target_package_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_handoff_transitions_identity"),
+        UniqueConstraint("proposal_id", name="uq_handoff_transitions_proposal"),
+        Index(
+            "uq_handoff_transitions_active_worker_item",
+            "workspace_id",
+            "worker_item_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('pending', 'running', 'blocked', 'blocked_unknown', 'failed')"
+            ),
+        ),
+        Index(
+            "uq_handoff_transitions_active_source_session",
+            "workspace_id",
+            "source_session_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('pending', 'running', 'blocked', 'blocked_unknown', 'failed')"
+            ),
+        ),
+        Index(
+            "ix_handoff_transitions_coordinator",
+            "workspace_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    proposal_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_workspace_manifest_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_runtime_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    target_execution_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    target_session_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    target_workspace_manifest_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    handoff_context_bundle_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    target_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_context_package_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    target_context_package_hash: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    phase: Mapped[str] = mapped_column(String(64), nullable=False)
+    writer_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_checkpoint_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    source_checkpoint_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_stop_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    source_stop_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_workspace_freeze_operation_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_workspace_freeze_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_input_cutoff_sequence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(100))
+    blocked_operation_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    logical_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    confirmed_by_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    confirmed_by_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    confirmed_source_channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class HandoffContextBundleModel(TimestampMixin, Base):
+    __tablename__ = "handoff_context_bundles"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version >= 1", name="ck_handoff_context_bundles_schema_version"
+        ),
+        CheckConstraint(
+            "logical_attempt >= 1 AND source_checkpoint_sequence >= 0 "
+            "AND source_last_accepted_sequence >= source_checkpoint_sequence "
+            "AND source_worker_context_version >= 1 AND target_context_version >= 1 "
+            "AND source_workspace_version >= 1",
+            name="ck_handoff_context_bundles_positive_fields",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(repository_state) = 'array' AND "
+            "jsonb_typeof(artifact_refs) = 'array' AND "
+            "jsonb_typeof(evidence_refs) = 'array' AND "
+            "jsonb_typeof(delivered_input_refs) = 'array' AND "
+            "jsonb_typeof(transferable_input_refs) = 'array' AND "
+            "jsonb_typeof(excluded_input_refs) = 'array'",
+            name="ck_handoff_context_bundles_json_arrays",
+        ),
+        CheckConstraint(
+            "source_context_package_hash ~ '^[0-9a-f]{64}$' AND "
+            "target_runtime_snapshot_hash ~ '^[0-9a-f]{64}$' AND "
+            "workspace_location_ref_hash ~ '^[0-9a-f]{64}$' AND "
+            "bundle_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_handoff_context_bundles_hashes",
+        ),
+        CheckConstraint("version >= 1", name="ck_handoff_context_bundles_version"),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["handoff_transition_id", "workspace_id"],
+            ["handoff_transitions.id", "handoff_transitions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_transition_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["recovery_decision_id", "workspace_id"],
+            [
+                "handoff_recovery_decisions.id",
+                "handoff_recovery_decisions.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_recovery_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_source_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_session_id", "workspace_id"],
+            ["execution_sessions.id", "execution_sessions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_source_session_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_context_package_id", "workspace_id"],
+            ["context_packages.id", "context_packages.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_source_package_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_target_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_worker_id", "workspace_id"],
+            ["workers.id", "workers.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_target_worker_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_workspace_manifest_id", "workspace_id"],
+            ["execution_workspaces.id", "execution_workspaces.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_context_bundles_source_manifest_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_handoff_context_bundles_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "handoff_transition_id",
+            "logical_attempt",
+            name="uq_handoff_context_bundles_attempt",
+        ),
+        Index(
+            "uq_handoff_context_bundles_hash",
+            "workspace_id",
+            "bundle_hash",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    handoff_transition_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    logical_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    recovery_decision_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_checkpoint_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_last_accepted_sequence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    source_context_package_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_context_package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_worker_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_worker_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_runtime_snapshot_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    target_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_workspace_manifest_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_workspace_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_location_ref_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    repository_state: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False
+    )
+    artifact_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    handoff_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    handoff_instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    delivered_input_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    transferable_input_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    excluded_input_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    bundle_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+
+
+class HandoffRecoveryDecisionModel(TimestampMixin, Base):
+    __tablename__ = "handoff_recovery_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "expected_transition_version >= 1 AND version >= 1",
+            name="ck_handoff_recovery_decisions_versions",
+        ),
+        CheckConstraint(
+            "strategy IN ('retry_current_phase', 'retry_same_target', 'select_new_target', "
+            "'continue_with_source_agent', 'confirm_source_stopped', 'confirm_target_absent', "
+            "'confirm_target_active')",
+            name="ck_handoff_recovery_decisions_strategy",
+        ),
+        CheckConstraint(
+            "source_channel = 'web'",
+            name="ck_handoff_recovery_decisions_source_channel",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence_refs) = 'array' AND "
+            "jsonb_typeof(resulting_operation_refs) = 'array' AND "
+            "(replacement_target_snapshot IS NULL OR jsonb_typeof(replacement_target_snapshot) = 'object')",
+            name="ck_handoff_recovery_decisions_json_shapes",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_recovery_decisions_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["handoff_transition_id", "workspace_id"],
+            ["handoff_transitions.id", "handoff_transitions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_handoff_recovery_decisions_transition_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_handoff_recovery_decisions_identity"
+        ),
+        Index(
+            "ix_handoff_recovery_decisions_transition_created",
+            "workspace_id",
+            "handoff_transition_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    handoff_transition_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    expected_transition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    replacement_target_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    resulting_operation_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+
+
+class ExecutionWorkspaceTransferModel(TimestampMixin, Base):
+    __tablename__ = "execution_workspace_transfers"
+    __table_args__ = (
+        CheckConstraint(
+            "logical_attempt >= 1 AND source_fencing_token >= 1 AND "
+            "target_fencing_token > source_fencing_token AND version >= 1",
+            name="ck_execution_workspace_transfers_fencing",
+        ),
+        CheckConstraint(
+            "transfer_mode = 'reuse_exact'",
+            name="ck_execution_workspace_transfers_mode",
+        ),
+        CheckConstraint(
+            "status IN ('requested', 'succeeded', 'failed', 'unknown')",
+            name="ck_execution_workspace_transfers_status",
+        ),
+        CheckConstraint(
+            "status = 'succeeded' AND target_manifest_id IS NOT NULL OR "
+            "status <> 'succeeded'",
+            name="ck_execution_workspace_transfers_success_target",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspace_transfers_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["handoff_transition_id", "workspace_id"],
+            ["handoff_transitions.id", "handoff_transitions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspace_transfers_transition_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspace_transfers_source_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspace_transfers_target_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["source_manifest_id", "workspace_id"],
+            ["execution_workspaces.id", "execution_workspaces.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspace_transfers_source_manifest_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_manifest_id", "workspace_id"],
+            ["execution_workspaces.id", "execution_workspaces.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_workspace_transfers_target_manifest_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_execution_workspace_transfers_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "handoff_transition_id",
+            "logical_attempt",
+            name="uq_execution_workspace_transfers_attempt",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "source_manifest_id",
+            "target_manifest_id",
+            name="uq_execution_workspace_transfers_manifest_pair",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "provider_operation_id",
+            name="uq_execution_workspace_transfers_provider_operation",
+        ),
+        Index(
+            "ix_execution_workspace_transfers_coordinator",
+            "workspace_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    handoff_transition_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    logical_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_manifest_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_manifest_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    location_ref_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    repository_state_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    transfer_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    failure_code: Mapped[str | None] = mapped_column(String(100))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

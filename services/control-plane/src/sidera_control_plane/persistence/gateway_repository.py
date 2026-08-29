@@ -411,6 +411,8 @@ class ExecutionInputRepository:
                 created_at=item.created_at,
                 updated_at=item.updated_at,
                 source_command_id=item.source_command_id,
+                source_input_id=item.source_input_id,
+                handoff_transition_id=item.handoff_transition_id,
             )
         )
 
@@ -544,4 +546,6 @@ def _to_domain_input(row: ExecutionInputModel) -> ExecutionInput:
         updated_at=row.updated_at,
         source_command_id=row.source_command_id,
         superseded_reason=row.superseded_reason,
+        source_input_id=row.source_input_id,
+        handoff_transition_id=row.handoff_transition_id,
     )

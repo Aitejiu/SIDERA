@@ -58,6 +58,7 @@ class ExecutionRepository:
                 stop_requested=execution.stop_requested,
                 source_execution_id=execution.source_execution_id,
                 source_session_id=execution.source_session_id,
+                handoff_transition_id=execution.handoff_transition_id,
                 created_at=execution.created_at,
             )
         )
@@ -93,6 +94,7 @@ class ExecutionRepository:
                 stop_requested=execution.stop_requested,
                 source_execution_id=execution.source_execution_id,
                 source_session_id=execution.source_session_id,
+                handoff_transition_id=execution.handoff_transition_id,
                 updated_at=datetime.now(UTC),
             )
         )
@@ -153,25 +155,26 @@ class ExecutionRepository:
         limit: int,
         excluded_ids: Collection[UUID] = (),
     ) -> tuple[Execution, ...]:
-        statement = select(ExecutionModel).join(
-            TaskModel,
-            and_(
-                TaskModel.id == ExecutionModel.task_id,
-                TaskModel.workspace_id == ExecutionModel.workspace_id,
-            ),
-        ).where(
-            ExecutionModel.status == ExecutionStatus.QUEUED.value,
-            ExecutionModel.active_lease_id.is_(None),
-            ExecutionModel.not_before <= now,
-            TaskModel.status.in_(("ready", "running")),
+        statement = (
+            select(ExecutionModel)
+            .join(
+                TaskModel,
+                and_(
+                    TaskModel.id == ExecutionModel.task_id,
+                    TaskModel.workspace_id == ExecutionModel.workspace_id,
+                ),
+            )
+            .where(
+                ExecutionModel.status == ExecutionStatus.QUEUED.value,
+                ExecutionModel.active_lease_id.is_(None),
+                ExecutionModel.not_before <= now,
+                TaskModel.status.in_(("ready", "running")),
+            )
         )
         if excluded_ids:
-            statement = statement.where(
-                ExecutionModel.id.not_in(tuple(excluded_ids))
-            )
+            statement = statement.where(ExecutionModel.id.not_in(tuple(excluded_ids)))
         statement = (
-            statement
-            .order_by(
+            statement.order_by(
                 TaskModel.priority.desc(),
                 ExecutionModel.not_before.asc(),
                 ExecutionModel.created_at.asc(),
@@ -186,15 +189,19 @@ class ExecutionRepository:
     def has_live_for_task(
         self, task_id: UUID, *, excluding: UUID | None = None
     ) -> bool:
-        statement = select(func.count()).select_from(ExecutionModel).where(
-            ExecutionModel.task_id == task_id,
-            ExecutionModel.status.in_(
-                (
-                    ExecutionStatus.QUEUED.value,
-                    ExecutionStatus.LEASED.value,
-                    ExecutionStatus.RUNNING.value,
-                )
-            ),
+        statement = (
+            select(func.count())
+            .select_from(ExecutionModel)
+            .where(
+                ExecutionModel.task_id == task_id,
+                ExecutionModel.status.in_(
+                    (
+                        ExecutionStatus.QUEUED.value,
+                        ExecutionStatus.LEASED.value,
+                        ExecutionStatus.RUNNING.value,
+                    )
+                ),
+            )
         )
         if excluding is not None:
             statement = statement.where(ExecutionModel.id != excluding)
@@ -272,5 +279,6 @@ def _to_domain_execution(row: ExecutionModel) -> Execution:
         stop_requested=row.stop_requested,
         source_execution_id=row.source_execution_id,
         source_session_id=row.source_session_id,
+        handoff_transition_id=row.handoff_transition_id,
         created_at=row.created_at,
     )

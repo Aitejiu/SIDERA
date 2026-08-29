@@ -57,6 +57,7 @@ class ExecutionRequestRepository:
             ExecutionRequestModel.proposal_revision_id == proposal_revision_id,
             ExecutionRequestModel.worker_item_key == worker_item_key,
             ExecutionRequestModel.workspace_id == workspace_id,
+            ExecutionRequestModel.handoff_transition_id.is_(None),
         )
         if for_update:
             statement = statement.with_for_update()
@@ -93,6 +94,7 @@ class ExecutionRequestRepository:
                 first_execution_id=request.first_execution_id,
                 source_execution_id=request.source_execution_id,
                 source_session_id=request.source_session_id,
+                handoff_transition_id=request.handoff_transition_id,
                 version=request.version,
                 updated_at=datetime.now(UTC),
             )
@@ -106,9 +108,7 @@ class ExecutionRequestRepository:
         if not isinstance(result, CursorResult) or result.rowcount != 1:
             raise VersionConflict(previous_version, actual or 0)
 
-    def claim_ready(
-        self, *, now: datetime, limit: int
-    ) -> tuple[ExecutionRequest, ...]:
+    def claim_ready(self, *, now: datetime, limit: int) -> tuple[ExecutionRequest, ...]:
         rows = self._claim_status(
             status=ExecutionRequestStatus.READY, now=now, limit=limit
         )
@@ -174,17 +174,23 @@ class ExecutionRequestRepository:
             select(ExecutionRequestModel)
             .join(
                 ExecutionRequestDependencyModel,
-                (ExecutionRequestDependencyModel.downstream_request_id
-                 == ExecutionRequestModel.id)
-                & (ExecutionRequestDependencyModel.workspace_id
-                   == ExecutionRequestModel.workspace_id),
+                (
+                    ExecutionRequestDependencyModel.downstream_request_id
+                    == ExecutionRequestModel.id
+                )
+                & (
+                    ExecutionRequestDependencyModel.workspace_id
+                    == ExecutionRequestModel.workspace_id
+                ),
             )
             .where(
                 ExecutionRequestDependencyModel.upstream_request_id
                 == upstream_request_id,
                 ExecutionRequestDependencyModel.workspace_id == workspace_id,
             )
-            .order_by(ExecutionRequestModel.created_at.asc(), ExecutionRequestModel.id.asc())
+            .order_by(
+                ExecutionRequestModel.created_at.asc(), ExecutionRequestModel.id.asc()
+            )
         ).all()
         return tuple(_to_request(row) for row in rows)
 
@@ -231,6 +237,7 @@ def _request_model(request: ExecutionRequest) -> ExecutionRequestModel:
         first_execution_id=request.first_execution_id,
         source_execution_id=request.source_execution_id,
         source_session_id=request.source_session_id,
+        handoff_transition_id=request.handoff_transition_id,
         version=request.version,
     )
 
@@ -266,6 +273,7 @@ def _to_request(row: ExecutionRequestModel) -> ExecutionRequest:
         first_execution_id=row.first_execution_id,
         source_execution_id=row.source_execution_id,
         source_session_id=row.source_session_id,
+        handoff_transition_id=row.handoff_transition_id,
         version=row.version,
         created_at=row.created_at,
         updated_at=row.updated_at,

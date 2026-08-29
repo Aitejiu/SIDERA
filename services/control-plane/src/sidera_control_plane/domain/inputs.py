@@ -40,6 +40,8 @@ class ExecutionInput:
     updated_at: datetime
     source_command_id: UUID | None = None
     superseded_reason: str | None = None
+    source_input_id: UUID | None = None
+    handoff_transition_id: UUID | None = None
 
     @classmethod
     def accept(
@@ -54,6 +56,8 @@ class ExecutionInput:
         attachment_refs: tuple[str, ...],
         now: datetime,
         source_command_id: UUID | None = None,
+        source_input_id: UUID | None = None,
+        handoff_transition_id: UUID | None = None,
     ) -> "ExecutionInput":
         if not text:
             raise ValidationError("input text cannot be empty")
@@ -63,6 +67,18 @@ class ExecutionInput:
             raise ValidationError("attachment_refs cannot contain empty values")
         if now.tzinfo is None:
             raise ValidationError("input timestamp must be timezone-aware")
+        if source_input_id is not None and not isinstance(source_input_id, UUID):
+            raise ValidationError("source_input_id must be a UUID")
+        if handoff_transition_id is not None and not isinstance(
+            handoff_transition_id, UUID
+        ):
+            raise ValidationError("handoff_transition_id must be a UUID")
+        if (source_input_id is None) != (handoff_transition_id is None):
+            raise ValidationError(
+                "source_input_id and handoff_transition_id must be provided together"
+            )
+        if source_input_id == id:
+            raise ValidationError("source_input_id cannot equal input id")
         return cls(
             id=id,
             workspace_id=workspace_id,
@@ -79,6 +95,8 @@ class ExecutionInput:
             updated_at=now,
             source_command_id=source_command_id,
             superseded_reason=None,
+            source_input_id=source_input_id,
+            handoff_transition_id=handoff_transition_id,
         )
 
     def update_text(self, text: str) -> None:
@@ -109,7 +127,9 @@ class ExecutionInput:
         self.version += 1
 
     def deliver(self) -> None:
-        self._transition(ExecutionInputStatus.DISPATCHING, ExecutionInputStatus.DELIVERED)
+        self._transition(
+            ExecutionInputStatus.DISPATCHING, ExecutionInputStatus.DELIVERED
+        )
         self.operation_id = None
 
     def block_unknown(self, *, failure_code: str) -> None:
@@ -148,9 +168,7 @@ class ExecutionInput:
         self.updated_at = now
         self.version += 1
 
-    def _finish_dispatch(
-        self, status: ExecutionInputStatus, failure_code: str
-    ) -> None:
+    def _finish_dispatch(self, status: ExecutionInputStatus, failure_code: str) -> None:
         if self.status is not ExecutionInputStatus.DISPATCHING:
             raise InvalidTransition("only dispatching input can finish dispatch")
         clean_code = failure_code.strip()

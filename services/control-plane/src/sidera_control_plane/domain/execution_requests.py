@@ -117,9 +117,7 @@ class ActivationDecision:
     blocked_upstream_request_ids: tuple[UUID, ...] = ()
     missing_artifact_refs: tuple[str, ...] = ()
     missing_evidence_refs: tuple[str, ...] = ()
-    details: Mapping[str, object] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    details: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if not self.reason.strip():
@@ -242,6 +240,7 @@ class ExecutionRequest:
     adapter_forbidden: frozenset[str] = frozenset()
     source_execution_id: UUID | None = None
     source_session_id: UUID | None = None
+    handoff_transition_id: UUID | None = None
 
     @classmethod
     def create(
@@ -271,6 +270,7 @@ class ExecutionRequest:
         adapter_forbidden: tuple[str, ...] | Iterable[str] = (),
         source_execution_id: UUID | None = None,
         source_session_id: UUID | None = None,
+        handoff_transition_id: UUID | None = None,
     ) -> ExecutionRequest:
         for name, value in (
             ("request_id", request_id),
@@ -287,12 +287,17 @@ class ExecutionRequest:
         for name, value in (
             ("source_execution_id", source_execution_id),
             ("source_session_id", source_session_id),
+            ("handoff_transition_id", handoff_transition_id),
         ):
             if value is not None and not isinstance(value, UUID):
                 raise ValidationError(f"{name} must be a UUID")
         if source_session_id is not None and source_execution_id is None:
+            raise ValidationError("source_session_id requires source_execution_id")
+        if handoff_transition_id is not None and (
+            source_execution_id is None or source_session_id is None
+        ):
             raise ValidationError(
-                "source_session_id requires source_execution_id"
+                "handoff target requires source execution and session lineage"
             )
         if plan_generation < 1:
             raise ValidationError("plan_generation must be positive")
@@ -306,9 +311,7 @@ class ExecutionRequest:
         if not capabilities:
             raise ValidationError("capability_requirements are required")
         preferences = _clean_strings(adapter_preferences, "adapter_preferences")
-        forbidden = frozenset(
-            _clean_strings(adapter_forbidden, "adapter_forbidden")
-        )
+        forbidden = frozenset(_clean_strings(adapter_forbidden, "adapter_forbidden"))
         if set(preferences).intersection(forbidden):
             raise ValidationError(
                 "adapter preferences cannot contain forbidden adapter types"
@@ -354,6 +357,7 @@ class ExecutionRequest:
             adapter_forbidden=forbidden,
             source_execution_id=source_execution_id,
             source_session_id=source_session_id,
+            handoff_transition_id=handoff_transition_id,
         )
 
     @property
@@ -409,7 +413,9 @@ class ExecutionRequest:
         if not isinstance(execution_lineage_id, UUID) or not isinstance(
             first_execution_id, UUID
         ):
-            raise ValidationError("execution lineage and first execution ids are required")
+            raise ValidationError(
+                "execution lineage and first execution ids are required"
+            )
         if self.execution_lineage_id is not None or self.first_execution_id is not None:
             raise InvalidTransition("execution request has already been materialized")
         _aware(now, "now")
@@ -464,8 +470,7 @@ class ExecutionRequest:
 
 
 def _fact_map(
-    facts: Mapping[UUID, UpstreamActivationFact]
-    | Iterable[UpstreamActivationFact],
+    facts: Mapping[UUID, UpstreamActivationFact] | Iterable[UpstreamActivationFact],
 ) -> dict[UUID, UpstreamActivationFact]:
     values = facts.values() if isinstance(facts, Mapping) else facts
     result: dict[UUID, UpstreamActivationFact] = {}
@@ -478,9 +483,15 @@ def _fact_map(
     return result
 
 
-def _dependency_enforcement(value: DependencyEnforcement | str) -> DependencyEnforcement:
+def _dependency_enforcement(
+    value: DependencyEnforcement | str,
+) -> DependencyEnforcement:
     try:
-        return value if isinstance(value, DependencyEnforcement) else DependencyEnforcement(value)
+        return (
+            value
+            if isinstance(value, DependencyEnforcement)
+            else DependencyEnforcement(value)
+        )
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"unsupported dependency enforcement: {value!r}") from exc
 
@@ -494,7 +505,11 @@ def _execution_status(value: ExecutionStatus | str) -> ExecutionStatus:
 
 def _evidence_status(value: EvidenceClaimStatus | str) -> EvidenceClaimStatus:
     try:
-        return value if isinstance(value, EvidenceClaimStatus) else EvidenceClaimStatus(value)
+        return (
+            value
+            if isinstance(value, EvidenceClaimStatus)
+            else EvidenceClaimStatus(value)
+        )
     except (TypeError, ValueError) as exc:
         raise ValidationError(
             "R5.1 activation only supports candidate evidence claims"
@@ -510,7 +525,9 @@ def _artifact_refs(values: Iterable[str], label: str) -> tuple[str, ...]:
         try:
             ArtifactType(match.group(1))
         except ValueError as exc:
-            raise ValidationError(f"unsupported artifact type in {label}: {ref}") from exc
+            raise ValidationError(
+                f"unsupported artifact type in {label}: {ref}"
+            ) from exc
     return refs
 
 

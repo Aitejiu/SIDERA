@@ -10,6 +10,11 @@ from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     ExecutionModel,
     ExecutionSessionModel,
+    ExecutionWorkspaceTransferModel,
+    HandoffContextBundleModel,
+    HandoffProposalModel,
+    HandoffRecoveryDecisionModel,
+    HandoffTransitionModel,
     TaskModel,
     WorkerModel,
     WorkspaceModel,
@@ -39,9 +44,7 @@ def test_foundation_migration_creates_authoritative_tables(database: Database) -
 
     with database.engine.connect() as connection:
         inspector = inspect(connection)
-        worker_columns = {
-            item["name"] for item in inspector.get_columns("workers")
-        }
+        worker_columns = {item["name"] for item in inspector.get_columns("workers")}
         worker_constraints = {
             item["name"] for item in inspector.get_check_constraints("workers")
         }
@@ -56,6 +59,31 @@ def test_foundation_migration_creates_authoritative_tables(database: Database) -
     assert "ck_workers_desired_state" in worker_constraints
     assert "uq_assignment_leases_active_execution" in lease_indexes
     assert "uq_execution_sessions_active_execution" in session_indexes
+
+
+def test_r6_2_migration_adds_handoff_tables_and_lineage_columns(
+    database: Database,
+) -> None:
+    with database.engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        assert {
+            HandoffProposalModel.__tablename__,
+            HandoffTransitionModel.__tablename__,
+            HandoffContextBundleModel.__tablename__,
+            HandoffRecoveryDecisionModel.__tablename__,
+            ExecutionWorkspaceTransferModel.__tablename__,
+        } <= tables
+        assert {"handoff_transition_id"} <= {
+            item["name"] for item in inspector.get_columns("executions")
+        }
+        assert {"handoff_transition_id"} <= {
+            item["name"] for item in inspector.get_columns("execution_requests")
+        }
+        assert {
+            "source_input_id",
+            "handoff_transition_id",
+        } <= {item["name"] for item in inspector.get_columns("execution_inputs")}
 
 
 def test_r2_schema_enforces_capacity_fencing_and_workspace_ownership(

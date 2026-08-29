@@ -60,6 +60,7 @@ class Execution:
     stop_requested: bool = False
     source_execution_id: UUID | None = None
     source_session_id: UUID | None = None
+    handoff_transition_id: UUID | None = None
     adapter_preferences: tuple[str, ...] = ()
     adapter_forbidden: frozenset[str] = frozenset()
     created_at: datetime | None = None
@@ -81,6 +82,7 @@ class Execution:
         not_before: datetime,
         source_execution_id: UUID | None = None,
         source_session_id: UUID | None = None,
+        handoff_transition_id: UUID | None = None,
         adapter_preferences: Iterable[str] = (),
         adapter_forbidden: Iterable[str] = (),
     ) -> "Execution":
@@ -89,11 +91,28 @@ class Execution:
             item.strip() for item in capability_requirements if item.strip()
         )
         if attempt < 1 or max_attempts < attempt:
-            raise ValidationError("attempt must be positive and cannot exceed max_attempts")
+            raise ValidationError(
+                "attempt must be positive and cannot exceed max_attempts"
+            )
         if not clean_purpose or not clean_requirements:
             raise ValidationError("purpose and capability_requirements are required")
         if not_before.tzinfo is None:
             raise ValidationError("not_before must be timezone-aware")
+        for name, value in (
+            ("source_execution_id", source_execution_id),
+            ("source_session_id", source_session_id),
+            ("handoff_transition_id", handoff_transition_id),
+        ):
+            if value is not None and not isinstance(value, UUID):
+                raise ValidationError(f"{name} must be a UUID")
+        if source_session_id is not None and source_execution_id is None:
+            raise ValidationError("source_session_id requires source_execution_id")
+        if handoff_transition_id is not None and (
+            source_execution_id is None or source_session_id is None
+        ):
+            raise ValidationError(
+                "handoff target requires source execution and session lineage"
+            )
         preferences = _clean_policy_values(adapter_preferences, "adapter_preferences")
         forbidden = frozenset(
             _clean_policy_values(adapter_forbidden, "adapter_forbidden")
@@ -125,6 +144,7 @@ class Execution:
             stop_requested=False,
             source_execution_id=source_execution_id,
             source_session_id=source_session_id,
+            handoff_transition_id=handoff_transition_id,
             adapter_preferences=preferences,
             adapter_forbidden=forbidden,
         )
@@ -359,7 +379,9 @@ class ExecutionSession:
         if adapter_config_version < 1 or workspace_config_version < 1:
             raise ValidationError("runtime config versions must be positive")
         if not process_ref.strip() or not workspace_ref.strip():
-            raise ValidationError("runtime process and workspace references are required")
+            raise ValidationError(
+                "runtime process and workspace references are required"
+            )
         self.adapter_module_id = adapter_module_id
         self.adapter_config_version = adapter_config_version
         self.workspace_module_id = workspace_module_id
@@ -381,6 +403,8 @@ class ExecutionSession:
     def close(self, *, lost: bool, now: datetime) -> None:
         if self.status is not ExecutionSessionStatus.ACTIVE:
             raise InvalidTransition("session is already terminal")
-        self.status = ExecutionSessionStatus.LOST if lost else ExecutionSessionStatus.CLOSED
+        self.status = (
+            ExecutionSessionStatus.LOST if lost else ExecutionSessionStatus.CLOSED
+        )
         self.last_activity_at = now
         self.version += 1

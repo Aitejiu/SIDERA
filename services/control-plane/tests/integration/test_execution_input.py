@@ -329,9 +329,10 @@ def test_input_command_persists_queue_outbox_and_client_replay(
         before_context_hashes = tuple(
             db_session.scalars(select(WorkContextRevisionModel.content_hash)).all()
         )
-        before_package_count = db_session.scalar(
-            select(func.count()).select_from(ContextPackageModel)
-        ) or 0
+        before_package_count = (
+            db_session.scalar(select(func.count()).select_from(ContextPackageModel))
+            or 0
+        )
     envelope = _envelope(
         workspace_id,
         ids["session_id"],
@@ -350,13 +351,23 @@ def test_input_command_persists_queue_outbox_and_client_replay(
         item = db_session.query(ExecutionInputModel).one()
         assert item.status == "queued"
         assert item.text == "  keep this text  "
-        assert db_session.query(OutboxMessageModel).filter(
-            OutboxMessageModel.topic == "execution_input.ExecutionInputAccepted"
-        ).count() == 1
+        assert item.source_input_id is None
+        assert item.handoff_transition_id is None
+        assert (
+            db_session.query(OutboxMessageModel)
+            .filter(
+                OutboxMessageModel.topic == "execution_input.ExecutionInputAccepted"
+            )
+            .count()
+            == 1
+        )
         assert db_session.query(CommandModel).count() == 1
-        assert tuple(
-            db_session.scalars(select(WorkContextRevisionModel.content_hash)).all()
-        ) == before_context_hashes
+        assert (
+            tuple(
+                db_session.scalars(select(WorkContextRevisionModel.content_hash)).all()
+            )
+            == before_context_hashes
+        )
         assert (
             db_session.scalar(select(func.count()).select_from(ContextPackageModel))
             or 0
