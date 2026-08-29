@@ -24,6 +24,10 @@ from sidera_control_plane.domain.gateway import (
     DeliveryOutcome,
     DeliveryResult,
 )
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffCheckpointEvidence,
+    HandoffOperationInspection,
+)
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     IdempotencyCapability,
@@ -346,6 +350,37 @@ class FakeWorkerAdapter:
         self._maybe_fail("collect_knowledge_candidates")
         self._session(handle)
         return self._knowledge_candidates
+
+    def capture_handoff_checkpoint(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        transition_id: UUID,
+        source_input_cutoff_sequence: int,
+        operation_id: UUID,
+    ) -> HandoffCheckpointEvidence:
+        raise NotImplementedError(
+            "FakeWorkerAdapter does not support handoff checkpoints"
+        )
+
+    def inspect_handoff_operation(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> HandoffOperationInspection:
+        raise NotImplementedError(
+            "FakeWorkerAdapter does not inspect handoff operations"
+        )
+
+    def enable_handoff_writer(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        fencing_token: int,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        raise NotImplementedError("FakeWorkerAdapter does not enable handoff writers")
 
     def release_boundary(self, handle: AdapterSessionHandle) -> None:
         """Make the current prompt safe for the next queued input."""

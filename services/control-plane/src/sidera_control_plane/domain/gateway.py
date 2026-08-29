@@ -1,16 +1,22 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
+from sidera_control_plane.domain.handoffs import HandoffPhase
 from sidera_control_plane.domain.modules import (
     ModuleLifecycle,
     WorkerAdapterCapabilityProfile,
 )
+
+if TYPE_CHECKING:
+    from sidera_control_plane.domain.handoff_evidence import SessionContextBinding
 
 
 class GatewayOperationType(StrEnum):
@@ -21,6 +27,8 @@ class GatewayOperationType(StrEnum):
     STOP_SESSION = "stop_session"
     COLLECT_ARTIFACTS = "collect_artifacts"
     CLEANUP_WORKSPACE = "cleanup_workspace"
+    HANDOFF_CHECKPOINT = "handoff_checkpoint"
+    HANDOFF_ENABLE_WRITER = "handoff_enable_writer"
 
 
 class GatewayOperationStatus(StrEnum):
@@ -107,7 +115,7 @@ class GatewayOperation:
         lease_id: UUID,
         fencing_token: int,
         now: datetime,
-    ) -> "GatewayOperation":
+    ) -> GatewayOperation:
         if fencing_token < 1:
             raise ValidationError("fencing_token must be positive")
         if config_version is not None and config_version < 1:
@@ -199,6 +207,7 @@ class AdapterSessionHandle:
     capability_snapshot: WorkerAdapterCapabilityProfile
     last_accepted_sequence: int
     started_at: datetime
+    context_binding: SessionContextBinding | None = None
 
     def __post_init__(self) -> None:
         if not self.adapter_session_id.strip() or not self.process_ref.strip():
@@ -255,6 +264,7 @@ class DeliveryResult:
     outcome: DeliveryOutcome
     accepted_sequence: int | None
     failure_code: str | None
+    execution_session_id: UUID | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -264,8 +274,14 @@ class DeliveryResult:
                 else DeliveryOutcome(self.outcome)
             )
         except (TypeError, ValueError) as exc:
-            raise ValidationError(f"unsupported delivery outcome: {self.outcome!r}") from exc
+            raise ValidationError(
+                f"unsupported delivery outcome: {self.outcome!r}"
+            ) from exc
         object.__setattr__(self, "outcome", outcome)
+        if self.execution_session_id is not None and not isinstance(
+            self.execution_session_id, UUID
+        ):
+            raise ValidationError("execution_session_id must be a UUID")
         if self.accepted_sequence is not None and self.accepted_sequence < 0:
             raise ValidationError("accepted_sequence cannot be negative")
         if outcome is DeliveryOutcome.DELIVERED and self.accepted_sequence is None:
@@ -274,7 +290,11 @@ class DeliveryResult:
 
 def _operation_type(value: GatewayOperationType | str) -> GatewayOperationType:
     try:
-        return value if isinstance(value, GatewayOperationType) else GatewayOperationType(value)
+        return (
+            value
+            if isinstance(value, GatewayOperationType)
+            else GatewayOperationType(value)
+        )
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"unsupported gateway operation type: {value!r}") from exc
 
@@ -283,6 +303,41 @@ def gateway_operation_id(
     execution_id: UUID, operation_type: GatewayOperationType
 ) -> UUID:
     return uuid5(NAMESPACE_URL, f"sidera.gateway:{operation_type.value}:{execution_id}")
+
+
+HANDOFF_OPERATION_NAMESPACE = uuid5(
+    NAMESPACE_URL,
+    "urn:sidera:handoff-operation:v1",
+)
+HANDOFF_STEP_ACTIONS = frozenset(
+    {"checkpoint", "freeze_workspace", "transfer_workspace", "enable_writer"}
+)
+
+
+def handoff_step_operation_id(
+    transition_id: UUID,
+    phase: HandoffPhase,
+    *,
+    logical_attempt: int,
+    action: str,
+) -> UUID:
+    if not isinstance(transition_id, UUID):
+        raise ValidationError("transition_id must be a UUID")
+    if not isinstance(phase, HandoffPhase):
+        try:
+            phase = HandoffPhase(phase)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"unsupported handoff phase: {phase!r}") from exc
+    if (
+        not isinstance(logical_attempt, int)
+        or isinstance(logical_attempt, bool)
+        or logical_attempt < 1
+    ):
+        raise ValidationError("logical_attempt must be positive")
+    if action not in HANDOFF_STEP_ACTIONS:
+        raise ValidationError("unsupported handoff step action")
+    identity = f"handoff:v1:{transition_id}:{logical_attempt}:{phase.value}:{action}"
+    return uuid5(HANDOFF_OPERATION_NAMESPACE, identity)
 
 
 def context_patch_operation_id(

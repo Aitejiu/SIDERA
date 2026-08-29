@@ -2,10 +2,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
+from sidera_control_plane.domain.handoffs import HandoffTransferMode
 
 
 class CapabilityInput(StrEnum):
@@ -77,6 +78,12 @@ class UsageReportingCapability(StrEnum):
     COST = "cost"
 
 
+class HandoffCheckpointMode(StrEnum):
+    UNSUPPORTED = "unsupported"
+    NATIVE = "native"
+    CONTROL_EVENT = "control-event"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerAdapterCapabilityProfile:
     input: CapabilityInput
@@ -87,6 +94,11 @@ class WorkerAdapterCapabilityProfile:
     stability: StabilityLevel
     context_package_versions: tuple[int, ...] = ()
     context_patch_versions: tuple[int, ...] = ()
+    handoff_checkpoint_mode: HandoffCheckpointMode = HandoffCheckpointMode.UNSUPPORTED
+    handoff_checkpoint_versions: tuple[int, ...] = ()
+    handoff_session_context_versions: tuple[int, ...] = ()
+    handoff_writer_gate_versions: tuple[int, ...] = ()
+    handoff_inspection: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -135,6 +147,39 @@ class WorkerAdapterCapabilityProfile:
                 self.context_patch_versions, "context_patch_versions"
             ),
         )
+        object.__setattr__(
+            self,
+            "handoff_checkpoint_mode",
+            _enum_value(
+                self.handoff_checkpoint_mode,
+                HandoffCheckpointMode,
+                "handoff checkpoint mode",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "handoff_checkpoint_versions",
+            _positive_version_tuple(
+                self.handoff_checkpoint_versions, "handoff_checkpoint_versions"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "handoff_session_context_versions",
+            _positive_version_tuple(
+                self.handoff_session_context_versions,
+                "handoff_session_context_versions",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "handoff_writer_gate_versions",
+            _positive_version_tuple(
+                self.handoff_writer_gate_versions, "handoff_writer_gate_versions"
+            ),
+        )
+        if not isinstance(self.handoff_inspection, bool):
+            raise ValidationError("handoff_inspection capability must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +188,9 @@ class WorkspaceProviderCapabilityProfile:
     writable: bool
     git_worktree: bool
     stability: StabilityLevel
+    workspace_handoff_versions: tuple[int, ...] = ()
+    workspace_transfer_modes: tuple[HandoffTransferMode, ...] = ()
+    handoff_inspection: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -159,6 +207,20 @@ class WorkspaceProviderCapabilityProfile:
             "stability",
             _enum_value(self.stability, StabilityLevel, "stability level"),
         )
+        object.__setattr__(
+            self,
+            "workspace_handoff_versions",
+            _positive_version_tuple(
+                self.workspace_handoff_versions, "workspace_handoff_versions"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "workspace_transfer_modes",
+            _handoff_transfer_mode_tuple(self.workspace_transfer_modes),
+        )
+        if not isinstance(self.handoff_inspection, bool):
+            raise ValidationError("handoff_inspection capability must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,9 +292,7 @@ class PlannerAdapterCapabilityProfile:
         if not self.proposal_schema_versions:
             raise ValidationError("proposal_schema_versions cannot be empty")
         if any(
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version < 1
+            not isinstance(version, int) or isinstance(version, bool) or version < 1
             for version in self.proposal_schema_versions
         ):
             raise ValidationError("proposal_schema_versions must be positive integers")
@@ -452,3 +512,20 @@ def _positive_version_tuple(value: tuple[int, ...], name: str) -> tuple[int, ...
     ):
         raise ValidationError(f"{name} must contain positive integers")
     return tuple(sorted(set(value)))
+
+
+def _handoff_transfer_mode_tuple(
+    value: tuple[HandoffTransferMode | str, ...],
+) -> tuple[HandoffTransferMode, ...]:
+    if not isinstance(value, tuple):
+        raise ValidationError("workspace_transfer_modes must be a tuple")
+    modes = tuple(
+        cast(
+            HandoffTransferMode,
+            _enum_value(item, HandoffTransferMode, "workspace transfer mode"),
+        )
+        for item in value
+    )
+    if any(item is not HandoffTransferMode.REUSE_EXACT for item in modes):
+        raise ValidationError("only reuse_exact workspace transfer is supported")
+    return tuple(sorted(set(modes), key=lambda item: item.value))

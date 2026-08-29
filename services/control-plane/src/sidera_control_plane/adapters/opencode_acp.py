@@ -46,6 +46,10 @@ from sidera_control_plane.domain.gateway import (
     DeliveryOutcome,
     DeliveryResult,
 )
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffCheckpointEvidence,
+    HandoffOperationInspection,
+)
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     IdempotencyCapability,
@@ -105,7 +109,9 @@ class OpenCodeACPAdapter:
         self._executable = executable
         self._model = model.strip() if model is not None and model.strip() else None
         self._workspace_root = (
-            workspace_root.expanduser().resolve() if workspace_root is not None else None
+            workspace_root.expanduser().resolve()
+            if workspace_root is not None
+            else None
         )
         self._request_timeout_seconds = request_timeout_seconds
         self._stop_grace_seconds = stop_grace_seconds
@@ -223,12 +229,15 @@ class OpenCodeACPAdapter:
                 session.stopped = True
                 sequence = session.next_sequence
                 session.next_sequence += 1
-                events = (*events, self._event(
-                    session,
-                    "session.failed",
-                    sequence,
-                    {"failure_code": "process_exited"},
-                ))
+                events = (
+                    *events,
+                    self._event(
+                        session,
+                        "session.failed",
+                        sequence,
+                        {"failure_code": "process_exited"},
+                    ),
+                )
             return events
 
     def send_input(
@@ -272,7 +281,9 @@ class OpenCodeACPAdapter:
                     },
                     timeout=self._request_timeout_seconds,
                 )
-                stop_reason = result.get("stopReason") if isinstance(result, Mapping) else None
+                stop_reason = (
+                    result.get("stopReason") if isinstance(result, Mapping) else None
+                )
                 if stop_reason == "cancelled":
                     return DeliveryResult(
                         operation_id=operation_id,
@@ -400,8 +411,9 @@ class OpenCodeACPAdapter:
                 )
             except (OSError, subprocess.CalledProcessError) as exc:
                 raise OpenCodeAdapterError(
-                    "OpenCode Git diff collection failed: "
-                    f"{type(exc).__name__}: {exc}"[:500]
+                    f"OpenCode Git diff collection failed: {type(exc).__name__}: {exc}"[
+                        :500
+                    ]
                 ) from exc
             diff = result.stdout
             if not diff:
@@ -433,6 +445,39 @@ class OpenCodeACPAdapter:
         # ACP currently exposes no bounded structured candidate channel. Keeping
         # this hook explicit lets a future adapter add one without changing the gateway.
         return ()
+
+    def capture_handoff_checkpoint(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        transition_id: UUID,
+        source_input_cutoff_sequence: int,
+        operation_id: UUID,
+    ) -> HandoffCheckpointEvidence:
+        raise NotImplementedError(
+            "OpenCodeACPAdapter handoff checkpoint is not enabled"
+        )
+
+    def inspect_handoff_operation(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> HandoffOperationInspection:
+        raise NotImplementedError(
+            "OpenCodeACPAdapter handoff inspection is not enabled"
+        )
+
+    def enable_handoff_writer(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        fencing_token: int,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        raise NotImplementedError(
+            "OpenCodeACPAdapter handoff writer gate is not enabled"
+        )
 
     def active_processes(self) -> tuple[Popen[Any], ...]:
         with self._lock:
@@ -614,7 +659,9 @@ def _redacted_config(config: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _prompt_content(text: str, attachment_refs: tuple[str, ...]) -> list[dict[str, object]]:
+def _prompt_content(
+    text: str, attachment_refs: tuple[str, ...]
+) -> list[dict[str, object]]:
     content: list[dict[str, object]] = [{"type": "text", "text": text}]
     content.extend({"type": "resource_link", "uri": ref} for ref in attachment_refs)
     return content
@@ -704,7 +751,9 @@ def _process_identity(process: Popen[Any]) -> ProcessDescriptor:
     try:
         process_group_id = os.getpgid(process.pid)
     except OSError as exc:
-        raise OpenCodeAdapterError("OpenCode process group identity is unavailable") from exc
+        raise OpenCodeAdapterError(
+            "OpenCode process group identity is unavailable"
+        ) from exc
     return ProcessDescriptor(
         pid=process.pid,
         started_at=datetime.now(UTC),
@@ -739,7 +788,9 @@ def _observed_process_start(pid: int) -> datetime | None:
     value = result.stdout.strip()
     for fmt in ("%a %b %d %H:%M:%S %Y", "%a %b  %d %H:%M:%S %Y"):
         try:
-            return datetime.strptime(value, fmt).replace(tzinfo=datetime.now().astimezone().tzinfo)
+            return datetime.strptime(value, fmt).replace(
+                tzinfo=datetime.now().astimezone().tzinfo
+            )
         except ValueError:
             continue
     return None

@@ -57,6 +57,12 @@ from sidera_control_plane.domain.gateway import (
     ExecutionEvent,
     GatewayOperation,
 )
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffCheckpointEvidence,
+    HandoffOperationInspection,
+    HandoffWorkspaceInspection,
+    HandoffWorkspaceTargetSpec,
+)
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
@@ -398,7 +404,6 @@ class PlanningRecordRepositoryPort(Protocol):
         self, request_id: UUID, workspace_id: UUID
     ) -> ProposalRevision | None:
         raise NotImplementedError
-
 
     def add_clarification(self, clarification: PlanningClarification) -> None:
         raise NotImplementedError
@@ -834,7 +839,9 @@ class KnowledgeCandidateSubmissionRepositoryPort(Protocol):
     ) -> tuple[KnowledgeCandidateSubmission, ...]:
         raise NotImplementedError
 
-    def save(self, submission: KnowledgeCandidateSubmission, previous_version: int) -> None:
+    def save(
+        self, submission: KnowledgeCandidateSubmission, previous_version: int
+    ) -> None:
         raise NotImplementedError
 
     def list_for_producer(
@@ -892,9 +899,7 @@ class ExecutionRequestRepositoryPort(Protocol):
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         raise NotImplementedError
 
-    def claim_ready(
-        self, *, now: datetime, limit: int
-    ) -> tuple[ExecutionRequest, ...]:
+    def claim_ready(self, *, now: datetime, limit: int) -> tuple[ExecutionRequest, ...]:
         raise NotImplementedError
 
     def claim_blocked(
@@ -1428,6 +1433,33 @@ class WorkerAdapter(Protocol):
     ) -> tuple[KnowledgeCandidateProposalV1, ...]:
         raise NotImplementedError
 
+    def capture_handoff_checkpoint(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        transition_id: UUID,
+        source_input_cutoff_sequence: int,
+        operation_id: UUID,
+    ) -> HandoffCheckpointEvidence:
+        raise NotImplementedError
+
+    def inspect_handoff_operation(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> HandoffOperationInspection:
+        raise NotImplementedError
+
+    def enable_handoff_writer(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        fencing_token: int,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        raise NotImplementedError
+
 
 class PlannerAdapter(Protocol):
     def probe(self, config: Mapping[str, object]) -> PlannerAdapterCapabilityProfile:
@@ -1479,11 +1511,29 @@ class WorkspaceProvider(Protocol):
     def inspect(self, location_ref: str) -> ExecutionWorkspaceManifest:
         raise NotImplementedError
 
+    def transfer_handoff(
+        self,
+        source_manifest: ExecutionWorkspaceManifest,
+        target: HandoffWorkspaceTargetSpec,
+        *,
+        transition_id: UUID,
+        logical_attempt: int,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def inspect_handoff_transfer(
+        self,
+        *,
+        transition_id: UUID,
+        logical_attempt: int,
+        operation_id: UUID,
+    ) -> HandoffWorkspaceInspection:
+        raise NotImplementedError
+
 
 class CommandRepositoryPort(Protocol):
-    def find_by_id(
-        self, workspace_id: UUID, command_id: UUID
-    ) -> StoredCommand | None:
+    def find_by_id(self, workspace_id: UUID, command_id: UUID) -> StoredCommand | None:
         raise NotImplementedError
 
     def find_duplicate(

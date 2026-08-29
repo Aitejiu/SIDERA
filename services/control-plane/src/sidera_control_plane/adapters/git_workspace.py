@@ -5,6 +5,10 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from uuid import UUID, uuid4
 
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffWorkspaceInspection,
+    HandoffWorkspaceTargetSpec,
+)
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
     CheckoutMode,
@@ -47,7 +51,9 @@ class GitWorktreeWorkspaceManager:
         self, spec: ExecutionSpec, *, operation_id: UUID
     ) -> ExecutionWorkspaceManifest:
         checkout_spec = spec.repositories[0]
-        self._validate_checkout_spec(checkout_spec.checkout_mode, checkout_spec.branch_policy)
+        self._validate_checkout_spec(
+            checkout_spec.checkout_mode, checkout_spec.branch_policy
+        )
         repository = self._resolve_repository(checkout_spec.repository_ref)
         self._assert_clean_source(repository)
         revision = self._resolve_revision(repository, checkout_spec.base_revision)
@@ -157,7 +163,11 @@ class GitWorktreeWorkspaceManager:
                 self._run_git(
                     ["worktree", "remove", "--force", str(location)], cwd=repository
                 )
-            except (OSError, WorkspaceProviderError, subprocess.CalledProcessError) as exc:
+            except (
+                OSError,
+                WorkspaceProviderError,
+                subprocess.CalledProcessError,
+            ) as exc:
                 manifest.quarantine()
                 self._manifests[manifest.location_ref] = manifest
                 raise WorkspaceProviderError(
@@ -187,6 +197,28 @@ class GitWorktreeWorkspaceManager:
             )
         return manifest
 
+    def transfer_handoff(
+        self,
+        source_manifest: ExecutionWorkspaceManifest,
+        target: HandoffWorkspaceTargetSpec,
+        *,
+        transition_id: UUID,
+        logical_attempt: int,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError("GitWorktreeWorkspaceManager handoff is not enabled")
+
+    def inspect_handoff_transfer(
+        self,
+        *,
+        transition_id: UUID,
+        logical_attempt: int,
+        operation_id: UUID,
+    ) -> HandoffWorkspaceInspection:
+        raise NotImplementedError(
+            "GitWorktreeWorkspaceManager handoff inspection is not enabled"
+        )
+
     def _create_worktree(
         self,
         repository: Path,
@@ -196,9 +228,7 @@ class GitWorktreeWorkspaceManager:
         revision: str,
     ) -> None:
         if self._branch_exists(repository, branch):
-            self._run_git(
-                ["worktree", "add", str(location), branch], cwd=repository
-            )
+            self._run_git(["worktree", "add", str(location), branch], cwd=repository)
         else:
             self._run_git(
                 ["worktree", "add", "-b", branch, str(location), revision],
@@ -261,7 +291,9 @@ class GitWorktreeWorkspaceManager:
             self._git_output(["rev-parse", "--show-toplevel"], cwd=location)
         ).resolve()
         if top_level != location.resolve():
-            raise WorkspaceProviderError("workspace location is not the expected worktree")
+            raise WorkspaceProviderError(
+                "workspace location is not the expected worktree"
+            )
         branch = self._git_output(["branch", "--show-current"], cwd=location)
         if branch != expected_branch:
             raise WorkspaceProviderError("workspace branch identity does not match")
@@ -299,7 +331,9 @@ class GitWorktreeWorkspaceManager:
         branch_policy: BranchPolicy,
     ) -> None:
         if checkout_mode is not CheckoutMode.WORKTREE:
-            raise WorkspaceProviderError("R3 Git provider supports worktree checkout only")
+            raise WorkspaceProviderError(
+                "R3 Git provider supports worktree checkout only"
+            )
         if branch_policy is not BranchPolicy.EXECUTION:
             raise WorkspaceProviderError("R3 Git provider owns execution branch names")
 
