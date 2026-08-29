@@ -5,6 +5,7 @@ import type {
   PlanningBriefPage,
   AnswerPlanningClarificationPayload,
   CancelPlanningRequestPayload,
+  ConfirmPlanRevisionPayload,
   ConfirmPlanningProposalPayload,
   PlanningClarificationPage,
   PlanningCommandRequest,
@@ -19,11 +20,14 @@ import type {
   RejectPlanningProposalPayload,
   RequestProposalRevisionPayload,
   SubmitPlanningRequestPayload,
+  SubmitPlanRevisionPayload,
+  RevisionDiff,
 } from "./types";
 
 const PLANNING_PROFILES_PATH = "/api/v1/workspaces/{workspace_id}/planning-profiles" as const;
 const PLANNING_REQUESTS_PATH = "/api/v1/workspaces/{workspace_id}/planning-requests" as const;
 const PLANNING_REQUEST_PATH = "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}" as const;
+const REVISION_DIFF_PATH = "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/diff" as const;
 
 export function planningProfilesQueryKey(workspaceId: string) {
   return ["planning-profiles", workspaceId] as const;
@@ -59,6 +63,10 @@ export function planningProposalQueryKey(
 
 export function planningMaterializationQueryKey(workspaceId: string, requestId: string) {
   return ["planning-materialization", workspaceId, requestId] as const;
+}
+
+export function planRevisionDiffQueryKey(workspaceId: string, requestId: string) {
+  return ["plan-revision-diff", workspaceId, requestId] as const;
 }
 
 export async function listPlanningProfiles(
@@ -163,6 +171,16 @@ export async function getPlanningMaterialization(
     "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}/materialization" as keyof paths,
     init,
   );
+}
+
+export async function getPlanRevisionDiff(
+  workspaceId: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<RevisionDiff> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/planning-requests/${encodeURIComponent(requestId)}/diff`;
+  const init = signal === undefined ? undefined : { signal };
+  return apiGetAt(path, REVISION_DIFF_PATH as keyof paths, init);
 }
 
 export function buildSubmitPlanningRequestCommand({
@@ -306,6 +324,54 @@ export function buildConfirmPlanningProposalCommand({
     workspaceId,
     actorId,
     commandType: "ConfirmPlanningProposal",
+    targetType: "planning_request",
+    targetId: requestId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildSubmitPlanRevisionCommand({
+  workspaceId,
+  rootTaskId,
+  expectedVersion,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  rootTaskId: string;
+  expectedVersion: number;
+  payload: SubmitPlanRevisionPayload;
+  actorId?: string;
+}): PlanningCommandRequest {
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "SubmitPlanRevision",
+    targetType: "task",
+    targetId: rootTaskId,
+    expectedVersion,
+    payload,
+  });
+}
+
+export function buildConfirmPlanRevisionCommand({
+  workspaceId,
+  requestId,
+  expectedVersion,
+  payload,
+  actorId = "aitejiu",
+}: {
+  workspaceId: string;
+  requestId: string;
+  expectedVersion: number;
+  payload: ConfirmPlanRevisionPayload;
+  actorId?: string;
+}): PlanningCommandRequest {
+  return buildPlanningCommand({
+    workspaceId,
+    actorId,
+    commandType: "ConfirmPlanRevision",
     targetType: "planning_request",
     targetId: requestId,
     expectedVersion,

@@ -2611,6 +2611,39 @@ export interface components {
              */
             worker_id: string;
         };
+        /** PlanConvergenceProjectionResponse */
+        PlanConvergenceProjectionResponse: {
+            /** Blocked Count */
+            blocked_count: number;
+            /** Completed At */
+            completed_at: string | null;
+            /** Confirmation Blocked */
+            confirmation_blocked: boolean;
+            /** Converged Count */
+            converged_count: number;
+            /** From Generation */
+            from_generation: number | null;
+            /** Has Active Fence */
+            has_active_fence: boolean;
+            /** Has In Flight */
+            has_in_flight: boolean;
+            /** Has Unknown */
+            has_unknown: boolean;
+            /** In Flight Count */
+            in_flight_count: number;
+            /** Plan Transition Id */
+            plan_transition_id: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /** Target Generation */
+            target_generation: number | null;
+            /** Total Count */
+            total_count: number;
+            /** Unknown Count */
+            unknown_count: number;
+        };
         /** PlanDiffEntryResponse */
         PlanDiffEntryResponse: {
             /**
@@ -2648,6 +2681,91 @@ export interface components {
             root_task_id: string;
             /** Schema Version */
             schema_version: number;
+        };
+        /** PlanHeadProjectionResponse */
+        PlanHeadProjectionResponse: {
+            /** Active Generation */
+            active_generation: number;
+            /** Active Snapshot Hash */
+            active_snapshot_hash: string;
+            /**
+             * Active Snapshot Id
+             * Format: uuid
+             */
+            active_snapshot_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+        };
+        /** PlanRevisionAttentionProjectionResponse */
+        PlanRevisionAttentionProjectionResponse: {
+            /** Action */
+            action: string;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Deep Link */
+            deep_link: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /** Resource Version */
+            resource_version: number;
+            /** Status */
+            status: string;
+            /** Subtask Path */
+            subtask_path: string[];
+            /** Summary */
+            summary: string;
+        };
+        /** PlanRevisionProjectionResponse */
+        PlanRevisionProjectionResponse: {
+            /** Action */
+            action: string | null;
+            /** Base Generation */
+            base_generation: number | null;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /**
+             * Planning Request Id
+             * Format: uuid
+             */
+            planning_request_id: string;
+            /** Proposal Content Hash */
+            proposal_content_hash: string | null;
+            /** Proposal Revision */
+            proposal_revision: number | null;
+            /** Status */
+            status: string;
+            /** Subtask Path */
+            subtask_path: string[];
+            /** Summary */
+            summary: string | null;
+            /** Target Generation */
+            target_generation: number | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
         };
         /** PlanTransitionResponse */
         PlanTransitionResponse: {
@@ -2882,6 +3000,15 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** PlanningContextPatchDeliveryMetricResponse */
+        PlanningContextPatchDeliveryMetricResponse: {
+            /** Adapter */
+            adapter: string;
+            /** Count */
+            count: number;
+            /** Outcome */
+            outcome: string;
+        };
         /** PlanningExecutionRequestMetricsResponse */
         PlanningExecutionRequestMetricsResponse: {
             /** Blocked */
@@ -2967,6 +3094,13 @@ export interface components {
              */
             workspace_id: string;
         };
+        /** PlanningMetricReasonResponse */
+        PlanningMetricReasonResponse: {
+            /** Count */
+            count: number;
+            /** Reason */
+            reason: string;
+        };
         /** PlanningMetricsResponse */
         PlanningMetricsResponse: {
             /**
@@ -2978,6 +3112,7 @@ export interface components {
             latency: components["schemas"]["PlanningLatencyMetricsResponse"];
             outcomes: components["schemas"]["PlanningOutcomeMetricsResponse"];
             planning: components["schemas"]["PlanningLifecycleMetricsResponse"];
+            revision: components["schemas"]["PlanningRevisionMetricsResponse"];
             runs: components["schemas"]["PlanningRunMetricsResponse"];
             usage: components["schemas"]["PlanningUsageMetricsResponse"];
             /**
@@ -3220,6 +3355,21 @@ export interface components {
             /** Unknown Outcome Policy */
             unknown_outcome_policy: string;
         };
+        /** PlanningRevisionMetricsResponse */
+        PlanningRevisionMetricsResponse: {
+            /** Context Patch Delivery Total */
+            context_patch_delivery_total: components["schemas"]["PlanningContextPatchDeliveryMetricResponse"][];
+            /** Plan Revision Conflicts Total */
+            plan_revision_conflicts_total: components["schemas"]["PlanningMetricReasonResponse"][];
+            /** Plan Revisions Active */
+            plan_revisions_active: number;
+            /** Plan Transitions Active */
+            plan_transitions_active: number;
+            /** Revision Confirmation Blocked Total */
+            revision_confirmation_blocked_total: components["schemas"]["PlanningMetricReasonResponse"][];
+            /** Worker Transitions Total */
+            worker_transitions_total: components["schemas"]["PlanningWorkerTransitionMetricResponse"][];
+        };
         /** PlanningRunMetricsResponse */
         PlanningRunMetricsResponse: {
             /** Blocked */
@@ -3313,6 +3463,15 @@ export interface components {
             output_tokens: number;
             /** Runtime Seconds */
             runtime_seconds: number;
+        };
+        /** PlanningWorkerTransitionMetricResponse */
+        PlanningWorkerTransitionMetricResponse: {
+            /** Action */
+            action: string;
+            /** Count */
+            count: number;
+            /** Outcome */
+            outcome: string;
         };
         /** ReconcileWorkerTransitionPayload */
         ReconcileWorkerTransitionPayload: {
@@ -3896,6 +4055,29 @@ export interface components {
             /** Title */
             title: string;
         };
+        /** SubtaskConvergenceProjectionResponse */
+        SubtaskConvergenceProjectionResponse: {
+            /** Blocked Count */
+            blocked_count: number;
+            /** Blocked Predecessor Paths */
+            blocked_predecessor_paths: string[][];
+            /** Converged Count */
+            converged_count: number;
+            /** Plan Transition Id */
+            plan_transition_id: string | null;
+            /** Source Generation */
+            source_generation: number | null;
+            /** Status */
+            status: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Target Generation */
+            target_generation: number | null;
+            /** Total Count */
+            total_count: number;
+            /** Unknown Count */
+            unknown_count: number;
+        };
         /** SubtaskEdgeProjectionResponse */
         SubtaskEdgeProjectionResponse: {
             /** Downstream Subtask Key */
@@ -3980,6 +4162,7 @@ export interface components {
         SubtaskSummaryProjectionResponse: {
             /** Acceptance Refs */
             acceptance_refs: string[];
+            convergence?: components["schemas"]["SubtaskConvergenceProjectionResponse"] | null;
             /** Current Action */
             current_action: string | null;
             /** Evidence Required */
@@ -4014,6 +4197,7 @@ export interface components {
             attention_items: components["schemas"]["SubtaskAttentionProjectionResponse"][];
             /** Checkpoints */
             checkpoints: components["schemas"]["SubtaskCheckpointSummaryProjectionResponse"][];
+            convergence?: components["schemas"]["SubtaskConvergenceProjectionResponse"] | null;
             /** Downstream Subtasks */
             downstream_subtasks: components["schemas"]["RelatedSubtaskProjectionResponse"][];
             /** Evidence */
@@ -4148,6 +4332,7 @@ export interface components {
         TaskConsoleOverviewProjectionResponse: {
             /** Acceptance Refs */
             acceptance_refs: string[];
+            active_revision?: components["schemas"]["PlanRevisionProjectionResponse"] | null;
             /**
              * As Of
              * Format: date-time
@@ -4157,6 +4342,7 @@ export interface components {
             attention_items: components["schemas"]["TaskConsoleAttentionProjectionResponse"][];
             /** Completed Subtask Count */
             completed_subtask_count: number;
+            convergence?: components["schemas"]["PlanConvergenceProjectionResponse"] | null;
             /** Current Milestone Key */
             current_milestone_key: string | null;
             /** Failed Subtask Count */
@@ -4169,6 +4355,7 @@ export interface components {
             last_change_cursor: number;
             /** Next Subtask Keys */
             next_subtask_keys: string[];
+            plan_head?: components["schemas"]["PlanHeadProjectionResponse"] | null;
             /**
              * Plan Snapshot Id
              * Format: uuid
@@ -4176,6 +4363,7 @@ export interface components {
             plan_snapshot_id: string;
             /** Planned Subtask Count */
             planned_subtask_count: number;
+            revision_attention?: components["schemas"]["PlanRevisionAttentionProjectionResponse"] | null;
             /**
              * Root Task Id
              * Format: uuid
@@ -4214,6 +4402,7 @@ export interface components {
             /** Last Change Cursor */
             last_change_cursor: number;
             node: components["schemas"]["TaskNodeProjectionResponse"];
+            plan_sync?: components["schemas"]["WorkerPlanSyncProjectionResponse"] | null;
             /** Schema Version */
             schema_version: number;
         };
@@ -4252,6 +4441,7 @@ export interface components {
             kind: string;
             /** Milestone Key */
             milestone_key: string | null;
+            plan_sync?: components["schemas"]["WorkerPlanSyncProjectionResponse"] | null;
             /** Required Capabilities */
             required_capabilities: string[];
             /** Scheduler Enforced */
@@ -5221,6 +5411,7 @@ export interface components {
             current_agent_summary: string | null;
             /** Current Step */
             current_step: string | null;
+            plan_sync?: components["schemas"]["WorkerPlanSyncProjectionResponse"] | null;
             /** Recent Activity At */
             recent_activity_at: string | null;
             /** Responsibility */
@@ -5238,6 +5429,63 @@ export interface components {
              * Format: uuid
              */
             worker_item_id: string;
+        };
+        /** WorkerPlanSyncProjectionResponse */
+        WorkerPlanSyncProjectionResponse: {
+            /** Acknowledged Context Version */
+            acknowledged_context_version: number;
+            /** Action */
+            action: string;
+            /** Completed At */
+            completed_at: string | null;
+            /** Continuation Execution Id */
+            continuation_execution_id: string | null;
+            /** Continuation Session Id */
+            continuation_session_id: string | null;
+            /** Current Context Version */
+            current_context_version: number;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Patch Acknowledged */
+            patch_acknowledged: boolean;
+            /** Patch Id */
+            patch_id: string | null;
+            /**
+             * Plan Transition Id
+             * Format: uuid
+             */
+            plan_transition_id: string;
+            /** Queued Input Ids */
+            queued_input_ids: string[];
+            /** Source Execution Id */
+            source_execution_id: string | null;
+            /** Source Generation */
+            source_generation: number;
+            /** Source Session Id */
+            source_session_id: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /** Superseded Input Ids */
+            superseded_input_ids: string[];
+            /** Target Context Version */
+            target_context_version: number;
+            /** Target Execution Id */
+            target_execution_id: string | null;
+            /** Target Generation */
+            target_generation: number;
+            /** Target Session Id */
+            target_session_id: string | null;
+            /** Trace Href */
+            trace_href: string | null;
+            /**
+             * Worker Transition Id
+             * Format: uuid
+             */
+            worker_transition_id: string;
+            /** Writer State */
+            writer_state: string;
         };
         /** WorkerResponse */
         WorkerResponse: {
@@ -5536,6 +5784,7 @@ export interface components {
             next_action: string | null;
             /** Placement History */
             placement_history: components["schemas"]["WorkerItemPlacementProjectionResponse"][];
+            plan_sync?: components["schemas"]["WorkerPlanSyncProjectionResponse"] | null;
             /** Read Only Reason */
             read_only_reason: string | null;
             trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;

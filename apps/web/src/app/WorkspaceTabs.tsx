@@ -188,7 +188,7 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function semanticTabForLocation(
+export function semanticTabForLocation(
   workspaceId: string,
   location: { pathname: string; search: string },
 ): WorkspaceTab | null {
@@ -279,6 +279,20 @@ function semanticTabForLocation(
       id: `planning:${planningRequestId}`,
       kind: "planning",
       title: `规划 ${planningRequestId.slice(0, 8)}`,
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
+  const revisionMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/tasks/([^/]+)/revisions/([^/]+)$`),
+  );
+  if (revisionMatch?.[1] !== undefined && revisionMatch[2] !== undefined) {
+    const rootTaskId = decodeURIComponent(revisionMatch[1]);
+    return {
+      id: `root-task:${rootTaskId}`,
+      kind: "root-task",
+      title: `任务 ${rootTaskId.slice(0, 8)}`,
       href: `${location.pathname}${location.search}`,
       closeable: true,
     };

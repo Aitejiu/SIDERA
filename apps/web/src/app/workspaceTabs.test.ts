@@ -10,6 +10,7 @@ import {
   serializeTabs,
   type WorkspaceTab,
 } from "./workspaceTabsState";
+import { semanticTabForLocation } from "./WorkspaceTabs";
 
 const taskIndex = (workspaceId = "ws-1") => initialTabs(workspaceId);
 
@@ -299,6 +300,21 @@ describe("workspace tabs", () => {
 
     expect(state.activeTabId).toBe("planning:request-1");
     expect(state.tabs).toContainEqual(direct);
+  });
+
+  it("maps a nested revision route to the existing root-task semantic tab", () => {
+    const revisionRoute = semanticTabForLocation("ws-1", {
+      pathname: "/workspaces/ws-1/tasks/task-1/revisions/request-1",
+      search: "",
+    });
+
+    expect(revisionRoute).toEqual({
+      id: "root-task:task-1",
+      kind: "root-task",
+      title: "任务 task-1",
+      href: "/workspaces/ws-1/tasks/task-1/revisions/request-1",
+      closeable: true,
+    });
   });
 
   it("discards damaged or cross-workspace session data", () => {

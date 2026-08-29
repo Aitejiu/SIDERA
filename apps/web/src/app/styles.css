@@ -6035,6 +6035,299 @@ h1 {
   line-height: 1.55;
 }
 
+.plan-revision-page {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.plan-revision-page__breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.plan-revision-page__breadcrumb a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dispatch);
+}
+
+.plan-revision-page__heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 5px 0 18px;
+  border-bottom: 1px solid var(--ink);
+}
+
+.plan-revision-page__heading p {
+  max-width: 700px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.plan-revision-page__heading-meta {
+  display: grid;
+  justify-items: end;
+  gap: 9px;
+  padding-bottom: 2px;
+  text-align: right;
+}
+
+.plan-revision-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--structure);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.plan-revision-status--proposal_ready,
+.plan-revision-status--awaiting_confirmation,
+.plan-revision-status--needs_confirmation {
+  border-color: #b8cdec;
+  color: var(--dispatch);
+  background: #f2f6fc;
+}
+
+.plan-revision-status--stale,
+.plan-revision-status--conflicted {
+  border-color: #d8b879;
+  color: var(--attention);
+  background: #fffaf0;
+}
+
+.plan-revision-status--materialized {
+  border-color: #acd0b7;
+  color: var(--complete);
+  background: #f2faf4;
+}
+
+.plan-revision-page__message,
+.plan-revision-page__stale {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--structure);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plan-revision-page__message--error {
+  border-color: #e0aaaa;
+  color: var(--blocked);
+  background: #fff5f4;
+}
+
+.plan-revision-page__message--success {
+  border-color: #b4d6be;
+  color: var(--complete);
+  background: #f3faf5;
+}
+
+.plan-revision-page__stale {
+  justify-content: space-between;
+  gap: 20px;
+  border-color: #d8b879;
+  background: #fffaf0;
+}
+
+.plan-revision-page__stale > div:first-child {
+  display: grid;
+  gap: 5px;
+}
+
+.plan-revision-page__stale p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.plan-revision-page__stale-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  color: var(--attention);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  text-align: right;
+}
+
+.plan-revision-page__stale-reasons span {
+  padding: 3px 5px;
+  border: 1px solid #d8b879;
+}
+
+.plan-revision-page__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 36px;
+  margin-top: 28px;
+}
+
+.plan-revision-page__main {
+  min-width: 0;
+}
+
+.plan-revision-page__overview {
+  border-top: 1px solid var(--ink);
+}
+
+.plan-revision-page__overview .section-heading {
+  margin: 0;
+  padding: 16px 0 13px;
+}
+
+.plan-revision-page__overview h2 {
+  margin: 5px 0 0;
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.plan-revision-page__impact-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--structure);
+  background: var(--structure);
+}
+
+.plan-revision-page__impact-grid > div {
+  display: grid;
+  gap: 8px;
+  min-height: 70px;
+  padding: 11px;
+  background: var(--surface);
+}
+
+.plan-revision-page__impact-grid span {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+}
+
+.plan-revision-page__impact-grid strong {
+  font-size: 18px;
+  font-weight: 680;
+}
+
+.plan-revision-page__change-list {
+  display: grid;
+  margin-top: 22px;
+  border-top: 1px solid var(--structure);
+}
+
+.plan-revision-page__change-list article {
+  display: grid;
+  gap: 5px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--structure);
+}
+
+.plan-revision-page__change-list article > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 15px;
+}
+
+.plan-revision-page__change-list article > div span {
+  flex: 0 0 auto;
+  color: var(--dispatch);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.plan-revision-page__change-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.plan-revision-page__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ink);
+}
+
+.plan-revision-page__actions .primary-button,
+.plan-revision-page__actions .quiet-button {
+  gap: 6px;
+}
+
+.plan-revision-page__inspector {
+  align-self: start;
+  border-top: 1px solid var(--ink);
+}
+
+.plan-revision-page__inspector section {
+  display: grid;
+  gap: 7px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--structure);
+}
+
+.plan-revision-page__inspector section > span:not(.eyebrow) {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.plan-revision-page__inspector strong {
+  font-size: 16px;
+  font-weight: 680;
+}
+
+.plan-revision-page__loading,
+.plan-revision-page__state {
+  display: grid;
+  gap: 8px;
+  padding: 18px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.plan-revision-page__loading--error,
+.plan-revision-page__state--error {
+  color: var(--blocked);
+}
+
+.plan-revision-page__loading strong,
+.plan-revision-page__state strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.plan-revision-page__state {
+  max-width: 680px;
+  margin-top: 28px;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--structure);
+}
+
+.plan-revision-page__state--error strong {
+  color: var(--blocked);
+}
+
+.plan-revision-page__state p {
+  margin: 0;
+}
+
 .plan-diff-legend {
   display: flex;
   flex-wrap: wrap;
@@ -6668,6 +6961,36 @@ h1 {
 }
 
 @media (max-width: 720px) {
+  .plan-revision-page__heading,
+  .plan-revision-page__stale {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plan-revision-page__heading-meta {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .plan-revision-page__stale-reasons {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .plan-revision-page__layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 26px;
+  }
+
+  .plan-revision-page__impact-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .plan-revision-page__actions .primary-button,
+  .plan-revision-page__actions .quiet-button {
+    width: 100%;
+  }
+
   .task-detail-heading__meta {
     align-items: start;
     flex-wrap: wrap;
@@ -6715,6 +7038,12 @@ h1 {
   .plan-generation-current {
     grid-column: 2;
     grid-row: 3;
+  }
+}
+
+@media (max-width: 420px) {
+  .plan-revision-page__impact-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
