@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from agent.tools.base import get_current_tool_context
@@ -14,7 +14,12 @@ from .client import (
     TransportUnavailable,
 )
 from .config import TaskBridgeConfig
-from .contracts import JsonValue, ToolEnvelope
+from .contracts import (
+    JsonValue,
+    PlanRevisionBrief,
+    PlanRevisionConfirmation,
+    ToolEnvelope,
+)
 from .source_routes import (
     MissingToolContext,
     SourceContextResolver,
@@ -240,6 +245,523 @@ class SideraTaskTools:
             )
         except ControlPlaneRejected as exc:
             return _encode(_rejected_envelope(exc.code, "planning status"))
+
+    async def sidera_create_plan_revision(
+        self,
+        event: object,
+        root_task_id: str,
+        goal: str,
+        constraints: list[str],
+        acceptance_criteria: list[str],
+    ) -> str:
+        """Create a revision request against the current active plan head."""
+
+        del event
+        task_id = _parse_uuid(root_task_id)
+        brief = _revision_brief(goal, constraints, acceptance_criteria)
+        if task_id is None:
+            return _encode(_invalid_resource("root Task"))
+        if brief is None:
+            return _encode(
+                ToolEnvelope(
+                    outcome="failed",
+                    summary="The plan revision brief is invalid.",
+                    resource_ref=f"task:{task_id}",
+                    web_url=self._task_url(task_id),
+                    error_code="invalid_revision_brief",
+                )
+            )
+        try:
+            source = await self._resolve_source()
+            task = await self._client.get_task(task_id)
+            active_plan = await self._client.get_active_plan(task_id)
+            root_version = _positive_int(task.get("version"))
+            base = _active_plan_base(active_plan, task_id)
+            if root_version is None or base is None:
+                return _encode(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The control plane returned an incomplete revision base.",
+                        resource_ref=f"task:{task_id}",
+                        web_url=self._task_url(task_id),
+                        error_code="invalid_control_plane_response",
+                    )
+                )
+            result = await self._dispatcher.execute(
+                f"planning:root:{task_id}",
+                CommandIntent(
+                    command_type="SubmitPlanRevision",
+                    target_type="task",
+                    target_id=task_id,
+                    expected_version=root_version,
+                    payload={
+                        "root_task_id": str(task_id),
+                        **base,
+                        **brief.model_dump(mode="json"),
+                        "planning_profile_id": str(self._config.planning_profile_id),
+                        "planning_profile_version": self._config.planning_profile_version,
+                    },
+                ),
+            )
+            if result.status != "applied":
+                return _encode(
+                    self._with_task_ref(_dispatch_envelope(result, "plan revision"), task_id)
+                )
+            revision_id = _result_uuid(result, "planning_request_id")
+            if revision_id is None:
+                return _encode(
+                    self._with_task_ref(
+                        ToolEnvelope(
+                            outcome="failed",
+                            summary="The control plane accepted the revision without a request reference.",
+                            error_code="invalid_control_plane_response",
+                        ),
+                        task_id,
+                    )
+                )
+            try:
+                await self._state.bind_resource_source(
+                    "planning_request",
+                    revision_id,
+                    source.source_type,
+                    source.source_ref,
+                )
+            except StateConflict:
+                return _encode(
+                    self._with_revision_ref(
+                        ToolEnvelope(
+                            outcome="failed",
+                            summary="The revision owner binding conflicts with existing state.",
+                            error_code="source_binding_conflict",
+                        ),
+                        revision_id,
+                        task_id,
+                    )
+                )
+            data = _safe_mutation_data(result)
+            data["planning_request_id"] = str(revision_id)
+            data["root_task_id"] = str(task_id)
+            return _encode(
+                ToolEnvelope(
+                    outcome="ok",
+                    summary="The plan revision was created; planning is running asynchronously.",
+                    resource_ref=f"revision:{revision_id}",
+                    web_url=self._revision_url(revision_id, task_id),
+                    data=data,
+                )
+            )
+        except (MissingToolContext, ValueError):
+            return _encode(
+                self._with_task_ref(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The request source or revision base could not be identified safely.",
+                        error_code="missing_tool_context",
+                    ),
+                    task_id,
+                )
+            )
+        except TransportUnavailable:
+            return _encode(self._with_task_ref(_unavailable_error(), task_id))
+        except CommandResultUnknown:
+            return _encode(
+                self._with_task_ref(
+                    ToolEnvelope(
+                        outcome="result_unknown",
+                        summary="The plan revision result is pending confirmation.",
+                        error_code="result_unknown",
+                    ),
+                    task_id,
+                )
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_task_ref(_rejected_envelope(exc.code, "plan revision"), task_id)
+            )
+
+    async def sidera_get_plan_revision(
+        self, event: object, planning_request_id: str
+    ) -> str:
+        """Read a bounded revision state and hierarchy diff."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("plan revision"))
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            kind_result = _revision_kind_preflight(detail)
+            if kind_result is not None:
+                return _encode(self._with_revision_ref(kind_result, request_id))
+            status = _string(detail.get("status")) or "unknown"
+            diff: dict[str, JsonValue] = {}
+            revision = _positive_int(detail.get("current_proposal_revision"))
+            if revision is not None and status not in {
+                "queued",
+                "planning",
+                "running",
+                "cancelled",
+            }:
+                diff = await self._client.get_revision_diff(request_id)
+            materialization: dict[str, JsonValue] = {}
+            if status in {"materialized", "executing", "running", "completed"}:
+                materialization = await self._client.get_materialization(request_id)
+            root_task_id = _revision_root_id(detail, diff, materialization)
+            data = _plan_revision_summary(detail, diff, materialization)
+            if root_task_id is not None:
+                data["root_task_id"] = str(root_task_id)
+            outcome, summary = _revision_read_outcome(status, detail, diff)
+            return _encode(
+                ToolEnvelope(
+                    outcome=outcome,
+                    summary=summary,
+                    resource_ref=f"revision:{request_id}",
+                    web_url=self._revision_url(request_id, root_task_id),
+                    data=data,
+                )
+            )
+        except TransportUnavailable:
+            return _encode(
+                self._with_revision_ref(_unavailable_error(), request_id)
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_revision_ref(_rejected_envelope(exc.code, "plan revision"), request_id)
+            )
+
+    async def sidera_submit_plan_revision_feedback(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        feedback: str,
+    ) -> str:
+        """Request a new revision proposal from one exact current proposal."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("plan revision"))
+        if (
+            request_version < 1
+            or proposal_revision < 1
+            or not _non_empty_text(proposal_content_hash)
+            or not _non_empty_text(feedback)
+        ):
+            return _encode(
+                self._with_revision_ref(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The plan revision feedback is invalid.",
+                        error_code="invalid_revision_feedback",
+                    ),
+                    request_id,
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _revision_proposal_preflight(
+                detail,
+                request_version,
+                proposal_revision,
+                proposal_content_hash,
+            )
+            if preflight is not None:
+                return _encode(self._with_revision_ref(preflight, request_id))
+            root_task_id = _revision_root_id(detail)
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="RequestProposalRevision",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={
+                        "current_proposal_revision": proposal_revision,
+                        "current_proposal_content_hash": proposal_content_hash.strip(),
+                        "feedback": feedback.strip(),
+                    },
+                ),
+            )
+            return _encode(
+                self._revision_mutation_result(
+                    result, request_id, "plan revision feedback", root_task_id
+                )
+            )
+        except TransportUnavailable:
+            return _encode(self._with_revision_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_revision_ref(
+                    _rejected_envelope(exc.code, "plan revision feedback"), request_id
+                )
+            )
+
+    async def sidera_confirm_plan_revision(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        diff_hash: str,
+        base_snapshot_id: str,
+        base_content_hash: str,
+        explicit_user_confirmation: bool,
+    ) -> str:
+        """Confirm one exact revision only after an explicit user decision."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("plan revision"))
+        if not explicit_user_confirmation:
+            return _encode(
+                self._with_revision_ref(
+                    ToolEnvelope(
+                        outcome="needs_user",
+                        summary="Explicit user confirmation is required before activating the new plan.",
+                        error_code="explicit_confirmation_required",
+                    ),
+                    request_id,
+                )
+            )
+        confirmation = _revision_confirmation(
+            proposal_revision,
+            proposal_content_hash,
+            diff_hash,
+            base_snapshot_id,
+            base_content_hash,
+        )
+        if request_version < 1 or confirmation is None:
+            return _encode(
+                self._with_revision_ref(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The exact plan revision confirmation fields are invalid.",
+                        error_code="invalid_revision_confirmation",
+                    ),
+                    request_id,
+                )
+            )
+        root_task_id: UUID | None = None
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            root_task_id = _revision_root_id(detail)
+            preflight = _revision_proposal_preflight(
+                detail,
+                request_version,
+                confirmation.proposal_revision,
+                confirmation.proposal_content_hash,
+                expected_profile=(
+                    self._config.planning_profile_id,
+                    self._config.planning_profile_version,
+                ),
+            )
+            if preflight is not None:
+                return _encode(
+                    self._with_revision_ref(preflight, request_id, root_task_id)
+                )
+            diff = await self._client.get_revision_diff(request_id)
+            fence_result = _revision_fence_preflight(confirmation, diff)
+            if fence_result is not None:
+                return _encode(
+                    self._with_revision_ref(fence_result, request_id, root_task_id)
+                )
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="ConfirmPlanRevision",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={
+                        "expected_proposal_revision": confirmation.proposal_revision,
+                        "expected_proposal_content_hash": confirmation.proposal_content_hash,
+                        "expected_diff_hash": confirmation.diff_hash,
+                        "expected_base_snapshot_id": str(confirmation.base_snapshot_id),
+                        "expected_base_content_hash": confirmation.base_content_hash,
+                        "profile_id": str(self._config.planning_profile_id),
+                        "profile_version": self._config.planning_profile_version,
+                    },
+                ),
+            )
+            return _encode(
+                self._revision_mutation_result(
+                    result, request_id, "plan revision confirmation", root_task_id
+                )
+            )
+        except TransportUnavailable:
+            return _encode(
+                self._with_revision_ref(_unavailable_error(), request_id, root_task_id)
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_revision_ref(
+                    _rejected_envelope(exc.code, "plan revision confirmation"),
+                    request_id,
+                    root_task_id,
+                )
+            )
+
+    async def sidera_reject_plan_revision(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        reason: str,
+    ) -> str:
+        """Reject one exact revision proposal with a user-provided reason."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("plan revision"))
+        if (
+            request_version < 1
+            or proposal_revision < 1
+            or not _non_empty_text(proposal_content_hash)
+            or not _non_empty_text(reason)
+        ):
+            return _encode(
+                self._with_revision_ref(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The plan revision rejection fields are invalid.",
+                        error_code="invalid_revision_rejection",
+                    ),
+                    request_id,
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _revision_proposal_preflight(
+                detail,
+                request_version,
+                proposal_revision,
+                proposal_content_hash,
+            )
+            if preflight is not None:
+                return _encode(self._with_revision_ref(preflight, request_id))
+            root_task_id = _revision_root_id(detail)
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="RejectPlanningProposal",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={
+                        "current_proposal_revision": proposal_revision,
+                        "current_proposal_content_hash": proposal_content_hash.strip(),
+                        "reason": reason.strip(),
+                    },
+                ),
+            )
+            return _encode(
+                self._revision_mutation_result(
+                    result, request_id, "plan revision rejection", root_task_id
+                )
+            )
+        except TransportUnavailable:
+            return _encode(self._with_revision_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_revision_ref(
+                    _rejected_envelope(exc.code, "plan revision rejection"), request_id
+                )
+            )
+
+    async def sidera_cancel_plan_revision(
+        self, event: object, planning_request_id: str, request_version: int
+    ) -> str:
+        """Cancel one revision request after checking its exact request version."""
+
+        del event
+        request_id = _parse_uuid(planning_request_id)
+        if request_id is None:
+            return _encode(_invalid_resource("plan revision"))
+        if request_version < 1:
+            return _encode(
+                self._with_revision_ref(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The plan revision request version is invalid.",
+                        error_code="invalid_request_version",
+                    ),
+                    request_id,
+                )
+            )
+        try:
+            detail = await self._client.get_planning_detail(request_id)
+            preflight = _revision_version_preflight(detail, request_version)
+            if preflight is not None:
+                return _encode(self._with_revision_ref(preflight, request_id))
+            root_task_id = _revision_root_id(detail)
+            result = await self._dispatcher.execute(
+                f"planning:request:{request_id}",
+                CommandIntent(
+                    command_type="CancelPlanningRequest",
+                    target_type="planning_request",
+                    target_id=request_id,
+                    expected_version=request_version,
+                    payload={},
+                ),
+            )
+            return _encode(
+                self._revision_mutation_result(
+                    result, request_id, "plan revision cancellation", root_task_id
+                )
+            )
+        except TransportUnavailable:
+            return _encode(self._with_revision_ref(_unavailable_error(), request_id))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_revision_ref(
+                    _rejected_envelope(exc.code, "plan revision cancellation"), request_id
+                )
+            )
+
+    async def sidera_get_plan_transition(
+        self, event: object, plan_transition_id: str
+    ) -> str:
+        """Read bounded plan and WorkerItem transition convergence facts."""
+
+        del event
+        transition_id = _parse_uuid(plan_transition_id)
+        if transition_id is None:
+            return _encode(_invalid_resource("plan transition"))
+        try:
+            transition = await self._client.get_plan_transition(transition_id)
+            data = _plan_transition_summary(transition, transition_id)
+            root_task_id = _parse_uuid(data.get("root_task_id"))
+            blocked_unknown = bool(data.get("blocked_unknown_count", 0))
+            degraded = (_string(data.get("status")) or "").lower() == "degraded"
+            if blocked_unknown or degraded:
+                outcome = "needs_user"
+                summary = "The plan transition needs review before convergence can continue."
+            else:
+                outcome = "ok"
+                summary = "Plan transition status loaded."
+            return _encode(
+                ToolEnvelope(
+                    outcome=outcome,
+                    summary=summary,
+                    resource_ref=f"plan-transition:{transition_id}",
+                    web_url=(
+                        self._task_url(root_task_id) if root_task_id is not None else None
+                    ),
+                    data=data,
+                )
+            )
+        except TransportUnavailable:
+            return _encode(_unavailable_error())
+        except ControlPlaneRejected as exc:
+            return _encode(_rejected_envelope(exc.code, "plan transition"))
 
     async def sidera_answer_clarifications(
         self,
@@ -519,6 +1041,29 @@ class SideraTaskTools:
             data=safe_data,
         )
 
+    def _revision_mutation_result(
+        self,
+        result: DispatchResult,
+        request_id: UUID,
+        operation: str,
+        root_task_id: UUID | None = None,
+    ) -> ToolEnvelope:
+        if result.status != "applied":
+            return self._with_revision_ref(
+                _dispatch_envelope(result, operation), request_id, root_task_id
+            )
+        safe_data = _safe_mutation_data(result)
+        safe_data.setdefault("planning_request_id", str(request_id))
+        if root_task_id is not None:
+            safe_data.setdefault("root_task_id", str(root_task_id))
+        return ToolEnvelope(
+            outcome="ok",
+            summary=f"The {operation} was accepted.",
+            resource_ref=f"revision:{request_id}",
+            web_url=self._revision_url(request_id, root_task_id),
+            data=safe_data,
+        )
+
     def _with_request_ref(
         self, envelope: ToolEnvelope, request_id: UUID
     ) -> ToolEnvelope:
@@ -526,6 +1071,29 @@ class SideraTaskTools:
             update={
                 "resource_ref": f"planning:{request_id}",
                 "web_url": self._planning_url(request_id),
+            }
+        )
+
+    def _with_revision_ref(
+        self,
+        envelope: ToolEnvelope,
+        request_id: UUID,
+        root_task_id: UUID | None = None,
+    ) -> ToolEnvelope:
+        return envelope.model_copy(
+            update={
+                "resource_ref": f"revision:{request_id}",
+                "web_url": self._revision_url(request_id, root_task_id),
+            }
+        )
+
+    def _with_task_ref(
+        self, envelope: ToolEnvelope, task_id: UUID
+    ) -> ToolEnvelope:
+        return envelope.model_copy(
+            update={
+                "resource_ref": f"task:{task_id}",
+                "web_url": self._task_url(task_id),
             }
         )
 
@@ -582,11 +1150,496 @@ class SideraTaskTools:
             f"{self._config.workspace_id}/planning/{request_id}"
         )
 
+    def _revision_url(self, request_id: UUID, root_task_id: UUID | None) -> str:
+        if root_task_id is None:
+            return self._planning_url(request_id)
+        return (
+            f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
+            f"{self._config.workspace_id}/tasks/{root_task_id}/revisions/{request_id}"
+        )
+
     def _task_url(self, task_id: UUID) -> str:
         return (
             f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
             f"{self._config.workspace_id}/tasks/{task_id}"
         )
+
+
+def _revision_brief(
+    goal: str, constraints: list[str], acceptance_criteria: list[str]
+) -> PlanRevisionBrief | None:
+    normalized_constraints = tuple(_clean_text_values(constraints))
+    normalized_acceptance = tuple(_clean_text_values(acceptance_criteria))
+    if not _non_empty_text(goal) or not normalized_acceptance:
+        return None
+    try:
+        return PlanRevisionBrief(
+            objective=goal.strip(),
+            constraints=normalized_constraints,
+            acceptance_criteria=normalized_acceptance,
+        )
+    except ValueError:
+        return None
+
+
+def _active_plan_base(
+    active_plan: Mapping[str, JsonValue], task_id: UUID
+) -> dict[str, JsonValue] | None:
+    returned_task_id = _parse_uuid(active_plan.get("root_task_id"))
+    snapshot_id = _parse_uuid(active_plan.get("active_snapshot_id"))
+    generation = _positive_int(active_plan.get("active_generation"))
+    content_hash = _string(active_plan.get("active_snapshot_hash"))
+    if (
+        returned_task_id is not None
+        and returned_task_id != task_id
+    ) or snapshot_id is None or generation is None or content_hash is None:
+        return None
+    return {
+        "expected_base_snapshot_id": str(snapshot_id),
+        "expected_base_generation": generation,
+        "expected_base_content_hash": content_hash,
+    }
+
+
+def _revision_root_id(
+    *sources: Mapping[str, JsonValue],
+) -> UUID | None:
+    for source in sources:
+        candidates: list[object] = [source]
+        for key in ("revision_base", "revision_freshness", "base"):
+            nested = source.get(key)
+            if isinstance(nested, Mapping):
+                candidates.append(nested)
+                nested_base = nested.get("base")
+                if isinstance(nested_base, Mapping):
+                    candidates.append(nested_base)
+        for candidate in candidates:
+            if isinstance(candidate, Mapping):
+                root_task_id = _parse_uuid(candidate.get("root_task_id"))
+                if root_task_id is not None:
+                    return root_task_id
+    return None
+
+
+def _revision_confirmation(
+    proposal_revision: int,
+    proposal_content_hash: str,
+    diff_hash: str,
+    base_snapshot_id: str,
+    base_content_hash: str,
+) -> PlanRevisionConfirmation | None:
+    snapshot_id = _parse_uuid(base_snapshot_id)
+    if (
+        snapshot_id is None
+        or proposal_revision < 1
+        or not _non_empty_text(proposal_content_hash)
+        or not _non_empty_text(diff_hash)
+        or not _non_empty_text(base_content_hash)
+    ):
+        return None
+    try:
+        return PlanRevisionConfirmation(
+            proposal_revision=proposal_revision,
+            proposal_content_hash=proposal_content_hash.strip(),
+            diff_hash=diff_hash.strip(),
+            base_snapshot_id=snapshot_id,
+            base_content_hash=base_content_hash.strip(),
+        )
+    except ValueError:
+        return None
+
+
+def _revision_kind_preflight(
+    detail: Mapping[str, JsonValue],
+) -> ToolEnvelope | None:
+    kind = _string(detail.get("kind"))
+    if kind is not None and kind.lower() != "revision":
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The planning request is not a plan revision.",
+            error_code="not_plan_revision",
+        )
+    return None
+
+
+def _revision_version_preflight(
+    detail: Mapping[str, JsonValue], expected_version: int
+) -> ToolEnvelope | None:
+    kind_result = _revision_kind_preflight(detail)
+    if kind_result is not None:
+        return kind_result
+    return _version_preflight(detail, expected_version)
+
+
+def _revision_proposal_preflight(
+    detail: Mapping[str, JsonValue],
+    expected_version: int,
+    expected_revision: int,
+    expected_hash: str,
+    *,
+    expected_profile: tuple[UUID, int] | None = None,
+) -> ToolEnvelope | None:
+    kind_result = _revision_kind_preflight(detail)
+    if kind_result is not None:
+        return kind_result
+    return _proposal_preflight(
+        detail,
+        expected_version,
+        expected_revision,
+        expected_hash,
+        expected_profile=expected_profile,
+    )
+
+
+def _revision_fence_preflight(
+    confirmation: PlanRevisionConfirmation,
+    diff: Mapping[str, JsonValue],
+) -> ToolEnvelope | None:
+    actual_diff_hash = _string(diff.get("diff_hash"))
+    base = diff.get("base")
+    if not isinstance(base, Mapping):
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an incomplete revision diff.",
+            error_code="invalid_control_plane_response",
+        )
+    actual_snapshot_id = _parse_uuid(base.get("plan_snapshot_id"))
+    actual_base_hash = _string(base.get("plan_content_hash"))
+    if (
+        actual_diff_hash is None
+        or actual_snapshot_id is None
+        or actual_base_hash is None
+    ):
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an incomplete revision fence.",
+            error_code="invalid_control_plane_response",
+        )
+    if actual_diff_hash != confirmation.diff_hash:
+        return ToolEnvelope(
+            outcome="conflict",
+            summary="The revision diff has changed; reload it before confirming.",
+            error_code="diff_conflict",
+        )
+    if actual_snapshot_id != confirmation.base_snapshot_id:
+        return ToolEnvelope(
+            outcome="conflict",
+            summary="The revision base snapshot has changed; reload it before confirming.",
+            error_code="base_conflict",
+        )
+    if actual_base_hash != confirmation.base_content_hash:
+        return ToolEnvelope(
+            outcome="conflict",
+            summary="The revision base content has changed; reload it before confirming.",
+            error_code="base_conflict",
+        )
+    return None
+
+
+def _plan_revision_summary(
+    detail: Mapping[str, JsonValue],
+    diff: Mapping[str, JsonValue],
+    materialization: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {}
+    for source, target in (
+        (detail, "status"),
+    ):
+        status = _string(source.get(target))
+        if status is not None:
+            data[target] = status
+    version = _positive_int(detail.get("version"))
+    if version is not None:
+        data["version"] = version
+    for key in ("current_brief_revision", "current_proposal_revision"):
+        value = _positive_int(detail.get(key))
+        if value is not None:
+            data[key] = value
+    content_hash = _string(detail.get("current_proposal_content_hash"))
+    if content_hash is not None:
+        data["current_proposal_content_hash"] = content_hash
+
+    base = detail.get("revision_base")
+    if isinstance(base, Mapping):
+        safe_base = _revision_base_summary(base)
+        if safe_base:
+            data["base"] = safe_base
+    freshness = detail.get("revision_freshness")
+    if isinstance(freshness, Mapping):
+        safe_freshness: dict[str, JsonValue] = {
+            "base_fresh": bool(freshness.get("base_fresh")),
+            "stale_reasons": _bounded_strings(
+                freshness.get("stale_reasons"), limit=10
+            ),
+        }
+        current_generation = _positive_int(freshness.get("current_plan_generation"))
+        current_root_version = _positive_int(
+            freshness.get("current_root_task_version")
+        )
+        if current_generation is not None:
+            safe_freshness["current_plan_generation"] = current_generation
+        if current_root_version is not None:
+            safe_freshness["current_root_task_version"] = current_root_version
+        data["freshness"] = safe_freshness
+
+    if diff:
+        data["diff"] = _revision_diff_summary(diff)
+    safe_materialization: dict[str, JsonValue] = {}
+    for key in (
+        "planning_request_id",
+        "proposal_revision_id",
+        "root_task_id",
+        "plan_snapshot_id",
+        "plan_generation",
+        "plan_transition_id",
+    ):
+        value = materialization.get(key)
+        if isinstance(value, (str, int)):
+            safe_materialization[key] = value
+    if safe_materialization:
+        data["materialization"] = safe_materialization
+    return data
+
+
+def _revision_base_summary(base: Mapping[str, object]) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {}
+    for source, target in (
+        ("root_task_id", "root_task_id"),
+        ("plan_snapshot_id", "plan_snapshot_id"),
+        ("plan_content_hash", "plan_content_hash"),
+    ):
+        value = base.get(source)
+        if isinstance(value, str):
+            data[target] = value
+    for source, target in (
+        ("plan_generation", "plan_generation"),
+        ("root_task_version", "root_task_version"),
+    ):
+        value = _positive_int(base.get(source))
+        if value is not None:
+            data[target] = value
+    return data
+
+
+def _revision_diff_summary(diff: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {}
+    for key in ("diff_hash", "proposal_content_hash"):
+        value = _string(diff.get(key))
+        if value is not None:
+            data[key] = value
+    target = diff.get("target_descriptor_preview")
+    if isinstance(target, Mapping):
+        generation = _positive_int(target.get("target_generation"))
+        if generation is not None:
+            data["target_generation"] = generation
+    base = diff.get("base")
+    if isinstance(base, Mapping):
+        safe_base = _revision_base_summary(base)
+        if safe_base:
+            data["base"] = safe_base
+    impact = diff.get("impact_counts")
+    if isinstance(impact, Mapping):
+        safe_impact: dict[str, JsonValue] = {}
+        for key in (
+            "preserve",
+            "move",
+            "patch",
+            "continue",
+            "create",
+            "derive",
+            "retire",
+            "affected_branches",
+        ):
+            value = _count(impact.get(key))
+            safe_impact[key] = value
+        data["impact_counts"] = safe_impact
+    risk_flags = _bounded_strings(diff.get("risk_flags"), limit=20)
+    if risk_flags:
+        data["risk_flags"] = risk_flags
+    branch_paths = _bounded_strings(diff.get("affected_branch_paths"), limit=40)
+    if branch_paths:
+        data["affected_branch_paths"] = branch_paths
+    for source, target in (
+        ("subtask_changes", "subtasks"),
+        ("worker_item_changes", "worker_items"),
+        ("transition_preview", "transition_preview"),
+    ):
+        changes = _safe_revision_changes(diff.get(source))
+        if changes:
+            data[target] = changes
+    policy = diff.get("accepted_transition_policy")
+    if isinstance(policy, Mapping):
+        safe_policy: dict[str, JsonValue] = {}
+        for key in ("failure_policy", "budget_level", "revision_operation"):
+            value = _string(policy.get(key))
+            if value is not None:
+                safe_policy[key] = value
+        for key in ("activate_immediately", "manual_gate"):
+            if isinstance(policy.get(key), bool):
+                safe_policy[key] = bool(policy.get(key))
+        if safe_policy:
+            data["accepted_transition_policy"] = safe_policy
+    return data
+
+
+def _safe_revision_changes(value: object) -> list[JsonValue]:
+    if not isinstance(value, list | tuple):
+        return []
+    result: list[JsonValue] = []
+    for item in value[:40]:
+        if not isinstance(item, Mapping):
+            continue
+        entry: dict[str, JsonValue] = {}
+        for key in (
+            "path",
+            "strategy",
+            "reason",
+            "context_disposition",
+            "fallback_action",
+        ):
+            text = _string(item.get(key))
+            if text is not None:
+                entry[key] = text
+        for key in ("target_worker_item_key", "target_subtask_key"):
+            text = _string(item.get(key))
+            if text is not None:
+                entry[key] = text
+        actions = _bounded_strings(item.get("allowed_actions"), limit=10)
+        if actions:
+            entry["allowed_actions"] = actions
+        reasons = _bounded_strings(item.get("reason_codes"), limit=10)
+        if reasons:
+            entry["reason_codes"] = reasons
+        if entry:
+            result.append(entry)
+    return result
+
+
+def _revision_read_outcome(
+    status: str,
+    detail: Mapping[str, JsonValue],
+    diff: Mapping[str, JsonValue],
+) -> tuple[Literal["ok", "needs_user", "conflict", "failed"], str]:
+    freshness = detail.get("revision_freshness")
+    if isinstance(freshness, Mapping) and freshness.get("base_fresh") is False:
+        return "conflict", "The revision base is stale; review the latest plan before acting."
+    normalized = status.lower()
+    if normalized in {"conflicted", "stale"}:
+        return "conflict", "The plan revision is stale and needs a fresh review."
+    if normalized in {
+        "proposal_ready",
+        "awaiting_confirmation",
+        "needs_confirmation",
+    }:
+        if not diff:
+            return "failed", "The revision proposal diff is not available yet."
+        return "needs_user", "The plan revision is ready for explicit user confirmation."
+    if normalized in {"failed", "blocked", "cancelled"}:
+        return "failed", "The plan revision reached a terminal state that needs review."
+    return "ok", "Plan revision status loaded."
+
+
+def _safe_mutation_data(result: DispatchResult) -> dict[str, JsonValue]:
+    data = _result_data(result)
+    return {
+        key: data[key]
+        for key in (
+            "planning_request_id",
+            "planning_run_id",
+            "brief_revision",
+            "root_task_id",
+            "base_snapshot_id",
+            "base_generation",
+            "plan_snapshot_id",
+            "plan_generation",
+            "plan_transition_id",
+            "proposal_revision",
+            "diff_hash",
+            "status",
+        )
+        if key in data and isinstance(data[key], (str, int))
+    }
+
+
+def _plan_transition_summary(
+    transition: Mapping[str, JsonValue], transition_id: UUID
+) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] = {"plan_transition_id": str(transition_id)}
+    for key in ("from_generation", "to_generation", "version"):
+        value = _positive_int(transition.get(key))
+        if value is not None:
+            data[key] = value
+    status = _string(transition.get("status")) or "unknown"
+    data["status"] = status
+    root = transition.get("root_task")
+    if isinstance(root, Mapping):
+        root_id = _parse_uuid(root.get("id"))
+        if root_id is not None:
+            data["root_task_id"] = str(root_id)
+        root_path = _string(root.get("path"))
+        if root_path is not None:
+            data["root_path"] = root_path
+
+    workers = transition.get("workers")
+    safe_workers: list[JsonValue] = []
+    if isinstance(workers, list | tuple):
+        for item in workers[:100]:
+            if not isinstance(item, Mapping):
+                continue
+            worker: dict[str, JsonValue] = {}
+            worker_id = _parse_uuid(item.get("worker_transition_id"))
+            if worker_id is not None:
+                worker["worker_transition_id"] = str(worker_id)
+            for key in ("path", "action", "fallback_action", "status", "failure_code"):
+                value = _string(item.get(key))
+                if value is not None:
+                    worker[key] = value
+            for key in ("source_execution_id", "target_execution_id"):
+                value = _parse_uuid(item.get(key))
+                if value is not None:
+                    worker[key] = str(value)
+            context = item.get("context")
+            if isinstance(context, Mapping):
+                safe_context: dict[str, JsonValue] = {}
+                for key in (
+                    "current_context_version",
+                    "acknowledged_context_version",
+                    "target_context_version",
+                ):
+                    value = _positive_int(context.get(key))
+                    if value is not None:
+                        safe_context[key] = value
+                if isinstance(context.get("patch_acknowledged"), bool):
+                    safe_context["patch_acknowledged"] = bool(
+                        context.get("patch_acknowledged")
+                    )
+                if safe_context:
+                    worker["context"] = safe_context
+            disposition = item.get("queued_input_disposition")
+            if isinstance(disposition, Mapping):
+                worker["queued_input_count"] = _count(disposition.get("queued_count"))
+                worker["superseded_input_count"] = _count(
+                    disposition.get("superseded_count")
+                )
+            dependencies = item.get("blocked_dependencies")
+            worker["blocked_dependency_count"] = (
+                len(dependencies) if isinstance(dependencies, list | tuple) else 0
+            )
+            if worker:
+                safe_workers.append(worker)
+    data["workers"] = safe_workers
+    data["worker_count"] = len(safe_workers)
+    data["blocked_unknown_count"] = sum(
+        isinstance(item, Mapping) and item.get("status") == "blocked_unknown"
+        for item in safe_workers
+    )
+    blocked_dependencies = transition.get("blocked_dependencies")
+    data["blocked_dependency_count"] = (
+        len(blocked_dependencies)
+        if isinstance(blocked_dependencies, list | tuple)
+        else 0
+    )
+    return data
 
 
 def _encode(envelope: ToolEnvelope) -> str:
@@ -598,6 +1651,10 @@ def _non_empty_text(value: str) -> bool:
 
 
 def _clean_texts(values: list[str]) -> list[JsonValue]:
+    return [value.strip() for value in values if value.strip()]
+
+
+def _clean_text_values(values: list[str]) -> list[str]:
     return [value.strip() for value in values if value.strip()]
 
 

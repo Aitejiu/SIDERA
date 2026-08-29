@@ -43,10 +43,13 @@ else:
 _CONTROL_PLANE_COMMAND_TYPES = frozenset(
     {
         "SubmitPlanningRequest",
+        "SubmitPlanRevision",
+        "CancelPlanningRequest",
         "AnswerPlanningClarification",
         "RequestProposalRevision",
         "ConfirmPlanningProposal",
         "RejectPlanningProposal",
+        "ConfirmPlanRevision",
     }
 )
 _KNOWLEDGE_COMMAND_TYPES = frozenset({"SubmitKnowledgeCandidate"})
@@ -300,6 +303,152 @@ class SideraTaskBridge(Plugin):
         )
 
     @tool(
+        name="sidera_create_plan_revision",
+        risk="write",
+        search_hint="SIDERA task plan revision change requirement topology",
+    )
+    async def sidera_create_plan_revision(
+        self,
+        event: object,
+        root_task_id: str,
+        goal: str,
+        constraints: list,
+        acceptance_criteria: list,
+    ) -> str:
+        """Create a SIDERA plan revision from a normalized user brief."""
+
+        return await self._toolset().sidera_create_plan_revision(
+            event,
+            root_task_id,
+            goal,
+            cast(list[str], constraints),
+            cast(list[str], acceptance_criteria),
+        )
+
+    @tool(
+        name="sidera_get_plan_revision",
+        risk="read-only",
+        search_hint="SIDERA inspect plan revision diff impact",
+    )
+    async def sidera_get_plan_revision(
+        self, event: object, planning_request_id: str
+    ) -> str:
+        """Read a bounded SIDERA plan revision and its hierarchy diff."""
+
+        return await self._toolset().sidera_get_plan_revision(
+            event, planning_request_id
+        )
+
+    @tool(
+        name="sidera_submit_plan_revision_feedback",
+        risk="write",
+        search_hint="SIDERA plan revision feedback modify proposal",
+    )
+    async def sidera_submit_plan_revision_feedback(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        feedback: str,
+    ) -> str:
+        """Request a new exact SIDERA plan revision proposal with feedback."""
+
+        return await self._toolset().sidera_submit_plan_revision_feedback(
+            event,
+            planning_request_id,
+            request_version,
+            proposal_revision,
+            proposal_content_hash,
+            feedback,
+        )
+
+    @tool(
+        name="sidera_confirm_plan_revision",
+        risk="write",
+        search_hint="SIDERA plan revision confirm activate",
+    )
+    async def sidera_confirm_plan_revision(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        diff_hash: str,
+        base_snapshot_id: str,
+        base_content_hash: str,
+        explicit_user_confirmation: bool,
+    ) -> str:
+        """Confirm one exact SIDERA plan revision after explicit user approval."""
+
+        return await self._toolset().sidera_confirm_plan_revision(
+            event,
+            planning_request_id,
+            request_version,
+            proposal_revision,
+            proposal_content_hash,
+            diff_hash,
+            base_snapshot_id,
+            base_content_hash,
+            explicit_user_confirmation,
+        )
+
+    @tool(
+        name="sidera_reject_plan_revision",
+        risk="write",
+        search_hint="SIDERA plan revision reject decline",
+    )
+    async def sidera_reject_plan_revision(
+        self,
+        event: object,
+        planning_request_id: str,
+        request_version: int,
+        proposal_revision: int,
+        proposal_content_hash: str,
+        reason: str,
+    ) -> str:
+        """Reject one exact SIDERA plan revision proposal."""
+
+        return await self._toolset().sidera_reject_plan_revision(
+            event,
+            planning_request_id,
+            request_version,
+            proposal_revision,
+            proposal_content_hash,
+            reason,
+        )
+
+    @tool(
+        name="sidera_cancel_plan_revision",
+        risk="write",
+        search_hint="SIDERA cancel plan revision request",
+    )
+    async def sidera_cancel_plan_revision(
+        self, event: object, planning_request_id: str, request_version: int
+    ) -> str:
+        """Cancel one exact SIDERA plan revision request."""
+
+        return await self._toolset().sidera_cancel_plan_revision(
+            event, planning_request_id, request_version
+        )
+
+    @tool(
+        name="sidera_get_plan_transition",
+        risk="read-only",
+        search_hint="SIDERA inspect plan transition worker convergence",
+    )
+    async def sidera_get_plan_transition(
+        self, event: object, plan_transition_id: str
+    ) -> str:
+        """Read bounded SIDERA plan transition and WorkerItem convergence facts."""
+
+        return await self._toolset().sidera_get_plan_transition(
+            event, plan_transition_id
+        )
+
+    @tool(
         name="sidera_answer_clarifications",
         risk="write",
         search_hint="SIDERA planning clarification answer question",
@@ -502,6 +651,10 @@ def _patch_host_tool_schemas() -> None:
             "context_refs": {"type": "string"},
             "requested_outputs": {"type": "string"},
         },
+        "sidera_create_plan_revision": {
+            "constraints": {"type": "string"},
+            "acceptance_criteria": {"type": "string"},
+        },
         "sidera_answer_clarifications": {
             "answers": {"type": "object"},
         },
@@ -527,6 +680,20 @@ def _patch_host_tool_schemas() -> None:
             "proposal_revision": "number",
             "explicit_user_confirmation": "boolean",
         },
+        "sidera_submit_plan_revision_feedback": {
+            "request_version": "number",
+            "proposal_revision": "number",
+        },
+        "sidera_confirm_plan_revision": {
+            "request_version": "number",
+            "proposal_revision": "number",
+            "explicit_user_confirmation": "boolean",
+        },
+        "sidera_reject_plan_revision": {
+            "request_version": "number",
+            "proposal_revision": "number",
+        },
+        "sidera_cancel_plan_revision": {"request_version": "number"},
         "sidera_reject_proposal": {
             "request_version": "number",
             "proposal_revision": "number",

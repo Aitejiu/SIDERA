@@ -137,6 +137,58 @@ def test_client_reads_workspace_scoped_resources_and_task_query() -> None:
     asyncio.run(scenario())
 
 
+def test_client_reads_revision_inputs_and_transition_query() -> None:
+    async def scenario() -> None:
+        request_id = UUID("00000000-0000-0000-0000-000000000022")
+        task_id = UUID("00000000-0000-0000-0000-000000000023")
+        transition_id = UUID("00000000-0000-0000-0000-000000000024")
+        request_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            request_paths.append(request.url.path)
+            if request.url.path.endswith(f"tasks/{task_id}"):
+                return httpx.Response(200, json={"id": str(task_id), "version": 7})
+            if request.url.path.endswith(f"tasks/{task_id}/active-plan"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "root_task_id": str(task_id),
+                        "active_snapshot_id": str(UUID(int=25)),
+                        "active_generation": 3,
+                        "active_snapshot_hash": "a" * 64,
+                        "version": 2,
+                    },
+                )
+            if request.url.path.endswith(f"planning-requests/{request_id}/diff"):
+                return httpx.Response(200, json={"diff_hash": "b" * 64})
+            if request.url.path.endswith(f"plan-transitions/{transition_id}"):
+                return httpx.Response(
+                    200,
+                    json={"plan_transition_id": str(transition_id), "status": "converged"},
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+        client = ControlPlaneClient(
+            make_config(), transport=httpx.MockTransport(handler)
+        )
+        assert (await client.get_task(task_id))["version"] == 7
+        assert (await client.get_active_plan(task_id))["active_generation"] == 3
+        assert (await client.get_revision_diff(request_id))["diff_hash"] == "b" * 64
+        assert (
+            await client.get_plan_transition(transition_id)
+        )["plan_transition_id"] == str(transition_id)
+        await client.close()
+
+        assert request_paths == [
+            f"/api/v1/tasks/{task_id}",
+            f"/api/v1/workspaces/{WORKSPACE_ID}/tasks/{task_id}/active-plan",
+            f"/api/v1/workspaces/{WORKSPACE_ID}/planning-requests/{request_id}/diff",
+            f"/api/v1/workspaces/{WORKSPACE_ID}/plan-transitions/{transition_id}",
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_client_maps_safe_conflict_details_without_raw_body() -> None:
     async def scenario() -> None:
         def handler(_request: httpx.Request) -> httpx.Response:

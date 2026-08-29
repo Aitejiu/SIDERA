@@ -57,7 +57,7 @@ class FakeContext:
         return task
 
 
-def test_plugin_declares_exact_ten_tools_and_risks() -> None:
+def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 
     metadata = [
@@ -65,7 +65,7 @@ def test_plugin_declares_exact_ten_tools_and_risks() -> None:
         for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
-    assert len(metadata) == 10
+    assert len(metadata) == 17
     assert {item.tool_name for item in metadata} == {
         "sidera_submit_brief",
         "sidera_get_planning_status",
@@ -73,6 +73,13 @@ def test_plugin_declares_exact_ten_tools_and_risks() -> None:
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
+        "sidera_create_plan_revision",
+        "sidera_get_plan_revision",
+        "sidera_submit_plan_revision_feedback",
+        "sidera_confirm_plan_revision",
+        "sidera_reject_plan_revision",
+        "sidera_cancel_plan_revision",
+        "sidera_get_plan_transition",
         "sidera_get_task_status",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
@@ -81,6 +88,8 @@ def test_plugin_declares_exact_ten_tools_and_risks() -> None:
     read_only = {
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_get_plan_revision",
+        "sidera_get_plan_transition",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
     }
@@ -105,6 +114,13 @@ def test_plugin_declares_exact_ten_tools_and_risks() -> None:
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
+        "sidera_create_plan_revision",
+        "sidera_get_plan_revision",
+        "sidera_submit_plan_revision_feedback",
+        "sidera_confirm_plan_revision",
+        "sidera_reject_plan_revision",
+        "sidera_cancel_plan_revision",
+        "sidera_get_plan_transition",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
         "sidera_submit_knowledge_candidate",
@@ -179,6 +195,11 @@ def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:
     assert clarification_schema is not None
     assert clarification_schema["properties"]["answers"]["type"] == "array"
 
+    revision_create = metadata["sidera_create_plan_revision"].tool_schema
+    assert revision_create is not None
+    assert revision_create["properties"]["constraints"]["type"] == "array"
+    assert revision_create["properties"]["acceptance_criteria"]["type"] == "array"
+
 
 def test_plugin_schema_preserves_write_argument_scalar_types() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
@@ -203,6 +224,12 @@ def test_plugin_schema_preserves_write_argument_scalar_types() -> None:
         == "boolean"
     )
 
+    revision_confirmation = metadata["sidera_confirm_plan_revision"].tool_schema
+    assert revision_confirmation is not None
+    assert revision_confirmation["properties"]["request_version"]["type"] == "number"
+    assert revision_confirmation["properties"]["proposal_revision"]["type"] == "number"
+    assert revision_confirmation["properties"]["explicit_user_confirmation"]["type"] == "boolean"
+
 
 def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
     submit = inspect.signature(plugin.SideraTaskBridge.sidera_submit_brief)
@@ -220,6 +247,9 @@ def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
         )
     )
     assert clarification.parameters["answers"].annotation is list
+    revision_create = inspect.signature(plugin.SideraTaskBridge.sidera_create_plan_revision)
+    assert revision_create.parameters["constraints"].annotation is list
+    assert revision_create.parameters["acceptance_criteria"].annotation is list
 
 
 def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
@@ -283,6 +313,10 @@ def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
             confirmation_schema["properties"]["explicit_user_confirmation"]["type"]
             == "boolean"
         )
+        revision_confirmation = metadata["sidera_confirm_plan_revision"].tool_schema
+        assert revision_confirmation is not None
+        assert revision_confirmation["properties"]["request_version"]["type"] == "number"
+        assert revision_confirmation["properties"]["proposal_revision"]["type"] == "number"
     finally:
         importer.unregister(module_name)
         plugin_registry.remove_module_tree(module_name)

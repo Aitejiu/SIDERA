@@ -17,6 +17,28 @@ ToolOutcome = Literal[
 ]
 
 
+class PlanRevisionBrief(BaseModel):
+    """The bounded, provider-neutral brief accepted by a plan revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str = Field(min_length=1, max_length=4_000)
+    constraints: tuple[str, ...] = Field(default_factory=tuple)
+    acceptance_criteria: tuple[str, ...] = Field(min_length=1)
+
+
+class PlanRevisionConfirmation(BaseModel):
+    """The exact optimistic-concurrency fence for revision confirmation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_revision: int = Field(ge=1)
+    proposal_content_hash: str = Field(min_length=1)
+    diff_hash: str = Field(min_length=1)
+    base_snapshot_id: UUID
+    base_content_hash: str = Field(min_length=1)
+
+
 class ProjectionChange(BaseModel):
     """Provider-neutral invalidation metadata from the Control Plane."""
 

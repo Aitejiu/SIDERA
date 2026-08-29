@@ -92,6 +92,7 @@ def evaluation(
     cursor: int = 4,
     source_ref: str = "src_private",
     resource_key: str = "planning_request:00000000-0000-0000-0000-000000000010",
+    web_url: str = "http://127.0.0.1:4174/workspaces/ws/planning/request",
 ) -> NotificationEvaluation:
     notice = NotificationNotice(
         notice_id=notice_id,
@@ -99,8 +100,8 @@ def evaluation(
         resource_key=resource_key,
         source_ref=source_ref,
         kind="planning_proposal_ready",
-        message="任务规划\n方案待确认\n下一步：查看并确认方案\nhttp://127.0.0.1:4174/workspaces/ws/planning/request",
-        web_url="http://127.0.0.1:4174/workspaces/ws/planning/request",
+        message=f"任务规划\n方案待确认\n下一步：查看并确认方案\n{web_url}",
+        web_url=web_url,
     )
     return NotificationEvaluation(
         resource_key=resource_key,
@@ -174,6 +175,37 @@ def test_exact_success_persists_pending_before_push_then_settles_and_advances() 
         assert snapshot.notification_snapshots[evaluation().resource_key].status == (
             "planning_proposal_ready"
         )
+
+    asyncio.run(scenario())
+
+
+def test_revision_notice_delivers_nested_task_link_through_private_route() -> None:
+    async def scenario() -> None:
+        _, _, registry, delivery = await setup()
+        revision_url = (
+            "http://127.0.0.1:4174/workspaces/ws/tasks/"
+            "00000000-0000-0000-0000-000000000020/revisions/"
+            "00000000-0000-0000-0000-000000000010"
+        )
+        current_evaluation = evaluation(
+            resource_key="planning_request:00000000-0000-0000-0000-000000000010",
+            web_url=revision_url,
+        )
+
+        result = await delivery.deliver(current_evaluation)
+
+        assert result.outcome == "sent"
+        assert registry.calls[0][0] == "message_push"
+        assert registry.calls[0][1] == {
+            "target_channel": "telegram",
+            "target_chat_id": "chat-42",
+            "message": current_evaluation.notice.message
+            if current_evaluation.notice is not None
+            else None,
+        }
+        assert current_evaluation.notice is not None
+        assert current_evaluation.notice.web_url == revision_url
+        assert revision_url in str(registry.calls[0][1]["message"])
 
     asyncio.run(scenario())
 

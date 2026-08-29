@@ -191,6 +191,43 @@ def test_planning_materialization_notifies_and_inherits_original_owner() -> None
     asyncio.run(scenario())
 
 
+def test_revision_proposal_notification_uses_bound_private_route_and_nested_task_link() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = {
+            "kind": "revision",
+            "status": "proposal_ready",
+            "version": 3,
+            "source_type": "plan_revision",
+            "source_ref": "revision-command-id",
+            "revision_base": {
+                "root_task_id": str(TASK_ID),
+                "plan_snapshot_id": str(UUID(int=41)),
+                "plan_generation": 2,
+                "plan_content_hash": "a" * 64,
+                "root_task_version": 6,
+            },
+            "current_proposal_revision": 1,
+            "current_proposal_content_hash": "proposal-hash",
+        }
+        state = await private_state("planning_request", REQUEST_ID)
+        evaluator = NotificationEvaluator(config(), client=client, state=state)
+
+        result = await evaluator.evaluate(
+            change(15, "planning_request", REQUEST_ID, "planning_proposal_ready"),
+            mode="live",
+        )
+
+        assert result is not None and result.notice is not None
+        assert result.notice.kind == "planning_proposal_ready"
+        assert result.notice.web_url.endswith(
+            f"/tasks/{TASK_ID}/revisions/{REQUEST_ID}"
+        )
+        assert "revision-command-id" not in result.notice.message
+
+    asyncio.run(scenario())
+
+
 def test_task_policy_prioritizes_attention_and_excludes_worker_details() -> None:
     async def scenario() -> None:
         client = FakeClient()

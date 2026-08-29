@@ -226,6 +226,39 @@ class ControlPlaneClient:
             f"/api/v1/workspaces/{self._config.workspace_id}/planning-requests/{request_id}"
         )
 
+    async def get_task(self, task_id: UUID) -> dict[str, JsonValue]:
+        """Read one task aggregate, including its optimistic-concurrency version."""
+
+        response = await self._request(
+            "GET",
+            f"/api/v1/tasks/{task_id}",
+            params={"workspace_id": str(self._config.workspace_id)},
+        )
+        return self._parse_json_object(response)
+
+    async def get_active_plan(self, task_id: UUID) -> dict[str, JsonValue]:
+        """Read the active plan head used as a revision base."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/tasks/{task_id}/active-plan"
+        )
+
+    async def get_revision_diff(self, request_id: UUID) -> dict[str, JsonValue]:
+        """Read the bounded, workspace-scoped revision diff projection."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/planning-requests/{request_id}/diff"
+        )
+
+    async def get_plan_transition(
+        self, plan_transition_id: UUID
+    ) -> dict[str, JsonValue]:
+        """Read one plan transition and its worker-level convergence facts."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/plan-transitions/{plan_transition_id}"
+        )
+
     async def list_clarifications(
         self, request_id: UUID
     ) -> tuple[dict[str, JsonValue], ...]:

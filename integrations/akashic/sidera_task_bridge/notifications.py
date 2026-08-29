@@ -477,7 +477,11 @@ class NotificationEvaluator:
         detail = await self._read_planning_detail(request_id)
         if detail is None:
             return None
-        if detail.get("source_type") not in {None, "akashic_private"}:
+        if detail.get("source_type") not in {
+            None,
+            "akashic_private",
+            "plan_revision",
+        }:
             return None
         if not _owner_matches(detail, binding):
             raise ValueError("source_binding_mismatch")
@@ -485,7 +489,16 @@ class NotificationEvaluator:
         status = _text(detail.get("status")) or "unknown"
         version = _non_negative_int(detail.get("version"), change.resource_version)
         cursor = _cursor_value(detail.get("last_change_cursor"), change.cursor)
-        web_url = self._planning_url(request_id)
+        root_task_id = _revision_root_id(detail)
+        is_revision = (
+            (_text(detail.get("kind")) or "").lower() == "revision"
+            or root_task_id is not None
+        )
+        web_url = (
+            self._revision_url(request_id, root_task_id)
+            if is_revision
+            else self._planning_url(request_id)
+        )
         previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
         fact = await self._planning_fact(
             detail,
@@ -722,6 +735,14 @@ class NotificationEvaluator:
             f"{self._config.workspace_id}/tasks/{task_id}"
         )
 
+    def _revision_url(self, request_id: UUID, root_task_id: UUID | None) -> str:
+        if root_task_id is None:
+            return self._planning_url(request_id)
+        return (
+            f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
+            f"{self._config.workspace_id}/tasks/{root_task_id}/revisions/{request_id}"
+        )
+
 
 def _task_fact(
     overview: Mapping[str, Any],
@@ -940,9 +961,35 @@ def _owner_matches(
 ) -> bool:
     source_type = detail.get("source_type")
     source_ref = detail.get("source_ref")
+    if source_type == "plan_revision":
+        # Revision requests deliberately use the command id as their CP source
+        # ref. The durable bridge binding remains the authority for the user route.
+        return True
     if source_type is not None and source_type != binding.source_type:
         return False
     return source_ref is None or source_ref == binding.source_ref
+
+
+def _revision_root_id(detail: Mapping[str, Any]) -> UUID | None:
+    candidates: list[object] = [detail]
+    for key in ("revision_base", "revision_freshness", "base"):
+        nested = detail.get(key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+            nested_base = nested.get("base")
+            if isinstance(nested_base, Mapping):
+                candidates.append(nested_base)
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            value = candidate.get("root_task_id")
+            if isinstance(value, UUID):
+                return value
+            if isinstance(value, str):
+                try:
+                    return UUID(value)
+                except ValueError:
+                    continue
+    return None
 
 
 def _fingerprint(value: object) -> str:

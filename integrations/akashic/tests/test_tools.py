@@ -21,6 +21,8 @@ PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
 REQUEST_ID = UUID("00000000-0000-0000-0000-000000000010")
 TASK_ID = UUID("00000000-0000-0000-0000-000000000020")
 COMMAND_ID = UUID("00000000-0000-0000-0000-000000000030")
+BASE_SNAPSHOT_ID = UUID("00000000-0000-0000-0000-000000000040")
+TRANSITION_ID = UUID("00000000-0000-0000-0000-000000000050")
 
 
 class MemoryKV:
@@ -53,6 +55,10 @@ class FakeClient:
         self.proposal: dict[str, Any] = {}
         self.materialization: dict[str, Any] = {}
         self.overview: dict[str, Any] = {}
+        self.task: dict[str, Any] = {}
+        self.active_plan: dict[str, Any] = {}
+        self.revision_diff: dict[str, Any] = {}
+        self.transition: dict[str, Any] = {}
 
     async def get_planning_detail(self, _request_id: UUID) -> dict[str, Any]:
         return self.detail
@@ -72,6 +78,18 @@ class FakeClient:
 
     async def get_task_overview(self, _task_id: UUID) -> dict[str, Any]:
         return self.overview
+
+    async def get_task(self, _task_id: UUID) -> dict[str, Any]:
+        return self.task
+
+    async def get_active_plan(self, _task_id: UUID) -> dict[str, Any]:
+        return self.active_plan
+
+    async def get_revision_diff(self, _request_id: UUID) -> dict[str, Any]:
+        return self.revision_diff
+
+    async def get_plan_transition(self, _transition_id: UUID) -> dict[str, Any]:
+        return self.transition
 
 
 def config() -> TaskBridgeConfig:
@@ -158,6 +176,13 @@ def test_submit_schema_exposes_only_business_fields() -> None:
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
         "sidera_reject_proposal",
+        "sidera_create_plan_revision",
+        "sidera_get_plan_revision",
+        "sidera_submit_plan_revision_feedback",
+        "sidera_confirm_plan_revision",
+        "sidera_reject_plan_revision",
+        "sidera_cancel_plan_revision",
+        "sidera_get_plan_transition",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
         "sidera_submit_knowledge_candidate",
@@ -546,5 +571,347 @@ def test_control_plane_conflict_maps_to_conflict_for_reject() -> None:
 
         assert result["outcome"] == "conflict"
         assert result["error_code"] == "planning_conflict"
+
+    asyncio.run(scenario())
+
+
+def _revision_detail() -> dict[str, Any]:
+    return {
+        "id": str(REQUEST_ID),
+        "kind": "revision",
+        "status": "proposal_ready",
+        "version": 4,
+        "current_proposal_revision": 2,
+        "current_proposal_content_hash": "proposal-hash",
+        "planning_profile_id": str(PROFILE_ID),
+        "planning_profile_version": 3,
+        "revision_base": {
+            "root_task_id": str(TASK_ID),
+            "plan_snapshot_id": str(BASE_SNAPSHOT_ID),
+            "plan_generation": 3,
+            "plan_content_hash": "a" * 64,
+            "root_task_version": 7,
+        },
+        "revision_freshness": {"base_fresh": True, "stale_reasons": []},
+    }
+
+
+def _revision_diff() -> dict[str, Any]:
+    return {
+        "planning_request_id": str(REQUEST_ID),
+        "root_task_id": str(TASK_ID),
+        "proposal_revision": 2,
+        "proposal_content_hash": "proposal-hash",
+        "diff_hash": "b" * 64,
+        "base": {
+            "plan_snapshot_id": str(BASE_SNAPSHOT_ID),
+            "plan_generation": 3,
+            "plan_content_hash": "a" * 64,
+            "root_task_version": 7,
+        },
+        "target_descriptor_preview": {"target_generation": 4},
+        "impact_counts": {
+            "preserve": 1,
+            "move": 0,
+            "patch": 1,
+            "continue": 0,
+            "create": 0,
+            "derive": 0,
+            "retire": 0,
+            "affected_branches": 1,
+        },
+        "risk_flags": ["worker_context_patch"],
+        "subtask_changes": [
+            {"path": "Task/Build > Subtask/API", "strategy": "preserve"}
+        ],
+        "worker_item_changes": [
+            {"path": "Task/Build > Subtask/API > WorkerItem/Backend", "strategy": "patch"}
+        ],
+        "accepted_transition_policy": {
+            "failure_policy": "block_affected_branch",
+            "manual_gate": False,
+        },
+    }
+
+
+def test_create_plan_revision_reads_current_base_and_excludes_chat_history() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.task = {"id": str(TASK_ID), "version": 7}
+        client.active_plan = {
+            "root_task_id": str(TASK_ID),
+            "active_snapshot_id": str(BASE_SNAPSHOT_ID),
+            "active_generation": 3,
+            "active_snapshot_hash": "a" * 64,
+        }
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="applied",
+                command_id=COMMAND_ID,
+                execution=response_data(COMMAND_ID),
+            )
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        with tool_execution_context_scope(private_context()):
+            result = decode(
+                await bridge.sidera_create_plan_revision(
+                    None,
+                    str(TASK_ID),
+                    "Change the backend split",
+                    ["Keep the public API stable"],
+                    ["Existing tests remain green"],
+                )
+            )
+
+        assert result["outcome"] == "ok"
+        assert result["resource_ref"] == f"revision:{REQUEST_ID}"
+        assert result["web_url"] == (
+            f"http://127.0.0.1:4174/workspaces/{WORKSPACE_ID}/tasks/"
+            f"{TASK_ID}/revisions/{REQUEST_ID}"
+        )
+        resource, command = dispatcher.calls[0]
+        assert resource == f"planning:root:{TASK_ID}"
+        assert isinstance(command, CommandIntent)
+        assert command.command_type == "SubmitPlanRevision"
+        assert command.target_type == "task"
+        assert command.target_id == TASK_ID
+        assert command.expected_version == 7
+        assert command.payload == {
+            "root_task_id": str(TASK_ID),
+            "expected_base_snapshot_id": str(BASE_SNAPSHOT_ID),
+            "expected_base_generation": 3,
+            "expected_base_content_hash": "a" * 64,
+            "objective": "Change the backend split",
+            "constraints": ["Keep the public API stable"],
+            "acceptance_criteria": ["Existing tests remain green"],
+            "planning_profile_id": str(PROFILE_ID),
+            "planning_profile_version": 3,
+        }
+        encoded = json.dumps(command.payload)
+        assert "chat-42" not in encoded
+        assert "conversation" not in encoded
+
+    asyncio.run(scenario())
+
+
+def test_get_plan_revision_returns_bounded_diff_and_needs_confirmation() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = _revision_detail()
+        client.revision_diff = _revision_diff()
+        client.proposal = {
+            "derived_diff": {"patch_body": "private patch body"},
+            "display": {"private": "proposal transcript"},
+        }
+        bridge, _, _ = tools(client=client)
+        result = decode(await bridge.sidera_get_plan_revision(None, str(REQUEST_ID)))
+
+        assert result["outcome"] == "needs_user"
+        assert result["resource_ref"] == f"revision:{REQUEST_ID}"
+        assert result["web_url"].endswith(f"/tasks/{TASK_ID}/revisions/{REQUEST_ID}")
+        assert result["data"]["root_task_id"] == str(TASK_ID)
+        assert result["data"]["diff"]["diff_hash"] == "b" * 64
+        assert result["data"]["diff"]["impact_counts"]["patch"] == 1
+        assert "display" not in json.dumps(result)
+        assert "patch_body" not in json.dumps(result)
+        assert "private patch body" not in json.dumps(result)
+
+    asyncio.run(scenario())
+
+
+def test_confirm_plan_revision_sends_every_exact_fence_without_self_confirmation() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = _revision_detail()
+        client.revision_diff = _revision_diff()
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="applied",
+                command_id=COMMAND_ID,
+                execution=response_data(COMMAND_ID),
+            )
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        result = decode(
+            await bridge.sidera_confirm_plan_revision(
+                None,
+                str(REQUEST_ID),
+                4,
+                2,
+                "proposal-hash",
+                "b" * 64,
+                str(BASE_SNAPSHOT_ID),
+                "a" * 64,
+                True,
+            )
+        )
+
+        assert result["outcome"] == "ok"
+        _, command = dispatcher.calls[0]
+        assert isinstance(command, CommandIntent)
+        assert command.command_type == "ConfirmPlanRevision"
+        assert command.payload == {
+            "expected_proposal_revision": 2,
+            "expected_proposal_content_hash": "proposal-hash",
+            "expected_diff_hash": "b" * 64,
+            "expected_base_snapshot_id": str(BASE_SNAPSHOT_ID),
+            "expected_base_content_hash": "a" * 64,
+            "profile_id": str(PROFILE_ID),
+            "profile_version": 3,
+        }
+        assert "explicit_user_confirmation" not in command.payload
+
+    asyncio.run(scenario())
+
+
+def test_revision_mutations_use_revision_commands_and_exact_version() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.detail = _revision_detail()
+        client.revision_diff = _revision_diff()
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="applied",
+                command_id=COMMAND_ID,
+                execution=response_data(COMMAND_ID),
+            )
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+
+        feedback = decode(
+            await bridge.sidera_submit_plan_revision_feedback(
+                None, str(REQUEST_ID), 4, 2, "proposal-hash", "Move one worker"
+            )
+        )
+        reject = decode(
+            await bridge.sidera_reject_plan_revision(
+                None, str(REQUEST_ID), 4, 2, "proposal-hash", "Scope is wrong"
+            )
+        )
+        cancel = decode(
+            await bridge.sidera_cancel_plan_revision(None, str(REQUEST_ID), 4)
+        )
+
+        assert feedback["outcome"] == "ok"
+        assert reject["outcome"] == "ok"
+        assert cancel["outcome"] == "ok"
+        assert [
+            (command.command_type, command.expected_version)
+            for _, command in dispatcher.calls
+            if isinstance(command, CommandIntent)
+        ] == [
+            ("RequestProposalRevision", 4),
+            ("RejectPlanningProposal", 4),
+            ("CancelPlanningRequest", 4),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_plan_revision_surfaces_rejected_and_unknown_without_replay() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.task = {"id": str(TASK_ID), "version": 7}
+        client.active_plan = {
+            "root_task_id": str(TASK_ID),
+            "active_snapshot_id": str(BASE_SNAPSHOT_ID),
+            "active_generation": 3,
+            "active_snapshot_hash": "a" * 64,
+        }
+        dispatcher = FakeDispatcher(
+            DispatchResult(
+                status="rejected",
+                command_id=COMMAND_ID,
+                error_code="planning_conflict",
+            )
+        )
+        bridge, dispatcher, _ = tools(client=client, dispatcher=dispatcher)
+        with tool_execution_context_scope(private_context()):
+            rejected = decode(
+                await bridge.sidera_create_plan_revision(
+                    None,
+                    str(TASK_ID),
+                    "Change the backend split",
+                    [],
+                    ["Existing tests remain green"],
+                )
+            )
+
+        dispatcher.result = DispatchResult(
+            status="result_unknown", command_id=COMMAND_ID
+        )
+        with tool_execution_context_scope(private_context()):
+            unknown = decode(
+                await bridge.sidera_create_plan_revision(
+                    None,
+                    str(TASK_ID),
+                    "Change the backend split",
+                    [],
+                    ["Existing tests remain green"],
+                )
+            )
+
+        assert rejected["outcome"] == "conflict"
+        assert rejected["error_code"] == "planning_conflict"
+        assert rejected["resource_ref"] == f"task:{TASK_ID}"
+        assert unknown["outcome"] == "result_unknown"
+        assert unknown["error_code"] == "result_unknown"
+        assert unknown["resource_ref"] == f"task:{TASK_ID}"
+        assert len(dispatcher.calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_get_plan_transition_redacts_runtime_details_and_surfaces_blocked_unknown() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.transition = {
+            "plan_transition_id": str(TRANSITION_ID),
+            "workspace_id": str(WORKSPACE_ID),
+            "root_task": {"id": str(TASK_ID), "title": "Build API", "path": "Task/Build API"},
+            "from_generation": 3,
+            "to_generation": 4,
+            "status": "degraded",
+            "version": 2,
+            "as_of": "2026-08-29T00:00:00Z",
+            "workers": [
+                {
+                    "worker_transition_id": str(UUID(int=51)),
+                    "path": "Task/Build API > Subtask/API > WorkerItem/Backend",
+                    "action": "patch",
+                    "fallback_action": "continue",
+                    "status": "blocked_unknown",
+                    "failure_code": "gateway_outcome_unknown",
+                    "source_execution_id": str(UUID(int=52)),
+                    "source_session_id": str(UUID(int=53)),
+                    "context": {
+                        "current_context_version": 3,
+                        "acknowledged_context_version": 2,
+                        "target_context_version": 4,
+                        "patch_id": str(UUID(int=54)),
+                        "patch_hash": "private-patch-hash",
+                        "patch_acknowledged": False,
+                    },
+                    "queued_input_disposition": {
+                        "queued_count": 1,
+                        "superseded_count": 2,
+                    },
+                    "operations": [{"operation_id": str(UUID(int=55)), "status": "failed"}],
+                    "blocked_dependencies": [],
+                }
+            ],
+            "blocked_dependencies": [],
+        }
+        bridge, _, _ = tools(client=client)
+        result = decode(await bridge.sidera_get_plan_transition(None, str(TRANSITION_ID)))
+
+        assert result["outcome"] == "needs_user"
+        assert result["resource_ref"] == f"plan-transition:{TRANSITION_ID}"
+        worker = result["data"]["workers"][0]
+        assert worker["status"] == "blocked_unknown"
+        assert worker["queued_input_count"] == 1
+        assert "source_session_id" not in json.dumps(result)
+        assert "private-patch-hash" not in json.dumps(result)
+        assert "operations" not in json.dumps(result)
 
     asyncio.run(scenario())
