@@ -19,6 +19,8 @@ from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
     ExecutionInputCommandHandler,
 )
+from sidera_control_plane.application.handoff_candidates import HandoffCandidateService
+from sidera_control_plane.application.handoff_commands import HandoffCommandHandler
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateSubmissionService,
@@ -126,6 +128,11 @@ def get_command_service(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
+    runtime_resolver = WorkerRuntimeResolver()
+    handoff_candidates = HandoffCandidateService(
+        factory,
+        runtime_resolver=runtime_resolver,
+    )
     return CommandService(
         factory,
         (
@@ -135,7 +142,7 @@ def get_command_service(
             WorkerCommandHandler(lambda: datetime.now(UTC)),
             RuntimeCommandHandler(
                 lambda: datetime.now(UTC),
-                resolver=WorkerRuntimeResolver(),
+                resolver=runtime_resolver,
             ),
             ExecutionCommandHandler(
                 lambda: datetime.now(UTC),
@@ -165,6 +172,11 @@ def get_command_service(
                 clock=lambda: datetime.now(UTC),
             ),
             PlanTransitionCommandHandler(lambda: datetime.now(UTC)),
+            HandoffCommandHandler(
+                lambda: datetime.now(UTC),
+                candidate_service=handoff_candidates,
+                runtime_resolver=runtime_resolver,
+            ),
         ),
     )
 

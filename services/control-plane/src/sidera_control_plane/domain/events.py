@@ -2,6 +2,15 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+HANDOFF_PROPOSAL_EVENT_TYPES = frozenset(
+    {
+        "HandoffProposalPrepared",
+        "HandoffProposalStale",
+        "HandoffProposalExpired",
+        "HandoffProposalCancelled",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class EventData:

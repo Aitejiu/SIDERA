@@ -606,6 +606,12 @@ def _runtime_snapshot(runtime: ResolvedWorkerRuntime) -> dict[str, object]:
     }
 
 
+def runtime_snapshot_for_handoff(runtime: ResolvedWorkerRuntime) -> dict[str, object]:
+    """Return the bounded runtime facts safe to freeze in a handoff proposal."""
+
+    return _runtime_snapshot(runtime)
+
+
 def _capability_hash(profile: object) -> str:
     if not is_dataclass(profile):
         return _sha256(_json_value(profile))

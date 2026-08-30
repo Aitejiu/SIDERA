@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.events import (
+    HANDOFF_PROPOSAL_EVENT_TYPES,
+    EventData,
+)
 
 PROJECTION_TYPES = frozenset(
     {
@@ -82,6 +85,26 @@ def projection_targets_for_event(
     """Map one durable domain event to the public projections it can affect."""
 
     payload = event.payload
+    if (
+        event.aggregate_type == "handoff_proposal"
+        or event.event_type in HANDOFF_PROPOSAL_EVENT_TYPES
+    ):
+        change_type = {
+            "HandoffProposalPrepared": "handoff_proposal_prepared",
+            "HandoffProposalStale": "handoff_proposal_stale",
+            "HandoffProposalExpired": "handoff_proposal_expired",
+            "HandoffProposalCancelled": "handoff_proposal_cancelled",
+        }.get(event.event_type, "handoff_proposal_updated")
+        return tuple(
+            ProjectionInvalidationTarget(projection_type, resource_id, change_type)
+            for projection_type, resource_id in (
+                ("task_overview", _payload_uuid(payload, "root_task_id")),
+                ("task_graph", _payload_uuid(payload, "root_task_id")),
+                ("subtask_workspace", _payload_uuid(payload, "root_task_id")),
+                ("worker_item_workspace", _payload_uuid(payload, "worker_item_id")),
+                ("worker_item_activity", _payload_uuid(payload, "worker_item_id")),
+            )
+        )
     if event.aggregate_type == "context_package" or event.event_type in {
         "ContextPackageCreated",
         "ContextPackageAcknowledged",
