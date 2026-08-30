@@ -4,9 +4,11 @@ from uuid import uuid4
 import pytest
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
+from sidera_control_plane.domain.handoffs import HandoffTransferMode
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
     CapabilityInput,
+    HandoffCheckpointMode,
     IdempotencyCapability,
     ModuleDefinition,
     ModuleInstance,
@@ -182,6 +184,30 @@ def test_context_patch_capability_round_trips_through_module_payload() -> None:
 
     assert payload["context_patch_versions"] == [1]
     assert restored == profile
+
+
+def test_handoff_capability_profiles_round_trip_through_module_payload() -> None:
+    worker = replace(
+        worker_capabilities(),
+        handoff_checkpoint_mode=HandoffCheckpointMode.CONTROL_EVENT,
+        handoff_checkpoint_versions=(1,),
+        handoff_session_context_versions=(1,),
+        handoff_writer_gate_versions=(1,),
+        handoff_inspection=True,
+    )
+    workspace = replace(
+        workspace_capabilities(),
+        workspace_handoff_versions=(1,),
+        workspace_transfer_modes=(HandoffTransferMode.REUSE_EXACT,),
+        handoff_inspection=True,
+    )
+
+    assert capability_profile_from_payload(
+        "worker_adapter", capability_profile_to_payload(worker)
+    ) == worker
+    assert capability_profile_from_payload(
+        "workspace_provider", capability_profile_to_payload(workspace)
+    ) == workspace
 
 
 def test_module_type_alias_is_stored_as_canonical_value() -> None:

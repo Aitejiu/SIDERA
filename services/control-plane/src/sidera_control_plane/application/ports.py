@@ -1129,6 +1129,9 @@ class WorkerRepositoryPort(Protocol):
     def save(self, worker: Worker, previous_version: int) -> None:
         raise NotImplementedError
 
+    def list_for_workspace(self, workspace_id: UUID) -> tuple[Worker, ...]:
+        raise NotImplementedError
+
     def lock_candidates(
         self,
         *,
@@ -1227,6 +1230,11 @@ class ExecutionRepositoryPort(Protocol):
     ) -> tuple[Execution, ...]:
         raise NotImplementedError
 
+    def list_for_worker_item(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> tuple[Execution, ...]:
+        raise NotImplementedError
+
     def list_for_tasks(
         self, task_ids: Collection[UUID], workspace_id: UUID
     ) -> tuple[Execution, ...]:
@@ -1302,6 +1310,11 @@ class SessionRepositoryPort(Protocol):
     def get_active_for_execution(
         self, execution_id: UUID, *, for_update: bool = False
     ) -> ExecutionSession | None:
+        raise NotImplementedError
+
+    def list_active_for_execution(
+        self, execution_id: UUID, workspace_id: UUID
+    ) -> tuple[ExecutionSession, ...]:
         raise NotImplementedError
 
     def get_latest_for_execution(
@@ -1431,6 +1444,11 @@ class GatewayOperationRepositoryPort(Protocol):
         raise NotImplementedError
 
     def save(self, operation: GatewayOperation, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def list_for_execution(
+        self, execution_id: UUID, workspace_id: UUID
+    ) -> tuple[GatewayOperation, ...]:
         raise NotImplementedError
 
 

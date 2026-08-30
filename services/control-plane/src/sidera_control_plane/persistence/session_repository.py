@@ -37,6 +37,20 @@ class SessionRepository:
         row = self._session.scalar(statement)
         return _to_domain_session(row) if row is not None else None
 
+    def list_active_for_execution(
+        self, execution_id: UUID, workspace_id: UUID
+    ) -> tuple[ExecutionSession, ...]:
+        rows = self._session.scalars(
+            select(ExecutionSessionModel)
+            .where(
+                ExecutionSessionModel.execution_id == execution_id,
+                ExecutionSessionModel.workspace_id == workspace_id,
+                ExecutionSessionModel.status == ExecutionSessionStatus.ACTIVE.value,
+            )
+            .order_by(ExecutionSessionModel.id.asc())
+        ).all()
+        return tuple(_to_domain_session(row) for row in rows)
+
     def get_latest_for_execution(
         self,
         execution_id: UUID,

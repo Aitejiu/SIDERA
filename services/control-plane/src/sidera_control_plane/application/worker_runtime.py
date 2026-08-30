@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+import hashlib
+import json
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
@@ -38,6 +41,7 @@ class ResolvedWorkerRuntime:
     workspace_definition_id: UUID
     capability_snapshot: WorkerAdapterCapabilityProfile
     resolution_facts: Mapping[str, JsonValue]
+    workspace_capability_snapshot: WorkspaceProviderCapabilityProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,16 @@ class RuntimeCandidateInspection:
     worker: Worker
     resolved: ResolvedWorkerRuntime | None
     issue: SchedulingIssue | None
+
+
+class WorkerRuntimeInspectionPort(Protocol):
+    def inspect_candidates(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        workers: Collection[Worker],
+        execution: Execution,
+    ) -> tuple[RuntimeCandidateInspection, ...]:
+        raise NotImplementedError
 
 
 RuntimeIssue = SchedulingIssue
@@ -362,6 +376,7 @@ def _resolve(
         "workspace_instance_resource_version": workspace_instance.resource_version,
         "workspace_config_version": configuration.workspace_module_config_version,
     }
+    facts.update(_workspace_scope_facts(worker, workspace_instance))
     return ResolvedWorkerRuntime(
         worker_id=worker.id,
         adapter_type=worker.adapter_type,
@@ -373,7 +388,96 @@ def _resolve(
         workspace_definition_id=workspace_definition.id,
         capability_snapshot=capability_snapshot,
         resolution_facts=MappingProxyType(facts),
+        workspace_capability_snapshot=workspace_definition.capabilities,
     )
+
+
+def _workspace_scope_facts(
+    worker: Worker, workspace_instance: ModuleInstance
+) -> dict[str, JsonValue]:
+    """Expose only digests for the scopes needed by handoff inspection."""
+    trust_boundary = _config_text(
+        workspace_instance,
+        ("trust_boundary", "trust_boundary_ref"),
+        str(worker.workspace_id),
+    )
+    repository_scope = _config_text(
+        workspace_instance,
+        ("repository_scope", "repository_ref"),
+        "workspace-default",
+    )
+    writable_paths = _config_paths(
+        workspace_instance,
+        "writable_paths",
+        (".",),
+    )
+    readable_paths = _config_paths(
+        workspace_instance,
+        "readable_paths",
+        writable_paths,
+    )
+    return {
+        "workspace_trust_boundary_hash": _scope_hash(trust_boundary),
+        "workspace_repository_scope_hash": _scope_hash(repository_scope),
+        "workspace_path_scope_hash": _scope_hash(
+            {
+                "readable": sorted(readable_paths),
+                "writable": sorted(writable_paths),
+            }
+        ),
+    }
+
+
+def _config_text(
+    instance: ModuleInstance,
+    names: tuple[str, ...],
+    default: str,
+) -> str:
+    for name in names:
+        value = _config_value(instance, name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return default
+
+
+def _config_paths(
+    instance: ModuleInstance,
+    name: str,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    value = _config_value(instance, name)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return default
+    paths = tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return paths or default
+
+
+def _config_value(instance: ModuleInstance, name: str) -> object | None:
+    for key in (f"{instance.config_namespace}.{name}", name):
+        if key in instance.config:
+            return instance.config[key]
+    return None
+
+
+def _scope_hash(value: object) -> str:
+    encoded = json.dumps(
+        _json_value(value),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
 
 
 def _validate_instance_identity(

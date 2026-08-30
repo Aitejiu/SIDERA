@@ -77,6 +77,14 @@ class WorkerRepository:
             actual = self._current_version(worker.id, worker.workspace_id)
             raise VersionConflict(previous_version, actual)
 
+    def list_for_workspace(self, workspace_id: UUID) -> tuple[Worker, ...]:
+        rows = self._session.scalars(
+            select(WorkerModel)
+            .where(WorkerModel.workspace_id == workspace_id)
+            .order_by(WorkerModel.display_name.asc(), WorkerModel.id.asc())
+        ).all()
+        return tuple(_to_domain_worker(row) for row in rows)
+
     def lock_candidates(
         self,
         *,

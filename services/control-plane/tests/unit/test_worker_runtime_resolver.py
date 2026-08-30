@@ -475,6 +475,20 @@ def test_valid_configuration_freezes_capability_snapshot_and_safe_facts() -> Non
     assert resolved.adapter_definition_id == fixture[5].id
     assert resolved.workspace_definition_id == fixture[6].id
     assert resolved.capability_snapshot == worker_capabilities()
+    assert resolved.workspace_capability_snapshot == fixture[6].capabilities
+    assert {
+        "workspace_trust_boundary_hash",
+        "workspace_repository_scope_hash",
+        "workspace_path_scope_hash",
+    } <= set(resolved.resolution_facts)
+    assert all(
+        len(str(resolved.resolution_facts[key])) == 64
+        for key in (
+            "workspace_trust_boundary_hash",
+            "workspace_repository_scope_hash",
+            "workspace_path_scope_hash",
+        )
+    )
     assert "config" not in resolved.resolution_facts
     assert "secret_refs" not in resolved.resolution_facts
     assert "http://adapter.invalid" not in str(resolved.resolution_facts)

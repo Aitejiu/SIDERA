@@ -127,6 +127,19 @@ class ExecutionRepository:
         ).all()
         return tuple(_to_domain_execution(row) for row in rows)
 
+    def list_for_worker_item(
+        self, worker_item_id: UUID, workspace_id: UUID
+    ) -> tuple[Execution, ...]:
+        rows = self._session.scalars(
+            select(ExecutionModel)
+            .where(
+                ExecutionModel.worker_item_id == worker_item_id,
+                ExecutionModel.workspace_id == workspace_id,
+            )
+            .order_by(ExecutionModel.created_at.asc(), ExecutionModel.id.asc())
+        ).all()
+        return tuple(_to_domain_execution(row) for row in rows)
+
     def list_for_tasks(
         self, task_ids: Collection[UUID], workspace_id: UUID
     ) -> tuple[Execution, ...]:

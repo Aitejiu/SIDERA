@@ -12,12 +12,14 @@ from sidera_control_plane.application.projection_invalidation import (
     projection_targets_for_module,
 )
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
+from sidera_control_plane.domain.handoffs import HandoffTransferMode
 from sidera_control_plane.domain.modules import (
     WORKER_ADAPTER_MODULE_TYPE,
     WORKSPACE_PROVIDER_MODULE_TYPE,
     CancellationCapability,
     CapabilityInput,
     ExecutionBinding,
+    HandoffCheckpointMode,
     IdempotencyCapability,
     ModuleCapabilityProfile,
     ModuleDefinition,
@@ -303,7 +305,7 @@ def capability_profile_to_payload(
     profile: ModuleCapabilityProfile,
 ) -> dict[str, object]:
     if isinstance(profile, WorkerAdapterCapabilityProfile):
-        return {
+        payload: dict[str, object] = {
             "input": profile.input.value,
             "idempotency": profile.idempotency.value,
             "resume": profile.resume.value,
@@ -313,13 +315,43 @@ def capability_profile_to_payload(
             "context_package_versions": list(profile.context_package_versions),
             "context_patch_versions": list(profile.context_patch_versions),
         }
+        if (
+            profile.handoff_checkpoint_mode is not HandoffCheckpointMode.UNSUPPORTED
+            or profile.handoff_checkpoint_versions
+        ):
+            payload["handoff_checkpoint_mode"] = profile.handoff_checkpoint_mode.value
+            payload["handoff_checkpoint_versions"] = list(
+                profile.handoff_checkpoint_versions
+            )
+        if profile.handoff_session_context_versions:
+            payload["handoff_session_context_versions"] = list(
+                profile.handoff_session_context_versions
+            )
+        if profile.handoff_writer_gate_versions:
+            payload["handoff_writer_gate_versions"] = list(
+                profile.handoff_writer_gate_versions
+            )
+        if profile.handoff_inspection:
+            payload["handoff_inspection"] = True
+        return payload
     if isinstance(profile, WorkspaceProviderCapabilityProfile):
-        return {
+        payload = {
             "isolation": profile.isolation.value,
             "writable": profile.writable,
             "git_worktree": profile.git_worktree,
             "stability": profile.stability.value,
         }
+        if profile.workspace_handoff_versions:
+            payload["workspace_handoff_versions"] = list(
+                profile.workspace_handoff_versions
+            )
+        if profile.workspace_transfer_modes:
+            payload["workspace_transfer_modes"] = [
+                mode.value for mode in profile.workspace_transfer_modes
+            ]
+        if profile.handoff_inspection:
+            payload["handoff_inspection"] = True
+        return payload
     return {
         "structured_output": profile.structured_output.value,
         "clarification": profile.clarification,
@@ -357,6 +389,24 @@ def capability_profile_from_payload(
             context_patch_versions=_version_tuple_capability(
                 payload, "context_patch_versions"
             ),
+            handoff_checkpoint_mode=_enum_capability_or_default(
+                payload,
+                "handoff_checkpoint_mode",
+                HandoffCheckpointMode,
+                HandoffCheckpointMode.UNSUPPORTED,
+            ),
+            handoff_checkpoint_versions=_version_tuple_capability(
+                payload, "handoff_checkpoint_versions"
+            ),
+            handoff_session_context_versions=_version_tuple_capability(
+                payload, "handoff_session_context_versions"
+            ),
+            handoff_writer_gate_versions=_version_tuple_capability(
+                payload, "handoff_writer_gate_versions"
+            ),
+            handoff_inspection=_bool_capability_or_default(
+                payload, "handoff_inspection", False
+            ),
         )
 
     if canonical_type == WORKSPACE_PROVIDER_MODULE_TYPE:
@@ -380,6 +430,15 @@ def capability_profile_from_payload(
             writable=_bool_capability(payload, "writable"),
             git_worktree=_bool_capability(payload, "git_worktree"),
             stability=_enum_capability(payload, "stability", StabilityLevel),
+            workspace_handoff_versions=_version_tuple_capability(
+                payload, "workspace_handoff_versions"
+            ),
+            workspace_transfer_modes=_handoff_transfer_mode_tuple_capability(
+                payload
+            ),
+            handoff_inspection=_bool_capability_or_default(
+                payload, "handoff_inspection", False
+            ),
         )
 
     _reject_unknown_fields(payload, _PLANNER_FIELDS)
@@ -471,12 +530,27 @@ _WORKER_FIELDS = frozenset(
         "stability",
         "context_package_versions",
         "context_patch_versions",
+        "handoff_checkpoint_mode",
+        "handoff_checkpoint_versions",
+        "handoff_session_context_versions",
+        "handoff_writer_gate_versions",
+        "handoff_inspection",
     }
 )
 _LEGACY_WORKER_FIELDS = frozenset(
     {"input", "idempotency", "resume", "stop", "sandbox", "stability"}
 )
-_WORKSPACE_FIELDS = frozenset({"isolation", "writable", "git_worktree", "stability"})
+_WORKSPACE_FIELDS = frozenset(
+    {
+        "isolation",
+        "writable",
+        "git_worktree",
+        "stability",
+        "workspace_handoff_versions",
+        "workspace_transfer_modes",
+        "handoff_inspection",
+    }
+)
 _PLANNER_FIELDS = frozenset(
     {
         "structured_output",
@@ -526,6 +600,51 @@ def _bool_capability(payload: Mapping[str, object], name: str) -> bool:
     if not isinstance(value, bool):
         raise ValidationError(f"capability field {name!r} must be a boolean")
     return value
+
+
+def _bool_capability_or_default(
+    payload: Mapping[str, object], name: str, default: bool
+) -> bool:
+    value = payload.get(name, default)
+    if not isinstance(value, bool):
+        raise ValidationError(f"capability field {name!r} must be a boolean")
+    return value
+
+
+def _enum_capability_or_default[EnumCapability: StrEnum](
+    payload: Mapping[str, object],
+    name: str,
+    enum_type: type[EnumCapability],
+    default: EnumCapability,
+) -> EnumCapability:
+    value = payload.get(name, default.value)
+    if not isinstance(value, str):
+        raise ValidationError(f"capability field {name!r} must be a string")
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported capability {name}: {value!r}") from exc
+
+
+def _handoff_transfer_mode_tuple_capability(
+    payload: Mapping[str, object],
+) -> tuple[HandoffTransferMode, ...]:
+    value = payload.get("workspace_transfer_modes", ())
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(
+            "capability field 'workspace_transfer_modes' must be an array"
+        )
+    modes: list[HandoffTransferMode] = []
+    for item in value:
+        try:
+            mode = HandoffTransferMode(item)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"unsupported capability workspace_transfer_modes: {item!r}"
+            ) from exc
+        if mode not in modes:
+            modes.append(mode)
+    return tuple(modes)
 
 
 def _positive_int_capability(payload: Mapping[str, object], name: str) -> int:
