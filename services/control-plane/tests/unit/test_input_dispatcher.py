@@ -65,11 +65,13 @@ class FakeUnitOfWork(AbstractContextManager["FakeUnitOfWork"]):
         *,
         worker_item_id: UUID | None = None,
         active_transition: object | None = None,
+        active_handoff: object | None = None,
     ) -> None:
         self.execution_inputs = repository
         self.events = events
         self.executions = _ExecutionRepository(worker_item_id)
         self.worker_transitions = _WorkerTransitionRepository(active_transition)
+        self.handoff_transitions = _HandoffTransitionRepository(active_handoff)
 
     def __enter__(self) -> Self:
         return self
@@ -94,6 +96,21 @@ class _ExecutionRepository:
 
 
 class _WorkerTransitionRepository:
+    def __init__(self, active_transition: object | None) -> None:
+        self.active_transition = active_transition
+
+    def get_active_for_worker_item(
+        self,
+        worker_item_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> object | None:
+        del worker_item_id, workspace_id, for_update
+        return self.active_transition
+
+
+class _HandoffTransitionRepository:
     def __init__(self, active_transition: object | None) -> None:
         self.active_transition = active_transition
 
@@ -147,6 +164,7 @@ def _dispatcher(
     *,
     worker_item_id: UUID | None = None,
     active_transition: object | None = None,
+    active_handoff: object | None = None,
 ) -> tuple[InputDispatcher, RecordingInputRepository, RecordingEvents]:
     repository = RecordingInputRepository([item])
     events = RecordingEvents()
@@ -155,6 +173,7 @@ def _dispatcher(
         events,
         worker_item_id=worker_item_id,
         active_transition=active_transition,
+        active_handoff=active_handoff,
     )
     return (
         InputDispatcher(
@@ -269,4 +288,36 @@ def test_claimed_input_is_requeued_when_worker_transition_holds_the_fence() -> N
 
     assert report.deferred == 1
     assert repository.items[item.id].status is ExecutionInputStatus.QUEUED
+    assert gateway.calls == []
+
+
+def test_claimed_input_is_requeued_when_handoff_holds_the_fence() -> None:
+    item = _input()
+    gateway = RecordingGateway(
+        DeliveryResult(
+            operation_id=uuid4(),
+            outcome=DeliveryOutcome.DELIVERED,
+            accepted_sequence=9,
+            failure_code=None,
+        )
+    )
+    transition = SimpleNamespace(
+        id=uuid4(),
+        status="running",
+        phase="checkpoint_source",
+        writer_state="source_active",
+        target_execution_id=None,
+    )
+    dispatcher, repository, _events = _dispatcher(
+        item,
+        gateway,
+        worker_item_id=uuid4(),
+        active_handoff=transition,
+    )
+
+    report = dispatcher.run_once()
+
+    assert report.deferred == 1
+    assert repository.items[item.id].status is ExecutionInputStatus.QUEUED
+    assert repository.items[item.id].failure_code is None
     assert gateway.calls == []

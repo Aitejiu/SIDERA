@@ -9,6 +9,10 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
     ExecutionInputCommandHandler,
 )
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    HandoffOperationGate,
+)
 from sidera_control_plane.application.ports import WorkerItemPlacement
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import (
@@ -372,6 +376,21 @@ def test_input_command_persists_queue_outbox_and_client_replay(
             db_session.scalar(select(func.count()).select_from(ContextPackageModel))
             or 0
         ) == before_package_count
+
+
+def test_input_gate_uses_the_authoritative_handoff_repository(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    worker_item_id = uuid4()
+    with SqlAlchemyUnitOfWork(database) as uow:
+        result = HandoffOperationGate(uow).evaluate(
+            worker_item_id=worker_item_id,
+            workspace_id=workspace_id,
+            operation=HandoffGateOperation.USER_INPUT,
+        )
+
+    assert result.allowed is True
 
 
 def test_input_commands_enforce_one_pending_and_allow_update_cancel(

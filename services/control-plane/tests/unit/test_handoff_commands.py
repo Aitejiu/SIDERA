@@ -40,9 +40,13 @@ from sidera_control_plane.domain.execution import (
 from sidera_control_plane.domain.handoffs import (
     HandoffCandidateInspection,
     HandoffCandidateList,
+    HandoffPhase,
     HandoffProposal,
     HandoffProposalStatus,
     HandoffSourceChannel,
+    HandoffTransition,
+    HandoffTransitionStatus,
+    HandoffWriterState,
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
@@ -227,6 +231,81 @@ class MemoryProposalRepository:
         self.proposals[proposal.id] = proposal
 
 
+class MemoryTransitionRepository:
+    def __init__(self) -> None:
+        self.transitions: dict[UUID, HandoffTransition] = {}
+
+    def get(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> HandoffTransition | None:
+        del for_update
+        transition = self.transitions.get(transition_id)
+        return (
+            transition
+            if transition is not None and transition.workspace_id == workspace_id
+            else None
+        )
+
+    def get_active_for_worker_item(
+        self,
+        worker_item_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> HandoffTransition | None:
+        del for_update
+        return next(
+            (
+                transition
+                for transition in self.transitions.values()
+                if transition.worker_item_id == worker_item_id
+                and transition.workspace_id == workspace_id
+                and transition.status
+                in {
+                    HandoffTransitionStatus.PENDING,
+                    HandoffTransitionStatus.RUNNING,
+                    HandoffTransitionStatus.BLOCKED,
+                    HandoffTransitionStatus.BLOCKED_UNKNOWN,
+                    HandoffTransitionStatus.FAILED,
+                }
+            ),
+            None,
+        )
+
+    def get_active_for_worker_items(
+        self,
+        worker_item_ids: tuple[UUID, ...],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[HandoffTransition, ...]:
+        del for_update
+        return tuple(
+            transition
+            for transition in self.transitions.values()
+            if transition.worker_item_id in worker_item_ids
+            and transition.workspace_id == workspace_id
+            and transition.status
+            in {
+                HandoffTransitionStatus.PENDING,
+                HandoffTransitionStatus.RUNNING,
+                HandoffTransitionStatus.BLOCKED,
+                HandoffTransitionStatus.BLOCKED_UNKNOWN,
+                HandoffTransitionStatus.FAILED,
+            }
+        )
+
+    def add(self, transition: HandoffTransition) -> None:
+        self.transitions[transition.id] = transition
+
+    def save(self, _transition: HandoffTransition, _previous_version: int) -> None:
+        raise NotImplementedError
+
+
 class MemoryEventStore:
     def __init__(self) -> None:
         self.events: list[EventData] = []
@@ -335,22 +414,26 @@ class HandoffUnitOfWork:
         self.session = session
         self.source = source
         self.target = target
+        self.root_task = SimpleNamespace(id=worker_item.root_task_id, version=1)
+        self.subtask = SimpleNamespace(id=execution.task_id, version=1)
         self.worker_items = SimpleNamespace(get=self._get_worker_item)
         self.executions = SimpleNamespace(get=self._get_execution)
+        self.tasks = SimpleNamespace(get=self._get_task)
         self.sessions = SimpleNamespace(get=self._get_session)
         self.workers = SimpleNamespace(get=self._get_worker, list_for_workspace=lambda _: (source, target))
         self.workspaces = SimpleNamespace(get_for_execution=lambda *_args, **_kwargs: manifest)
+        context_package = SimpleNamespace(
+            package_id=uuid4(),
+            package_hash="a" * 64,
+            purpose=ContextPurpose.EXECUTION,
+            consumer_type=ContextConsumerType.WORKER,
+            consumer_id=execution.id,
+            worker_item_id=worker_item.id,
+            context_version=worker_item.context_version,
+            status=ContextPackageStatus.ACTIVE,
+        )
         self.context_packages = SimpleNamespace(
-            get_for_consumer=lambda *_args, **_kwargs: SimpleNamespace(
-                package_id=uuid4(),
-                package_hash="a" * 64,
-                purpose=ContextPurpose.EXECUTION,
-                consumer_type=ContextConsumerType.WORKER,
-                consumer_id=execution.id,
-                worker_item_id=worker_item.id,
-                context_version=worker_item.context_version,
-                status=ContextPackageStatus.ACTIVE,
-            )
+            get_for_consumer=lambda *_args, **_kwargs: context_package
         )
         self.plans = SimpleNamespace(
             get_head=lambda *_args, **_kwargs: SimpleNamespace(
@@ -360,10 +443,10 @@ class HandoffUnitOfWork:
             )
         )
         self.plan_transitions = SimpleNamespace(list_for_root=lambda *_args, **_kwargs: ())
-        self.handoff_transitions = SimpleNamespace(get_active_for_worker_item=lambda *_args, **_kwargs: None)
         self.execution_inputs = SimpleNamespace(get_pending_for_session=lambda *_args, **_kwargs: None)
         self.gateway_operations = SimpleNamespace(list_for_execution=lambda *_args, **_kwargs: ())
         self.handoff_proposals = MemoryProposalRepository((prior,) if prior else ())
+        self.handoff_transitions = MemoryTransitionRepository()
         self.events = MemoryEventStore()
         self.commands = MemoryCommandRepository()
         self.candidate_service = candidate_service
@@ -373,6 +456,16 @@ class HandoffUnitOfWork:
     def _get_worker_item(self, item_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> WorkerItem | None:
         del for_update
         return self.worker_item if item_id == self.worker_item.id and workspace_id == WORKSPACE_ID else None
+
+    def _get_task(self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> object | None:
+        del for_update
+        if workspace_id != WORKSPACE_ID:
+            return None
+        if task_id == self.root_task.id:
+            return self.root_task
+        if task_id == self.subtask.id:
+            return self.subtask
+        return None
 
     def _get_execution(self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> Execution | None:
         del for_update
@@ -508,6 +601,38 @@ def _handler(uow: HandoffUnitOfWork) -> HandoffCommandHandler:
     )
 
 
+def _confirm_envelope(
+    proposal: HandoffProposal,
+    *,
+    key: str = "confirm-1",
+    proposal_version: int | None = None,
+    proposal_hash: str | None = None,
+    worker_item_version: int | None = None,
+) -> CommandEnvelope:
+    return CommandEnvelope(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        command_type="ConfirmWorkerHandoff",
+        target_type="handoff_proposal",
+        actor_type="user",
+        actor_id="user:test",
+        target_id=proposal.id,
+        expected_version=proposal.version if proposal_version is None else proposal_version,
+        payload={
+            "proposal_id": str(proposal.id),
+            "expected_proposal_version": proposal.version if proposal_version is None else proposal_version,
+            "expected_proposal_hash": proposal.proposal_hash if proposal_hash is None else proposal_hash,
+            "expected_worker_item_version": (
+                proposal.payload.impact_summary["worker_item_version"]
+                if worker_item_version is None
+                else worker_item_version
+            ),
+        },
+        idempotency_key=key,
+        correlation_id=uuid4(),
+    )
+
+
 def test_prepare_captures_web_facts_and_leaves_source_running() -> None:
     uow, item, source, target, execution, session = _fixture()
     before_execution = replace(execution)
@@ -613,6 +738,53 @@ def test_cancel_only_accepts_a_prepared_proposal() -> None:
     assert error.value.code == "handoff_proposal_not_prepared"
 
 
+def test_confirm_creates_one_pending_transition_without_external_operations() -> None:
+    uow, item, _source, target, execution, session = _fixture()
+    prepared = _handler(uow).handle(uow, _prepare_envelope(item, target))
+    proposal = uow.handoff_proposals.proposals[prepared.aggregate_id]
+    handler = _handler(uow)
+    service = CommandService(lambda: cast(ControlPlaneUnitOfWork, uow), (handler,))
+    confirm = _confirm_envelope(proposal)
+
+    first = service.handle(confirm)
+    replay = service.handle(replace(confirm, correlation_id=uuid4()))
+
+    assert replay == first
+    assert len(uow.handoff_transitions.transitions) == 1
+    transition = next(iter(uow.handoff_transitions.transitions.values()))
+    assert transition.proposal_id == proposal.id
+    assert transition.phase is HandoffPhase.CHECKPOINT_SOURCE
+    assert transition.writer_state is HandoffWriterState.SOURCE_ACTIVE
+    assert transition.status is HandoffTransitionStatus.PENDING
+    assert transition.source_input_cutoff_sequence == session.last_sequence
+    assert uow.handoff_proposals.proposals[proposal.id].status is HandoffProposalStatus.CONFIRMED
+    assert getattr(execution, "handoff_transition_id", None) is None
+    assert transition.target_execution_id is None
+    assert transition.target_session_id is None
+    assert uow.adapter_calls == 0
+    assert uow.workspace_provider_calls == 0
+    assert [event.event_type for event in uow.events.events] == [
+        "HandoffProposalPrepared",
+        "HandoffConfirmed",
+    ]
+
+
+def test_confirm_rejects_an_exact_hash_mismatch_as_stale() -> None:
+    uow, item, _source, target, _execution, _session = _fixture()
+    prepared = _handler(uow).handle(uow, _prepare_envelope(item, target))
+    proposal = uow.handoff_proposals.proposals[prepared.aggregate_id]
+
+    with pytest.raises(HandoffCommandError) as error:
+        _handler(uow).handle(
+            uow,
+            _confirm_envelope(proposal, proposal_hash="0" * 64),
+        )
+
+    assert error.value.code == "handoff_proposal_stale"
+    assert not uow.handoff_transitions.transitions
+    assert uow.handoff_proposals.proposals[proposal.id].status is HandoffProposalStatus.PREPARED
+
+
 def test_prepare_ttl_must_be_positive_and_bounded() -> None:
     uow, item, _source, target, _execution, _session = _fixture()
     envelope = _prepare_envelope(item, target)
@@ -628,6 +800,6 @@ def test_prepare_ttl_must_be_positive_and_bounded() -> None:
 
 def test_handler_exposes_only_the_two_task6_commands() -> None:
     assert HandoffCommandHandler.command_types == frozenset(
-        {"PrepareWorkerHandoff", "CancelWorkerHandoff"}
+        {"PrepareWorkerHandoff", "CancelWorkerHandoff", "ConfirmWorkerHandoff"}
     )
     assert HandoffCandidateService is not None

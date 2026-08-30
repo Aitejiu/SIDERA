@@ -22,6 +22,10 @@ from sidera_control_plane.application.event_ingestor import (
     EventIngestionReport,
     SessionEventIngestor,
 )
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    HandoffOperationGate,
+)
 from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateProposalV1,
     KnowledgeCandidateSubmissionService,
@@ -117,6 +121,8 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "context_package_corrupt",
         "context_package_stale",
         "context_hash_mismatch",
+        "handoff_in_progress",
+        "handoff_gate_unavailable",
     }
 )
 logger = logging.getLogger(__name__)
@@ -529,6 +535,7 @@ class WorkerGateway:
                 raise
         try:
             context = self._load_context(message)
+            self._require_normal_handoff_schedule(context.execution)
             keeper = self._lease_keeper(context)
             keeper.start()
             try:
@@ -566,6 +573,21 @@ class WorkerGateway:
         except GatewayError as exc:
             _log_gateway_error(message, exc)
             raise
+
+    def _require_normal_handoff_schedule(self, execution: Execution) -> None:
+        if execution.worker_item_id is None:
+            return
+        with self._uow_factory() as uow:
+            result = HandoffOperationGate(uow).evaluate(
+                worker_item_id=execution.worker_item_id,
+                workspace_id=execution.workspace_id,
+                operation=HandoffGateOperation.NORMAL_SCHEDULE,
+            )
+        if not result.allowed:
+            raise GatewayMessageError(
+                "execution start is fenced by an active handoff",
+                code=result.blocking_code,
+            )
 
     def _lease_keeper(self, context: _AssignmentContext) -> AssignmentLeaseKeeper:
         return AssignmentLeaseKeeper(
@@ -1545,6 +1567,19 @@ class WorkerGateway:
                     accepted_sequence=None,
                     failure_code="active_session_mismatch",
                 )
+            if context.execution.worker_item_id is not None:
+                handoff_gate = HandoffOperationGate(uow).evaluate(
+                    worker_item_id=context.execution.worker_item_id,
+                    workspace_id=item.workspace_id,
+                    operation=HandoffGateOperation.USER_INPUT,
+                )
+                if not handoff_gate.allowed:
+                    return DeliveryResult(
+                        operation_id=operation_id,
+                        outcome=DeliveryOutcome.BLOCKED,
+                        accepted_sequence=None,
+                        failure_code=handoff_gate.blocking_code,
+                    )
             if session.input_mode != CapabilityInput.QUEUED.value:
                 return DeliveryResult(
                     operation_id=operation_id,

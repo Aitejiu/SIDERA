@@ -12,6 +12,7 @@ from sidera_control_plane.application.handoff_candidates import (
 )
 from sidera_control_plane.application.handoff_proposal_reconciler import (
     HandoffBaseInspectionError,
+    HandoffProposalReconciler,
     collect_handoff_base,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
@@ -29,6 +30,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffProposalStatus,
     HandoffSourceChannel,
     HandoffTransferMode,
+    HandoffTransition,
 )
 from sidera_control_plane.domain.worker_item import WorkerItemStatus
 
@@ -42,6 +44,14 @@ _PREPARE_KEYS = frozenset(
     }
 )
 _CANCEL_KEYS = frozenset({"reason"})
+_CONFIRM_KEYS = frozenset(
+    {
+        "proposal_id",
+        "expected_proposal_version",
+        "expected_proposal_hash",
+        "expected_worker_item_version",
+    }
+)
 
 
 class HandoffCommandError(DomainError):
@@ -59,7 +69,13 @@ class HandoffCommandError(DomainError):
 
 
 class HandoffCommandHandler:
-    command_types = frozenset({"PrepareWorkerHandoff", "CancelWorkerHandoff"})
+    command_types = frozenset(
+        {
+            "PrepareWorkerHandoff",
+            "CancelWorkerHandoff",
+            "ConfirmWorkerHandoff",
+        }
+    )
 
     def __init__(
         self,
@@ -83,6 +99,8 @@ class HandoffCommandHandler:
             return self._prepare(uow, envelope)
         if envelope.command_type == "CancelWorkerHandoff":
             return self._cancel(uow, envelope)
+        if envelope.command_type == "ConfirmWorkerHandoff":
+            return self._confirm(uow, envelope)
         raise HandoffCommandError(
             "validation_error",
             f"unsupported handoff command: {envelope.command_type}",
@@ -375,6 +393,154 @@ class HandoffCommandHandler:
             data={"proposal": proposal.to_mapping()},
         )
 
+    def _confirm(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if envelope.target_type != "handoff_proposal":
+            raise HandoffCommandError(
+                "validation_error", "ConfirmWorkerHandoff targets a handoff_proposal"
+            )
+        proposal_id = _required_target(envelope)
+        confirm = _confirm_payload(envelope.payload)
+        if confirm["proposal_id"] != proposal_id:
+            raise HandoffCommandError(
+                "validation_error", "proposal_id must match target_id"
+            )
+        if envelope.expected_version != confirm["expected_proposal_version"]:
+            raise HandoffCommandError(
+                "validation_error",
+                "expected_version must match expected_proposal_version",
+            )
+
+        proposal = uow.handoff_proposals.get(
+            proposal_id,
+            envelope.workspace_id,
+            for_update=True,
+        )
+        if proposal is None:
+            raise HandoffCommandError("not_found", "handoff proposal not found")
+        _assert_confirm_base(proposal, confirm)
+        if proposal.status is not HandoffProposalStatus.PREPARED:
+            raise HandoffCommandError(
+                "handoff_proposal_stale",
+                "handoff proposal is no longer prepared",
+                details={"status": proposal.status.value},
+            )
+
+        payload = proposal.payload
+        head = uow.plans.get_head(
+            payload.root_task_id,
+            envelope.workspace_id,
+            for_update=True,
+        )
+        if head is None or not _confirm_head_matches(head, payload):
+            raise HandoffCommandError(
+                "handoff_proposal_stale",
+                "handoff proposal plan base is stale",
+                details={
+                    "reason": "plan_head_changed",
+                    "current_snapshot_id": (
+                        str(head.active_snapshot_id) if head is not None else None
+                    ),
+                    "current_generation": (
+                        head.active_generation if head is not None else None
+                    ),
+                    "current_version": head.version if head is not None else None,
+                },
+            )
+
+        _lock_confirm_tasks(uow, payload, envelope.workspace_id)
+        worker_item = uow.worker_items.get(
+            payload.worker_item_id,
+            envelope.workspace_id,
+            for_update=True,
+        )
+        if worker_item is None:
+            raise HandoffCommandError("not_found", "handoff worker item not found")
+        if worker_item.version != confirm["expected_worker_item_version"]:
+            raise HandoffCommandError(
+                "handoff_proposal_stale",
+                "handoff worker item base is stale",
+                details={
+                    "reason": "worker_item_changed",
+                    "current_worker_item_version": worker_item.version,
+                },
+            )
+
+        plan_transitions = uow.plan_transitions.list_for_root(
+            payload.root_task_id,
+            envelope.workspace_id,
+        )
+        if any(
+            getattr(item.status, "value", item.status) == "converging"
+            for item in plan_transitions
+        ):
+            raise HandoffCommandError(
+                "handoff_plan_transition_active",
+                "root plan transition is active",
+            )
+        active_handoff = uow.handoff_transitions.get_active_for_worker_item(
+            payload.worker_item_id,
+            envelope.workspace_id,
+            for_update=True,
+        )
+        if active_handoff is not None:
+            raise HandoffCommandError(
+                "handoff_already_active",
+                "worker item already has an active handoff",
+                details={"transition_id": str(active_handoff.id)},
+            )
+
+        reconciler = HandoffProposalReconciler(
+            lambda: uow,
+            candidate_service=self._candidate_service,
+            runtime_resolver=self._runtime_resolver,
+        )
+        proposal = reconciler.reconcile_in_uow(
+            uow,
+            proposal_id=proposal.id,
+            workspace_id=envelope.workspace_id,
+            now=self._clock(),
+        )
+        if proposal.status is not HandoffProposalStatus.PREPARED:
+            raise HandoffCommandError(
+                "handoff_proposal_stale",
+                "handoff proposal is stale after reconciliation",
+                details={
+                    "status": proposal.status.value,
+                    "reason": proposal.stale_reason,
+                },
+            )
+        _assert_confirm_base(proposal, confirm)
+
+        now = self._clock()
+        proposal.mark_confirmed(now=now)
+        uow.handoff_proposals.save_status(proposal, proposal.version - 1)
+        transition = HandoffTransition.create(
+            id=uuid4(),
+            proposal=proposal,
+            confirmed_by_type=envelope.actor_type,
+            confirmed_by_id=envelope.actor_id,
+            confirmed_at=now,
+        )
+        uow.handoff_transitions.add(transition)
+        event = _handoff_transition_event(
+            transition,
+            envelope,
+            source_worker_id=payload.source_worker_id,
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=transition.id,
+            aggregate_version=transition.version,
+            event_ids=(event.id,),
+            data={
+                "proposal": proposal.to_mapping(),
+                "transition": _transition_mapping(transition),
+            },
+        )
+
 
 def _prepare_payload(
     payload: Mapping[str, object],
@@ -405,6 +571,145 @@ def _prepare_payload(
         "handoff_instruction": instruction,
         "input_plan": dict(input_plan),
         "proposal_ttl_seconds": ttl,
+    }
+
+
+def _confirm_payload(payload: Mapping[str, object]) -> dict[str, Any]:
+    _require_exact_keys(payload, _CONFIRM_KEYS)
+    proposal_id = _parse_uuid(payload.get("proposal_id"), "proposal_id")
+    proposal_version = _required_positive_int(
+        payload, "expected_proposal_version"
+    )
+    proposal_hash = payload.get("expected_proposal_hash")
+    if (
+        not isinstance(proposal_hash, str)
+        or len(proposal_hash) != 64
+        or proposal_hash != proposal_hash.lower()
+        or any(character not in "0123456789abcdef" for character in proposal_hash)
+    ):
+        raise HandoffCommandError(
+            "validation_error", "expected_proposal_hash must be a SHA-256 hash"
+        )
+    worker_item_version = _required_positive_int(
+        payload, "expected_worker_item_version"
+    )
+    return {
+        "proposal_id": proposal_id,
+        "expected_proposal_version": proposal_version,
+        "expected_proposal_hash": proposal_hash,
+        "expected_worker_item_version": worker_item_version,
+    }
+
+
+def _required_positive_int(payload: Mapping[str, object], name: str) -> int:
+    value = payload.get(name)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise HandoffCommandError("validation_error", f"{name} must be positive")
+    return value
+
+
+def _assert_confirm_base(
+    proposal: HandoffProposal, confirm: Mapping[str, object]
+) -> None:
+    if proposal.version != confirm["expected_proposal_version"]:
+        raise HandoffCommandError(
+            "handoff_proposal_stale",
+            "handoff proposal version is stale",
+            details={
+                "expected_proposal_version": confirm["expected_proposal_version"],
+                "current_proposal_version": proposal.version,
+            },
+        )
+    if proposal.proposal_hash != confirm["expected_proposal_hash"]:
+        raise HandoffCommandError(
+            "handoff_proposal_stale",
+            "handoff proposal hash is stale",
+            details={
+                "expected_proposal_hash": confirm["expected_proposal_hash"],
+                "current_proposal_hash": proposal.proposal_hash,
+            },
+        )
+
+
+def _confirm_head_matches(head: Any, payload: HandoffProposalPayload) -> bool:
+    return (
+        getattr(head, "active_snapshot_id", None) == payload.observed_plan_snapshot_id
+        and getattr(head, "active_generation", None) == payload.observed_plan_generation
+        and getattr(head, "version", None) == payload.observed_plan_head_version
+    )
+
+
+def _lock_confirm_tasks(
+    uow: ControlPlaneUnitOfWork,
+    payload: HandoffProposalPayload,
+    workspace_id: UUID,
+) -> None:
+    task_ids = tuple(sorted({payload.root_task_id, payload.subtask_id}, key=str))
+    for task_id in task_ids:
+        if uow.tasks.get(task_id, workspace_id, for_update=True) is None:
+            raise HandoffCommandError(
+                "handoff_proposal_stale",
+                "handoff proposal references a missing task",
+                details={"task_id": str(task_id)},
+            )
+
+
+def _handoff_transition_event(
+    transition: HandoffTransition,
+    envelope: CommandEnvelope,
+    *,
+    source_worker_id: UUID,
+) -> EventData:
+    return EventData(
+        id=uuid4(),
+        workspace_id=transition.workspace_id,
+        aggregate_type="handoff_transition",
+        aggregate_id=transition.id,
+        aggregate_version=transition.version,
+        event_type="HandoffConfirmed",
+        payload={
+            "handoff_transition_id": str(transition.id),
+            "proposal_id": str(transition.proposal_id),
+            "worker_item_id": str(transition.worker_item_id),
+            "source_execution_id": str(transition.source_execution_id),
+            "source_session_id": str(transition.source_session_id),
+            "source_worker_id": str(source_worker_id),
+            "target_worker_id": str(transition.target_worker_id),
+            "phase": transition.phase.value,
+            "status": transition.status.value,
+            "writer_state": transition.writer_state.value,
+            "source_input_cutoff_sequence": transition.source_input_cutoff_sequence,
+            "confirmed_source_channel": transition.confirmed_source_channel.value,
+        },
+        actor_type=envelope.actor_type,
+        actor_id=envelope.actor_id,
+        causation_id=envelope.id,
+        correlation_id=envelope.correlation_id,
+    )
+
+
+def _transition_mapping(transition: HandoffTransition) -> dict[str, object]:
+    return {
+        "id": str(transition.id),
+        "workspace_id": str(transition.workspace_id),
+        "worker_item_id": str(transition.worker_item_id),
+        "proposal_id": str(transition.proposal_id),
+        "source_execution_id": str(transition.source_execution_id),
+        "source_session_id": str(transition.source_session_id),
+        "target_worker_id": str(transition.target_worker_id),
+        "target_execution_id": (
+            str(transition.target_execution_id)
+            if transition.target_execution_id is not None
+            else None
+        ),
+        "status": transition.status.value,
+        "phase": transition.phase.value,
+        "writer_state": transition.writer_state.value,
+        "source_input_cutoff_sequence": transition.source_input_cutoff_sequence,
+        "target_context_version": transition.target_context_version,
+        "confirmed_source_channel": transition.confirmed_source_channel.value,
+        "confirmed_at": transition.confirmed_at.isoformat(),
+        "version": transition.version,
     }
 
 

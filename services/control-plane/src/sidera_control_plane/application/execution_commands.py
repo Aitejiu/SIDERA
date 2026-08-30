@@ -4,6 +4,10 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    require_handoff_operation,
+)
 from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGate,
     PlanTransitionGateOperation,
@@ -239,6 +243,12 @@ class ExecutionCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         execution = _get_target_execution(uow, envelope, for_update=True)
+        _require_handoff_operation(
+            uow,
+            execution.worker_item_id,
+            envelope.workspace_id,
+            HandoffGateOperation.ORDINARY_STOP,
+        )
         if execution.active_lease_id is None:
             raise InvalidTransition("stopping an execution requires an active lease")
         session = uow.sessions.get_active_for_execution(execution.id, for_update=True)
@@ -281,6 +291,12 @@ class ExecutionCommandHandler:
         )
         if execution is None:
             raise NotFound("source execution not found")
+        _require_handoff_operation(
+            uow,
+            execution.worker_item_id,
+            envelope.workspace_id,
+            HandoffGateOperation.CONTINUATION,
+        )
         if execution.status not in TERMINAL_EXECUTION_STATUSES:
             raise InvalidTransition("source execution is not terminal")
         if execution.active_lease_id is not None:
@@ -366,6 +382,12 @@ class ExecutionCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         source = _get_target_execution(uow, envelope, for_update=True)
+        _require_handoff_operation(
+            uow,
+            source.worker_item_id,
+            envelope.workspace_id,
+            HandoffGateOperation.NORMAL_SCHEDULE,
+        )
         if source.status not in {ExecutionStatus.FAILED, ExecutionStatus.LOST}:
             raise InvalidTransition("only failed or lost executions can be retried")
         if source.attempt >= source.max_attempts:
@@ -443,6 +465,12 @@ class ExecutionCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         execution = _get_target_execution(uow, envelope, for_update=True)
+        _require_handoff_operation(
+            uow,
+            execution.worker_item_id,
+            envelope.workspace_id,
+            HandoffGateOperation.ORDINARY_STOP,
+        )
         task = uow.tasks.get(execution.task_id, envelope.workspace_id)
         if task is None:
             raise NotFound("task not found")
@@ -897,6 +925,18 @@ class ExecutionInputCommandHandler:
             return self._send(uow, envelope)
         session = self._load_session(uow, envelope)
         item = self._load_input(uow, envelope, session.id)
+        execution_repository = getattr(uow, "executions", None)
+        if execution_repository is not None:
+            source_execution = execution_repository.get(
+                session.execution_id, envelope.workspace_id, for_update=True
+            )
+            if source_execution is not None:
+                _require_handoff_operation(
+                    uow,
+                    source_execution.worker_item_id,
+                    envelope.workspace_id,
+                    HandoffGateOperation.USER_INPUT,
+                )
         previous_version = item.version
         if envelope.command_type == "UpdatePendingExecutionInput":
             item.update_text(_required_str(envelope.payload, "text"))
@@ -1000,6 +1040,12 @@ class ExecutionInputCommandHandler:
             raise InvalidTransition("WorkerItem is not active")
         if not worker_item.context_is_synchronized:
             raise InvalidTransition("WorkerItem context is not acknowledged")
+        _require_handoff_operation(
+            uow,
+            worker_item.id,
+            envelope.workspace_id,
+            HandoffGateOperation.USER_INPUT,
+        )
 
         client_key = _required_str(envelope.payload, "client_idempotency_key")
         text = _required_str(envelope.payload, "text")
@@ -1119,6 +1165,15 @@ def _validate_execution_worker_item(
     ) is None:
         raise NotFound("worker item not found")
 
+    # Legacy executions may not have a materialized placement, but an active
+    # handoff still owns the WorkerItem and must fence new scheduling.
+    _require_handoff_operation(
+        uow,
+        worker_item_id,
+        envelope.workspace_id,
+        HandoffGateOperation.NORMAL_SCHEDULE,
+    )
+
     snapshot = uow.plans.get_current_for_task(task_id, envelope.workspace_id)
     if snapshot is None or snapshot.schema_version != 2:
         return worker_item_id
@@ -1191,6 +1246,22 @@ def _require_worker_item_transition_gate(
         raise InvalidTransition(
             f"execution mutation is blocked by {result.reason}"
         )
+
+
+def _require_handoff_operation(
+    uow: ControlPlaneUnitOfWork,
+    worker_item_id: UUID | None,
+    workspace_id: UUID,
+    operation: HandoffGateOperation,
+) -> None:
+    if worker_item_id is None:
+        return
+    require_handoff_operation(
+        uow,
+        worker_item_id=worker_item_id,
+        workspace_id=workspace_id,
+        operation=operation,
+    )
 
 
 def _get_target_session(

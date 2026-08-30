@@ -4,8 +4,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, cast
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.handoff_gate import HandoffInProgress
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_item_materializer import (
     WorkerItemMaterializer,
@@ -543,6 +545,21 @@ class RevisionMaterializer:
                     "request_id": str(active_revision.id),
                 },
             )
+        handoff_transitions = getattr(uow, "handoff_transitions", None)
+        get_active_handoffs = getattr(
+            handoff_transitions, "get_active_for_worker_items", None
+        )
+        if callable(get_active_handoffs):
+            active_handoffs = cast(
+                tuple[Any, ...],
+                get_active_handoffs(
+                    tuple(sorted(set(worker_ids), key=str)),
+                    workspace_id,
+                    for_update=True,
+                ),
+            )
+            if active_handoffs:
+                raise HandoffInProgress(active_handoffs[0])
         for worker_id in worker_ids:
             transition = uow.worker_transitions.get_active_for_worker_item(
                 worker_id,

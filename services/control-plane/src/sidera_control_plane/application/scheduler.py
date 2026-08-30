@@ -11,6 +11,10 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    HandoffOperationGate,
+)
 from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGate,
     PlanTransitionGateOperation,
@@ -145,6 +149,38 @@ class Scheduler:
                 execution = claimed[0]
                 execution_id = execution.id
                 if execution.worker_item_id is not None:
+                    handoff_gate = HandoffOperationGate(uow).evaluate(
+                        worker_item_id=execution.worker_item_id,
+                        workspace_id=execution.workspace_id,
+                        operation=HandoffGateOperation.NORMAL_SCHEDULE,
+                    )
+                    if not handoff_gate.allowed:
+                        return self._commit_deferred(
+                            uow=uow,
+                            execution=execution,
+                            issue=SchedulingIssue(
+                                reason_code=SchedulingBlockReason.PLAN_TRANSITION_BLOCKED,
+                                reason_details={
+                                    "handoff_blocking_code": handoff_gate.blocking_code,
+                                    "handoff_transition_id": (
+                                        str(handoff_gate.transition_id)
+                                        if handoff_gate.transition_id is not None
+                                        else None
+                                    ),
+                                    "handoff_phase": (
+                                        handoff_gate.phase.value
+                                        if handoff_gate.phase is not None
+                                        else None
+                                    ),
+                                },
+                                requires_operator=(
+                                    handoff_gate.blocking_code
+                                    == "handoff_gate_unavailable"
+                                ),
+                            ),
+                            now=now,
+                            execution_id=execution_id,
+                        )
                     transition_gate = PlanTransitionGate(uow).evaluate(
                         worker_item_id=execution.worker_item_id,
                         workspace_id=execution.workspace_id,

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.handoff_gate import HandoffInProgress
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
@@ -54,6 +55,24 @@ from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 pytestmark = pytest.mark.integration
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
+
+
+def test_handoff_plan_blocker_keeps_the_stable_error_code() -> None:
+    transition = type(
+        "Transition",
+        (),
+        {
+            "id": uuid4(),
+            "status": "running",
+            "phase": "checkpoint_source",
+            "writer_state": "source_active",
+            "target_execution_id": None,
+        },
+    )()
+
+    error = HandoffInProgress(transition)
+
+    assert error.code == "handoff_in_progress"
 
 
 @pytest.fixture

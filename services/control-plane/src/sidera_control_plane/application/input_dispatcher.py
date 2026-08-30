@@ -4,6 +4,10 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    HandoffOperationGate,
+)
 from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGate,
     PlanTransitionGateOperation,
@@ -36,6 +40,8 @@ _SAFE_BOUNDARY_FAILURE_CODES = frozenset(
         "safe_boundary_unavailable",
         "worker_transition_fence",
         "worker_transition_in_flight",
+        "handoff_in_progress",
+        "handoff_gate_unavailable",
     }
 )
 
@@ -106,6 +112,13 @@ class InputDispatcher:
                 worker_item_id = getattr(execution, "worker_item_id", None)
                 if worker_item_id is None:
                     return None
+                handoff_gate = HandoffOperationGate(uow).evaluate(
+                    worker_item_id=worker_item_id,
+                    workspace_id=item.workspace_id,
+                    operation=HandoffGateOperation.USER_INPUT,
+                )
+                if not handoff_gate.allowed:
+                    return handoff_gate.blocking_code
                 gate = PlanTransitionGate(uow).evaluate(
                     worker_item_id=worker_item_id,
                     workspace_id=item.workspace_id,
