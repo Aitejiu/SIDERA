@@ -20,6 +20,11 @@ from sidera_control_plane.application.ports import (
     ExecutionRepositoryPort,
     ExecutionRequestRepositoryPort,
     GatewayOperationRepositoryPort,
+    HandoffContextBundleRepositoryPort,
+    HandoffProposalRepositoryPort,
+    HandoffRecoveryDecisionRepositoryPort,
+    HandoffTransitionRepositoryPort,
+    HandoffWorkspaceTransferRepositoryPort,
     KnowledgeCandidateSubmissionRepositoryPort,
     LeaseStorePort,
     ModuleRepositoryPort,
@@ -67,6 +72,13 @@ from sidera_control_plane.persistence.gateway_repository import (
     ExecutionEventRepository,
     ExecutionInputRepository,
     GatewayOperationRepository,
+)
+from sidera_control_plane.persistence.handoff_repository import (
+    HandoffContextBundleRepository,
+    HandoffProposalRepository,
+    HandoffRecoveryDecisionRepository,
+    HandoffTransitionRepository,
+    HandoffWorkspaceTransferRepository,
 )
 from sidera_control_plane.persistence.knowledge_candidate_submission_repository import (
     KnowledgeCandidateSubmissionRepository,
@@ -129,6 +141,12 @@ class SqlAlchemyUnitOfWork:
     scheduling_blocks: SchedulingBlockRepositoryPort
     executions: ExecutionRepositoryPort
     execution_requests: ExecutionRequestRepositoryPort
+    handoff_proposals: HandoffProposalRepositoryPort
+    handoff_transitions: HandoffTransitionRepositoryPort
+    handoff_context_bundles: HandoffContextBundleRepositoryPort
+    handoff_recovery_decisions: HandoffRecoveryDecisionRepositoryPort
+    handoff_workspace_transfers: HandoffWorkspaceTransferRepositoryPort
+    workspace_transfers: HandoffWorkspaceTransferRepositoryPort
     leases: LeaseStorePort
     planning_profiles: PlanningProfileRepositoryPort
     planning_requests: PlanningRequestRepositoryPort
@@ -181,6 +199,16 @@ class SqlAlchemyUnitOfWork:
         self.scheduling_blocks = SqlAlchemySchedulingBlockRepository(self.session)
         self.executions = ExecutionRepository(self.session)
         self.execution_requests = ExecutionRequestRepository(self.session)
+        self.handoff_proposals = HandoffProposalRepository(self.session)
+        self.handoff_transitions = HandoffTransitionRepository(self.session)
+        self.handoff_context_bundles = HandoffContextBundleRepository(self.session)
+        self.handoff_recovery_decisions = HandoffRecoveryDecisionRepository(
+            self.session
+        )
+        self.handoff_workspace_transfers = HandoffWorkspaceTransferRepository(
+            self.session
+        )
+        self.workspace_transfers = self.handoff_workspace_transfers
         self.leases = LeaseStore(self.session)
         self.planning_profiles = PlanningProfileRepository(self.session)
         self.planning_requests = PlanningRequestRepository(self.session)

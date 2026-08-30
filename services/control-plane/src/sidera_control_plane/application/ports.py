@@ -59,9 +59,16 @@ from sidera_control_plane.domain.gateway import (
 )
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
+    HandoffContextBundle,
     HandoffOperationInspection,
     HandoffWorkspaceInspection,
     HandoffWorkspaceTargetSpec,
+    HandoffWorkspaceTransfer,
+)
+from sidera_control_plane.domain.handoff_recovery import HandoffRecoveryDecision
+from sidera_control_plane.domain.handoffs import (
+    HandoffProposal,
+    HandoffTransition,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
@@ -921,6 +928,153 @@ class ExecutionRequestRepositoryPort(Protocol):
         raise NotImplementedError
 
 
+class HandoffProposalRepositoryPort(Protocol):
+    def get(
+        self, proposal_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> HandoffProposal | None:
+        """Load one proposal in one workspace."""
+        raise NotImplementedError
+
+    def find_prepared_for_worker_item(
+        self,
+        worker_item_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> HandoffProposal | None:
+        """Load the sole prepared proposal."""
+        raise NotImplementedError
+
+    def add(self, proposal: HandoffProposal) -> None:
+        """Insert one proposal."""
+        raise NotImplementedError
+
+    def save_status(self, proposal: HandoffProposal, previous_version: int) -> None:
+        """Persist lifecycle fields only using CAS."""
+        raise NotImplementedError
+
+
+class HandoffTransitionRepositoryPort(Protocol):
+    def get(
+        self, transition_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> HandoffTransition | None:
+        """Load one transition."""
+        raise NotImplementedError
+
+    def get_active_for_worker_item(
+        self,
+        worker_item_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> HandoffTransition | None:
+        """Load the active owner for one WorkerItem."""
+        raise NotImplementedError
+
+    def get_active_for_worker_items(
+        self,
+        worker_item_ids: tuple[UUID, ...],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[HandoffTransition, ...]:
+        """Load active owners for sorted WorkerItem IDs."""
+        raise NotImplementedError
+
+    def claim_next(
+        self, *, owner_id: str, now: datetime, limit: int
+    ) -> tuple[HandoffTransition, ...]:
+        """Claim due transitions with SKIP LOCKED."""
+        raise NotImplementedError
+
+    def add(self, transition: HandoffTransition) -> None:
+        """Insert one transition."""
+        raise NotImplementedError
+
+    def save(self, transition: HandoffTransition, previous_version: int) -> None:
+        """Persist mutable coordinator fields using CAS."""
+        raise NotImplementedError
+
+
+class HandoffContextBundleRepositoryPort(Protocol):
+    def get(
+        self, bundle_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> HandoffContextBundle | None:
+        raise NotImplementedError
+
+    def get_by_attempt(
+        self,
+        transition_id: UUID,
+        logical_attempt: int,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> HandoffContextBundle | None:
+        raise NotImplementedError
+
+    def add_append_only(self, bundle: HandoffContextBundle) -> None:
+        raise NotImplementedError
+
+    def list_for_transition(
+        self, transition_id: UUID, workspace_id: UUID
+    ) -> tuple[HandoffContextBundle, ...]:
+        raise NotImplementedError
+
+
+class HandoffRecoveryDecisionRepositoryPort(Protocol):
+    def get(
+        self, decision_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> HandoffRecoveryDecision | None:
+        raise NotImplementedError
+
+    def add_append_only(
+        self, decision: HandoffRecoveryDecision, workspace_id: UUID
+    ) -> None:
+        raise NotImplementedError
+
+    def list_for_transition(
+        self, transition_id: UUID, workspace_id: UUID
+    ) -> tuple[HandoffRecoveryDecision, ...]:
+        raise NotImplementedError
+
+
+class HandoffWorkspaceTransferRepositoryPort(Protocol):
+    def get(
+        self, transfer_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> HandoffWorkspaceTransfer | None:
+        raise NotImplementedError
+
+    def get_by_attempt(
+        self,
+        transition_id: UUID,
+        logical_attempt: int,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> HandoffWorkspaceTransfer | None:
+        raise NotImplementedError
+
+    def get_by_operation(
+        self, operation_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> HandoffWorkspaceTransfer | None:
+        raise NotImplementedError
+
+    def add_append_only(
+        self, transfer: HandoffWorkspaceTransfer, workspace_id: UUID
+    ) -> None:
+        raise NotImplementedError
+
+    def list_for_transition(
+        self, transition_id: UUID, workspace_id: UUID
+    ) -> tuple[HandoffWorkspaceTransfer, ...]:
+        raise NotImplementedError
+
+
+# Keep the shorter name available to application code that treats the table as
+# a workspace-transfer aggregate rather than an adapter handoff detail.
+WorkspaceTransferRepositoryPort = HandoffWorkspaceTransferRepositoryPort
+
+
 class AttentionAcknowledgementRepositoryPort(Protocol):
     def get_current_source(
         self, root_task_id: UUID, workspace_id: UUID, attention_key: str
@@ -1581,6 +1735,12 @@ class ControlPlaneUnitOfWork(Protocol):
     worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort
     execution_requests: ExecutionRequestRepositoryPort
+    handoff_proposals: HandoffProposalRepositoryPort
+    handoff_transitions: HandoffTransitionRepositoryPort
+    handoff_context_bundles: HandoffContextBundleRepositoryPort
+    handoff_recovery_decisions: HandoffRecoveryDecisionRepositoryPort
+    handoff_workspace_transfers: HandoffWorkspaceTransferRepositoryPort
+    workspace_transfers: HandoffWorkspaceTransferRepositoryPort
     leases: LeaseStorePort
     planning_profiles: PlanningProfileRepositoryPort
     planning_requests: PlanningRequestRepositoryPort

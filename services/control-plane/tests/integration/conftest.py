@@ -26,7 +26,11 @@ from sidera_control_plane.persistence.models import (
     ExecutionRequestModel,
     ExecutionSessionModel,
     ExecutionWorkspaceModel,
+    ExecutionWorkspaceTransferModel,
     GatewayOperationModel,
+    HandoffContextBundleModel,
+    HandoffProposalModel,
+    HandoffTransitionModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
     OutboxMessageModel,
@@ -146,8 +150,21 @@ def _clear_database(database: Database) -> None:
                 source_execution_id=None,
                 source_session_id=None,
                 worker_item_id=None,
+                handoff_transition_id=None,
             )
         )
+        session.execute(update(ExecutionRequestModel).values(handoff_transition_id=None))
+        session.execute(
+            update(ExecutionInputModel).values(
+                source_input_id=None,
+                handoff_transition_id=None,
+            )
+        )
+        session.execute(delete(ExecutionWorkspaceTransferModel))
+        session.execute(delete(HandoffContextBundleModel))
+        session.execute(text("TRUNCATE TABLE handoff_recovery_decisions"))
+        session.execute(delete(HandoffTransitionModel))
+        session.execute(delete(HandoffProposalModel))
         for model in (
             ProjectionChangeModel,
             AttentionAcknowledgementModel,

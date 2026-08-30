@@ -153,6 +153,17 @@ def test_unit_of_work_exposes_worker_item_repository_on_shared_session(
         assert uow.worker_items is not None
 
 
+def test_unit_of_work_exposes_handoff_repositories_on_shared_session(
+    uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+) -> None:
+    with uow_factory() as uow:
+        assert uow.handoff_proposals is not None
+        assert uow.handoff_transitions is not None
+        assert uow.handoff_context_bundles is not None
+        assert uow.handoff_recovery_decisions is not None
+        assert uow.handoff_workspace_transfers is not None
+
+
 class MutateAndRejectHandler:
     command_types = frozenset({"MutateAndRejectTask"})
 
