@@ -64,6 +64,8 @@ from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
     Execution,
     ExecutionSession,
+    ExecutionSessionStatus,
+    ExecutionStatus,
 )
 from sidera_control_plane.domain.gateway import (
     AdapterSessionHandle,
@@ -75,15 +77,28 @@ from sidera_control_plane.domain.gateway import (
     RuntimeModuleOperation,
     context_patch_operation_id,
     gateway_operation_id,
+    handoff_step_operation_id,
     runtime_module_operation_allowed,
+)
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffCheckpointEvidence,
+    HandoffOperationInspection,
+    HandoffStopEvidence,
+)
+from sidera_control_plane.domain.handoffs import (
+    HandoffPhase,
+    HandoffTransition,
+    HandoffTransitionStatus,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     ExecutionBinding,
+    HandoffCheckpointMode,
     ModuleDefinition,
     ModuleInstance,
+    StopCapability,
 )
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
@@ -94,6 +109,7 @@ from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     RepositoryCheckoutSpec,
     WorkspaceLifecycle,
+    workspace_manifest_digest,
 )
 
 ASSIGNMENT_TOPIC = "execution.ExecutionLeased"
@@ -142,6 +158,10 @@ class GatewayMessageError(GatewayError):
 
 class GatewayRecoveryRequired(GatewayError):
     """A prior external side effect has no safe in-process retry path."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ExecutionSpecFactory(Protocol):
@@ -197,6 +217,16 @@ class _AssignmentContext:
     workspace_definition: ModuleDefinition
     workspace_instance: ModuleInstance
     causation_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _HandoffSourceContext:
+    transition: HandoffTransition
+    assignment: _AssignmentContext
+    session: ExecutionSession
+    manifest: ExecutionWorkspaceManifest
+    package: ContextPackageManifestV1
+    acknowledgement: ContextAcknowledgement
 
 
 @dataclass(frozen=True, slots=True)
@@ -748,6 +778,780 @@ class WorkerGateway:
             accepted_sequence=delivery.accepted_sequence,
         )
 
+    def capture_handoff_source(
+        self,
+        *,
+        workspace_id: UUID,
+        transition_id: UUID,
+        expected_transition_version: int,
+    ) -> HandoffCheckpointEvidence:
+        """Capture and persist one exact quiescent source checkpoint."""
+
+        operation_id: UUID | None = None
+        source: _HandoffSourceContext | None = None
+        handle: AdapterSessionHandle | None = None
+        recovery_required = False
+        with self._uow_factory() as uow:
+            transition = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_transition_version,
+                operation=HandoffGateOperation.COORDINATOR_CHECKPOINT_SOURCE,
+                phase=HandoffPhase.CHECKPOINT_SOURCE,
+            )
+            existing = _checkpoint_from_transition(transition)
+            if existing is not None:
+                _assert_persisted_checkpoint_identity(transition, existing)
+                return existing
+            operation_id = handoff_step_operation_id(
+                transition.id,
+                HandoffPhase.CHECKPOINT_SOURCE,
+                logical_attempt=transition.logical_attempt,
+                action="checkpoint",
+            )
+            source = self._load_handoff_source_context_in_uow(
+                uow,
+                transition=transition,
+                workspace_id=workspace_id,
+            )
+            operation_state = self._begin_operation(
+                uow,
+                source.assignment,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+                session_id=source.session.id,
+            )
+            if operation_state.completed or operation_state.recovery_required:
+                recovery_required = True
+            else:
+                handle = _session_handle(source.session)
+
+        assert source is not None
+        assert operation_id is not None
+        adapter = self._adapter(
+            source.assignment.adapter_definition,
+            source.assignment.adapter_instance,
+            operation=RuntimeModuleOperation.OBSERVE,
+        )
+        if recovery_required:
+            self._inspect_unknown_handoff_operation(
+                adapter=adapter,
+                handle=handle or _session_handle(source.session),
+                context=source.assignment,
+                operation_id=operation_id,
+                expected_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+            )
+            raise GatewayRecoveryRequired(
+                f"handoff checkpoint operation {operation_id} requires reconciliation"
+            )
+        if handle is None:
+            raise GatewayRecoveryRequired("handoff source session handle unavailable")
+        try:
+            evidence = adapter.capture_handoff_checkpoint(
+                handle,
+                transition_id=transition_id,
+                source_input_cutoff_sequence=source.transition.source_input_cutoff_sequence,
+                operation_id=operation_id,
+            )
+        except NotImplementedError as exc:
+            self._fail_operation(
+                operation_id, source.assignment, "handoff_checkpoint_unsupported"
+            )
+            raise GatewayMessageError(
+                "worker adapter does not support source checkpoints",
+                code="handoff_checkpoint_unsupported",
+            ) from exc
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            if "quiescent" in failure_code:
+                self._fail_operation(
+                    operation_id,
+                    source.assignment,
+                    "handoff_checkpoint_not_quiescent",
+                )
+                raise GatewayMessageError(
+                    "source checkpoint did not prove quiescence",
+                    code="handoff_checkpoint_not_quiescent",
+                ) from exc
+            self._mark_operation_unknown(operation_id, source.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                f"handoff checkpoint result is unknown: {failure_code}"
+            ) from exc
+        try:
+            self._validate_handoff_checkpoint(source, evidence, operation_id)
+        except GatewayMessageError as exc:
+            self._fail_operation(operation_id, source.assignment, exc.code or _failure_code(exc))
+            raise
+        try:
+            self._persist_handoff_checkpoint(source, evidence, operation_id)
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, source.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                "handoff checkpoint confirmation could not be persisted"
+            ) from exc
+        return evidence
+
+    def stop_handoff_source(
+        self,
+        *,
+        workspace_id: UUID,
+        transition_id: UUID,
+        expected_transition_version: int,
+    ) -> HandoffStopEvidence:
+        """Stop the exact source Session using canonical STOP_SESSION identity."""
+
+        operation_id: UUID | None = None
+        source: _HandoffSourceContext | None = None
+        handle: AdapterSessionHandle | None = None
+        recovery_required = False
+        with self._uow_factory() as uow:
+            transition = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_transition_version,
+                operation=HandoffGateOperation.COORDINATOR_STOP_SOURCE,
+                phase=HandoffPhase.STOP_SOURCE,
+            )
+            existing = _stop_from_transition(transition)
+            if existing is not None:
+                _assert_persisted_stop_identity(transition, existing)
+                return existing
+            if transition.source_checkpoint_sequence is None:
+                raise GatewayMessageError(
+                    "source stop requires an exact checkpoint",
+                    code="handoff_checkpoint_missing",
+                )
+            operation_id = gateway_operation_id(
+                transition.source_execution_id,
+                GatewayOperationType.STOP_SESSION,
+            )
+            source = self._load_handoff_source_context_in_uow(
+                uow,
+                transition=transition,
+                workspace_id=workspace_id,
+                require_active_source=True,
+            )
+            operation_state = self._begin_operation(
+                uow,
+                source.assignment,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.STOP_SESSION,
+                session_id=source.session.id,
+            )
+            if operation_state.completed or operation_state.recovery_required:
+                recovery_required = True
+            else:
+                handle = _session_handle(source.session)
+
+        assert source is not None
+        assert operation_id is not None
+        adapter = self._adapter(
+            source.assignment.adapter_definition,
+            source.assignment.adapter_instance,
+            operation=RuntimeModuleOperation.STOP,
+        )
+        if recovery_required:
+            self._inspect_unknown_handoff_operation(
+                adapter=adapter,
+                handle=handle or _session_handle(source.session),
+                context=source.assignment,
+                operation_id=operation_id,
+                expected_type=GatewayOperationType.STOP_SESSION,
+            )
+            raise GatewayRecoveryRequired(
+                f"handoff stop operation {operation_id} requires reconciliation"
+            )
+        if handle is None:
+            raise GatewayRecoveryRequired("handoff source session handle unavailable")
+        try:
+            delivery = adapter.stop_session(handle, operation_id=operation_id)
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, source.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                f"handoff stop result is unknown: {failure_code}"
+            ) from exc
+        try:
+            evidence = self._validate_handoff_stop(
+                source,
+                delivery,
+                operation_id,
+            )
+        except GatewayMessageError as exc:
+            if exc.code in {
+                "handoff_stop_session_mismatch",
+                "handoff_stop_sequence_mismatch",
+                "handoff_stop_sequence_missing",
+            }:
+                self._mark_operation_unknown(
+                    operation_id, source.assignment, exc.code or "handoff_stop_invalid"
+                )
+                raise GatewayRecoveryRequired(str(exc)) from exc
+            self._fail_operation(operation_id, source.assignment, exc.code or _failure_code(exc))
+            raise
+        try:
+            self._persist_handoff_stop(source, evidence, operation_id)
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, source.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                "handoff stop confirmation could not be persisted"
+            ) from exc
+        return evidence
+
+    def _load_handoff_transition_for_operation(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        workspace_id: UUID,
+        transition_id: UUID,
+        expected_transition_version: int,
+        operation: HandoffGateOperation,
+        phase: HandoffPhase,
+    ) -> HandoffTransition:
+        if expected_transition_version < 1:
+            raise GatewayMessageError(
+                "handoff transition version must be positive",
+                code="handoff_transition_version_mismatch",
+            )
+        transition = uow.handoff_transitions.get(
+            transition_id,
+            workspace_id,
+            for_update=True,
+        )
+        if transition is None:
+            raise GatewayMessageError(
+                "handoff transition was not found",
+                code="handoff_transition_not_found",
+            )
+        if transition.version != expected_transition_version:
+            raise GatewayMessageError(
+                "handoff transition version is stale",
+                code="handoff_transition_version_mismatch",
+            )
+        result = HandoffOperationGate(uow).evaluate(
+            worker_item_id=transition.worker_item_id,
+            workspace_id=workspace_id,
+            operation=operation,
+            transition_id=transition_id,
+        )
+        if not result.allowed:
+            raise GatewayMessageError(
+                "handoff coordinator operation is fenced",
+                code=result.blocking_code,
+            )
+        if transition.phase is not phase:
+            raise GatewayMessageError(
+                "handoff transition is at another phase",
+                code="handoff_phase_mismatch",
+            )
+        if transition.status not in {
+            HandoffTransitionStatus.PENDING,
+            HandoffTransitionStatus.RUNNING,
+        }:
+            raise GatewayMessageError(
+                "handoff transition is not executable",
+                code="handoff_transition_blocked",
+            )
+        return transition
+
+    def _load_handoff_source_context_in_uow(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        transition: HandoffTransition,
+        workspace_id: UUID,
+        require_active_source: bool = True,
+    ) -> _HandoffSourceContext:
+        execution = uow.executions.get(
+            transition.source_execution_id,
+            workspace_id,
+            for_update=True,
+        )
+        if execution is None:
+            raise GatewayMessageError(
+                "handoff source execution was not found",
+                code="handoff_source_execution_missing",
+            )
+        if execution.worker_item_id != transition.worker_item_id:
+            raise GatewayMessageError(
+                "handoff source execution does not match WorkerItem",
+                code="handoff_source_execution_mismatch",
+            )
+        if require_active_source and execution.status is not ExecutionStatus.RUNNING:
+            raise GatewayMessageError(
+                "handoff source execution is not running",
+                code="handoff_source_not_active",
+            )
+        lease_id = execution.active_lease_id
+        if lease_id is None:
+            raise GatewayMessageError(
+                "handoff source execution has no active lease",
+                code="handoff_source_lease_missing",
+            )
+        assignment = self._load_context_by_ids_in_uow(
+            uow,
+            workspace_id=workspace_id,
+            execution_id=execution.id,
+            lease_id=lease_id,
+            fencing_token=execution.last_fencing_token,
+            operation=RuntimeModuleOperation.OBSERVE,
+        )
+        session = uow.sessions.get_any(
+            transition.source_session_id,
+            workspace_id,
+            for_update=True,
+        )
+        if session is None or session.execution_id != execution.id:
+            raise GatewayMessageError(
+                "handoff source Session does not match execution",
+                code="handoff_source_session_mismatch",
+            )
+        if require_active_source and session.status is not ExecutionSessionStatus.ACTIVE:
+            raise GatewayMessageError(
+                "handoff source Session is not active",
+                code="handoff_source_not_active",
+            )
+        manifest = uow.workspaces.get_for_execution(
+            execution.id,
+            workspace_id,
+            for_update=True,
+        )
+        if manifest is None or manifest.id != transition.source_workspace_manifest_id:
+            raise GatewayMessageError(
+                "handoff source Workspace does not match transition",
+                code="handoff_source_workspace_mismatch",
+            )
+        if require_active_source and manifest.lifecycle is not WorkspaceLifecycle.ACTIVE:
+            raise GatewayMessageError(
+                "handoff source Workspace is not active",
+                code="handoff_source_workspace_not_active",
+            )
+        package_repository = getattr(uow, "context_packages", None)
+        if package_repository is None:
+            raise GatewayMessageError(
+                "handoff source ContextPackage repository is unavailable",
+                code="handoff_context_package_missing",
+            )
+        package = package_repository.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            execution.id,
+            workspace_id,
+            for_update=True,
+        )
+        if package is None:
+            raise GatewayMessageError(
+                "handoff source ContextPackage is missing",
+                code="handoff_context_package_missing",
+            )
+        if package.status is not ContextPackageStatus.ACTIVE:
+            raise GatewayMessageError(
+                "handoff source ContextPackage is not active",
+                code="handoff_context_package_stale",
+            )
+        if package.expires_at <= self._clock():
+            raise GatewayMessageError(
+                "handoff source ContextPackage is expired",
+                code="handoff_context_package_expired",
+            )
+        if (
+            package.workspace_id != workspace_id
+            or package.purpose is not ContextPurpose.EXECUTION
+            or package.consumer_type is not ContextConsumerType.WORKER
+            or package.consumer_id != execution.id
+            or package.worker_item_id != transition.worker_item_id
+            or package.context_version != transition.target_context_version
+        ):
+            raise GatewayMessageError(
+                "handoff source ContextPackage identity does not match",
+                code="handoff_context_package_mismatch",
+            )
+        acknowledgement = package_repository.get_ack(
+            package.package_id,
+            ContextConsumerType.WORKER,
+            execution.id,
+            workspace_id,
+            for_update=True,
+        )
+        if acknowledgement is None:
+            raise GatewayMessageError(
+                "handoff source ContextPackage acknowledgement is missing",
+                code="handoff_context_ack_missing",
+            )
+        if (
+            acknowledgement.package_hash != package.package_hash
+            or acknowledgement.consumer_type is not ContextConsumerType.WORKER
+            or acknowledgement.consumer_id != execution.id
+            or acknowledgement.context_version != package.context_version
+            or acknowledgement.adapter_module_id != assignment.binding.adapter_module_id
+            or acknowledgement.adapter_config_version
+            != assignment.binding.adapter_config_version
+        ):
+            raise GatewayMessageError(
+                "handoff source ContextPackage acknowledgement does not match",
+                code="handoff_context_ack_mismatch",
+            )
+        profile = assignment.binding.capability_snapshot
+        if (
+            profile.handoff_checkpoint_mode is HandoffCheckpointMode.UNSUPPORTED
+            or 1 not in profile.handoff_checkpoint_versions
+            or profile.stop is not StopCapability.EXACT_EXECUTION
+            or not profile.handoff_inspection
+        ):
+            raise GatewayMessageError(
+                "worker adapter does not support source handoff",
+                code="handoff_checkpoint_unsupported",
+            )
+        if session.last_sequence < transition.source_input_cutoff_sequence:
+            raise GatewayMessageError(
+                "source Session cursor is behind the handoff cutoff",
+                code="handoff_source_sequence_stale",
+            )
+        return _HandoffSourceContext(
+            transition=transition,
+            assignment=assignment,
+            session=session,
+            manifest=manifest,
+            package=package,
+            acknowledgement=acknowledgement,
+        )
+
+    @staticmethod
+    def _validate_handoff_checkpoint(
+        source: _HandoffSourceContext,
+        evidence: HandoffCheckpointEvidence,
+        operation_id: UUID,
+    ) -> None:
+        if not isinstance(evidence, HandoffCheckpointEvidence):
+            raise GatewayMessageError(
+                "worker adapter returned invalid checkpoint evidence",
+                code="handoff_checkpoint_evidence_invalid",
+            )
+        if evidence.operation_id != operation_id:
+            raise GatewayMessageError(
+                "checkpoint operation identity does not match",
+                code="handoff_checkpoint_operation_mismatch",
+            )
+        if evidence.transition_id != source.transition.id:
+            raise GatewayMessageError(
+                "checkpoint transition identity does not match",
+                code="handoff_checkpoint_transition_mismatch",
+            )
+        if evidence.source_session_id != source.session.id:
+            raise GatewayMessageError(
+                "checkpoint Session identity does not match",
+                code="handoff_checkpoint_session_mismatch",
+            )
+        if evidence.accepted_sequence < source.transition.source_input_cutoff_sequence:
+            raise GatewayMessageError(
+                "checkpoint sequence is behind the handoff cutoff",
+                code="handoff_checkpoint_sequence_stale",
+            )
+        if evidence.workspace_digest != workspace_manifest_digest(source.manifest):
+            raise GatewayMessageError(
+                "checkpoint workspace digest does not match source Workspace",
+                code="handoff_checkpoint_workspace_mismatch",
+            )
+        if (
+            evidence.context_package_id != source.package.package_id
+            or evidence.context_package_hash != source.package.package_hash
+            or evidence.context_version != source.package.context_version
+        ):
+            raise GatewayMessageError(
+                "checkpoint ContextPackage identity does not match",
+                code="handoff_checkpoint_context_mismatch",
+            )
+        if evidence.quiescent is not True:
+            raise GatewayMessageError(
+                "checkpoint did not prove quiescence",
+                code="handoff_checkpoint_not_quiescent",
+            )
+
+    def _persist_handoff_checkpoint(
+        self,
+        source: _HandoffSourceContext,
+        evidence: HandoffCheckpointEvidence,
+        operation_id: UUID,
+    ) -> None:
+        with self._uow_factory() as uow:
+            transition = uow.handoff_transitions.get(
+                source.transition.id,
+                source.transition.workspace_id,
+                for_update=True,
+            )
+            if transition is None:
+                raise GatewayRecoveryRequired("handoff transition disappeared")
+            existing = _checkpoint_from_transition(transition)
+            if existing is not None:
+                if existing != evidence:
+                    raise GatewayRecoveryRequired(
+                        "handoff checkpoint evidence conflicts with persisted evidence"
+                    )
+                self._succeed_operation(
+                    uow,
+                    operation_id,
+                    source.assignment,
+                    _checkpoint_result_ref(evidence),
+                    session_id=source.session.id,
+                )
+                return
+            if transition.phase is not HandoffPhase.CHECKPOINT_SOURCE:
+                raise GatewayRecoveryRequired("handoff checkpoint phase changed")
+            previous_version = transition.version
+            transition.record_checkpoint(
+                sequence=evidence.accepted_sequence,
+                facts=evidence.to_mapping(),
+            )
+            uow.handoff_transitions.save(transition, previous_version)
+            self._succeed_operation(
+                uow,
+                operation_id,
+                source.assignment,
+                _checkpoint_result_ref(evidence),
+                session_id=source.session.id,
+            )
+
+    def _validate_handoff_stop(
+        self,
+        source: _HandoffSourceContext,
+        delivery: DeliveryResult,
+        operation_id: UUID,
+    ) -> HandoffStopEvidence:
+        if not isinstance(delivery, DeliveryResult):
+            raise GatewayMessageError(
+                "worker adapter returned invalid stop result",
+                code="handoff_stop_unknown",
+            )
+        if delivery.operation_id != operation_id:
+            raise GatewayMessageError(
+                "stop operation identity does not match",
+                code="handoff_stop_operation_mismatch",
+            )
+        if delivery.outcome is DeliveryOutcome.UNKNOWN:
+            raise GatewayMessageError(
+                "source stop result is unknown",
+                code="handoff_stop_unknown",
+            )
+        if delivery.outcome is not DeliveryOutcome.DELIVERED:
+            raise GatewayMessageError(
+                "source stop was not delivered",
+                code=delivery.failure_code or "handoff_stop_failed",
+            )
+        if delivery.execution_session_id != source.session.id:
+            raise GatewayMessageError(
+                "stop result Session identity does not match",
+                code="handoff_stop_session_mismatch",
+            )
+        if delivery.accepted_sequence is None:
+            raise GatewayMessageError(
+                "stop result has no accepted sequence",
+                code="handoff_stop_sequence_missing",
+            )
+        if delivery.accepted_sequence != source.transition.source_checkpoint_sequence:
+            raise GatewayMessageError(
+                "stop sequence does not match checkpoint sequence",
+                code="handoff_stop_sequence_mismatch",
+            )
+        return HandoffStopEvidence(
+            operation_id=operation_id,
+            source_session_id=source.session.id,
+            accepted_sequence=delivery.accepted_sequence,
+            stopped=True,
+            produced_at=self._clock(),
+        )
+
+    def _persist_handoff_stop(
+        self,
+        source: _HandoffSourceContext,
+        evidence: HandoffStopEvidence,
+        operation_id: UUID,
+    ) -> None:
+        with self._uow_factory() as uow:
+            transition = uow.handoff_transitions.get(
+                source.transition.id,
+                source.transition.workspace_id,
+                for_update=True,
+            )
+            if transition is None:
+                raise GatewayRecoveryRequired("handoff transition disappeared")
+            existing = _stop_from_transition(transition)
+            if existing is not None:
+                if existing != evidence:
+                    raise GatewayRecoveryRequired(
+                        "handoff stop evidence conflicts with persisted evidence"
+                    )
+                self._succeed_operation(
+                    uow,
+                    operation_id,
+                    source.assignment,
+                    f"sequence:{evidence.accepted_sequence}",
+                    session_id=source.session.id,
+                )
+                return
+            if transition.phase is not HandoffPhase.STOP_SOURCE:
+                raise GatewayRecoveryRequired("handoff stop phase changed")
+            current_execution = uow.executions.get(
+                transition.source_execution_id,
+                transition.workspace_id,
+                for_update=True,
+            )
+            current_session = uow.sessions.get_any(
+                transition.source_session_id,
+                transition.workspace_id,
+                for_update=True,
+            )
+            if current_execution is None or current_session is None:
+                raise GatewayRecoveryRequired("handoff source runtime facts disappeared")
+            if current_session.execution_id != current_execution.id:
+                raise GatewayRecoveryRequired("handoff source Session identity changed")
+            if current_execution.active_lease_id is None:
+                raise GatewayRecoveryRequired("handoff source lease disappeared")
+            current_lease = uow.leases.get(
+                current_execution.active_lease_id,
+                transition.workspace_id,
+                for_update=True,
+            )
+            current_worker = uow.workers.get(
+                source.assignment.binding.worker_id,
+                transition.workspace_id,
+                for_update=True,
+            )
+            if current_lease is None or current_worker is None:
+                raise GatewayRecoveryRequired("handoff source ownership disappeared")
+            if current_session.status is not ExecutionSessionStatus.ACTIVE:
+                raise GatewayRecoveryRequired("handoff source Session is no longer active")
+            current_execution.assert_fence(
+                lease_id=current_execution.active_lease_id,
+                fencing_token=current_execution.last_fencing_token,
+            )
+            current_lease.assert_owner(
+                source.assignment.binding.worker_id,
+                current_execution.last_fencing_token,
+                self._clock(),
+            )
+            previous_execution_version = current_execution.version
+            previous_session_version = current_session.version
+            previous_lease_version = current_lease.version
+            previous_worker_version = current_worker.version
+            current_session.close(lost=False, now=self._clock())
+            current_lease.revoke(now=self._clock())
+            current_worker.release()
+            current_execution.cancel(now=self._clock())
+            previous_transition_version = transition.version
+            transition.record_stop(
+                sequence=evidence.accepted_sequence,
+                facts=evidence.to_mapping(),
+            )
+            uow.sessions.save(current_session, previous_session_version)
+            uow.leases.save(current_lease, previous_lease_version)
+            uow.workers.save(current_worker, previous_worker_version)
+            uow.executions.save(current_execution, previous_execution_version)
+            uow.handoff_transitions.save(transition, previous_transition_version)
+            self._succeed_operation(
+                uow,
+                operation_id,
+                source.assignment,
+                f"sequence:{evidence.accepted_sequence}",
+                session_id=current_session.id,
+            )
+            command_id = operation_id
+            for event in (
+                _gateway_event(
+                    command_id,
+                    workspace_id=current_execution.workspace_id,
+                    aggregate_type="execution",
+                    aggregate_id=current_execution.id,
+                    aggregate_version=current_execution.version,
+                    event_type="ExecutionCanceledByHandoff",
+                    payload={
+                        "status": current_execution.status.value,
+                        "session_id": str(current_session.id),
+                        "transition_id": str(transition.id),
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=current_session.workspace_id,
+                    aggregate_type="execution_session",
+                    aggregate_id=current_session.id,
+                    aggregate_version=current_session.version,
+                    event_type="ExecutionSessionClosedByHandoff",
+                    payload={
+                        "status": current_session.status.value,
+                        "last_sequence": current_session.last_sequence,
+                        "transition_id": str(transition.id),
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=current_lease.workspace_id,
+                    aggregate_type="lease",
+                    aggregate_id=current_lease.id,
+                    aggregate_version=current_lease.version,
+                    event_type="LeaseReleasedByHandoff",
+                    payload={
+                        "status": current_lease.status.value,
+                        "fencing_token": current_lease.fencing_token,
+                        "transition_id": str(transition.id),
+                    },
+                ),
+            ):
+                uow.events.append_with_outbox(event)
+
+    def _inspect_unknown_handoff_operation(
+        self,
+        *,
+        adapter: WorkerAdapter,
+        handle: AdapterSessionHandle,
+        context: _AssignmentContext,
+        operation_id: UUID,
+        expected_type: GatewayOperationType,
+    ) -> None:
+        try:
+            inspection = adapter.inspect_handoff_operation(
+                handle,
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            raise GatewayRecoveryRequired(
+                f"handoff operation inspection is unknown: {failure_code}",
+                code="handoff_operation_inspection_unknown",
+            ) from exc
+        if not isinstance(inspection, HandoffOperationInspection):
+            self._mark_operation_unknown(
+                operation_id, context, "handoff_inspection_invalid"
+            )
+            raise GatewayRecoveryRequired(
+                "handoff operation inspection returned an invalid result",
+                code="handoff_inspection_invalid",
+            )
+        if (
+            inspection.operation_id != operation_id
+            or inspection.operation_type is not expected_type
+            or inspection.session_id != handle.execution_session_id
+        ):
+            self._mark_operation_unknown(
+                operation_id, context, "handoff_inspection_identity_mismatch"
+            )
+            raise GatewayRecoveryRequired(
+                "handoff operation inspection identity does not match",
+                code="handoff_inspection_identity_mismatch",
+            )
+        self._mark_operation_unknown(
+            operation_id,
+            context,
+            f"handoff_inspection_{inspection.outcome.value}",
+        )
+        raise GatewayRecoveryRequired(
+            f"handoff operation {operation_id} requires reconciliation",
+            code="handoff_operation_requires_reconciliation",
+        )
+
     def _persist_stop_success(
         self,
         context: _AssignmentContext,
@@ -1268,97 +2072,114 @@ class WorkerGateway:
         causation_id: UUID | None = None,
     ) -> _AssignmentContext:
         with self._uow_factory() as uow:
-            execution = uow.executions.get(execution_id, workspace_id, for_update=True)
-            if execution is None:
-                raise GatewayMessageError("assigned execution was not found")
-            binding = uow.bindings.get_for_execution(
-                execution_id, workspace_id, for_update=True
-            )
-            if binding is None:
-                raise GatewayMessageError(
-                    "execution binding was not found", code="runtime_binding_missing"
-                )
-            lease = uow.leases.get(lease_id, workspace_id, for_update=True)
-            if lease is None:
-                raise GatewayMessageError("assignment lease was not found")
-            task = uow.tasks.get(execution.task_id, workspace_id)
-            if task is None:
-                raise GatewayMessageError("assigned task was not found")
-            if binding.lease_id != lease_id or binding.fencing_token != fencing_token:
-                raise GatewayMessageError(
-                    "assignment binding fence does not match event",
-                    code="runtime_binding_missing",
-                )
-            if binding.execution_id != execution_id:
-                raise GatewayMessageError(
-                    "assignment binding targets another execution",
-                    code="runtime_binding_missing",
-                )
-            if execution.assigned_worker_id != binding.worker_id:
-                raise GatewayMessageError(
-                    "execution worker does not match binding",
-                    code="runtime_binding_missing",
-                )
-            worker = uow.workers.get(binding.worker_id, workspace_id, for_update=True)
-            if worker is None:
-                raise GatewayMessageError(
-                    "bound worker was not found", code="runtime_binding_missing"
-                )
-            if execution.active_lease_id != lease_id:
-                raise GatewayMessageError("execution lease does not match event")
-            execution.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
-            lease.assert_owner(binding.worker_id, fencing_token, self._clock())
-            adapter_instance, adapter_definition = _load_module(
+            return self._load_context_by_ids_in_uow(
                 uow,
-                binding.adapter_module_id,
-                workspace_id,
-                expected_type="worker_adapter",
-            )
-            workspace_instance, workspace_definition = _load_module(
-                uow,
-                binding.workspace_module_id,
-                workspace_id,
-                expected_type="workspace_provider",
-            )
-            if adapter_instance.config_version != binding.adapter_config_version:
-                raise GatewayMessageError(
-                    "bound adapter config version does not match",
-                    code="runtime_binding_version_mismatch",
-                )
-            if workspace_instance.config_version != binding.workspace_config_version:
-                raise GatewayMessageError(
-                    "bound workspace config version does not match",
-                    code="runtime_binding_version_mismatch",
-                )
-            if binding.capability_snapshot != adapter_definition.capabilities:
-                raise GatewayMessageError(
-                    "binding capability snapshot is stale",
-                    code="runtime_capability_mismatch",
-                )
-            if adapter_definition.provider != worker.adapter_type:
-                raise GatewayMessageError(
-                    "bound adapter provider does not match worker adapter type",
-                    code="runtime_adapter_provider_mismatch",
-                )
-            if operation is not RuntimeModuleOperation.START:
-                _validate_module_operation(
-                    adapter_definition, adapter_instance, operation
-                )
-                _validate_module_operation(
-                    workspace_definition, workspace_instance, operation
-                )
-            return _AssignmentContext(
-                execution=execution,
-                task=task,
-                worker=worker,
-                lease=lease,
-                binding=binding,
-                adapter_definition=adapter_definition,
-                adapter_instance=adapter_instance,
-                workspace_definition=workspace_definition,
-                workspace_instance=workspace_instance,
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+                operation=operation,
                 causation_id=causation_id,
             )
+
+    def _load_context_by_ids_in_uow(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        lease_id: UUID,
+        fencing_token: int,
+        operation: RuntimeModuleOperation,
+        causation_id: UUID | None = None,
+    ) -> _AssignmentContext:
+        execution = uow.executions.get(execution_id, workspace_id, for_update=True)
+        if execution is None:
+            raise GatewayMessageError("assigned execution was not found")
+        binding = uow.bindings.get_for_execution(
+            execution_id, workspace_id, for_update=True
+        )
+        if binding is None:
+            raise GatewayMessageError(
+                "execution binding was not found", code="runtime_binding_missing"
+            )
+        lease = uow.leases.get(lease_id, workspace_id, for_update=True)
+        if lease is None:
+            raise GatewayMessageError("assignment lease was not found")
+        task = uow.tasks.get(execution.task_id, workspace_id)
+        if task is None:
+            raise GatewayMessageError("assigned task was not found")
+        if binding.lease_id != lease_id or binding.fencing_token != fencing_token:
+            raise GatewayMessageError(
+                "assignment binding fence does not match event",
+                code="runtime_binding_missing",
+            )
+        if binding.execution_id != execution_id:
+            raise GatewayMessageError(
+                "assignment binding targets another execution",
+                code="runtime_binding_missing",
+            )
+        if execution.assigned_worker_id != binding.worker_id:
+            raise GatewayMessageError(
+                "execution worker does not match binding",
+                code="runtime_binding_missing",
+            )
+        worker = uow.workers.get(binding.worker_id, workspace_id, for_update=True)
+        if worker is None:
+            raise GatewayMessageError(
+                "bound worker was not found", code="runtime_binding_missing"
+            )
+        if execution.active_lease_id != lease_id:
+            raise GatewayMessageError("execution lease does not match event")
+        execution.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
+        lease.assert_owner(binding.worker_id, fencing_token, self._clock())
+        adapter_instance, adapter_definition = _load_module(
+            uow,
+            binding.adapter_module_id,
+            workspace_id,
+            expected_type="worker_adapter",
+        )
+        workspace_instance, workspace_definition = _load_module(
+            uow,
+            binding.workspace_module_id,
+            workspace_id,
+            expected_type="workspace_provider",
+        )
+        if adapter_instance.config_version != binding.adapter_config_version:
+            raise GatewayMessageError(
+                "bound adapter config version does not match",
+                code="runtime_binding_version_mismatch",
+            )
+        if workspace_instance.config_version != binding.workspace_config_version:
+            raise GatewayMessageError(
+                "bound workspace config version does not match",
+                code="runtime_binding_version_mismatch",
+            )
+        if binding.capability_snapshot != adapter_definition.capabilities:
+            raise GatewayMessageError(
+                "binding capability snapshot is stale",
+                code="runtime_capability_mismatch",
+            )
+        if adapter_definition.provider != worker.adapter_type:
+            raise GatewayMessageError(
+                "bound adapter provider does not match worker adapter type",
+                code="runtime_adapter_provider_mismatch",
+            )
+        if operation is not RuntimeModuleOperation.START:
+            _validate_module_operation(adapter_definition, adapter_instance, operation)
+            _validate_module_operation(workspace_definition, workspace_instance, operation)
+        return _AssignmentContext(
+            execution=execution,
+            task=task,
+            worker=worker,
+            lease=lease,
+            binding=binding,
+            adapter_definition=adapter_definition,
+            adapter_instance=adapter_instance,
+            workspace_definition=workspace_definition,
+            workspace_instance=workspace_instance,
+            causation_id=causation_id,
+        )
 
     def sync_session(
         self,
@@ -2774,6 +3595,111 @@ def _optional_payload_uuid(
 
 def _operation_id(execution_id: UUID, operation_type: GatewayOperationType) -> UUID:
     return gateway_operation_id(execution_id, operation_type)
+
+
+def _checkpoint_result_ref(evidence: HandoffCheckpointEvidence) -> str:
+    return f"checkpoint:{evidence.accepted_sequence}:{evidence.workspace_digest}"
+
+
+def _checkpoint_from_transition(
+    transition: HandoffTransition,
+) -> HandoffCheckpointEvidence | None:
+    facts = transition.source_checkpoint_facts
+    if transition.source_checkpoint_sequence is None and facts is None:
+        return None
+    if transition.source_checkpoint_sequence is None or facts is None:
+        raise GatewayRecoveryRequired("handoff checkpoint facts are incomplete")
+    try:
+        evidence = HandoffCheckpointEvidence(
+            operation_id=UUID(str(facts["operation_id"])),
+            transition_id=UUID(str(facts["transition_id"])),
+            source_session_id=UUID(str(facts["source_session_id"])),
+            accepted_sequence=int(cast(int, facts["accepted_sequence"])),
+            workspace_digest=str(facts["workspace_digest"]),
+            context_package_id=UUID(str(facts["context_package_id"])),
+            context_package_hash=str(facts["context_package_hash"]),
+            context_version=int(cast(int, facts["context_version"])),
+            progress_summary_ref=str(facts["progress_summary_ref"]),
+            artifact_refs=_fact_refs(facts.get("artifact_refs")),
+            evidence_refs=_fact_refs(facts.get("evidence_refs")),
+            quiescent=facts["quiescent"],  # type: ignore[arg-type]
+            produced_at=datetime.fromisoformat(str(facts["produced_at"])),
+            schema_version=int(cast(int, facts.get("schema_version", 1))),
+        )
+    except (DomainError, KeyError, TypeError, ValueError) as exc:
+        raise GatewayRecoveryRequired("persisted handoff checkpoint facts are invalid") from exc
+    if evidence.accepted_sequence != transition.source_checkpoint_sequence:
+        raise GatewayRecoveryRequired("persisted handoff checkpoint sequence conflicts")
+    return evidence
+
+
+def _stop_from_transition(transition: HandoffTransition) -> HandoffStopEvidence | None:
+    facts = transition.source_stop_facts
+    if transition.source_stop_sequence is None and facts is None:
+        return None
+    if transition.source_stop_sequence is None or facts is None:
+        raise GatewayRecoveryRequired("handoff stop facts are incomplete")
+    try:
+        evidence = HandoffStopEvidence(
+            operation_id=UUID(str(facts["operation_id"])),
+            source_session_id=UUID(str(facts["source_session_id"])),
+            accepted_sequence=int(cast(int, facts["accepted_sequence"])),
+            stopped=cast(bool, facts["stopped"]),
+            produced_at=datetime.fromisoformat(str(facts["produced_at"])),
+        )
+    except (DomainError, KeyError, TypeError, ValueError) as exc:
+        raise GatewayRecoveryRequired("persisted handoff stop facts are invalid") from exc
+    if evidence.accepted_sequence != transition.source_stop_sequence:
+        raise GatewayRecoveryRequired("persisted handoff stop sequence conflicts")
+    return evidence
+
+
+def _fact_refs(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("handoff evidence refs must be a sequence")
+    return tuple(str(item) for item in value)
+
+
+def _assert_persisted_checkpoint_identity(
+    transition: HandoffTransition,
+    evidence: HandoffCheckpointEvidence,
+) -> None:
+    expected_operation_id = handoff_step_operation_id(
+        transition.id,
+        HandoffPhase.CHECKPOINT_SOURCE,
+        logical_attempt=transition.logical_attempt,
+        action="checkpoint",
+    )
+    if (
+        evidence.operation_id != expected_operation_id
+        or evidence.transition_id != transition.id
+        or evidence.source_session_id != transition.source_session_id
+        or evidence.accepted_sequence < transition.source_input_cutoff_sequence
+    ):
+        raise GatewayRecoveryRequired(
+            "persisted handoff checkpoint identity conflicts with transition"
+        )
+
+
+def _assert_persisted_stop_identity(
+    transition: HandoffTransition,
+    evidence: HandoffStopEvidence,
+) -> None:
+    expected_operation_id = gateway_operation_id(
+        transition.source_execution_id,
+        GatewayOperationType.STOP_SESSION,
+    )
+    if (
+        evidence.operation_id != expected_operation_id
+        or evidence.source_session_id != transition.source_session_id
+        or transition.source_checkpoint_sequence is None
+        or evidence.accepted_sequence != transition.source_checkpoint_sequence
+    ):
+        raise GatewayRecoveryRequired(
+            "persisted handoff stop identity conflicts with transition"
+        )
 
 
 def _context_operation_id(execution_id: UUID, package_id: UUID) -> UUID:

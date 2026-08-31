@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -251,6 +253,35 @@ class ExecutionWorkspaceManifest:
             )
         self.lifecycle = target
         self.version += 1
+
+
+def workspace_manifest_digest(manifest: ExecutionWorkspaceManifest) -> str:
+    """Hash the exact repository state owned by one workspace manifest."""
+
+    if not isinstance(manifest, ExecutionWorkspaceManifest):
+        raise ValidationError("workspace digest requires a workspace manifest")
+    document = {
+        "id": str(manifest.id),
+        "workspace_id": str(manifest.workspace_id),
+        "execution_id": str(manifest.execution_id),
+        "fencing_token": manifest.fencing_token,
+        "checkouts": [
+            {
+                "repository_ref": checkout.repository_ref,
+                "base_revision": checkout.base_revision,
+                "branch": checkout.branch,
+                "current_head": checkout.current_head,
+            }
+            for checkout in manifest.checkouts
+        ],
+    }
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

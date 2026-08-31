@@ -162,7 +162,7 @@ def _clear_database(database: Database) -> None:
         )
         session.execute(delete(ExecutionWorkspaceTransferModel))
         session.execute(delete(HandoffContextBundleModel))
-        session.execute(text("TRUNCATE TABLE handoff_recovery_decisions"))
+        session.execute(text("DELETE FROM handoff_recovery_decisions"))
         session.execute(delete(HandoffTransitionModel))
         session.execute(delete(HandoffProposalModel))
         for model in (

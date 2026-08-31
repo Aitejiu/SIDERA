@@ -1,5 +1,6 @@
 from collections import deque
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -23,13 +24,16 @@ from sidera_control_plane.domain.gateway import (
     AdapterSessionHandle,
     DeliveryOutcome,
     DeliveryResult,
+    GatewayOperationType,
 )
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
+    HandoffInspectionOutcome,
     HandoffOperationInspection,
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
+    HandoffCheckpointMode,
     IdempotencyCapability,
     ResumeCapability,
     SandboxCapability,
@@ -40,6 +44,7 @@ from sidera_control_plane.domain.modules import (
 from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
+    workspace_manifest_digest,
 )
 
 
@@ -59,7 +64,14 @@ class FakeWorkerAdapter:
         stability=StabilityLevel.STABLE,
         context_package_versions=(1,),
         context_patch_versions=(1,),
+        handoff_checkpoint_mode=HandoffCheckpointMode.NATIVE,
+        handoff_checkpoint_versions=(1,),
+        handoff_inspection=True,
     )
+
+    @classmethod
+    def capabilities(cls) -> WorkerAdapterCapabilityProfile:
+        return cls._CAPABILITIES
 
     def __init__(
         self,
@@ -67,6 +79,8 @@ class FakeWorkerAdapter:
         artifacts: tuple[ArtifactCandidate, ...] = (),
         knowledge_candidates: tuple[KnowledgeCandidateProposalV1, ...] = (),
         failures: Mapping[str, str] | None = None,
+        handoff_context: tuple[UUID, str, int] | None = None,
+        handoff_workspace_digest: str | None = None,
     ) -> None:
         self._artifacts = tuple(artifacts)
         if any(
@@ -76,10 +90,30 @@ class FakeWorkerAdapter:
             raise TypeError("knowledge_candidates must be typed proposals")
         self._knowledge_candidates = tuple(knowledge_candidates)
         self._failures = dict(failures or {})
+        if handoff_context is not None:
+            package_id, package_hash, context_version = handoff_context
+            if not isinstance(package_id, UUID) or not isinstance(package_hash, str):
+                raise TypeError("handoff_context must contain a UUID and hash")
+            if context_version < 1:
+                raise ValueError("handoff context version must be positive")
+            self._handoff_context = (package_id, package_hash, context_version)
+        else:
+            self._handoff_context = (
+                uuid5(NAMESPACE_URL, "sidera.fake.handoff.package"),
+                "0" * 64,
+                1,
+            )
+        if handoff_workspace_digest is not None and len(handoff_workspace_digest) != 64:
+            raise ValueError("handoff workspace digest must be a SHA-256 hash")
+        self._handoff_workspace_digest = handoff_workspace_digest
+        self._checkpoint_override: tuple[bool, str | None] | None = None
         self._patch_outcomes: deque[tuple[DeliveryOutcome, str | None]] = deque()
         self._patch_results: dict[UUID, ContextPatchDeliveryResult] = {}
         self._applied_context_patches: list[ContextPatchMaterializationV1] = []
         self._sessions: dict[str, _FakeSession] = {}
+        self._handoff_operations: dict[UUID, _FakeHandoffOperation] = {}
+        self._checkpoint_call_count = 0
+        self._inspect_call_count = 0
         self._lock = RLock()
 
     def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
@@ -117,7 +151,7 @@ class FakeWorkerAdapter:
         *,
         operation_id: UUID,
     ) -> AdapterSessionHandle:
-        del workspace, operation_id
+        del operation_id
         self._maybe_fail("start_session")
         now = datetime.now(UTC)
         execution_session_id = uuid5(
@@ -146,6 +180,12 @@ class FakeWorkerAdapter:
                     ]
                 ),
                 next_sequence=2,
+                execution_id=spec.execution_id,
+                workspace_digest=(
+                    self._handoff_workspace_digest
+                    or workspace_manifest_digest(workspace)
+                ),
+                handoff_context=self._handoff_context,
             )
         return handle
 
@@ -183,6 +223,13 @@ class FakeWorkerAdapter:
                     accepted_sequence=None,
                     failure_code="session_stopped",
                 )
+            if session.checkpointed:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="handoff_checkpointed",
+                )
             if session.prompt_busy:
                 return DeliveryResult(
                     operation_id=operation_id,
@@ -192,6 +239,7 @@ class FakeWorkerAdapter:
                 )
             sequence = session.next_sequence
             session.next_sequence += 1
+            session.last_accepted_sequence = sequence
             session.prompt_busy = True
             session.events.append(
                 AdapterEvent(
@@ -238,6 +286,16 @@ class FakeWorkerAdapter:
                         error_code="session_identity_mismatch",
                     )
                 )
+            if session.checkpointed:
+                return self._remember_patch_result(
+                    ContextPatchDeliveryResult(
+                        outcome="blocked",
+                        operation_id=operation_id,
+                        patch_hash=patch_hash,
+                        accepted_sequence=None,
+                        error_code="handoff_checkpointed",
+                    )
+                )
             if session.stopped:
                 return self._remember_patch_result(
                     ContextPatchDeliveryResult(
@@ -282,6 +340,7 @@ class FakeWorkerAdapter:
                 )
             sequence = session.next_sequence
             session.next_sequence += 1
+            session.last_accepted_sequence = sequence
             session.prompt_busy = True
             session.events.append(
                 AdapterEvent(
@@ -308,13 +367,58 @@ class FakeWorkerAdapter:
         self._maybe_fail("stop_session")
         session = self._session(handle)
         with self._lock:
+            previous = self._handoff_operations.get(operation_id)
+            if previous is not None:
+                if previous.operation_type is not GatewayOperationType.STOP_SESSION:
+                    raise FakeAdapterError("operation_id_reused")
+                if not isinstance(previous.result, DeliveryResult):
+                    raise FakeAdapterError("operation_result_mismatch")
+                return previous.result
             if session.stopped:
-                return DeliveryResult(
+                if (
+                    session.expected_stop_operation_id is not None
+                    and operation_id != session.expected_stop_operation_id
+                ):
+                    raise FakeAdapterError("handoff_stop_identity_mismatch")
+                result = DeliveryResult(
                     operation_id=operation_id,
                     outcome=DeliveryOutcome.DELIVERED,
-                    accepted_sequence=session.next_sequence - 1,
+                    accepted_sequence=session.last_accepted_sequence,
                     failure_code=None,
+                    execution_session_id=session.handle.execution_session_id,
                 )
+                self._remember_handoff_operation(
+                    operation_id, GatewayOperationType.STOP_SESSION, result
+                )
+                return result
+            if session.checkpointed:
+                if operation_id != session.expected_stop_operation_id:
+                    raise FakeAdapterError("handoff_stop_identity_mismatch")
+                self._maybe_fail("handoff_stop_before")
+                session.stopped = True
+                session.prompt_busy = False
+                sequence = session.next_sequence
+                session.next_sequence += 1
+                session.events.append(
+                    AdapterEvent(
+                        event_type="session.canceled",
+                        sequence=sequence,
+                        payload={"handoff": True},
+                        occurred_at=datetime.now(UTC),
+                    )
+                )
+                result = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.DELIVERED,
+                    accepted_sequence=session.checkpoint_sequence,
+                    failure_code=None,
+                    execution_session_id=session.handle.execution_session_id,
+                )
+                self._remember_handoff_operation(
+                    operation_id, GatewayOperationType.STOP_SESSION, result
+                )
+                self._maybe_fail("handoff_stop_after")
+                return result
             session.stopped = True
             session.prompt_busy = False
             sequence = session.next_sequence
@@ -332,6 +436,7 @@ class FakeWorkerAdapter:
                 outcome=DeliveryOutcome.DELIVERED,
                 accepted_sequence=sequence,
                 failure_code=None,
+                execution_session_id=session.handle.execution_session_id,
             )
 
     def collect_artifacts(
@@ -359,9 +464,65 @@ class FakeWorkerAdapter:
         source_input_cutoff_sequence: int,
         operation_id: UUID,
     ) -> HandoffCheckpointEvidence:
-        raise NotImplementedError(
-            "FakeWorkerAdapter does not support handoff checkpoints"
-        )
+        if not isinstance(transition_id, UUID) or not isinstance(operation_id, UUID):
+            raise TypeError("handoff checkpoint identifiers must be UUIDs")
+        if source_input_cutoff_sequence < 0:
+            raise ValueError("source input cutoff must be non-negative")
+        session = self._session(handle)
+        with self._lock:
+            previous = self._handoff_operations.get(operation_id)
+            if previous is not None:
+                if previous.operation_type is not GatewayOperationType.HANDOFF_CHECKPOINT:
+                    raise FakeAdapterError("operation_id_reused")
+                if not isinstance(previous.result, HandoffCheckpointEvidence):
+                    raise FakeAdapterError("checkpoint_result_mismatch")
+                return previous.result
+            self._maybe_fail("handoff_checkpoint_before")
+            self._maybe_fail("capture_handoff_checkpoint")
+            if session.stopped:
+                raise FakeAdapterError("session_stopped")
+            if session.checkpointed:
+                raise FakeAdapterError("handoff_checkpointed")
+            if session.prompt_busy:
+                raise FakeAdapterError("prompt_busy")
+            if session.last_accepted_sequence < source_input_cutoff_sequence:
+                raise FakeAdapterError("handoff_checkpoint_sequence_stale")
+            self._checkpoint_call_count += 1
+            session.events.clear()
+            accepted_sequence = session.last_accepted_sequence
+            package_id, package_hash, context_version = session.handoff_context
+            override = self._checkpoint_override
+            self._checkpoint_override = None
+            if override is not None and not override[0]:
+                raise ValueError("checkpoint evidence must be quiescent")
+            evidence = HandoffCheckpointEvidence(
+                operation_id=operation_id,
+                transition_id=transition_id,
+                source_session_id=session.handle.execution_session_id,
+                accepted_sequence=accepted_sequence,
+                workspace_digest=override[1] if override and override[1] else session.workspace_digest,
+                context_package_id=package_id,
+                context_package_hash=package_hash,
+                context_version=context_version,
+                progress_summary_ref=(
+                    f"fake-progress://{session.execution_id}/{accepted_sequence}"
+                ),
+                artifact_refs=(f"fake-artifact://{session.execution_id}",),
+                evidence_refs=(f"fake-evidence://{session.execution_id}",),
+                quiescent=True,
+                produced_at=datetime.now(UTC),
+            )
+            session.checkpointed = True
+            session.checkpoint_sequence = accepted_sequence
+            session.expected_stop_operation_id = uuid5(
+                NAMESPACE_URL,
+                f"sidera.gateway:stop_session:{session.execution_id}",
+            )
+            self._remember_handoff_operation(
+                operation_id, GatewayOperationType.HANDOFF_CHECKPOINT, evidence
+            )
+            self._maybe_fail("handoff_checkpoint_after")
+            return evidence
 
     def inspect_handoff_operation(
         self,
@@ -369,9 +530,48 @@ class FakeWorkerAdapter:
         *,
         operation_id: UUID,
     ) -> HandoffOperationInspection:
-        raise NotImplementedError(
-            "FakeWorkerAdapter does not inspect handoff operations"
-        )
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        self._inspect_call_count += 1
+        with self._lock:
+            record = self._handoff_operations.get(operation_id)
+            if record is None:
+                session = next(
+                    (
+                        item
+                        for item in self._sessions.values()
+                        if item.handle.execution_session_id == handle.execution_session_id
+                    ),
+                    None,
+                )
+                return HandoffOperationInspection(
+                    operation_id=operation_id,
+                    operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+                    outcome=HandoffInspectionOutcome.ABSENT,
+                    execution_id=session.execution_id if session is not None else None,
+                    session_id=handle.execution_session_id,
+                    accepted_sequence=None,
+                    context_binding=handle.context_binding,
+                    observed_at=datetime.now(UTC),
+                    evidence_refs=(),
+                )
+            operation_type, result = record.operation_type, record.result
+            accepted_sequence = getattr(result, "accepted_sequence", None)
+            return HandoffOperationInspection(
+                operation_id=operation_id,
+                operation_type=operation_type,
+                outcome=HandoffInspectionOutcome.SUCCEEDED,
+                execution_id=next(
+                    item.execution_id
+                    for item in self._sessions.values()
+                    if item.handle.execution_session_id == handle.execution_session_id
+                ),
+                session_id=handle.execution_session_id,
+                accepted_sequence=accepted_sequence,
+                context_binding=handle.context_binding,
+                observed_at=datetime.now(UTC),
+                evidence_refs=(f"fake-inspection://{operation_id}",),
+            )
 
     def enable_handoff_writer(
         self,
@@ -389,6 +589,8 @@ class FakeWorkerAdapter:
         with self._lock:
             if session.stopped:
                 raise FakeAdapterError("session_stopped")
+            if session.checkpointed:
+                raise FakeAdapterError("handoff_checkpointed")
             session.prompt_busy = False
             sequence = session.next_sequence
             session.next_sequence += 1
@@ -408,6 +610,31 @@ class FakeWorkerAdapter:
                 for session in self._sessions.values()
                 if not session.stopped
             )
+
+    @property
+    def checkpoint_call_count(self) -> int:
+        return self._checkpoint_call_count
+
+    @property
+    def inspect_call_count(self) -> int:
+        return self._inspect_call_count
+
+    def pending_events(self, handle: AdapterSessionHandle) -> tuple[AdapterEvent, ...]:
+        session = self._session(handle)
+        with self._lock:
+            return tuple(session.events)
+
+    def inject_handoff_checkpoint(
+        self,
+        *,
+        quiescent: bool = True,
+        workspace_digest: str | None = None,
+    ) -> None:
+        if not isinstance(quiescent, bool):
+            raise TypeError("quiescent must be a boolean")
+        if workspace_digest is not None and len(workspace_digest) != 64:
+            raise ValueError("handoff workspace digest must be a SHA-256 hash")
+        self._checkpoint_override = (quiescent, workspace_digest)
 
     @property
     def applied_context_patches(self) -> tuple[ContextPatchMaterializationV1, ...]:
@@ -457,6 +684,23 @@ class FakeWorkerAdapter:
         self._patch_results[result.operation_id] = result
         return result
 
+    def _remember_handoff_operation(
+        self,
+        operation_id: UUID,
+        operation_type: GatewayOperationType,
+        result: HandoffCheckpointEvidence | DeliveryResult,
+    ) -> None:
+        self._handoff_operations[operation_id] = _FakeHandoffOperation(
+            operation_type=operation_type,
+            result=result,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeHandoffOperation:
+    operation_type: GatewayOperationType
+    result: HandoffCheckpointEvidence | DeliveryResult
+
 
 class _FakeSession:
     def __init__(
@@ -465,10 +709,20 @@ class _FakeSession:
         handle: AdapterSessionHandle,
         events: deque[AdapterEvent],
         next_sequence: int,
+        execution_id: UUID,
+        workspace_digest: str,
+        handoff_context: tuple[UUID, str, int],
     ) -> None:
         self.handle = handle
         self.events = events
         self.next_sequence = next_sequence
+        self.execution_id = execution_id
+        self.workspace_digest = workspace_digest
+        self.handoff_context = handoff_context
+        self.last_accepted_sequence = 0
+        self.checkpointed = False
+        self.checkpoint_sequence = 0
+        self.expected_stop_operation_id: UUID | None = None
         self.prompt_busy = False
         self.stopped = False
 

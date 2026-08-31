@@ -87,6 +87,7 @@ class RecordingFakeAdapter(FakeWorkerAdapter):
         self.start_count = 0
         self.input_count = 0
         self.stop_count = 0
+        self.stop_results: list[DeliveryResult] = []
 
     def start_session(
         self,
@@ -115,7 +116,9 @@ class RecordingFakeAdapter(FakeWorkerAdapter):
         self, handle: AdapterSessionHandle, *, operation_id: UUID
     ) -> DeliveryResult:
         self.stop_count += 1
-        return super().stop_session(handle, operation_id=operation_id)
+        result = super().stop_session(handle, operation_id=operation_id)
+        self.stop_results.append(result)
+        return result
 
 
 class UnknownInputAdapter(RecordingFakeAdapter):
@@ -842,6 +845,7 @@ def test_gateway_stops_exact_execution_and_continues_without_touching_sibling(
         ids["execution_id"], GatewayOperationType.STOP_SESSION
     )
     assert adapter.stop_count == 1
+    assert adapter.stop_results[0].execution_session_id == first_session.session_id
     with database.session() as session:
         stopped_execution = session.get(ExecutionModel, ids["execution_id"])
         sibling_execution = session.get(ExecutionModel, sibling_ids["execution_id"])
