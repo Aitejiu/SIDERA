@@ -1,9 +1,16 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
+
+
+def input_operation_id(input_id: UUID) -> UUID:
+    """Return the durable dispatch operation identity for one input."""
+    if not isinstance(input_id, UUID):
+        raise ValidationError("input_id must be a UUID")
+    return uuid5(NAMESPACE_URL, f"sidera.input:{input_id}")
 
 
 class ExecutionInputStatus(StrEnum):

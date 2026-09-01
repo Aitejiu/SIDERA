@@ -1554,6 +1554,27 @@ class ExecutionInputRepositoryPort(Protocol):
     ) -> ExecutionInput | None:
         raise NotImplementedError
 
+    def list_for_session(
+        self,
+        session_id: UUID,
+        workspace_id: UUID,
+        *,
+        before: datetime | None = None,
+        for_update: bool = False,
+    ) -> tuple[ExecutionInput, ...]:
+        """List inputs in a Session through a bounded observation time."""
+        raise NotImplementedError
+
+    def list_for_handoff_transition(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ExecutionInput, ...]:
+        """List derived inputs for one handoff transition."""
+        raise NotImplementedError
+
     def find_by_client_idempotency_key(
         self,
         session_id: UUID,

@@ -16,7 +16,11 @@ from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_gateway import GatewayRecoveryRequired
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.gateway import DeliveryOutcome, DeliveryResult
-from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
+from sidera_control_plane.domain.inputs import (
+    ExecutionInput,
+    ExecutionInputStatus,
+    input_operation_id,
+)
 
 
 class InputGateway(Protocol):
@@ -134,7 +138,7 @@ class InputDispatcher:
         operation_id = item.operation_id
         if operation_id is None:
             return DeliveryResult(
-                operation_id=item.id,
+                operation_id=input_operation_id(item.id),
                 outcome=DeliveryOutcome.UNKNOWN,
                 accepted_sequence=None,
                 failure_code="input_operation_id_missing",
@@ -172,7 +176,7 @@ class InputDispatcher:
             if current is None or current.status is not ExecutionInputStatus.DISPATCHING:
                 return "ignored"
             previous_version = current.version
-            operation_id = item.operation_id or item.id
+            operation_id = item.operation_id or input_operation_id(item.id)
             failure_code = result.failure_code or result.outcome.value
             if result.outcome is DeliveryOutcome.DELIVERED:
                 current.deliver()

@@ -1,6 +1,6 @@
 from collections.abc import Collection
 from datetime import UTC, datetime
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
@@ -25,7 +25,11 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperationStatus,
     GatewayOperationType,
 )
-from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
+from sidera_control_plane.domain.inputs import (
+    ExecutionInput,
+    ExecutionInputStatus,
+    input_operation_id,
+)
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
     EvidenceClaimModel,
@@ -356,6 +360,48 @@ class ExecutionInputRepository:
         row = self._session.scalar(statement)
         return _to_domain_input(row) if row is not None else None
 
+    def list_for_session(
+        self,
+        session_id: UUID,
+        workspace_id: UUID,
+        *,
+        before: datetime | None = None,
+        for_update: bool = False,
+    ) -> tuple[ExecutionInput, ...]:
+        statement = select(ExecutionInputModel).where(
+            ExecutionInputModel.session_id == session_id,
+            ExecutionInputModel.workspace_id == workspace_id,
+        )
+        if before is not None:
+            statement = statement.where(ExecutionInputModel.created_at <= before)
+        statement = statement.order_by(
+            ExecutionInputModel.created_at.asc(), ExecutionInputModel.id.asc()
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        return tuple(_to_domain_input(row) for row in rows)
+
+    def list_for_handoff_transition(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ExecutionInput, ...]:
+        statement = (
+            select(ExecutionInputModel)
+            .where(
+                ExecutionInputModel.handoff_transition_id == transition_id,
+                ExecutionInputModel.workspace_id == workspace_id,
+            )
+            .order_by(ExecutionInputModel.created_at.asc(), ExecutionInputModel.id.asc())
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        return tuple(_to_domain_input(row) for row in rows)
+
     def find_by_client_idempotency_key(
         self,
         session_id: UUID,
@@ -386,9 +432,7 @@ class ExecutionInputRepository:
         for row in rows:
             item = _to_domain_input(row)
             previous_version = item.version
-            item.begin_dispatch(
-                operation_id=uuid5(NAMESPACE_URL, f"sidera.input:{item.id}")
-            )
+            item.begin_dispatch(operation_id=input_operation_id(item.id))
             self.save(item, previous_version)
             claimed.append(item)
         return tuple(claimed)
