@@ -12,8 +12,15 @@ from sqlalchemy.exc import IntegrityError
 
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.handoff_gate import (
+    HandoffGateBlocked,
     HandoffGateOperation,
     HandoffOperationGate,
+)
+from sidera_control_plane.application.handoff_target import (
+    HandoffActivationGate,
+    HandoffTargetAssignment,
+    HandoffTargetError,
+    runtime_snapshot_matches,
 )
 from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGate,
@@ -41,8 +48,8 @@ from sidera_control_plane.domain.context_packages import (
     ContextPurpose,
 )
 from sidera_control_plane.domain.events import EventData
-from sidera_control_plane.domain.execution import Execution
-from sidera_control_plane.domain.lease import AssignmentLease
+from sidera_control_plane.domain.execution import Execution, ExecutionStatus
+from sidera_control_plane.domain.lease import AssignmentLease, LeaseStatus
 from sidera_control_plane.domain.modules import (
     ExecutionBinding,
     WorkerAdapterCapabilityProfile,
@@ -51,7 +58,11 @@ from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
     SchedulingIssue,
 )
-from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker import (
+    SCHEDULABLE_WORKER_STATUSES,
+    Worker,
+    WorkerDesiredState,
+)
 
 ACTIVE_EXECUTION_LEASE_CONSTRAINT = "uq_assignment_leases_active_execution"
 EXECUTION_BINDING_CONSTRAINT = "uq_bindings_execution"
@@ -154,14 +165,25 @@ class Scheduler:
                         workspace_id=execution.workspace_id,
                         operation=HandoffGateOperation.NORMAL_SCHEDULE,
                     )
-                    if not handoff_gate.allowed:
+                    activation_gate = HandoffActivationGate().evaluate(
+                        execution=execution,
+                        transition=None,
+                        operation=HandoffGateOperation.NORMAL_SCHEDULE,
+                        handoff_gate=handoff_gate,
+                    )
+                    if not activation_gate.allowed:
+                        blocking_code = activation_gate.blocking_code
                         return self._commit_deferred(
                             uow=uow,
                             execution=execution,
                             issue=SchedulingIssue(
-                                reason_code=SchedulingBlockReason.PLAN_TRANSITION_BLOCKED,
+                                reason_code=(
+                                    SchedulingBlockReason.HANDOFF_IN_PROGRESS
+                                    if blocking_code == "handoff_in_progress"
+                                    else SchedulingBlockReason.HANDOFF_TARGET_STALE
+                                ),
                                 reason_details={
-                                    "handoff_blocking_code": handoff_gate.blocking_code,
+                                    "handoff_blocking_code": blocking_code,
                                     "handoff_transition_id": (
                                         str(handoff_gate.transition_id)
                                         if handoff_gate.transition_id is not None
@@ -172,11 +194,13 @@ class Scheduler:
                                         if handoff_gate.phase is not None
                                         else None
                                     ),
+                                    "target_execution_id": (
+                                        str(handoff_gate.target_execution_id)
+                                        if handoff_gate.target_execution_id is not None
+                                        else None
+                                    ),
                                 },
-                                requires_operator=(
-                                    handoff_gate.blocking_code
-                                    == "handoff_gate_unavailable"
-                                ),
+                                requires_operator=blocking_code != "handoff_in_progress",
                             ),
                             now=now,
                             execution_id=execution_id,
@@ -330,6 +354,282 @@ class Scheduler:
                 raise
             return 1, 0, 1, execution_id
 
+    def assign_handoff_target(
+        self,
+        *,
+        workspace_id: UUID,
+        transition_id: UUID,
+        expected_transition_version: int,
+        now: datetime,
+    ) -> HandoffTargetAssignment:
+        """Assign the exact pinned target after transfer and package gates."""
+
+        if expected_transition_version < 1:
+            raise HandoffTargetError("handoff transition version must be positive")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise HandoffTargetError("handoff assignment timestamp must be timezone-aware")
+        assignment_started_at = self._monotonic_clock()
+        with self._uow_factory() as uow:
+            transition = uow.handoff_transitions.get(
+                transition_id,
+                workspace_id,
+                for_update=True,
+            )
+            if transition is None:
+                raise HandoffTargetError("handoff transition was not found")
+            target_execution_id = transition.target_execution_id
+            if target_execution_id is None:
+                raise HandoffTargetError("handoff target execution is not created")
+            execution = uow.executions.get(
+                target_execution_id,
+                workspace_id,
+                for_update=True,
+            )
+            if execution is None:
+                raise HandoffTargetError("handoff target execution was not found")
+            worker = uow.workers.get(
+                transition.target_worker_id,
+                workspace_id,
+                for_update=True,
+            )
+            if worker is None:
+                raise HandoffTargetError("handoff target worker was not found")
+
+            existing = self._existing_handoff_assignment(
+                uow,
+                execution,
+                worker,
+                transition_id=transition.id,
+                now=now,
+            )
+            if existing is not None:
+                return existing
+            if transition.version != expected_transition_version:
+                raise HandoffTargetError("handoff transition version is stale")
+
+            handoff_gate = HandoffOperationGate(uow).evaluate(
+                worker_item_id=transition.worker_item_id,
+                workspace_id=workspace_id,
+                operation=HandoffGateOperation.COORDINATOR_ASSIGN_TARGET,
+                transition_id=transition_id,
+                target_execution_id=execution.id,
+            )
+            if not handoff_gate.allowed:
+                raise HandoffGateBlocked(handoff_gate)
+            activation_gate = HandoffActivationGate().evaluate(
+                execution=execution,
+                transition=transition,
+                operation=HandoffGateOperation.COORDINATOR_ASSIGN_TARGET,
+                handoff_gate=handoff_gate,
+            )
+            if not activation_gate.allowed:
+                raise HandoffTargetError(
+                    "handoff target activation gate rejected the target",
+                    details={"blocking_code": activation_gate.blocking_code},
+                )
+            self._validate_handoff_target_worker(execution, transition, worker, now)
+            resolved = self._runtime_resolver.lock_and_resolve(uow, worker, execution)
+            if isinstance(resolved, SchedulingIssue):
+                raise HandoffTargetError(
+                    "handoff target runtime is stale",
+                    details={
+                        "reason_code": resolved.reason_code.value,
+                        "reason_details": _plain_json(resolved.reason_details),
+                    },
+                )
+            if not runtime_snapshot_matches(
+                resolved,
+                transition.target_runtime_snapshot,
+            ):
+                raise HandoffTargetError("handoff target runtime facts are stale")
+            manifest = self._load_handoff_target_manifest(
+                uow,
+                execution=execution,
+                transition=transition,
+            )
+            self._load_handoff_target_package(
+                uow,
+                execution=execution,
+                transition=transition,
+                now=now,
+            )
+            result = self._commit_assignment(
+                uow=uow,
+                execution=execution,
+                worker=worker,
+                resolved=resolved,
+                decision_reason={
+                    "policy": "handoff-exact-v1",
+                    "handoff_transition_id": str(transition.id),
+                    "target_worker_id": str(worker.id),
+                    "target_runtime_snapshot": _plain_json(
+                        transition.target_runtime_snapshot
+                    ),
+                    "pin_applied": True,
+                },
+                now=now,
+                execution_id=execution.id,
+                assignment_started_at=assignment_started_at,
+                fencing_token=manifest.fencing_token,
+            )
+            if result[1] != 1:
+                raise HandoffTargetError("handoff target assignment did not commit")
+            lease_id = execution.active_lease_id
+            binding = uow.bindings.get_for_execution(
+                execution.id,
+                workspace_id,
+                for_update=True,
+            )
+            if lease_id is None or binding is None:
+                raise HandoffTargetError(
+                    "handoff target assignment facts are incomplete"
+                )
+            return HandoffTargetAssignment(
+                execution_id=execution.id,
+                lease_id=lease_id,
+                binding_id=binding.id,
+                worker_id=worker.id,
+                fencing_token=execution.last_fencing_token,
+            )
+
+    def _existing_handoff_assignment(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        execution: Execution,
+        worker: Worker,
+        *,
+        transition_id: UUID,
+        now: datetime,
+    ) -> HandoffTargetAssignment | None:
+        if execution.active_lease_id is None:
+            if execution.status is ExecutionStatus.QUEUED:
+                return None
+            raise HandoffTargetError("handoff target assignment state is inconsistent")
+        lease = uow.leases.get(
+            execution.active_lease_id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        binding = uow.bindings.get_for_execution(
+            execution.id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        if lease is None or binding is None:
+            raise HandoffTargetError("handoff target assignment facts are incomplete")
+        if (
+            execution.status not in {ExecutionStatus.LEASED, ExecutionStatus.RUNNING}
+            or execution.assigned_worker_id != worker.id
+            or lease.execution_id != execution.id
+            or lease.worker_id != worker.id
+            or lease.status is not LeaseStatus.ACTIVE
+            or now >= lease.expires_at
+            or lease.fencing_token != execution.last_fencing_token
+            or lease.assignment_reason.get("policy") != "handoff-exact-v1"
+            or lease.assignment_reason.get("handoff_transition_id")
+            != str(transition_id)
+            or binding.execution_id != execution.id
+            or binding.worker_id != worker.id
+            or binding.lease_id != lease.id
+            or binding.fencing_token != lease.fencing_token
+        ):
+            raise HandoffTargetError("handoff target assignment facts changed")
+        return HandoffTargetAssignment(
+            execution_id=execution.id,
+            lease_id=lease.id,
+            binding_id=binding.id,
+            worker_id=worker.id,
+            fencing_token=lease.fencing_token,
+        )
+
+    def _validate_handoff_target_worker(
+        self,
+        execution: Execution,
+        transition: Any,
+        worker: Worker,
+        now: datetime,
+    ) -> None:
+        if worker.id != transition.target_worker_id:
+            raise HandoffTargetError("handoff target worker identity changed")
+        if worker.workspace_id != execution.workspace_id:
+            raise HandoffTargetError("handoff target worker workspace changed")
+        if (
+            worker.status not in SCHEDULABLE_WORKER_STATUSES
+            or worker.desired_state is not WorkerDesiredState.ACTIVE
+            or not worker.is_fresh(
+                now=now,
+                timeout=timedelta(seconds=self._worker_heartbeat_timeout_seconds),
+            )
+            or worker.current_load >= worker.capacity
+            or not execution.capability_requirements.issubset(worker.capabilities)
+            or worker.adapter_type in execution.adapter_forbidden
+        ):
+            raise HandoffTargetError("handoff target worker is no longer eligible")
+
+    @staticmethod
+    def _load_handoff_target_manifest(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        execution: Execution,
+        transition: Any,
+    ) -> Any:
+        manifest_id = transition.target_workspace_manifest_id
+        if manifest_id is None:
+            raise HandoffTargetError("handoff target workspace transfer is not ready")
+        manifest = uow.workspaces.get(
+            manifest_id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        if manifest is None:
+            raise HandoffTargetError("handoff target workspace manifest was not found")
+        if (
+            manifest.workspace_id != execution.workspace_id
+            or manifest.execution_id != execution.id
+            or manifest.task_id != execution.task_id
+            or manifest.lifecycle.value != "ready"
+            or manifest.fencing_token != execution.last_fencing_token + 1
+        ):
+            raise HandoffTargetError("handoff target workspace manifest is stale")
+        return manifest
+
+    @staticmethod
+    def _load_handoff_target_package(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        execution: Execution,
+        transition: Any,
+        now: datetime,
+    ) -> Any:
+        from sidera_control_plane.domain.context_packages import (
+            ContextPackageStatus,
+            ContextPurpose,
+        )
+
+        package_id = transition.target_context_package_id
+        package_hash = transition.target_context_package_hash
+        if package_id is None or package_hash is None:
+            raise HandoffTargetError("handoff target context package is not ready")
+        package = uow.context_packages.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            execution.id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        if package is None:
+            raise HandoffTargetError("handoff target context package was not found")
+        if (
+            package.package_id != package_id
+            or package.package_hash != package_hash
+            or package.status is not ContextPackageStatus.ACTIVE
+            or package.expires_at <= now
+            or package.consumer_id != execution.id
+            or package.worker_item_id != execution.worker_item_id
+            or package.context_version != transition.target_context_version
+        ):
+            raise HandoffTargetError("handoff target context package is stale")
+        return package
+
     def _context_required(self, execution: Execution) -> bool:
         if not self._context_enforcement:
             return False
@@ -435,10 +735,17 @@ class Scheduler:
         now: datetime,
         execution_id: UUID,
         assignment_started_at: float,
+        fencing_token: int | None = None,
     ) -> tuple[int, int, int, UUID]:
         previous_execution_version = execution.version
         previous_worker_version = worker.version
-        fencing_token = execution.last_fencing_token + 1
+        assignment_fence = (
+            execution.last_fencing_token + 1
+            if fencing_token is None
+            else fencing_token
+        )
+        if assignment_fence != execution.last_fencing_token + 1:
+            raise HandoffTargetError("assignment fence is not the next execution fence")
         lease = AssignmentLease.issue(
             lease_id=uuid4(),
             workspace_id=execution.workspace_id,
@@ -446,14 +753,14 @@ class Scheduler:
             worker_id=worker.id,
             issued_at=now,
             expires_at=now + timedelta(seconds=self._assignment_lease_seconds),
-            fencing_token=fencing_token,
+            fencing_token=assignment_fence,
             assignment_reason=decision_reason,
         )
         worker.reserve()
         execution.assign(
             lease_id=lease.id,
             worker_id=worker.id,
-            fencing_token=fencing_token,
+            fencing_token=assignment_fence,
         )
         binding = ExecutionBinding(
             id=uuid4(),
@@ -466,7 +773,7 @@ class Scheduler:
             workspace_config_version=resolved.workspace_module_config_version,
             capability_snapshot=resolved.capability_snapshot,
             lease_id=lease.id,
-            fencing_token=fencing_token,
+            fencing_token=assignment_fence,
             version=1,
         )
         assignment_duration_seconds = _safe_duration(
@@ -483,7 +790,7 @@ class Scheduler:
                 "worker_id": str(worker.id),
                 "lease_id": str(lease.id),
                 "binding_id": str(binding.id),
-                "fencing_token": fencing_token,
+                "fencing_token": assignment_fence,
                 "assignment_reason": decision_reason,
             },
             expected_version=previous_execution_version,
@@ -504,7 +811,7 @@ class Scheduler:
                     "adapter_config_version": binding.adapter_config_version,
                     "workspace_config_version": binding.workspace_config_version,
                     "lease_id": str(lease.id),
-                    "fencing_token": fencing_token,
+                    "fencing_token": assignment_fence,
                     "capability_snapshot": _capability_payload(
                         binding.capability_snapshot
                     ),
@@ -522,7 +829,7 @@ class Scheduler:
                     "status": execution.status.value,
                     "worker_id": str(worker.id),
                     "lease_id": str(lease.id),
-                    "fencing_token": fencing_token,
+                    "fencing_token": assignment_fence,
                 },
             ),
             _event(
@@ -536,7 +843,7 @@ class Scheduler:
                     "status": lease.status.value,
                     "execution_id": str(execution.id),
                     "worker_id": str(worker.id),
-                    "fencing_token": fencing_token,
+                    "fencing_token": assignment_fence,
                     "assignment_reason": decision_reason,
                 },
             ),

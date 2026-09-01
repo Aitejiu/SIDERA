@@ -64,6 +64,22 @@ class ExecutionRequestRepository:
         row = self._session.scalar(statement)
         return _to_request(row) if row is not None else None
 
+    def get_by_handoff_transition(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        statement = select(ExecutionRequestModel).where(
+            ExecutionRequestModel.handoff_transition_id == transition_id,
+            ExecutionRequestModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_request(row) if row is not None else None
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         result = self._session.execute(
             update(ExecutionRequestModel)

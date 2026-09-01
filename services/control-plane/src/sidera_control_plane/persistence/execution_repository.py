@@ -127,6 +127,22 @@ class ExecutionRepository:
         ).all()
         return tuple(_to_domain_execution(row) for row in rows)
 
+    def get_by_handoff_transition(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> Execution | None:
+        statement = select(ExecutionModel).where(
+            ExecutionModel.handoff_transition_id == transition_id,
+            ExecutionModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_execution(row) if row is not None else None
+
     def list_for_worker_item(
         self, worker_item_id: UUID, workspace_id: UUID
     ) -> tuple[Execution, ...]:

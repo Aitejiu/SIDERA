@@ -37,6 +37,8 @@ class SchedulingBlockReason(StrEnum):
     CONTEXT_PACKAGE_REVOKED = "context_package_revoked"
     CONTEXT_PACKAGE_CORRUPT = "context_package_corrupt"
     CONTEXT_PACKAGE_STALE = "context_package_stale"
+    HANDOFF_IN_PROGRESS = "handoff_in_progress"
+    HANDOFF_TARGET_STALE = "handoff_target_stale"
     PLAN_TRANSITION_BLOCKED = "plan_transition_blocked"
     PLAN_GENERATION_STALE = "plan_generation_stale"
 
@@ -59,6 +61,8 @@ _SCHEDULING_REASON_LABELS = {
     "context_package_revoked": "上下文包已撤销",
     "context_package_corrupt": "上下文包已损坏",
     "context_package_stale": "上下文包与执行版本不一致",
+    "handoff_in_progress": "执行正在进行 Worker 切换",
+    "handoff_target_stale": "Worker 切换目标已失效",
     "plan_transition_blocked": "WorkerItem 正在进行计划切换",
     "plan_generation_stale": "执行请求属于旧计划代",
 }

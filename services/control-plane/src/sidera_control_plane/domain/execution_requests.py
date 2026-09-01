@@ -426,6 +426,34 @@ class ExecutionRequest:
         self.updated_at = now
         self.version += 1
 
+    def build_handoff_target(
+        self,
+        *,
+        request_id: UUID,
+        execution_lineage_id: UUID,
+        first_execution_id: UUID,
+        source_execution_id: UUID,
+        source_session_id: UUID,
+        handoff_transition_id: UUID,
+        now: datetime,
+    ) -> ExecutionRequest:
+        """Clone immutable plan facts into a new materialized handoff request."""
+
+        if self.status is not ExecutionRequestStatus.MATERIALIZED:
+            raise InvalidTransition("only a materialized request can create a handoff target")
+        if self.execution_lineage_id is None or self.first_execution_id is None:
+            raise ValidationError("materialized request lineage is incomplete")
+        return _materialized_handoff_target(
+            source=self,
+            request_id=request_id,
+            execution_lineage_id=execution_lineage_id,
+            first_execution_id=first_execution_id,
+            source_execution_id=source_execution_id,
+            source_session_id=source_session_id,
+            handoff_transition_id=handoff_transition_id,
+            now=now,
+        )
+
     def cancel(self, *, now: datetime, reason: str = "cancelled") -> None:
         self._close(status=ExecutionRequestStatus.CANCELLED, now=now, reason=reason)
 
@@ -481,6 +509,53 @@ def _fact_map(
             )
         result[fact.request_id] = fact
     return result
+
+
+def _materialized_handoff_target(
+    *,
+    source: ExecutionRequest,
+    request_id: UUID,
+    execution_lineage_id: UUID,
+    first_execution_id: UUID,
+    source_execution_id: UUID,
+    source_session_id: UUID,
+    handoff_transition_id: UUID,
+    now: datetime,
+) -> ExecutionRequest:
+    target = ExecutionRequest.create(
+        request_id=request_id,
+        workspace_id=source.workspace_id,
+        planning_request_id=source.planning_request_id,
+        proposal_revision_id=source.proposal_revision_id,
+        plan_snapshot_id=source.plan_snapshot_id,
+        plan_generation=source.plan_generation,
+        root_task_id=source.root_task_id,
+        subtask_id=source.subtask_id,
+        worker_item_id=source.worker_item_id,
+        worker_item_key=source.worker_item_key,
+        intent_key=source.intent_key,
+        purpose="handoff",
+        capability_requirements=source.capability_requirements,
+        adapter_preferences=source.adapter_preferences,
+        adapter_forbidden=source.adapter_forbidden,
+        budget_class=source.budget_class,
+        not_before=source.not_before,
+        max_attempts=source.max_attempts,
+        expected_artifact_refs=source.expected_artifact_refs,
+        expected_evidence_refs=source.expected_evidence_refs,
+        expected_outputs=source.expected_outputs,
+        now=now,
+        source_execution_id=source_execution_id,
+        source_session_id=source_session_id,
+        handoff_transition_id=handoff_transition_id,
+    )
+    target.mark_ready(now=now)
+    target.materialize(
+        execution_lineage_id=execution_lineage_id,
+        first_execution_id=first_execution_id,
+        now=now,
+    )
+    return target
 
 
 def _dependency_enforcement(

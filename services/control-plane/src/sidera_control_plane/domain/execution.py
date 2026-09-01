@@ -85,6 +85,7 @@ class Execution:
         handoff_transition_id: UUID | None = None,
         adapter_preferences: Iterable[str] = (),
         adapter_forbidden: Iterable[str] = (),
+        initial_fencing_token: int = 0,
     ) -> "Execution":
         clean_purpose = purpose.strip()
         clean_requirements = frozenset(
@@ -96,6 +97,12 @@ class Execution:
             )
         if not clean_purpose or not clean_requirements:
             raise ValidationError("purpose and capability_requirements are required")
+        if (
+            not isinstance(initial_fencing_token, int)
+            or isinstance(initial_fencing_token, bool)
+            or initial_fencing_token < 0
+        ):
+            raise ValidationError("initial_fencing_token must be non-negative")
         if not_before.tzinfo is None:
             raise ValidationError("not_before must be timezone-aware")
         for name, value in (
@@ -135,7 +142,7 @@ class Execution:
             pinned_worker_id=pinned_worker_id,
             assigned_worker_id=None,
             active_lease_id=None,
-            last_fencing_token=0,
+            last_fencing_token=initial_fencing_token,
             not_before=not_before,
             failure_code=None,
             started_at=None,

@@ -903,6 +903,15 @@ class ExecutionRequestRepositoryPort(Protocol):
     ) -> ExecutionRequest | None:
         raise NotImplementedError
 
+    def get_by_handoff_transition(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        raise NotImplementedError
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         raise NotImplementedError
 
@@ -1232,6 +1241,15 @@ class ExecutionRepositoryPort(Protocol):
     def list_for_lineage(
         self, lineage_id: UUID, workspace_id: UUID
     ) -> tuple[Execution, ...]:
+        raise NotImplementedError
+
+    def get_by_handoff_transition(
+        self,
+        transition_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> Execution | None:
         raise NotImplementedError
 
     def list_for_worker_item(
