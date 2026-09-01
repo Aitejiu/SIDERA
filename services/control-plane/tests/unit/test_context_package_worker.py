@@ -6,7 +6,10 @@ from types import SimpleNamespace
 from typing import Self
 from uuid import UUID, uuid4
 
+import pytest
+
 from sidera_control_plane.adapters.knowledge_http import KnowledgeAdapterError
+from sidera_control_plane.application.context_assembly import ContextAssemblyError
 from sidera_control_plane.application.ports import (
     ExactRevisionManifest,
     ExactSectionBody,
@@ -371,3 +374,139 @@ def test_worker_does_not_block_terminal_planning_run_after_stale_claim() -> None
     assert state.run.status.value == "succeeded"
     assert state.saved_run is None
     assert state.planning_request.status.value == "submitted"
+
+
+def test_worker_adds_only_bounded_handoff_facts_to_execution_package() -> None:
+    execution_id = uuid4()
+    execution_request_id = uuid4()
+    worker_item_id = uuid4()
+    bundle_id = uuid4()
+    bundle_hash = "a" * 64
+    request = ContextAssemblyRequest.create(
+        request_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        purpose=ContextPurpose.EXECUTION,
+        consumer_type=ContextConsumerType.WORKER,
+        consumer_id=execution_id,
+        worker_item_id=worker_item_id,
+        work_context_revision_id=CONTEXT_REVISION_ID,
+        context_version=2,
+        knowledge_search_scope={"query": None, "status": "active", "limit": 10},
+        knowledge_filter_refs=(),
+        fact_scope_refs=("handoff_context_bundle",),
+        budget={
+            "execution_request_id": str(execution_request_id),
+            "handoff_context_bundle_id": str(bundle_id),
+            "handoff_context_bundle_hash": bundle_hash,
+        },
+        expires_at=NOW + timedelta(minutes=30),
+        request_fingerprint="b" * 64,
+        idempotency_key="context:handoff:test:v1",
+        created_at=NOW,
+    )
+    execution_request = SimpleNamespace(
+        id=execution_request_id,
+        planning_request_id=None,
+        status=SimpleNamespace(value="materialized"),
+        worker_item_id=worker_item_id,
+        proposal_revision_id=uuid4(),
+        plan_snapshot_id=uuid4(),
+        plan_generation=4,
+        gate_reason=None,
+        expected_outputs=("diff",),
+    )
+    execution = SimpleNamespace(
+        id=execution_id,
+        lineage_id=uuid4(),
+        attempt=2,
+        task_id=uuid4(),
+        status=SimpleNamespace(value="queued"),
+    )
+    worker_item = SimpleNamespace(
+        id=worker_item_id,
+        context_version=2,
+        acknowledged_context_version=1,
+    )
+    bundle = SimpleNamespace(
+        id=bundle_id,
+        bundle_hash=bundle_hash,
+        workspace_id=WORKSPACE_ID,
+        worker_item_id=worker_item_id,
+        handoff_transition_id=uuid4(),
+        logical_attempt=2,
+        source_execution_id=uuid4(),
+        source_session_id=uuid4(),
+        source_checkpoint_sequence=7,
+        source_last_accepted_sequence=7,
+        source_context_package_id=uuid4(),
+        source_context_package_hash="c" * 64,
+        source_worker_context_version=1,
+        source_workspace_manifest_id=uuid4(),
+        source_workspace_version=3,
+        workspace_location_ref_hash="d" * 64,
+        repository_state=(
+            {
+                "repository_ref": "repo://sidera",
+                "base_revision": "e" * 40,
+                "branch": "handoff",
+                "current_head": "f" * 40,
+            },
+        ),
+        artifact_refs=("artifact:diff",),
+        evidence_refs=("evidence:checkpoint",),
+        delivered_input_refs=(uuid4(),),
+        transferable_input_refs=(uuid4(),),
+        excluded_input_refs=(uuid4(),),
+        target_execution_id=execution_id,
+        target_worker_id=uuid4(),
+        target_runtime_snapshot_hash="1" * 64,
+        target_context_version=2,
+        handoff_reason="replace the unavailable worker",
+        handoff_instruction="continue from the accepted checkpoint",
+    )
+    uow = SimpleNamespace(
+        execution_requests=SimpleNamespace(
+            get=lambda *_args, **_kwargs: execution_request,
+            list_dependencies=lambda *_args, **_kwargs: (),
+        ),
+        executions=SimpleNamespace(get=lambda *_args, **_kwargs: execution),
+        worker_items=SimpleNamespace(get=lambda *_args, **_kwargs: worker_item),
+        planning_requests=SimpleNamespace(get=lambda *_args, **_kwargs: None),
+        handoff_context_bundles=SimpleNamespace(
+            get=lambda requested_id, workspace_id, **_kwargs: (
+                bundle
+                if requested_id == bundle_id and workspace_id == WORKSPACE_ID
+                else None
+            )
+        ),
+    )
+    worker = _worker(FakeState(_assembly_request()), FakeCatalog(FakeState(_assembly_request())))
+
+    facts = worker._execution_facts(uow, request)
+
+    handoff = facts["handoff"]
+    assert isinstance(handoff, dict)
+    assert handoff["bundle_id"] == str(bundle_id)
+    assert handoff["source"]["last_accepted_sequence"] == 7
+    assert handoff["target"]["runtime_hash"] == "1" * 64
+    assert "trace" not in str(handoff).lower()
+    assert "snapshot" not in str(handoff).lower()
+
+
+def test_worker_rejects_a_stale_handoff_bundle_reference() -> None:
+    state = FakeState(_assembly_request())
+    worker = _worker(state, FakeCatalog(state))
+    request = SimpleNamespace(
+        budget={
+            "handoff_context_bundle_id": str(uuid4()),
+            "handoff_context_bundle_hash": "a" * 64,
+        },
+        workspace_id=WORKSPACE_ID,
+        consumer_id=uuid4(),
+        worker_item_id=uuid4(),
+        context_version=1,
+    )
+    uow = SimpleNamespace(handoff_context_bundles=SimpleNamespace(get=lambda *_args, **_kwargs: None))
+
+    with pytest.raises(ContextAssemblyError, match="no longer available"):
+        worker._handoff_facts(uow, request)

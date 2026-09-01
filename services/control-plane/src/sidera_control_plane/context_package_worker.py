@@ -34,6 +34,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextPurpose,
 )
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.handoff_evidence import HandoffContextBundle
 from sidera_control_plane.domain.planning import PlanningRunStatus
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
@@ -263,7 +264,7 @@ class ContextPackageWorker:
         dependencies = uow.execution_requests.list_dependencies(
             execution_request.id, request.workspace_id
         )
-        return {
+        facts: dict[str, object] = {
             "planning_request": {
                 "id": str(planning_request.id) if planning_request else None,
                 "status": planning_request.status.value if planning_request else None,
@@ -308,6 +309,60 @@ class ContextPackageWorker:
                 for item in dependencies
             ),
         }
+        handoff_facts = self._handoff_facts(uow, request)
+        if handoff_facts is not None:
+            facts["handoff"] = handoff_facts
+        return facts
+
+    @staticmethod
+    def _handoff_facts(
+        uow: ControlPlaneUnitOfWork,
+        request: ContextAssemblyRequest,
+    ) -> Mapping[str, object] | None:
+        bundle_id_value = request.budget.get("handoff_context_bundle_id")
+        if bundle_id_value is None:
+            return None
+        try:
+            bundle_id = (
+                bundle_id_value
+                if isinstance(bundle_id_value, UUID)
+                else UUID(str(bundle_id_value))
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ContextAssemblyError(
+                "context_consumer_stale",
+                "handoff assembly budget has an invalid Bundle ID",
+            ) from exc
+        bundle_hash = request.budget.get("handoff_context_bundle_hash")
+        if not isinstance(bundle_hash, str) or not bundle_hash.strip():
+            raise ContextAssemblyError(
+                "context_consumer_stale",
+                "handoff assembly budget is missing the Bundle hash",
+            )
+        bundles = getattr(uow, "handoff_context_bundles", None)
+        if bundles is None:
+            raise ContextAssemblyError(
+                "context_consumer_stale",
+                "handoff Bundle repository is unavailable",
+            )
+        bundle = bundles.get(bundle_id, request.workspace_id)
+        if bundle is None:
+            raise ContextAssemblyError(
+                "context_consumer_stale",
+                "handoff context Bundle is no longer available",
+            )
+        if (
+            bundle.bundle_hash != bundle_hash
+            or bundle.workspace_id != request.workspace_id
+            or bundle.target_execution_id != request.consumer_id
+            or bundle.worker_item_id != request.worker_item_id
+            or bundle.target_context_version != request.context_version
+        ):
+            raise ContextAssemblyError(
+                "context_consumer_stale",
+                "handoff context Bundle does not match the target consumer",
+            )
+        return _safe_handoff_facts(bundle)
 
     def _assemble(
         self,
@@ -544,6 +599,46 @@ def _budget_uuid(request: ContextAssemblyRequest, key: str) -> UUID:
         raise ContextAssemblyError(
             "context_consumer_stale", f"assembly budget is missing {key}"
         ) from exc
+
+
+def _safe_handoff_facts(bundle: HandoffContextBundle) -> Mapping[str, object]:
+    """Expose only bounded handoff references and operator-safe execution facts."""
+
+    def ids(values: Sequence[UUID]) -> tuple[str, ...]:
+        return tuple(str(value) for value in values)
+
+    return {
+        "bundle_id": str(bundle.id),
+        "bundle_hash": bundle.bundle_hash,
+        "transition_id": str(bundle.handoff_transition_id),
+        "logical_attempt": bundle.logical_attempt,
+        "source": {
+            "execution_id": str(bundle.source_execution_id),
+            "session_id": str(bundle.source_session_id),
+            "checkpoint_sequence": bundle.source_checkpoint_sequence,
+            "last_accepted_sequence": bundle.source_last_accepted_sequence,
+            "context_package_id": str(bundle.source_context_package_id),
+            "context_package_hash": bundle.source_context_package_hash,
+            "context_version": bundle.source_worker_context_version,
+            "workspace_manifest_id": str(bundle.source_workspace_manifest_id),
+            "workspace_version": bundle.source_workspace_version,
+            "workspace_location_ref_hash": bundle.workspace_location_ref_hash,
+            "repository_state": bundle.repository_state,
+            "artifact_refs": bundle.artifact_refs,
+            "evidence_refs": bundle.evidence_refs,
+            "delivered_input_refs": ids(bundle.delivered_input_refs),
+            "transferable_input_refs": ids(bundle.transferable_input_refs),
+            "excluded_input_refs": ids(bundle.excluded_input_refs),
+        },
+        "target": {
+            "execution_id": str(bundle.target_execution_id),
+            "worker_id": str(bundle.target_worker_id),
+            "runtime_hash": bundle.target_runtime_snapshot_hash,
+            "context_version": bundle.target_context_version,
+        },
+        "reason": bundle.handoff_reason,
+        "instruction": bundle.handoff_instruction,
+    }
 
 
 def _system_command(

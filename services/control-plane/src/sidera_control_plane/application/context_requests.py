@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -126,6 +126,10 @@ def build_execution_context_assembly_request(
     work_context_revision: WorkContextRevision,
     ttl_seconds: int,
     created_at: datetime,
+    request_id: UUID | None = None,
+    idempotency_key: str | None = None,
+    additional_fact_scope_refs: Sequence[str] = (),
+    additional_budget: Mapping[str, object] | None = None,
 ) -> ContextAssemblyRequest:
     if execution.worker_item_id != worker_item.id:
         raise ValueError("execution and WorkerItem do not match")
@@ -145,6 +149,14 @@ def build_execution_context_assembly_request(
         "plan_id": str(execution_request.plan_snapshot_id),
         "plan_generation": execution_request.plan_generation,
     }
+    if additional_budget:
+        overlapping_keys = set(additional_budget).intersection(budget)
+        if overlapping_keys:
+            raise ValueError(
+                "additional context budget cannot replace execution facts: "
+                + ", ".join(sorted(overlapping_keys))
+            )
+        budget.update(additional_budget)
     snapshot = work_context_revision.snapshot
     search_scope = _search_scope(
         snapshot.objective,
@@ -160,6 +172,7 @@ def build_execution_context_assembly_request(
         "plan_snapshot",
         "dependency_state",
     )
+    fact_scope_refs += tuple(additional_fact_scope_refs)
     expires_at = _expires_at(created_at, ttl_seconds)
     fingerprint = _request_fingerprint(
         purpose=ContextPurpose.EXECUTION,
@@ -179,7 +192,7 @@ def build_execution_context_assembly_request(
         plan_generation=execution_request.plan_generation,
     )
     return ContextAssemblyRequest.create(
-        request_id=uuid4(),
+        request_id=request_id or uuid4(),
         workspace_id=execution.workspace_id,
         purpose=ContextPurpose.EXECUTION,
         consumer_type=ContextConsumerType.WORKER,
@@ -193,7 +206,7 @@ def build_execution_context_assembly_request(
         budget=budget,
         expires_at=expires_at,
         request_fingerprint=fingerprint,
-        idempotency_key=f"context:execution:{execution.id}:v1",
+        idempotency_key=idempotency_key or f"context:execution:{execution.id}:v1",
         created_at=created_at,
     )
 
