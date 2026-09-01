@@ -1,4 +1,5 @@
 import {
+  ArrowRightLeft,
   CheckCircle2,
   CircleDot,
   FileCheck2,
@@ -204,6 +205,7 @@ function activityVariant(kind: string): string {
   if (kind === "user_input") return "intervention";
   if (kind === "checkpoint") return "checkpoint";
   if (kind === "artifact" || kind === "evidence") return "delivery";
+  if (kind.startsWith("handoff.")) return "handoff";
   if (kind === "error" || kind.startsWith("error.")) return "error";
   if (kind === "plan.recovery") return "error";
   if (kind.startsWith("plan.")) return "plan";
@@ -215,6 +217,7 @@ function activityLabel(kind: string): string {
   if (kind === "user_input") return "USER INTERVENTION";
   if (kind === "checkpoint") return "CHECKPOINT";
   if (kind === "artifact" || kind === "evidence") return "DELIVERY";
+  if (kind.startsWith("handoff.")) return "WORKER HANDOFF";
   if (kind === "error" || kind.startsWith("error.")) return "LIFECYCLE / ERROR";
   if (kind === "plan.generation") return "PLAN GENERATION";
   if (kind === "plan.patch") return "CONTEXT PATCH";
@@ -229,6 +232,7 @@ function activityIcon(kind: string) {
   if (kind === "checkpoint") return <CheckCircle2 size={16} />;
   if (kind === "artifact") return <PackageCheck size={16} />;
   if (kind === "evidence") return <FileCheck2 size={16} />;
+  if (kind.startsWith("handoff.")) return <ArrowRightLeft size={16} />;
   if (kind === "error" || kind.startsWith("error.")) return <TriangleAlert size={16} />;
   if (kind === "plan.generation") return <GitBranch size={16} />;
   if (kind === "plan.patch") return <RefreshCcw size={16} />;

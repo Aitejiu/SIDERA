@@ -27,6 +27,28 @@ const context = {
   worker_id: WORKER_ID,
 };
 
+const activeHandoff = {
+  transition_id: "a0000000-0000-0000-0000-000000000001",
+  proposal_id: "b0000000-0000-0000-0000-000000000001",
+  status: "running",
+  phase: "start_target_session",
+  writer_state: "target_starting",
+  source_execution_id: EXECUTION_ID,
+  source_session_id: SESSION_ID,
+  source_worker_id: WORKER_ID,
+  target_worker_id: "80000000-0000-0000-0000-000000000002",
+  target_execution_id: null,
+  target_session_id: null,
+  attention_required: false,
+  failure_code: null,
+  blocked_operation_id: null,
+  available_recovery_strategies: [],
+  source_trace_descriptor: null,
+  target_trace_descriptor: null,
+  started_at: "2026-08-23T08:05:00Z",
+  updated_at: "2026-08-23T08:05:00Z",
+};
+
 const workspace = {
   workspace_id: WORKSPACE_ID,
   worker_item: {
@@ -135,6 +157,21 @@ describe("WorkerComposer", () => {
     expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeDisabled();
     expect(screen.getByText("这个 WorkerItem 已退役，只能查看历史上下文")).toBeVisible();
     expect(screen.getByRole("button", { name: "发送到当前 Session" })).toBeDisabled();
+  });
+
+  it("keeps the draft but makes the composer read-only during an active handoff", async () => {
+    window.localStorage.setItem(workerItemDraftKey(WORKSPACE_ID, WORKER_ITEM_ID), JSON.stringify({
+      text: "切换完成后再发送",
+      clientIdempotencyKey: "draft-key",
+      lastContextFingerprint: "",
+    }));
+
+    renderComposer({ ...workspace, active_handoff: activeHandoff });
+
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toHaveValue("切换完成后再发送");
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送到当前 Session" })).toBeDisabled();
+    expect(screen.getByText("Agent 正在切换，当前 Session 暂停写入；草稿已保留。")).toBeVisible();
   });
 
   it("resends a superseded input as a new input on the current Session", async () => {

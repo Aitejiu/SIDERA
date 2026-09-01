@@ -5509,6 +5509,667 @@ h1 {
   color: var(--ink);
 }
 
+.worker-item-handoff-button {
+  justify-content: flex-start;
+  width: fit-content;
+  margin-top: 3px;
+}
+
+.worker-item-handoff-summary {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  margin-top: 3px;
+  padding: 9px 10px;
+  border-left: 3px solid var(--dispatch);
+  color: var(--dispatch);
+  background: #f4f8ff;
+}
+
+.worker-item-handoff-summary > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.worker-item-handoff-summary strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.worker-item-handoff-summary small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.worker-timeline-item--handoff {
+  background: #f4f8ff;
+}
+
+.worker-timeline-item--handoff .worker-timeline-item__marker {
+  color: var(--dispatch);
+  border-color: #9db8e5;
+  background: #edf4ff;
+}
+
+.handoff-dialog-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(23 31 42 / 42%);
+}
+
+.handoff-dialog {
+  display: grid;
+  gap: 17px;
+  width: min(780px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: var(--canvas);
+  box-shadow: 0 16px 40px rgb(18 26 36 / 22%);
+  outline: none;
+}
+
+.handoff-dialog--progress {
+  width: min(920px, 100%);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.handoff-dialog__heading,
+.handoff-dialog__actions,
+.handoff-dialog__section-heading,
+.handoff-progress__heading,
+.handoff-progress__recovery-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.handoff-dialog__heading {
+  align-items: start;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--ink);
+}
+
+.handoff-dialog__heading h2,
+.handoff-progress__heading h2 {
+  margin-top: 5px;
+  font-size: 19px;
+}
+
+.handoff-dialog__body {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.handoff-dialog__scope,
+.handoff-review-scope,
+.handoff-review-request {
+  display: grid;
+  gap: 7px;
+  padding: 12px 13px;
+  border-left: 3px solid var(--dispatch);
+  background: #f4f8ff;
+}
+
+.handoff-dialog__scope strong {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.handoff-dialog__scope > span:last-child {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.handoff-dialog__section-heading {
+  align-items: end;
+}
+
+.handoff-dialog__section-heading h3,
+.handoff-progress__recovery-heading h3 {
+  margin-top: 5px;
+  font-size: 14px;
+}
+
+.handoff-dialog__candidates {
+  display: grid;
+  gap: 7px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.handoff-candidate {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--structure);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.handoff-candidate:hover,
+.handoff-candidate:has(input:focus-visible),
+.handoff-candidate.is-selected {
+  border-color: var(--dispatch);
+  background: #f5f8fe;
+}
+
+.handoff-candidate.is-ineligible {
+  color: var(--muted);
+  background: #f6f6f5;
+  cursor: not-allowed;
+  opacity: .74;
+}
+
+.handoff-candidate__body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.handoff-candidate__topline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.handoff-candidate__topline strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.handoff-candidate__body > span:not(.handoff-candidate__topline),
+.handoff-candidate__body small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-candidate__recommended {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--complete);
+  font-size: 10px;
+}
+
+.handoff-candidate__reason {
+  color: var(--attention) !important;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.handoff-candidate__state {
+  align-self: center;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.handoff-candidate__state.is-eligible {
+  color: var(--dispatch);
+}
+
+.handoff-dialog__fields,
+.handoff-progress__field {
+  display: grid;
+  gap: 10px;
+}
+
+.handoff-dialog__fields label,
+.handoff-progress__field {
+  display: grid;
+  gap: 6px;
+}
+
+.handoff-dialog__fields label > span,
+.handoff-progress__field > span,
+.handoff-review-request > div > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.handoff-dialog__fields textarea,
+.handoff-progress__field input {
+  width: 100%;
+  min-height: 40px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--structure);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.handoff-dialog__fields textarea:focus,
+.handoff-progress__field input:focus {
+  border-color: var(--dispatch);
+  outline: 2px solid rgb(33 102 209 / 18%);
+  outline-offset: 1px;
+}
+
+.handoff-dialog__notice,
+.handoff-dialog__error,
+.handoff-dialog__stale {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.handoff-dialog__notice {
+  border-left: 3px solid var(--dispatch);
+  color: var(--muted);
+  background: #f4f8ff;
+}
+
+.handoff-dialog__error,
+.handoff-dialog__stale {
+  border-left: 3px solid var(--blocked);
+  color: var(--blocked);
+  background: #fff6f4;
+}
+
+.handoff-dialog__error .quiet-button {
+  margin-left: auto;
+}
+
+.handoff-dialog__stale strong {
+  font-weight: 700;
+}
+
+.handoff-dialog__actions {
+  justify-content: flex-end;
+  padding-top: 3px;
+}
+
+.handoff-dialog__facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.handoff-dialog__facts--grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.handoff-dialog__facts > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--structure);
+  background: var(--surface);
+}
+
+.handoff-dialog__facts dt,
+.handoff-progress__facts dt {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 9px;
+}
+
+.handoff-dialog__facts dd,
+.handoff-progress__facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.handoff-dialog__facts dd strong {
+  font-size: 12px;
+}
+
+.handoff-dialog__facts dd code,
+.mono-value {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  word-break: break-all;
+}
+
+.handoff-review-participants,
+.handoff-progress__participants {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.handoff-review-participant,
+.handoff-progress__participant {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--structure);
+  background: var(--surface);
+}
+
+.handoff-review-participant strong,
+.handoff-progress__participant strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-review-participant > span:not(.eyebrow),
+.handoff-progress__participant > span:not(.eyebrow) {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.handoff-review-request {
+  border-left-color: var(--attention);
+  background: #fffaf2;
+}
+
+.handoff-review-request p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.handoff-progress {
+  display: grid;
+  gap: 16px;
+  margin-top: 20px;
+  padding: 17px;
+  border: 1px solid var(--structure);
+  border-left: 3px solid var(--dispatch);
+  background: var(--surface);
+}
+
+.handoff-progress--attention {
+  border-left-color: var(--attention);
+  background: #fffaf2;
+}
+
+.handoff-progress--complete {
+  border-left-color: var(--complete);
+  background: #f7fbf8;
+}
+
+.handoff-progress--loading {
+  color: var(--muted);
+}
+
+.handoff-progress__heading {
+  align-items: start;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ink);
+}
+
+.handoff-progress__heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.handoff-progress__status {
+  color: var(--dispatch);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+}
+
+.handoff-progress--attention .handoff-progress__status {
+  color: var(--attention);
+}
+
+.handoff-progress--complete .handoff-progress__status {
+  color: var(--complete);
+}
+
+.handoff-progress__participants > svg {
+  color: var(--dispatch);
+}
+
+.handoff-progress__callout {
+  display: flex;
+  align-items: start;
+  gap: 9px;
+  padding: 11px 12px;
+  border-left: 3px solid var(--dispatch);
+  background: #f4f8ff;
+}
+
+.handoff-progress__callout.is-attention {
+  border-left-color: var(--attention);
+  color: var(--attention);
+  background: #fff6e8;
+}
+
+.handoff-progress__callout > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.handoff-progress__callout strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.handoff-progress__callout span,
+.handoff-progress__callout small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.handoff-progress__milestones {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--structure);
+  background: var(--structure);
+}
+
+.handoff-progress__milestone {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 9px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.handoff-progress__milestone > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-progress__milestone-marker {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+  color: var(--muted);
+}
+
+.handoff-progress__milestone-marker > span {
+  width: 6px;
+  height: 6px;
+  border: 1px solid currentColor;
+}
+
+.handoff-progress__milestone.is-completed {
+  color: var(--complete);
+}
+
+.handoff-progress__milestone.is-current {
+  color: var(--dispatch);
+  font-weight: 650;
+  background: #f4f8ff;
+}
+
+.handoff-progress__facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.handoff-progress__facts > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--structure);
+  background: var(--canvas);
+}
+
+.handoff-progress__traces {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.handoff-progress__trace-link,
+.handoff-progress__trace-disabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dispatch);
+  font-size: 11px;
+}
+
+.handoff-progress__trace-disabled {
+  color: var(--muted);
+}
+
+.handoff-progress__recovery {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border-top: 1px solid #dfc39d;
+  background: #fffdf8;
+}
+
+.handoff-progress__recovery-heading {
+  align-items: end;
+}
+
+.handoff-progress__recovery-heading > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.handoff-progress__recovery-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.handoff-progress__recovery-options legend {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.handoff-progress__recovery-options label {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--structure);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.handoff-progress__recovery-options label:has(input:checked) {
+  border-color: var(--dispatch);
+  background: #f4f8ff;
+}
+
+.handoff-progress__recovery-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.handoff-progress__loading,
+.handoff-progress__error,
+.handoff-progress__success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.handoff-progress__error {
+  color: var(--blocked);
+}
+
+.handoff-progress__error > div {
+  display: grid;
+  gap: 3px;
+}
+
+.handoff-progress__error strong {
+  color: var(--ink);
+}
+
+.handoff-progress__success {
+  color: var(--complete);
+}
+
+.spin {
+  animation: handoff-spin 1s linear infinite;
+}
+
+@keyframes handoff-spin {
+  to { transform: rotate(360deg); }
+}
+
 .worker-timeline-item__delivery,
 .worker-timeline-item__attachment {
   display: inline-flex;
@@ -6525,6 +7186,69 @@ h1 {
 
   .worker-plan-recovery__facts {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .handoff-dialog-backdrop {
+    place-items: end center;
+    padding: 12px;
+  }
+
+  .handoff-dialog {
+    max-height: calc(100vh - 24px);
+    padding: 16px;
+  }
+
+  .handoff-dialog__facts--grid,
+  .handoff-progress__facts,
+  .handoff-progress__recovery-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .handoff-review-participants,
+  .handoff-progress__participants {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .handoff-review-participants > svg,
+  .handoff-progress__participants > svg {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+
+  .handoff-candidate {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+
+  .handoff-candidate__state {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .handoff-candidate__body > span:not(.handoff-candidate__topline),
+  .handoff-candidate__body small {
+    white-space: normal;
+  }
+
+  .handoff-progress__milestones {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .handoff-progress__recovery-actions,
+  .handoff-dialog__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .handoff-progress__recovery-actions .quiet-button,
+  .handoff-progress__recovery-actions .primary-button,
+  .handoff-dialog__actions .quiet-button,
+  .handoff-dialog__actions .primary-button {
+    width: 100%;
+  }
+
+  .worker-item-handoff-button {
+    width: 100%;
+    justify-content: center;
   }
 
   .worker-item-sidebar {

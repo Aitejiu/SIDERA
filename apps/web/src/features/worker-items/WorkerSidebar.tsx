@@ -1,5 +1,6 @@
 import {
   Activity,
+  ArrowRightLeft,
   CheckCircle2,
   CircleAlert,
   GitBranch,
@@ -24,11 +25,15 @@ export function WorkerSidebar({
   taskTitle,
   subtaskTitle,
   onRefresh,
+  handoffAvailable,
+  onOpenHandoff,
 }: {
   workspace: WorkerWorkspace;
   taskTitle: string;
   subtaskTitle: string;
   onRefresh: () => Promise<void>;
+  handoffAvailable: boolean;
+  onOpenHandoff: () => void;
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
   const currentExecution = workspace.execution_history[0] ?? null;
@@ -62,6 +67,16 @@ export function WorkerSidebar({
         <strong>{runtime?.worker_display_name ?? "尚未接入 Agent"}</strong>
         <span>{runtime?.adapter_type ?? "等待 runtime"}</span>
         <span className="mono-label">WorkerItem {shortId(workerItem.id)}</span>
+        {workspace.active_handoff ? (
+          <div className="worker-item-handoff-summary" role="status">
+            <ArrowRightLeft size={14} aria-hidden="true" />
+            <span><strong>Agent 切换中</strong><small>{handoffPhaseLabel(workspace.active_handoff.phase)}</small></span>
+          </div>
+        ) : handoffAvailable ? (
+          <button className="quiet-button worker-item-handoff-button" type="button" onClick={onOpenHandoff}>
+            <ArrowRightLeft size={14} aria-hidden="true" />调整执行 Agent
+          </button>
+        ) : null}
       </section>
 
       <section className="worker-item-sidebar__section">
@@ -218,6 +233,23 @@ function planActionLabel(action: string): string {
     retire: "退役并保留历史",
   };
   return labels[action] ?? action;
+}
+
+function handoffPhaseLabel(phase: string): string {
+  const labels: Record<string, string> = {
+    checkpoint_source: "记录源 Agent 检查点",
+    stop_source: "停止源 Agent 写入",
+    freeze_source_workspace: "冻结源 Workspace",
+    create_target_execution: "创建目标 Execution",
+    assemble_bundle: "组装上下文 Bundle",
+    transfer_workspace: "转移 Workspace",
+    start_target_session: "启动目标 Session",
+    acknowledge_context: "确认目标 Context",
+    transfer_safe_inputs: "转移安全输入",
+    activate_target: "激活目标 Agent",
+    complete: "完成 Agent 切换",
+  };
+  return labels[phase] ?? phase;
 }
 
 function shortId(value: string): string {

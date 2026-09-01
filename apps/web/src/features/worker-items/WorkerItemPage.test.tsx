@@ -20,6 +20,7 @@ const CONTEXT_PACKAGE_TWO_ID = "90000000-0000-0000-0000-000000000002";
 const WORKER_TRANSITION_ID = "a0000000-0000-0000-0000-000000000001";
 const PLAN_TRANSITION_ID = "b0000000-0000-0000-0000-000000000001";
 const PATCH_ID = "c0000000-0000-0000-0000-000000000001";
+const HANDOFF_TARGET_ID = "80000000-0000-0000-0000-000000000002";
 
 const workspace = {
   workspace_id: WORKSPACE_ID,
@@ -212,6 +213,35 @@ const workspace = {
     completed_at: null,
     trace_href: null,
   },
+};
+
+const handoffCandidates = {
+  workspace_id: WORKSPACE_ID,
+  worker_item_id: WORKER_ITEM_ID,
+  source_execution_id: EXECUTION_TWO_ID,
+  source_session_id: SESSION_TWO_ID,
+  source_worker_id: "80000000-0000-0000-0000-000000000001",
+  source_worker_item_version: 7,
+  candidates: [{
+    worker_id: HANDOFF_TARGET_ID,
+    display_name: "Target Agent",
+    adapter_type: "opencode",
+    eligible: true,
+    recommended: true,
+    ineligibility_code: null,
+    runtime_snapshot: {},
+    capability_snapshot_hash: "a".repeat(64),
+    policy_reason: { selected: "recommended" },
+    workspace_compatibility: { compatible: true },
+    runtime_profile_label: "OpenCode · v1",
+    capabilities_satisfied: ["python"],
+    health_summary: "idle; load 0/2",
+    policy_reasons: [{ code: "recommended" }],
+    inspected_at: "2026-08-23T08:05:00Z",
+  }],
+  recommended_worker_id: HANDOFF_TARGET_ID,
+  blocking_codes: [],
+  inspected_at: "2026-08-23T08:05:00Z",
 };
 
 function makeExecutionContextPackage(packageId: string, executionId: string, contextVersion: number) {
@@ -416,6 +446,10 @@ describe("WorkerItemPage", () => {
         () => HttpResponse.json(workspace),
       ),
       http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/handoff-candidates`,
+        () => HttpResponse.json(handoffCandidates),
+      ),
+      http.get(
         `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/activity`,
         ({ request }) => new URL(request.url).searchParams.get("after") === "cursor-older"
           ? HttpResponse.json(olderActivityPage)
@@ -501,6 +535,36 @@ describe("WorkerItemPage", () => {
     expect(screen.getByText("当前执行已绑定；更换节点需要停止并创建新的执行尝试")).toBeVisible();
     expect(screen.getByText("运行回调测试")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
+  });
+
+  it("opens the handoff chooser in the current WorkerItem tab only when a target is eligible", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const sidebar = await screen.findByRole("complementary", { name: "WorkerItem 事实" });
+    await user.click(await within(sidebar).findByRole("button", { name: "调整执行 Agent" }));
+    expect(await screen.findByRole("dialog", { name: "调整执行 Agent" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(window.location.pathname).toBe(`/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}`);
+  });
+
+  it("does not offer handoff for a read-only source", async () => {
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+        () => HttpResponse.json({
+          ...workspace,
+          can_intervene: false,
+          read_only_reason: "no_active_session",
+          current_runtime: null,
+          intervention_context: null,
+        }),
+      ),
+    );
+    renderPage();
+
+    await screen.findByRole("heading", { name: "实现回调幂等" });
+    expect(screen.queryByRole("button", { name: "调整执行 Agent" })).not.toBeInTheDocument();
   });
 
   it("shows plan sync state and keeps transition facts separate from Agent Trace", async () => {

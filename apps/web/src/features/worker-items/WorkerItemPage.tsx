@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, CircleAlert, GitBranch, RefreshCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -10,30 +10,47 @@ import { StatusMark } from "@/shared/ui/StatusMark";
 import { getTaskGraph, taskGraphQueryKey } from "../tasks/api";
 import { executionQueryKey, getExecution } from "../trace/api";
 import {
+  getHandoffCandidates,
   getWorkerItemWorkspace,
   getWorkerTransition,
   listWorkerItemActivity,
   recoverWorkerTransition,
+  handoffCandidatesQueryKey,
   workerActivityQueryKey,
   workerWorkspaceQueryKey,
 } from "./api";
 import { WorkerComposer } from "./WorkerComposer";
+import { HandoffDialog } from "./HandoffDialog";
+import { HandoffProgress } from "./HandoffProgress";
 import { WorkerSidebar } from "./WorkerSidebar";
 import { WorkerTimeline } from "./WorkerTimeline";
 import { WorkerTraceDialog } from "./WorkerTraceDialog";
 import type { Execution } from "../trace/types";
-import type { RecoverWorkerTransitionPayload, WorkerActivity, WorkerWorkspace } from "./types";
+import type { HandoffCandidateList, RecoverWorkerTransitionPayload, WorkerActivity, WorkerWorkspace } from "./types";
 
 export function WorkerItemPage() {
   const { workspaceId = "", workerItemId = "" } = useParams<{
     workspaceId: string;
     workerItemId: string;
   }>();
+  const location = useLocation();
   const stream = useWorkspaceStreamOptional();
   const workspaceQuery = useQuery({
     queryKey: workerWorkspaceQueryKey(workspaceId, workerItemId),
     queryFn: ({ signal }) => getWorkerItemWorkspace(workspaceId, workerItemId, signal),
     enabled: Boolean(workspaceId && workerItemId),
+  });
+  const handoffCandidatesEnabled = Boolean(
+    workspaceId
+      && workerItemId
+      && workspaceQuery.data?.can_intervene
+      && workspaceQuery.data.current_runtime?.session_id
+      && workspaceQuery.data.active_handoff == null,
+  );
+  const handoffCandidatesQuery = useQuery({
+    queryKey: handoffCandidatesQueryKey(workspaceId, workerItemId),
+    queryFn: ({ signal }) => getHandoffCandidates(workspaceId, workerItemId, signal),
+    enabled: handoffCandidatesEnabled,
   });
   const rootTaskId = workspaceQuery.data?.worker_item.root_task_id ?? "";
   const taskGraphQuery = useQuery({
@@ -66,6 +83,12 @@ export function WorkerItemPage() {
       stream.seedSnapshotCursor(cursor);
     }
   }, [stream, workspaceQuery.data?.last_change_cursor]);
+  useEffect(() => {
+    const nextPath = `${location.pathname}${location.search}${location.hash}`;
+    if (window.location.pathname !== location.pathname || window.location.search !== location.search || window.location.hash !== location.hash) {
+      window.history.replaceState({}, "", nextPath);
+    }
+  }, [location.hash, location.pathname, location.search]);
   const activity = useMemo(() => flattenActivities(activityQuery.data?.pages), [activityQuery.data?.pages]);
 
   const refreshWorkerItem = async () => {
@@ -73,6 +96,7 @@ export function WorkerItemPage() {
       workspaceQuery.refetch(),
       activityQuery.refetch(),
       executionId ? executionQuery.refetch() : Promise.resolve(),
+      handoffCandidatesEnabled ? handoffCandidatesQuery.refetch() : Promise.resolve(),
     ]);
   };
 
@@ -101,6 +125,10 @@ export function WorkerItemPage() {
             onRetryActivity={() => void activityQuery.refetch()}
             execution={executionQuery.data}
             onRefresh={refreshWorkerItem}
+            handoffCandidates={handoffCandidatesQuery.data}
+            handoffCandidatesPending={handoffCandidatesQuery.isPending}
+            handoffCandidatesError={handoffCandidatesQuery.error}
+            onRefreshHandoffCandidates={() => handoffCandidatesQuery.refetch()}
           />
         ) : null}
       </AsyncState>
@@ -121,6 +149,10 @@ function WorkerItemContent({
   onRetryActivity,
   execution,
   onRefresh,
+  handoffCandidates,
+  handoffCandidatesPending,
+  handoffCandidatesError,
+  onRefreshHandoffCandidates,
 }: {
   workspace: WorkerWorkspace;
   activity: readonly WorkerActivity[];
@@ -134,13 +166,21 @@ function WorkerItemContent({
   onRetryActivity: () => void;
   execution: Execution | undefined;
   onRefresh: () => Promise<void>;
+  handoffCandidates: HandoffCandidateList | undefined;
+  handoffCandidatesPending: boolean;
+  handoffCandidatesError: unknown;
+  onRefreshHandoffCandidates: () => Promise<unknown>;
 }) {
   const [traceDescriptor, setTraceDescriptor] = useState<NonNullable<WorkerActivity["trace_descriptor"]> | null>(null);
+  const [handoffOpen, setHandoffOpen] = useState(false);
   const workerStatus = statusFor(workspace.worker_item.status);
   const timelineActivity = useMemo(
     () => enrichWorkerActivities(activity, workspace),
     [activity, workspace],
   );
+  const handoffAvailable = workspace.active_handoff == null
+    && workspace.can_intervene
+    && handoffCandidates?.candidates.some((candidate) => candidate.eligible) === true;
   return (
     <>
       <div className="breadcrumb worker-item-page__breadcrumb">
@@ -175,6 +215,14 @@ function WorkerItemContent({
             <strong>{workspace.worker_item.responsibility}</strong>
             <span>Execution / Session 会在这里连续呈现，历史上下文不会因换代丢失。</span>
           </div>
+          {workspace.active_handoff && !handoffOpen ? (
+            <HandoffProgress
+              workspaceId={workspace.workspace_id}
+              transitionId={workspace.active_handoff.transition_id}
+              fallback={workspace.active_handoff}
+              onRefresh={onRefresh}
+            />
+          ) : null}
           {isActivityError ? (
             <div className="worker-item-page__activity-error" role="alert">
               <RefreshCcw size={15} aria-hidden="true" />
@@ -207,8 +255,23 @@ function WorkerItemContent({
           taskTitle={taskTitle}
           subtaskTitle={subtaskTitle}
           onRefresh={onRefresh}
+          handoffAvailable={handoffAvailable}
+          onOpenHandoff={() => setHandoffOpen(true)}
         />
       </div>
+      {handoffOpen && workspace.active_handoff == null ? (
+        <HandoffDialog
+          workspace={workspace}
+          taskTitle={taskTitle}
+          subtaskTitle={subtaskTitle}
+          candidates={handoffCandidates}
+          candidatesPending={handoffCandidatesPending}
+          candidatesError={handoffCandidatesError}
+          onRefreshCandidates={onRefreshHandoffCandidates}
+          onRefresh={onRefresh}
+          onClose={() => setHandoffOpen(false)}
+        />
+      ) : null}
       {traceDescriptor ? (
         <WorkerTraceDialog
           workspaceId={workspace.workspace_id}
@@ -508,6 +571,26 @@ function enrichWorkerActivities(
         trace_descriptor: null,
       });
     }
+  }
+  const handoff = workspace.active_handoff;
+  if (handoff && !result.some((item) => item.source_type === "handoff_transition" && item.source_id === handoff.transition_id)) {
+    const blocked = handoff.status === "blocked" || handoff.status === "blocked_unknown" || handoff.status === "failed";
+    result.push({
+      activity_id: `handoff:${handoff.transition_id}:${handoff.updated_at}`,
+      source_type: "handoff_transition",
+      source_id: handoff.transition_id,
+      execution_id: handoff.target_execution_id ?? handoff.source_execution_id,
+      session_id: handoff.target_session_id ?? handoff.source_session_id,
+      occurred_at: handoff.updated_at,
+      kind: "handoff.transition",
+      title: blocked ? "Agent 切换需要关注" : handoff.phase,
+      summary: blocked ? handoff.failure_code ?? "Agent 切换结果需要确认" : "WorkerItem 正在切换执行 Agent",
+      correlation_id: handoff.transition_id,
+      body: blocked ? "当前 Session 保持只读，等待带证据的恢复策略。" : null,
+      delivery_status: blocked ? "blocked" : null,
+      artifact_ids: [],
+      trace_descriptor: handoff.source_trace_descriptor,
+    });
   }
   return result.sort((left, right) => {
     const timeDifference = Date.parse(left.occurred_at) - Date.parse(right.occurred_at);

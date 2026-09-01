@@ -40,6 +40,39 @@ export function workerHandler(
   return http.get(`/api/v1/workers/${workerId}`, () => HttpResponse.json(body));
 }
 
+export function handoffCandidatesHandler(
+  workspaceId: string,
+  workerItemId: string,
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get(
+    `/api/v1/workspaces/${workspaceId}/worker-items/${workerItemId}/handoff-candidates`,
+    () => HttpResponse.json(body),
+  );
+}
+
+export function handoffProposalHandler(
+  workspaceId: string,
+  proposalId: string,
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get(
+    `/api/v1/workspaces/${workspaceId}/handoff-proposals/${proposalId}`,
+    () => HttpResponse.json(body),
+  );
+}
+
+export function handoffTransitionHandler(
+  workspaceId: string,
+  transitionId: string,
+  body: Parameters<typeof HttpResponse.json>[0],
+): HttpHandler {
+  return http.get(
+    `/api/v1/workspaces/${workspaceId}/handoff-transitions/${transitionId}`,
+    () => HttpResponse.json(body),
+  );
+}
+
 export function modulesHandler(
   moduleType: "worker_adapter" | "workspace_provider",
   body: Parameters<typeof HttpResponse.json>[0],

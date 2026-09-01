@@ -53,11 +53,15 @@ export function WorkerComposer({
   const contextChanged = draft.text.trim().length > 0
     && draft.lastContextFingerprint.length > 0
     && draft.lastContextFingerprint !== fingerprint;
+  const handoffInProgress = workspace.active_handoff !== undefined
+    && workspace.active_handoff !== null
+    && workspace.active_handoff.status !== "converged";
   const writable = workspace.can_intervene
     && context !== null
     && streamReady
-    && !contextChanged;
-  const readOnlyMessage = getReadOnlyMessage(workspace, streamReady, contextChanged);
+    && !contextChanged
+    && !handoffInProgress;
+  const readOnlyMessage = getReadOnlyMessage(workspace, streamReady, contextChanged, handoffInProgress);
 
   useEffect(() => {
     saveWorkerItemDraft(draftKey, draft);
@@ -248,7 +252,9 @@ function getReadOnlyMessage(
   workspace: WorkerWorkspace,
   streamReady: boolean,
   contextChanged: boolean,
+  handoffInProgress: boolean,
 ): string {
+  if (handoffInProgress) return "Agent 正在切换，当前 Session 暂停写入；草稿已保留。";
   if (!streamReady) return "实时连接陈旧，已暂停写入；恢复同步后才能介入。";
   if (contextChanged) return "工作 context 已变化，草稿已保留；请确认最新 context 后再发送。";
   if (workspace.read_only_reason === "worker_item_retired") return "这个 WorkerItem 已退役，只能查看历史上下文";
