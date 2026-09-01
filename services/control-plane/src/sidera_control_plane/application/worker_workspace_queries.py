@@ -10,6 +10,7 @@ from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
 )
 from sidera_control_plane.domain.worker_item_projections import (
+    ActiveHandoffProjection,
     ArtifactSummaryProjection,
     BindingFact,
     EvidenceSummaryProjection,
@@ -45,6 +46,7 @@ class WorkerWorkspaceQuerySnapshot:
     as_of: datetime
     projection_stale: bool = False
     convergence_facts: PlanConvergenceFacts | None = None
+    active_handoff: ActiveHandoffProjection | None = None
 
 
 class WorkerWorkspaceQueryStore(Protocol):
@@ -112,4 +114,5 @@ class WorkerWorkspaceQueryService:
             as_of=snapshot.as_of,
             projection_stale=snapshot.projection_stale,
             convergence_facts=snapshot.convergence_facts,
+            active_handoff=snapshot.active_handoff,
         )

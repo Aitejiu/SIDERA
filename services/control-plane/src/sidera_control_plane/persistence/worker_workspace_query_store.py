@@ -23,6 +23,9 @@ from sidera_control_plane.domain.worker_item_projections import (
     WorkerItemPlacementFact,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.handoff_query_store import (
+    SqlAlchemyHandoffQueryStore,
+)
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
     AssignmentLeaseModel,
@@ -47,6 +50,7 @@ from sidera_control_plane.persistence.plan_convergence_query import (
 class SqlAlchemyWorkerWorkspaceQueryStore:
     def __init__(self, database: Database) -> None:
         self._database = database
+        self._handoff_store = SqlAlchemyHandoffQueryStore(database)
 
     def load(
         self, workspace_id: UUID, worker_item_id: UUID
@@ -223,6 +227,11 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                     .order_by(ProjectionChangeModel.cursor.desc())
                     .limit(1)
                 ) or 0
+            active_handoff = self._handoff_store.load_in_session(
+                session,
+                workspace_id,
+                worker_item_ids=(worker_item_id,),
+            ).get(worker_item_id)
             as_of = max((
                 worker_item.updated_at,
                 *(execution.updated_at for execution in execution_rows),
@@ -233,6 +242,11 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 *(claim.created_at for claim in evidence),
                 *(block.first_seen_at for block in active_block_rows),
                 *(block.last_seen_at for block in active_block_rows),
+                *(
+                    (active_handoff.updated_at,)
+                    if active_handoff is not None
+                    else ()
+                ),
             ))
             convergence_facts = load_plan_convergence_facts(
                 session,
@@ -258,6 +272,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
                 convergence_facts=convergence_facts,
+                active_handoff=active_handoff,
             )
 
 

@@ -333,3 +333,59 @@ def test_worker_runtime_changes_keep_worker_identity_but_scope_derived_facts_to_
         if target.projection_type
         not in {"workers", "worker_runtime"}
     )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "HandoffProposalPrepared",
+        "HandoffProposalStale",
+        "HandoffProposalCancelled",
+        "HandoffConfirmed",
+        "HandoffCheckpointCaptured",
+        "HandoffSourceStopped",
+        "HandoffWorkspaceFrozen",
+        "HandoffTargetExecutionCreated",
+        "HandoffContextBundleCreated",
+        "HandoffWorkspaceTransferred",
+        "HandoffTargetSessionStarted",
+        "HandoffContextAcknowledged",
+        "HandoffInputTransferred",
+        "HandoffTargetActivated",
+        "HandoffBlocked",
+        "HandoffRecovered",
+        "HandoffConverged",
+    ],
+)
+def test_handoff_events_invalidate_the_worker_item_and_root_projections(
+    event_type: str,
+) -> None:
+    event = _event(
+        event_type,
+        aggregate_type=(
+            "handoff_proposal" if event_type.startswith("HandoffProposal") else "handoff_transition"
+        ),
+        payload={
+            "root_task_id": str(ROOT_TASK_ID),
+            "worker_item_id": str(WORKER_ITEM_ID),
+            "target_execution_id": str(EXECUTION_ID),
+        },
+    )
+
+    targets = projection_targets_for_event(event)
+
+    assert {
+        target.projection_type for target in targets
+    } >= {
+        "task_overview",
+        "task_graph",
+        "subtask_workspace",
+        "worker_item_workspace",
+        "worker_item_activity",
+    }
+    assert all(target.projection_type in PROJECTION_TYPES for target in targets)
+    assert {
+        target.resource_id
+        for target in targets
+        if target.projection_type == "worker_item_workspace"
+    } == {WORKER_ITEM_ID}

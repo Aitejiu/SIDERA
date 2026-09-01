@@ -23,6 +23,9 @@ from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleWorkerItemFact,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.handoff_query_store import (
+    SqlAlchemyHandoffQueryStore,
+)
 from sidera_control_plane.persistence.models import (
     AttentionAcknowledgementModel,
     EvidenceClaimModel,
@@ -47,6 +50,7 @@ class SqlAlchemyTaskConsoleQueryStore:
     def __init__(self, database: Database) -> None:
         self._database = database
         self._normalizer = PlanNormalizer()
+        self._handoff_store = SqlAlchemyHandoffQueryStore(database)
 
     def load(
         self,
@@ -217,6 +221,12 @@ class SqlAlchemyTaskConsoleQueryStore:
                     .order_by(ProjectionChangeModel.cursor.desc())
                     .limit(1)
                 ) or 0
+            handoffs = self._handoff_store.load_for_root_in_session(
+                session,
+                workspace_id,
+                root_task_id,
+                tuple(sorted(worker_item_ids, key=str)),
+            )
             as_of = max(
                 (
                     value.occurred_at
@@ -231,10 +241,12 @@ class SqlAlchemyTaskConsoleQueryStore:
                     for value in worker_items.values()
                 ),
                 *(
-                    value.updated_at
-                    for value in tasks.values()
+                value.updated_at
+                for value in tasks.values()
                 ),
             )
+            if handoffs:
+                as_of = max(as_of, *(item.updated_at for item in handoffs.values()))
             convergence_facts = load_plan_convergence_facts(
                 session,
                 workspace_id=workspace_id,
@@ -254,6 +266,7 @@ class SqlAlchemyTaskConsoleQueryStore:
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
                 convergence_facts=convergence_facts,
+                handoffs=handoffs,
             )
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:

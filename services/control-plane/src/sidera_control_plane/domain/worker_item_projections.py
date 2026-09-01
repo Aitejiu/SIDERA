@@ -204,6 +204,29 @@ class TraceDescriptorProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveHandoffProjection:
+    transition_id: UUID
+    proposal_id: UUID
+    status: str
+    phase: str
+    writer_state: str
+    source_execution_id: UUID
+    source_session_id: UUID
+    source_worker_id: UUID
+    target_worker_id: UUID
+    target_execution_id: UUID | None
+    target_session_id: UUID | None
+    attention_required: bool
+    failure_code: str | None
+    blocked_operation_id: UUID | None
+    available_recovery_strategies: tuple[str, ...]
+    source_trace_descriptor: TraceDescriptorProjection | None
+    target_trace_descriptor: TraceDescriptorProjection | None
+    started_at: datetime | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerActivityFact:
     id: UUID
     source_type: str
@@ -367,6 +390,7 @@ class WorkerWorkspaceProjection:
     last_change_cursor: int
     as_of: datetime
     plan_sync: WorkerPlanSyncProjection | None = None
+    active_handoff: ActiveHandoffProjection | None = None
 
 
 class WorkerItemProjectionService:
@@ -388,6 +412,7 @@ class WorkerItemProjectionService:
         as_of: datetime,
         projection_stale: bool = False,
         convergence_facts: PlanConvergenceFacts | None = None,
+        active_handoff: ActiveHandoffProjection | None = None,
     ) -> None:
         self.worker_item = worker_item
         self.placements = tuple(placements)
@@ -404,6 +429,7 @@ class WorkerItemProjectionService:
         self.as_of = as_of
         self.projection_stale = projection_stale
         self.convergence_facts = convergence_facts
+        self.active_handoff = active_handoff
         self._convergence_service = PlanConvergenceProjectionService()
 
     def compose_workspace(self) -> WorkerWorkspaceProjection:
@@ -509,6 +535,7 @@ class WorkerItemProjectionService:
             last_change_cursor=self.last_change_cursor,
             as_of=self.as_of,
             plan_sync=plan_sync,
+            active_handoff=self.active_handoff,
         )
 
     def activity_facts(self) -> tuple[WorkerActivityFact, ...]:

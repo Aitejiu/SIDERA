@@ -11,6 +11,26 @@ HANDOFF_PROPOSAL_EVENT_TYPES = frozenset(
     }
 )
 
+HANDOFF_EVENT_TYPES = frozenset(
+    {
+        *HANDOFF_PROPOSAL_EVENT_TYPES,
+        "HandoffConfirmed",
+        "HandoffCheckpointCaptured",
+        "HandoffSourceStopped",
+        "HandoffWorkspaceFrozen",
+        "HandoffTargetExecutionCreated",
+        "HandoffContextBundleCreated",
+        "HandoffWorkspaceTransferred",
+        "HandoffTargetSessionStarted",
+        "HandoffContextAcknowledged",
+        "HandoffInputTransferred",
+        "HandoffTargetActivated",
+        "HandoffBlocked",
+        "HandoffRecovered",
+        "HandoffConverged",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class EventData:

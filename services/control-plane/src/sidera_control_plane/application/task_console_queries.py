@@ -23,6 +23,7 @@ from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleTaskFact,
     TaskConsoleWorkerItemFact,
 )
+from sidera_control_plane.domain.worker_item_projections import ActiveHandoffProjection
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class TaskConsoleQuerySnapshot:
     last_change_cursor: int
     as_of: datetime
     convergence_facts: PlanConvergenceFacts | None = None
+    handoffs: dict[UUID, ActiveHandoffProjection] | None = None
 
 
 class TaskConsoleQueryStore(Protocol):
@@ -103,6 +105,7 @@ class TaskConsoleQueryService:
             as_of=loaded.as_of,
             acknowledgements=loaded.acknowledgements,
             convergence_facts=loaded.convergence_facts,
+            handoffs=loaded.handoffs or {},
         )
 
     def get_activity(

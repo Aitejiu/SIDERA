@@ -43,6 +43,7 @@ from sidera_control_plane.domain.projections import (
     TaskOverviewProjection,
     WorkspaceCapabilitiesProjection,
 )
+from sidera_control_plane.domain.worker_item_projections import ActiveHandoffProjection
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +188,7 @@ class TaskFirstProjectionService:
         as_of: datetime,
         acknowledgements: Iterable[AttentionAcknowledgement] = (),
         convergence_facts: PlanConvergenceFacts | None = None,
+        handoffs: Mapping[UUID, ActiveHandoffProjection] | None = None,
     ) -> TaskGraphProjection:
         nodes = [
             self._node_for_item(
@@ -203,6 +205,14 @@ class TaskFirstProjectionService:
             )
             for item in snapshot.work_items
         ]
+        handoff_values = handoffs or {}
+        canonical_for_handoff = (
+            self._normalizer.normalize(snapshot) if handoff_values else None
+        )
+        if canonical_for_handoff is not None:
+            nodes = self._apply_handoff_overlay(
+                nodes, canonical_for_handoff, handoff_values
+            )
         nodes = self._apply_dependency_overlay(snapshot, nodes)
         root_convergence: PlanRootProjection | None = None
         if convergence_facts is not None:
@@ -242,6 +252,7 @@ class TaskFirstProjectionService:
             as_of=as_of,
             acknowledgements=acknowledgements,
             convergence=root_convergence,
+            handoffs=handoff_values,
         )
         return TaskGraphProjection(
             schema_version=1,
@@ -676,6 +687,7 @@ class TaskFirstProjectionService:
         as_of: datetime,
         acknowledgements: Iterable[AttentionAcknowledgement],
         convergence: PlanRootProjection | None,
+        handoffs: Mapping[UUID, ActiveHandoffProjection],
     ) -> TaskOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
@@ -684,7 +696,7 @@ class TaskFirstProjectionService:
         acknowledged_by_key = {
             item.attention_key: item for item in acknowledgements
         }
-        attention = tuple(
+        regular_attention = tuple(
             item
             for node in nodes
             if node.state
@@ -706,6 +718,45 @@ class TaskFirstProjectionService:
                 )
             )
         )
+        handoff_attention = tuple(
+            item
+            for node in nodes
+            if node.handoff_worker_item_id is not None
+            for handoff in (
+                handoffs.get(node.handoff_worker_item_id),
+            )
+            if handoff is not None and handoff.attention_required
+            for item in (
+                AttentionItemProjection(
+                    key=f"handoff:{handoff.transition_id}:attention",
+                    kind="handoff",
+                    title=node.title,
+                    summary=handoff.failure_code or "handoff requires attention",
+                    resource_id=node.handoff_worker_item_id,
+                    resource_version=1,
+                    correlation_id=handoff.transition_id,
+                    occurred_at=handoff.updated_at,
+                    worker_item_id=node.handoff_worker_item_id,
+                    deep_link=(
+                        f"/api/v1/workspaces/{snapshot.workspace_id}/worker-items/"
+                        f"{node.handoff_worker_item_id}/workspace"
+                    ),
+                ),
+            )
+            if not any(
+                acknowledgement.applies_to(
+                    AttentionSource(
+                        attention_key=item.key,
+                        root_task_id=snapshot.root_task_id,
+                        resource_id=item.resource_id,
+                        resource_version=item.resource_version,
+                        correlation_id=item.correlation_id,
+                    )
+                )
+                for acknowledgement in acknowledgements
+            )
+        )
+        attention = handoff_attention + regular_attention
         next_keys = tuple(
             node.work_item_key
             for node in nodes
@@ -753,7 +804,42 @@ class TaskFirstProjectionService:
             revision_attention=(
                 convergence.revision_attention if convergence is not None else None
             ),
+            handoff_running_count=sum(node.handoff_running for node in nodes),
+            handoff_blocked_count=sum(node.handoff_blocked for node in nodes),
         )
+
+    @staticmethod
+    def _apply_handoff_overlay(
+        nodes: list[TaskNodeProjection],
+        canonical_plan: Any,
+        handoffs: Mapping[UUID, ActiveHandoffProjection],
+    ) -> list[TaskNodeProjection]:
+        handoff_by_key = {
+            item.key: handoffs[item.worker_item_id]
+            for item in canonical_plan.worker_items
+            if item.worker_item_id is not None and item.worker_item_id in handoffs
+        }
+        worker_id_by_key = {
+            item.key: item.worker_item_id
+            for item in canonical_plan.worker_items
+            if item.worker_item_id is not None
+        }
+        result: list[TaskNodeProjection] = []
+        for node in nodes:
+            handoff = handoff_by_key.get(node.work_item_key)
+            if handoff is None:
+                result.append(node)
+                continue
+            blocked = handoff.status in {"blocked", "blocked_unknown", "failed"}
+            result.append(
+                replace(
+                    node,
+                    handoff_running=not blocked,
+                    handoff_blocked=blocked,
+                    handoff_worker_item_id=worker_id_by_key[node.work_item_key],
+                )
+            )
+        return result
 
     @staticmethod
     def _attention(

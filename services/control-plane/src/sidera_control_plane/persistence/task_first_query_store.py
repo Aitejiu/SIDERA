@@ -28,7 +28,11 @@ from sidera_control_plane.domain.plan_convergence_projections import (
 )
 from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.worker_item_projections import ActiveHandoffProjection
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.handoff_query_store import (
+    SqlAlchemyHandoffQueryStore,
+)
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
     AssignmentLeaseModel,
@@ -68,6 +72,7 @@ class TaskFirstQuerySnapshot:
     last_change_cursor: int
     as_of: datetime
     convergence_facts: PlanConvergenceFacts | None = None
+    handoffs: dict[UUID, ActiveHandoffProjection] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +130,7 @@ class SqlAlchemyTaskFirstQueryStore:
     def __init__(self, database: Database) -> None:
         self._database = database
         self._normalizer = PlanNormalizer()
+        self._handoff_store = SqlAlchemyHandoffQueryStore(database)
 
     def load(
         self,
@@ -288,6 +294,16 @@ class SqlAlchemyTaskFirstQueryStore:
                     .order_by(ProjectionChangeModel.cursor.desc())
                     .limit(1)
                 ) or 0
+            handoffs = self._handoff_store.load_for_root_in_session(
+                session,
+                workspace_id,
+                root_task_id,
+                tuple(
+                    item.worker_item_id
+                    for item in canonical_plan.worker_items
+                    if item.worker_item_id is not None
+                ),
+            )
             as_of = max(
                 (
                     item.occurred_at
@@ -295,6 +311,8 @@ class SqlAlchemyTaskFirstQueryStore:
                 ),
                 default=plan.published_at,
             )
+            if handoffs:
+                as_of = max(as_of, *(item.updated_at for item in handoffs.values()))
             acknowledgements: tuple[AttentionAcknowledgement, ...] = ()
             if actor_type is not None and actor_id is not None:
                 acknowledgement_rows = session.scalars(
@@ -331,6 +349,7 @@ class SqlAlchemyTaskFirstQueryStore:
                     root_task_id=root_task_id,
                     plan=canonical_plan,
                 ),
+                handoffs=handoffs,
             )
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:

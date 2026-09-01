@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from sidera_control_plane.domain.events import (
-    HANDOFF_PROPOSAL_EVENT_TYPES,
+    HANDOFF_EVENT_TYPES,
     EventData,
 )
 
@@ -86,24 +86,40 @@ def projection_targets_for_event(
 
     payload = event.payload
     if (
-        event.aggregate_type == "handoff_proposal"
-        or event.event_type in HANDOFF_PROPOSAL_EVENT_TYPES
+        event.aggregate_type in {"handoff_proposal", "handoff_transition"}
+        or event.event_type in HANDOFF_EVENT_TYPES
     ):
         change_type = {
             "HandoffProposalPrepared": "handoff_proposal_prepared",
             "HandoffProposalStale": "handoff_proposal_stale",
             "HandoffProposalExpired": "handoff_proposal_expired",
             "HandoffProposalCancelled": "handoff_proposal_cancelled",
-        }.get(event.event_type, "handoff_proposal_updated")
+        }.get(event.event_type, "handoff_updated")
+        worker_item_id = worker_item_id or _payload_uuid(payload, "worker_item_id")
+        root_task_id = root_task_id or _payload_uuid(payload, "root_task_id")
+        target_types: tuple[str, ...] = (
+            "task_overview",
+            "task_graph",
+            "subtask_workspace",
+            "worker_item_workspace",
+            "worker_item_activity",
+        )
+        trace_execution_id = _payload_uuid(payload, "target_execution_id")
+        if event.event_type == "HandoffTargetSessionStarted" and trace_execution_id:
+            target_types += ("worker_trace",)
         return tuple(
-            ProjectionInvalidationTarget(projection_type, resource_id, change_type)
-            for projection_type, resource_id in (
-                ("task_overview", _payload_uuid(payload, "root_task_id")),
-                ("task_graph", _payload_uuid(payload, "root_task_id")),
-                ("subtask_workspace", _payload_uuid(payload, "root_task_id")),
-                ("worker_item_workspace", _payload_uuid(payload, "worker_item_id")),
-                ("worker_item_activity", _payload_uuid(payload, "worker_item_id")),
+            ProjectionInvalidationTarget(
+                projection_type,
+                (
+                    trace_execution_id
+                    if projection_type == "worker_trace"
+                    else worker_item_id
+                    if projection_type in {"worker_item_workspace", "worker_item_activity"}
+                    else root_task_id
+                ),
+                change_type,
             )
+            for projection_type in target_types
         )
     if event.aggregate_type == "context_package" or event.event_type in {
         "ContextPackageCreated",

@@ -22,6 +22,7 @@ from sidera_control_plane.domain.plan_convergence_projections import (
 )
 from sidera_control_plane.domain.plan_normalization import CanonicalTaskPlan
 from sidera_control_plane.domain.plans import SubtaskPlanItem
+from sidera_control_plane.domain.worker_item_projections import ActiveHandoffProjection
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +112,9 @@ class SubtaskNodeProjection:
     waiting_details_summary: str | None = None
     requires_operator: bool = False
     blocked_since: datetime | None = None
+    handoff_running_count: int = 0
+    handoff_blocked_count: int = 0
+    handoff_worker_item_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +140,8 @@ class TaskConsoleAttentionProjection:
     waiting_details_summary: str | None = None
     requires_operator: bool = False
     blocked_since: datetime | None = None
+    worker_item_id: UUID | None = None
+    deep_link: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +179,8 @@ class TaskConsoleOverviewProjection:
     active_revision: PlanRevisionProjection | None = None
     convergence: PlanConvergenceProjection | None = None
     revision_attention: PlanRevisionAttentionProjection | None = None
+    handoff_running_count: int = 0
+    handoff_blocked_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +233,9 @@ class TaskConsoleProjectionService:
         as_of: datetime,
         acknowledgements: Iterable[AttentionAcknowledgement] = (),
         convergence_facts: PlanConvergenceFacts | None = None,
+        handoffs: Mapping[UUID, ActiveHandoffProjection] | None = None,
     ) -> TaskConsoleGraphProjection:
+        handoff_values = handoffs or {}
         placement_values = tuple(
             placement
             for placement in placements
@@ -293,6 +303,15 @@ class TaskConsoleProjectionService:
                     ),
                     attention_worker_item_count=sum(
                         _is_attention_state(item_state) for item_state in item_states
+                    )
+                    + sum(
+                        bool(
+                            handoff_values.get(
+                                placement.worker_item_id
+                            )
+                            and handoff_values[placement.worker_item_id].attention_required
+                        )
+                        for placement in item_placements
                     ),
                     evidence_required=len(subtask.acceptance_refs),
                     evidence_satisfied=evidence_satisfied,
@@ -324,6 +343,19 @@ class TaskConsoleProjectionService:
                         if latest_block is not None
                         else None
                     ),
+                    handoff_running_count=sum(
+                        _handoff_is_running(handoff_values.get(placement.worker_item_id))
+                        for placement in item_placements
+                    ),
+                    handoff_blocked_count=sum(
+                        _handoff_is_blocked(handoff_values.get(placement.worker_item_id))
+                        for placement in item_placements
+                    ),
+                    handoff_worker_item_ids=tuple(
+                        placement.worker_item_id
+                        for placement in item_placements
+                        if placement.worker_item_id in handoff_values
+                    ),
                 )
             )
 
@@ -350,10 +382,12 @@ class TaskConsoleProjectionService:
             tasks=tasks,
             activity=activity_values,
             executions=execution_values,
+            placements=placement_values,
             last_change_cursor=last_change_cursor,
             as_of=as_of,
             acknowledgements=tuple(acknowledgements),
             convergence=convergence,
+            handoffs=handoff_values,
         )
         return TaskConsoleGraphProjection(
             schema_version=1,
@@ -481,10 +515,12 @@ class TaskConsoleProjectionService:
         tasks: Mapping[UUID, TaskConsoleTaskFact],
         activity: tuple[TaskConsoleActivityFact, ...],
         executions: tuple[TaskConsoleExecutionFact, ...],
+        placements: tuple[TaskConsolePlacementFact, ...],
         last_change_cursor: int,
         as_of: datetime,
         acknowledgements: tuple[AttentionAcknowledgement, ...],
         convergence: PlanRootProjection | None,
+        handoffs: Mapping[UUID, ActiveHandoffProjection],
     ) -> TaskConsoleOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
@@ -493,6 +529,53 @@ class TaskConsoleProjectionService:
         activity_by_task = _group_activity_by_task(activity)
         executions_by_task = _group_executions_by_task(executions)
         attention: list[TaskConsoleAttentionProjection] = []
+        placement_by_worker_item = {
+            placement.worker_item_id: placement for placement in placements
+        }
+        handoff_by_subtask: dict[str, list[tuple[UUID, ActiveHandoffProjection]]] = defaultdict(list)
+        for worker_item_id, handoff in handoffs.items():
+            placement = placement_by_worker_item.get(worker_item_id)
+            if placement is not None:
+                handoff_by_subtask[placement.subtask_key].append(
+                    (worker_item_id, handoff)
+                )
+        for subtask_key, values in sorted(handoff_by_subtask.items()):
+            node = next((item for item in nodes if item.subtask_key == subtask_key), None)
+            if node is None:
+                continue
+            for worker_item_id, handoff in sorted(values, key=lambda item: str(item[0])):
+                if not handoff.attention_required:
+                    continue
+                item = TaskConsoleAttentionProjection(
+                    key=f"handoff:{handoff.transition_id}:attention",
+                    kind="handoff",
+                    task_title=plan.title,
+                    subtask_key=node.subtask_key,
+                    subtask_title=node.title,
+                    reason=handoff.failure_code or "handoff requires attention",
+                    resource_id=worker_item_id,
+                    resource_version=1,
+                    correlation_id=handoff.transition_id,
+                    occurred_at=handoff.updated_at,
+                    requires_operator=True,
+                    worker_item_id=worker_item_id,
+                    deep_link=(
+                        f"/api/v1/workspaces/{plan.workspace_id}/worker-items/"
+                        f"{worker_item_id}/workspace"
+                    ),
+                )
+                source = AttentionSource(
+                    attention_key=item.key,
+                    root_task_id=plan.root_task_id,
+                    resource_id=item.resource_id,
+                    resource_version=item.resource_version,
+                    correlation_id=item.correlation_id,
+                )
+                if not any(
+                    acknowledgement.applies_to(source)
+                    for acknowledgement in acknowledgements
+                ):
+                    attention.append(item)
         for node in nodes:
             if node.state not in {"waiting_user", "blocked", "failed"}:
                 continue
@@ -612,6 +695,8 @@ class TaskConsoleProjectionService:
             revision_attention=(
                 convergence.revision_attention if convergence is not None else None
             ),
+            handoff_running_count=sum(node.handoff_running_count for node in nodes),
+            handoff_blocked_count=sum(node.handoff_blocked_count for node in nodes),
         )
 
 
@@ -767,6 +852,18 @@ def _evidence_satisfied(
 
 def _is_running_state(state: str) -> bool:
     return state in {"queued", "assigned", "running", "retrying"}
+
+
+def _handoff_is_running(handoff: ActiveHandoffProjection | None) -> bool:
+    return handoff is not None and handoff.status in {"pending", "running"}
+
+
+def _handoff_is_blocked(handoff: ActiveHandoffProjection | None) -> bool:
+    return handoff is not None and handoff.status in {
+        "blocked",
+        "blocked_unknown",
+        "failed",
+    }
 
 
 def _is_attention_state(state: str) -> bool:

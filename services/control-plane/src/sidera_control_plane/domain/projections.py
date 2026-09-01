@@ -84,6 +84,8 @@ class AttentionItemProjection:
     resource_version: int
     correlation_id: UUID
     occurred_at: datetime
+    worker_item_id: UUID | None = None
+    deep_link: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +112,9 @@ class TaskNodeProjection:
     evidence_required: int
     updated_at: datetime | None
     plan_sync: WorkerPlanSyncProjection | None = None
+    handoff_running: bool = False
+    handoff_blocked: bool = False
+    handoff_worker_item_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +152,8 @@ class TaskOverviewProjection:
     active_revision: PlanRevisionProjection | None = None
     convergence: PlanConvergenceProjection | None = None
     revision_attention: PlanRevisionAttentionProjection | None = None
+    handoff_running_count: int = 0
+    handoff_blocked_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
