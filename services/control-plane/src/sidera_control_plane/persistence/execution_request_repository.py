@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
@@ -74,6 +75,7 @@ class ExecutionRequestRepository:
         statement = select(ExecutionRequestModel).where(
             ExecutionRequestModel.handoff_transition_id == transition_id,
             ExecutionRequestModel.workspace_id == workspace_id,
+            ExecutionRequestModel.status == ExecutionRequestStatus.MATERIALIZED.value,
         )
         if for_update:
             statement = statement.with_for_update()
@@ -128,7 +130,7 @@ class ExecutionRequestRepository:
                 expected_evidence_refs=list(request.expected_evidence_refs),
                 status=request.status.value,
                 gate_reason=request.gate_reason,
-                gate_details=dict(request.gate_details),
+                gate_details=_json_value(request.gate_details),
                 gate_evaluated_at=request.gate_evaluated_at,
                 status_changed_at=request.status_changed_at,
                 execution_lineage_id=request.execution_lineage_id,
@@ -271,7 +273,7 @@ def _request_model(request: ExecutionRequest) -> ExecutionRequestModel:
         expected_evidence_refs=list(request.expected_evidence_refs),
         status=request.status.value,
         gate_reason=request.gate_reason,
-        gate_details=dict(request.gate_details),
+        gate_details=_json_value(request.gate_details),
         gate_evaluated_at=request.gate_evaluated_at,
         status_changed_at=request.status_changed_at,
         execution_lineage_id=request.execution_lineage_id,
@@ -332,3 +334,19 @@ def _to_dependency(
         required_artifact_refs=tuple(row.required_artifact_refs),
         required_evidence_refs=tuple(row.required_evidence_refs),
     )
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_value(item) for item in value]
+    return value

@@ -114,7 +114,7 @@ function HandoffProgressView({
   const [recoveryOpen, setRecoveryOpen] = useState(true);
   const [strategy, setStrategy] = useState<RecoveryStrategy | "">("");
   const [reason, setReason] = useState("");
-  const [evidenceRefs, setEvidenceRefs] = useState("");
+  const [evidenceRefs, setEvidenceRefs] = useState(() => transition.recovery_evidence_refs.join(", "));
   const [recoveryStatus, setRecoveryStatus] = useState<"idle" | "submitting" | "submitted">("idle");
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const allowedStrategies = transition.available_recovery_strategies.filter(isRecoveryStrategy);
@@ -144,8 +144,12 @@ function HandoffProgressView({
         reason.trim(),
         evidence,
       );
-      await Promise.all([transitionQuery.refetch(), onRefresh()]);
       setRecoveryStatus("submitted");
+      window.setTimeout(() => {
+        void Promise.all([transitionQuery.refetch(), onRefresh()]).catch((error: unknown) => {
+          setRecoveryError(`恢复请求已记录，但新的切换状态读取失败：${describeError(error)}`);
+        });
+      }, 0);
     } catch (error) {
       setRecoveryStatus("idle");
       setRecoveryError(describeError(error));
@@ -266,6 +270,12 @@ function HandoffProgressView({
                   disabled={recoveryStatus !== "idle"}
                 />
               </label>
+              {transition.recovery_evidence_refs.length > 0 ? (
+                <div className="handoff-progress__evidence" aria-label="当前检查证据">
+                  <span>当前检查证据已由后端带入，可按需补充</span>
+                  <code>{transition.recovery_evidence_refs.join(", ")}</code>
+                </div>
+              ) : null}
               {recoveryError ? <div className="handoff-progress__error" role="alert"><CircleAlert size={14} aria-hidden="true" />{recoveryError}</div> : null}
               {recoveryStatus === "submitted" ? <div className="handoff-progress__success" role="status">恢复请求已记录，正在读取新的切换状态。</div> : null}
               <div className="handoff-progress__recovery-actions">

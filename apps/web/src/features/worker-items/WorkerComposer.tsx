@@ -1,4 +1,4 @@
-import { RefreshCcw, Send, Square } from "lucide-react";
+import { CheckCircle2, RefreshCcw, Send, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -62,6 +62,13 @@ export function WorkerComposer({
     && !contextChanged
     && !handoffInProgress;
   const readOnlyMessage = getReadOnlyMessage(workspace, streamReady, contextChanged, handoffInProgress);
+
+  const confirmCurrentContext = () => {
+    if (context === null || fingerprint === "") return;
+    setDraft((current) => ({ ...current, lastContextFingerprint: fingerprint }));
+    setStatus("idle");
+    setErrorMessage(null);
+  };
 
   useEffect(() => {
     saveWorkerItemDraft(draftKey, draft);
@@ -217,6 +224,11 @@ export function WorkerComposer({
         <div className="worker-composer__notice">
           <RefreshCcw size={14} aria-hidden="true" />
           <span>{readOnlyMessage}</span>
+          {contextChanged ? (
+            <button className="quiet-button worker-composer__notice-action" type="button" onClick={confirmCurrentContext}>
+              <CheckCircle2 size={14} aria-hidden="true" />确认当前 context
+            </button>
+          ) : null}
         </div>
       ) : null}
       {errorMessage ? <div className="worker-composer__error" role="alert">{errorMessage}</div> : null}

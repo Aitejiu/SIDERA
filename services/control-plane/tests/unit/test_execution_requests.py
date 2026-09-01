@@ -26,6 +26,7 @@ def make_request(
     request_id: UUID = REQUEST_ID,
     source_execution_id: UUID | None = None,
     source_session_id: UUID | None = None,
+    handoff_transition_id: UUID | None = None,
 ) -> ExecutionRequest:
     return ExecutionRequest.create(
         request_id=request_id,
@@ -51,6 +52,7 @@ def make_request(
         now=NOW,
         source_execution_id=source_execution_id,
         source_session_id=source_session_id,
+        handoff_transition_id=handoff_transition_id,
     )
 
 
@@ -126,6 +128,39 @@ def test_cancelled_and_obsolete_requests_cannot_reopen() -> None:
     assert obsolete.status is ExecutionRequestStatus.OBSOLETE
     with pytest.raises(InvalidTransition):
         obsolete.mark_ready(now=NOW)
+
+
+def test_materialized_handoff_target_retirement_releases_attempt_slot() -> None:
+    source_execution_id = uuid4()
+    source_session_id = uuid4()
+    transition_id = uuid4()
+    target = make_request(
+        request_id=uuid4(),
+        source_execution_id=source_execution_id,
+        source_session_id=source_session_id,
+        handoff_transition_id=transition_id,
+    )
+    target.mark_ready(now=NOW)
+    target_lineage_id = uuid4()
+    first_execution_id = uuid4()
+    target.materialize(
+        execution_lineage_id=target_lineage_id,
+        first_execution_id=first_execution_id,
+        now=NOW,
+    )
+
+    target.retire_handoff_target(now=NOW, reason="target_start_unknown")
+
+    assert target.status is ExecutionRequestStatus.OBSOLETE
+    assert target.handoff_transition_id == transition_id
+    assert target.execution_lineage_id == target_lineage_id
+    assert target.first_execution_id == first_execution_id
+    assert target.gate_details == {
+        "reason": "target_start_unknown",
+        "retired_execution_lineage_id": str(target_lineage_id),
+        "retired_first_execution_id": str(first_execution_id),
+        "retired_handoff_transition_id": str(transition_id),
+    }
 
 
 def test_request_rejects_unscoped_required_refs_and_invalid_snapshot() -> None:

@@ -151,6 +151,8 @@ def test_active_block_surfaces_safe_subtask_action_and_block_attention(
             "waiting_details_summary": "2 个候选执行节点未配置运行环境",
             "requires_operator": True,
             "blocked_since": NOW.isoformat().replace("+00:00", "Z"),
+            "worker_item_id": None,
+            "deep_link": None,
         }
     ]
     assert str(CONSOLE_WAITING_EXECUTION_ID) not in callback["current_action"]

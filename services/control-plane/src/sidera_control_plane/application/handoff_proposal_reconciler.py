@@ -6,8 +6,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.handoff_candidates import (
     HandoffCandidateBlocked,
@@ -19,6 +20,7 @@ from sidera_control_plane.application.worker_runtime import (
     ResolvedWorkerRuntime,
     WorkerRuntimeInspectionPort,
 )
+from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import ContextPurpose
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
@@ -407,21 +409,56 @@ class HandoffProposalReconciler:
         reason: str,
     ) -> None:
         uow.handoff_proposals.save_status(proposal, previous_version)
-        uow.events.append_with_outbox(
-            EventData(
-                id=uuid4(),
-                workspace_id=proposal.payload.workspace_id,
-                aggregate_type="handoff_proposal",
+        command_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.handoff-proposal-reconcile:{self._actor_id}:"
+            f"{proposal.id}:{event_type}:v{proposal.version}",
+        )
+        command = CommandEnvelope(
+            id=command_id,
+            workspace_id=proposal.payload.workspace_id,
+            command_type="HandoffProposalReconcile",
+            target_type="handoff_proposal",
+            actor_type=self._actor_type,
+            actor_id=self._actor_id,
+            target_id=proposal.id,
+            payload={
+                "proposal_id": str(proposal.id),
+                "event_type": event_type,
+                "reason": reason,
+            },
+            expected_version=previous_version,
+            idempotency_key=(
+                f"handoff-proposal-reconcile:{proposal.id}:{event_type}:"
+                f"v{proposal.version}"
+            ),
+            correlation_id=proposal.id,
+        )
+        event = EventData(
+            id=uuid4(),
+            workspace_id=proposal.payload.workspace_id,
+            aggregate_type="handoff_proposal",
+            aggregate_id=proposal.id,
+            aggregate_version=proposal.version,
+            event_type=event_type,
+            payload=_proposal_event_payload(proposal, reason=reason),
+            actor_type=self._actor_type,
+            actor_id=self._actor_id,
+            causation_id=command.id,
+            correlation_id=command.correlation_id,
+        )
+        uow.commands.record_applied(
+            command,
+            hash_request(command),
+            CommandResult(
+                command_id=command.id,
                 aggregate_id=proposal.id,
                 aggregate_version=proposal.version,
-                event_type=event_type,
-                payload=_proposal_event_payload(proposal, reason=reason),
-                actor_type=self._actor_type,
-                actor_id=self._actor_id,
-                causation_id=proposal.id,
-                correlation_id=uuid4(),
-            )
+                event_ids=(event.id,),
+                data={"event_type": event_type, "reason": reason},
+            ),
         )
+        uow.events.append_with_outbox(event)
 
 
 def _resolve_runtimes(

@@ -5471,6 +5471,7 @@ h1 {
 .worker-composer__error {
   display: flex;
   align-items: start;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 10px 12px;
   border-left: 3px solid var(--attention);
@@ -5478,6 +5479,15 @@ h1 {
   color: #6f4b08;
   font-size: 11px;
   line-height: 1.45;
+}
+
+.worker-composer__notice > span {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.worker-composer__notice-action {
+  flex: 0 0 auto;
 }
 
 .worker-composer__error {
@@ -5768,6 +5778,24 @@ h1 {
   border-color: var(--dispatch);
   outline: 2px solid rgb(33 102 209 / 18%);
   outline-offset: 1px;
+}
+
+.handoff-progress__evidence {
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid var(--structure);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.handoff-progress__evidence code {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
 }
 
 .handoff-dialog__notice,

@@ -62,6 +62,19 @@ class GatewayOperationRepository:
         row = self._session.scalar(statement)
         return _to_domain_operation(row) if row is not None else None
 
+    def list_for_execution(
+        self, execution_id: UUID, workspace_id: UUID
+    ) -> tuple[GatewayOperation, ...]:
+        rows = self._session.scalars(
+            select(GatewayOperationModel)
+            .where(
+                GatewayOperationModel.execution_id == execution_id,
+                GatewayOperationModel.workspace_id == workspace_id,
+            )
+            .order_by(GatewayOperationModel.created_at.asc(), GatewayOperationModel.id.asc())
+        ).all()
+        return tuple(_to_domain_operation(row) for row in rows)
+
     def add(self, operation: GatewayOperation) -> None:
         self._session.add(
             GatewayOperationModel(

@@ -39,6 +39,12 @@ class GatewayOperationStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+_HANDOFF_INSPECTION_RESULT_PREFIX = "handoff-inspection:v1:"
+_HANDOFF_INSPECTION_OUTCOMES = frozenset(
+    {"absent", "in_progress", "succeeded", "failed", "unknown"}
+)
+
+
 class DeliveryOutcome(StrEnum):
     DELIVERED = "delivered"
     BLOCKED = "blocked"
@@ -170,6 +176,23 @@ class GatewayOperation:
             raise ValidationError("failure_code is required")
         self._finish(GatewayOperationStatus.UNKNOWN, None, clean_code)
 
+    def record_handoff_inspection(self, *, outcome: str) -> None:
+        """Persist bounded provider inspection without resolving the operation."""
+
+        if self.status is not GatewayOperationStatus.UNKNOWN:
+            raise InvalidTransition(
+                "handoff inspection can only be recorded for an unknown operation"
+            )
+        clean_outcome = outcome.strip()
+        if clean_outcome not in _HANDOFF_INSPECTION_OUTCOMES:
+            raise ValidationError("handoff inspection outcome is invalid")
+        marker = f"{_HANDOFF_INSPECTION_RESULT_PREFIX}{clean_outcome}"
+        if self.result_ref == marker:
+            return
+        if self.result_ref is not None:
+            raise InvalidTransition("handoff inspection result is already recorded")
+        self.result_ref = marker
+        self.version += 1
     def retry(self, *, now: datetime) -> None:
         if self.status not in {
             GatewayOperationStatus.FAILED,
@@ -197,6 +220,15 @@ class GatewayOperation:
         self.result_ref = result_ref
         self.failure_code = failure_code
         self.version += 1
+
+
+def handoff_inspection_outcome_from_result_ref(result_ref: str | None) -> str | None:
+    if not isinstance(result_ref, str) or not result_ref.startswith(
+        _HANDOFF_INSPECTION_RESULT_PREFIX
+    ):
+        return None
+    outcome = result_ref.removeprefix(_HANDOFF_INSPECTION_RESULT_PREFIX)
+    return outcome if outcome in _HANDOFF_INSPECTION_OUTCOMES else None
 
 
 @dataclass(frozen=True, slots=True)

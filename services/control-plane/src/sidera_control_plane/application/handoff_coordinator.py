@@ -612,6 +612,7 @@ class HandoffCoordinator:
             if current.phase is not transition.phase:
                 raise HandoffCoordinatorError("handoff phase changed during dispatch")
             from_phase = current.phase
+            previous_version = current.version
             if step.target_workspace_manifest_id is not None:
                 if current.target_workspace_manifest_id not in {
                     None,
@@ -625,7 +626,6 @@ class HandoffCoordinator:
                         step.target_workspace_manifest_id
                     )
                     current.version += 1
-            previous_version = current.version
             if from_phase is HandoffPhase.ACTIVATE_TARGET:
                 self._validate_activation_facts(uow, current, now=now)
             current.advance(step.target_phase, now=now)

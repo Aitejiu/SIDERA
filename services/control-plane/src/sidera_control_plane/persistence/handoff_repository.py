@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
@@ -101,7 +102,7 @@ class HandoffProposalRepository(HandoffProposalRepositoryPort):
                 source_session_last_sequence=payload.source_session_last_sequence,
                 source_worker_id=payload.source_worker_id,
                 source_worker_version=payload.source_worker_version,
-                source_runtime_snapshot=dict(payload.source_runtime_snapshot),
+                source_runtime_snapshot=_json_object(payload.source_runtime_snapshot),
                 source_workspace_manifest_id=payload.source_workspace_manifest_id,
                 source_workspace_manifest_version=payload.source_workspace_manifest_version,
                 source_context_package_id=payload.source_context_package_id,
@@ -112,15 +113,15 @@ class HandoffProposalRepository(HandoffProposalRepositoryPort):
                 observed_plan_head_version=payload.observed_plan_head_version,
                 target_worker_id=payload.target_worker_id,
                 target_worker_version=payload.target_worker_version,
-                target_runtime_snapshot=dict(payload.target_runtime_snapshot),
+                target_runtime_snapshot=_json_object(payload.target_runtime_snapshot),
                 target_capability_snapshot_hash=payload.target_capability_snapshot_hash,
-                target_policy_reason=dict(payload.target_policy_reason),
-                target_policy_facts=dict(payload.target_policy_facts),
+                target_policy_reason=_json_object(payload.target_policy_reason),
+                target_policy_facts=_json_object(payload.target_policy_facts),
                 transfer_mode=payload.transfer_mode.value,
                 handoff_reason=payload.handoff_reason,
                 handoff_instruction=payload.handoff_instruction,
-                input_plan=dict(payload.input_plan),
-                impact_summary=dict(payload.impact_summary),
+                input_plan=_json_object(payload.input_plan),
+                impact_summary=_json_object(payload.impact_summary),
                 payload=payload.to_mapping(),
                 proposal_schema_version=payload.proposal_schema_version,
                 proposal_hash=proposal.proposal_hash,
@@ -361,7 +362,7 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
             )
             .values(
                 target_worker_id=transition.target_worker_id,
-                target_runtime_snapshot=dict(transition.target_runtime_snapshot),
+                target_runtime_snapshot=_json_object(transition.target_runtime_snapshot),
                 target_execution_id=transition.target_execution_id,
                 target_session_id=transition.target_session_id,
                 target_workspace_manifest_id=transition.target_workspace_manifest_id,
@@ -483,7 +484,7 @@ class HandoffContextBundleRepository(HandoffContextBundleRepositoryPort):
                 source_workspace_manifest_id=bundle.source_workspace_manifest_id,
                 source_workspace_version=bundle.source_workspace_version,
                 workspace_location_ref_hash=bundle.workspace_location_ref_hash,
-                repository_state=[dict(item) for item in bundle.repository_state],
+                repository_state=[_json_object(item) for item in bundle.repository_state],
                 artifact_refs=list(bundle.artifact_refs),
                 evidence_refs=list(bundle.evidence_refs),
                 handoff_reason=bundle.handoff_reason,
@@ -739,7 +740,28 @@ def _active_status_values(
 def _optional_dict(value: object) -> dict[str, object] | None:
     if value is None:
         return None
-    return dict(value)  # type: ignore[arg-type]
+    return _json_object(value)
+
+
+def _json_object(value: object) -> dict[str, object]:
+    converted = _json_value(value)
+    if not isinstance(converted, dict):
+        raise ValidationError("handoff JSON value must be an object")
+    return converted
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, StrEnum):
+        return value.value
+    return value
 
 
 def _transition_model(transition: HandoffTransition) -> HandoffTransitionModel:
@@ -752,7 +774,7 @@ def _transition_model(transition: HandoffTransition) -> HandoffTransitionModel:
         source_session_id=transition.source_session_id,
         source_workspace_manifest_id=transition.source_workspace_manifest_id,
         target_worker_id=transition.target_worker_id,
-        target_runtime_snapshot=dict(transition.target_runtime_snapshot),
+        target_runtime_snapshot=_json_object(transition.target_runtime_snapshot),
         target_execution_id=transition.target_execution_id,
         target_session_id=transition.target_session_id,
         target_workspace_manifest_id=transition.target_workspace_manifest_id,

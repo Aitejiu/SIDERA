@@ -166,6 +166,14 @@ class MemoryEvents:
         self.events.append(event)
 
 
+class MemoryCommands:
+    def __init__(self) -> None:
+        self.commands: list[object] = []
+
+    def record_applied(self, envelope: object, _request_hash: str, _result: object) -> None:
+        self.commands.append(envelope)
+
+
 class ReconcileUnitOfWork:
     def __init__(self, proposal: HandoffProposal) -> None:
         payload = proposal.payload
@@ -239,6 +247,7 @@ class ReconcileUnitOfWork:
         self.execution_inputs = SimpleNamespace(get_pending_for_session=lambda *_args, **_kwargs: self.pending_input)
         self.gateway_operations = SimpleNamespace(list_for_execution=lambda *_args, **_kwargs: ())
         self.handoff_proposals = MemoryProposalRepository(proposal)
+        self.commands = MemoryCommands()
         self.events = MemoryEvents()
 
     def _worker_get(self, worker_id: UUID, _workspace_id: UUID, **_kwargs: Any) -> Worker | None:
@@ -361,6 +370,8 @@ def test_execution_change_is_staled_once_and_is_idempotent() -> None:
     assert first.stale_reason == "source_execution_changed"
     assert second == first
     assert [event.event_type for event in uow.events.events] == ["HandoffProposalStale"]
+    assert len(uow.commands.commands) == 1
+    assert uow.events.events[0].causation_id == uow.commands.commands[0].id
 
 
 @pytest.mark.parametrize(

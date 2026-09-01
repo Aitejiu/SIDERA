@@ -145,6 +145,25 @@ describe("WorkerComposer", () => {
     expect(window.localStorage.getItem(workerItemDraftKey(WORKSPACE_ID, WORKER_ITEM_ID))).toContain("先补并发测试");
   });
 
+  it("requires explicit context confirmation before sending a retained draft", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(workerItemDraftKey(WORKSPACE_ID, WORKER_ITEM_ID), JSON.stringify({
+      text: "切换后继续检查",
+      clientIdempotencyKey: "retained-draft",
+      lastContextFingerprint: "source-session|old",
+    }));
+
+    renderComposer();
+
+    const input = screen.getByRole("textbox", { name: "介入这个 Worker" });
+    expect(input).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认当前 context" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认当前 context" }));
+
+    expect(input).toBeEnabled();
+    expect(input).toHaveValue("切换后继续检查");
+  });
+
   it("keeps the composer visible but disabled with a human read-only reason", async () => {
     renderComposer({
       ...workspace,

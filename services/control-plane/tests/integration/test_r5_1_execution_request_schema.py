@@ -317,8 +317,8 @@ def test_r5_1_execution_request_schema_has_idempotency_and_lineage_constraints(
             for item in inspector.get_check_constraints("execution_request_dependencies")
         }
 
-    assert "uq_execution_requests_proposal_worker_item" in request_uniques
     assert "uq_execution_requests_identity" in request_uniques
+    assert "uq_execution_requests_proposal_worker_item" in request_indexes
     assert "uq_execution_requests_lineage" in request_indexes
     assert "ck_execution_requests_materialized_lineage" in request_checks
     assert "ck_execution_request_dependencies_not_self" in dependency_checks

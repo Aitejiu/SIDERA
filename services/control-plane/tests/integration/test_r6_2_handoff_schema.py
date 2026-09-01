@@ -15,7 +15,7 @@ pytestmark = pytest.mark.integration
 
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[2]
 LEGACY_REVISION = "0019_r6_2_agent_handoff"
-REVISION = "0020_r6_2_workspace_transfer_outcome"
+REVISION = "0021_r6_2_retired_handoff_targets"
 PREVIOUS_REVISION = "0018_r6_1_execution_request_lineage"
 
 

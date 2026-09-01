@@ -359,6 +359,9 @@ def test_r3_gateway_records_round_trip_through_unit_of_work(
         assert uow.gateway_operations.get_by_operation_id(
             operation.operation_id, workspace_id
         ) == operation
+        assert uow.gateway_operations.list_for_execution(
+            ids["execution_id"], workspace_id
+        ) == (operation,)
         assert uow.execution_events.get(event.session_id, event.sequence, workspace_id) == event
         assert uow.artifacts.list_for_execution(ids["execution_id"], workspace_id) == (artifact,)
         assert uow.evidence_claims.list_for_task(ids["task_id"], workspace_id) == (claim,)

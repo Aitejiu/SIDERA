@@ -161,6 +161,18 @@ class _OperationRepository:
         self.operations[operation.operation_id] = operation
 
 
+class _CommandRepository:
+    def __init__(self):
+        self.commands = {}
+
+    def find_by_id(self, workspace_id, command_id):
+        return self.commands.get((workspace_id, command_id))
+
+    def record_applied(self, command, request_hash, result):
+        del request_hash
+        self.commands[(command.workspace_id, command.id)] = result
+
+
 class _ContextPackageRepository:
     def __init__(self, package, acknowledgement):
         self.package = package
@@ -210,7 +222,7 @@ class _Uow:
             fixture.package, fixture.acknowledgement
         )
         self.events = SimpleNamespace(append_with_outbox=lambda event: None)
-        self.commands = SimpleNamespace()
+        self.commands = _CommandRepository()
 
     def __enter__(self):
         return self

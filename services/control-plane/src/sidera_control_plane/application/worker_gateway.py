@@ -2306,10 +2306,32 @@ class WorkerGateway:
                 f"sequence:{evidence.accepted_sequence}",
                 session_id=current_session.id,
             )
-            command_id = operation_id
-            for event in (
+            command = CommandEnvelope(
+                id=uuid5(
+                    NAMESPACE_URL,
+                    f"sidera.gateway.handoff-stop-command:{operation_id}",
+                ),
+                workspace_id=transition.workspace_id,
+                command_type="StopHandoffSource",
+                target_type="handoff_transition",
+                actor_type="system",
+                actor_id="gateway",
+                target_id=transition.id,
+                payload={
+                    "source_execution_id": str(current_execution.id),
+                    "source_session_id": str(current_session.id),
+                    "source_lease_id": str(current_lease.id),
+                    "transition_id": str(transition.id),
+                    "operation_id": str(operation_id),
+                    "accepted_sequence": evidence.accepted_sequence,
+                },
+                expected_version=previous_transition_version,
+                idempotency_key=f"gateway-handoff-stop:{operation_id}",
+                correlation_id=transition.id,
+            )
+            events = (
                 _gateway_event(
-                    command_id,
+                    command.id,
                     workspace_id=current_execution.workspace_id,
                     aggregate_type="execution",
                     aggregate_id=current_execution.id,
@@ -2322,7 +2344,7 @@ class WorkerGateway:
                     },
                 ),
                 _gateway_event(
-                    command_id,
+                    command.id,
                     workspace_id=current_session.workspace_id,
                     aggregate_type="execution_session",
                     aggregate_id=current_session.id,
@@ -2335,7 +2357,7 @@ class WorkerGateway:
                     },
                 ),
                 _gateway_event(
-                    command_id,
+                    command.id,
                     workspace_id=current_lease.workspace_id,
                     aggregate_type="lease",
                     aggregate_id=current_lease.id,
@@ -2347,8 +2369,20 @@ class WorkerGateway:
                         "transition_id": str(transition.id),
                     },
                 ),
-            ):
-                uow.events.append_with_outbox(event)
+            )
+            if uow.commands.find_by_id(transition.workspace_id, command.id) is None:
+                uow.commands.record_applied(
+                    command,
+                    hash_request(command),
+                    CommandResult(
+                        command_id=command.id,
+                        aggregate_id=transition.id,
+                        aggregate_version=transition.version,
+                        event_ids=tuple(event.id for event in events),
+                    ),
+                )
+                for event in events:
+                    uow.events.append_with_outbox(event)
 
     def _inspect_unknown_handoff_operation(
         self,

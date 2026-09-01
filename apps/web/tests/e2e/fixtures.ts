@@ -6,6 +6,7 @@ import { test as base } from "@playwright/test";
 export const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 export const R5_WORKSPACE_ID = "20000000-0000-0000-0000-000000000002";
 export const R6_1_WORKSPACE_ID = "20000000-0000-0000-0000-000000000003";
+export const R6_2_WORKSPACE_ID = "20000000-0000-0000-0000-000000000004";
 export const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 export const SUBTASK_TASK_ID = "30000000-0000-0000-0000-000000000002";
 export const SECOND_ROOT_TASK_ID = "30000000-0000-0000-0000-000000000005";
@@ -31,6 +32,16 @@ export const KNOWLEDGE_STALE_CANDIDATE_ID = "c0000000-0000-0000-0000-00000000000
 
 export type SeedScenario = "task-first" | "scale" | "runtime-routing" | "context-knowledge";
 export type PlanningSeedScenario = "proposal" | "clarification" | "scale" | "real";
+export type HandoffSeedScenario = "normal" | "target-start-unknown";
+export type R6HandoffSeed = {
+  workspace_id: string;
+  root_task_id: string;
+  source_execution_id: string;
+  source_session_id: string;
+  worker_item_ids: Record<"a" | "b" | "c", string>;
+  target_worker_ids: string[];
+  scenario: HandoffSeedScenario;
+};
 
 const webRoot = resolve(import.meta.dirname, "../..");
 const repositoryRoot = resolve(webRoot, "../..");
@@ -38,6 +49,8 @@ const controlPlaneRoot = resolve(repositoryRoot, "services/control-plane");
 const seedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r4_workspace.py");
 const planningSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r5_planning.py");
 const revisionSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_1_revision.py");
+const handoffSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_2_handoff.py");
+const handoffRuntimeScript = resolve(controlPlaneRoot, "tests/e2e/r6_2_fake_runtime.py");
 const defaultPython = resolve(controlPlaneRoot, ".venv/bin/python");
 const knowledgeServiceRoot = resolve(repositoryRoot, "services/knowledge-service");
 const knowledgeSeedScript = resolve(knowledgeServiceRoot, "tests/e2e/seed_r5_3_knowledge.py");
@@ -85,6 +98,35 @@ export function seedR6Revision(): void {
   );
 }
 
+export function seedR6Handoff(scenario: HandoffSeedScenario = "normal"): R6HandoffSeed {
+  const output = execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    [
+      handoffSeedScript,
+      "--workspace-id",
+      R6_2_WORKSPACE_ID,
+      "--scenario",
+      scenario,
+      "--reset",
+    ],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: e2eEnvironment(),
+      encoding: "utf8",
+    },
+  );
+  const lastLine = output.trim().split(/\r?\n/).at(-1);
+  if (lastLine === undefined || lastLine.length === 0) {
+    throw new Error("R6.2 handoff seed did not return a JSON summary");
+  }
+  const parsed: unknown = JSON.parse(lastLine);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("R6.2 handoff seed returned a non-object summary");
+  }
+  return parsed as R6HandoffSeed;
+}
+
 export function seedKnowledge(workspaceId: string = WORKSPACE_ID): void {
   execFileSync(
     process.env.SIDERA_E2E_KNOWLEDGE_PYTHON ?? knowledgeDefaultPython,
@@ -121,6 +163,53 @@ export function runSchedulerOnce(): Record<string, unknown> {
 
 export function runPlanTransitionWorkerOnce(): Record<string, unknown> {
   return runControlPlaneOnce("sidera_control_plane.plan_transition_worker");
+}
+
+export function runHandoffWorkerOnce(
+  workspaceId: string = R6_2_WORKSPACE_ID,
+  scenario: HandoffSeedScenario = "normal",
+): Record<string, unknown> {
+  return runFakeHandoffRuntime(workspaceId, scenario, "--until-converged");
+}
+
+export function runHandoffUntilUnknown(
+  workspaceId: string = R6_2_WORKSPACE_ID,
+  scenario: HandoffSeedScenario = "target-start-unknown",
+): Record<string, unknown> {
+  return runFakeHandoffRuntime(workspaceId, scenario, "--until-unknown");
+}
+
+function runFakeHandoffRuntime(
+  workspaceId: string,
+  scenario: HandoffSeedScenario,
+  mode: "--until-converged" | "--until-unknown",
+): Record<string, unknown> {
+  const output = execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    [
+      handoffRuntimeScript,
+      "--workspace-id",
+      workspaceId,
+      "--scenario",
+      scenario,
+      mode,
+    ],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: e2eEnvironment(),
+      encoding: "utf8",
+    },
+  );
+  const lastLine = output.trim().split(/\r?\n/).at(-1);
+  if (lastLine === undefined || lastLine.length === 0) {
+    throw new Error("R6.2 fake runtime did not return a JSON summary");
+  }
+  const parsed: unknown = JSON.parse(lastLine);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("R6.2 fake runtime returned a non-object summary");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function runControlPlaneOnce(moduleName: string): Record<string, unknown> {
@@ -165,6 +254,7 @@ type Fixtures = {
   seedR4: (scenario?: SeedScenario) => void;
   seedR5: (scenario?: PlanningSeedScenario) => void;
   seedR6Revision: () => void;
+  seedR6Handoff: (scenario?: HandoffSeedScenario) => R6HandoffSeed;
   seedKnowledge: (workspaceId?: string) => void;
 };
 
@@ -186,6 +276,12 @@ export const test = base.extend<Fixtures>({
     // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(seedR6Revision);
+  },
+  seedR6Handoff: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(seedR6Handoff);
   },
   seedKnowledge: async ({ browserName }, use) => {
     void browserName;

@@ -164,12 +164,13 @@ def _seed(
         startup_latency_ms=1,
         now=NOW,
     )
+    execution_id = uuid4()
     execution = Execution.create(
-        execution_id=uuid4(),
+        execution_id=execution_id,
         workspace_id=workspace_id,
         task_id=task.id,
         worker_item_id=item.id,
-        lineage_id=uuid4(),
+        lineage_id=execution_id,
         attempt=1,
         max_attempts=2,
         purpose="candidate query",
@@ -212,6 +213,9 @@ def _seed(
         uow.workers.add(source)
         uow.workers.add(target)
         uow.worker_items.add(item)
+        # The execution/task/work-item graph contains a cycle elsewhere in
+        # the metadata; persist the task-side parents before the execution.
+        uow.flush()
         uow.executions.add(execution)
         uow.flush()
         uow.sessions.add(session)

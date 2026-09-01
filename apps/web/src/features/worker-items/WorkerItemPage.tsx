@@ -259,7 +259,7 @@ function WorkerItemContent({
           onOpenHandoff={() => setHandoffOpen(true)}
         />
       </div>
-      {handoffOpen && workspace.active_handoff == null ? (
+      {handoffOpen ? (
         <HandoffDialog
           workspace={workspace}
           taskTitle={taskTitle}

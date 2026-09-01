@@ -2902,8 +2902,11 @@ class ExecutionRequestModel(TimestampMixin, Base):
         CheckConstraint(
             "(status = 'materialized' AND execution_lineage_id IS NOT NULL "
             "AND first_execution_id IS NOT NULL) OR "
-            "(status <> 'materialized' AND execution_lineage_id IS NULL "
-            "AND first_execution_id IS NULL)",
+            "(status = 'obsolete' AND handoff_transition_id IS NOT NULL "
+            "AND execution_lineage_id IS NOT NULL "
+            "AND first_execution_id IS NOT NULL) OR "
+            "(status IN ('blocked', 'ready', 'cancelled', 'obsolete') "
+            "AND execution_lineage_id IS NULL AND first_execution_id IS NULL)",
             name="ck_execution_requests_materialized_lineage",
         ),
         CheckConstraint(
@@ -2995,7 +2998,9 @@ class ExecutionRequestModel(TimestampMixin, Base):
             "workspace_id",
             "handoff_transition_id",
             unique=True,
-            postgresql_where=text("handoff_transition_id IS NOT NULL"),
+            postgresql_where=text(
+                "handoff_transition_id IS NOT NULL AND status = 'materialized'"
+            ),
         ),
         Index(
             "uq_execution_requests_lineage",

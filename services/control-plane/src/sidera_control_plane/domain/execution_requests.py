@@ -460,6 +460,52 @@ class ExecutionRequest:
     def obsolete(self, *, now: datetime, reason: str = "obsolete") -> None:
         self._close(status=ExecutionRequestStatus.OBSOLETE, now=now, reason=reason)
 
+    def retire_handoff_target(
+        self,
+        *,
+        now: datetime,
+        reason: str = "handoff_recovery_retry",
+    ) -> None:
+        """Retire a materialized handoff target before creating a new attempt.
+
+        A handoff target request is materialized before the external target
+        session starts. Recovery must preserve that attempt as terminal audit
+        history while releasing the partial unique handoff slot. The request
+        schema requires terminal requests to have no materialized lineage, so
+        the retired IDs remain in gate details and the transition/execution
+        records remain the authoritative runtime history.
+        """
+
+        if self.status is not ExecutionRequestStatus.MATERIALIZED:
+            raise InvalidTransition(
+                f"only a materialized handoff target can be retired, got {self.status}"
+            )
+        if self.handoff_transition_id is None:
+            raise ValidationError("handoff target transition is required for retirement")
+        _aware(now, "now")
+        clean_reason = _required_text(reason, "reason")
+        self.status = ExecutionRequestStatus.OBSOLETE
+        self.gate_reason = clean_reason
+        self.gate_details = MappingProxyType(
+            {
+                "reason": clean_reason,
+                "retired_execution_lineage_id": (
+                    str(self.execution_lineage_id)
+                    if self.execution_lineage_id is not None
+                    else None
+                ),
+                "retired_first_execution_id": (
+                    str(self.first_execution_id)
+                    if self.first_execution_id is not None
+                    else None
+                ),
+                "retired_handoff_transition_id": str(self.handoff_transition_id),
+            }
+        )
+        self.status_changed_at = now
+        self.updated_at = now
+        self.version += 1
+
     def _close(
         self,
         *,

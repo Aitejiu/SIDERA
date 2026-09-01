@@ -26,6 +26,7 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperationStatus,
     GatewayOperationType,
     gateway_operation_id,
+    handoff_inspection_outcome_from_result_ref,
     handoff_step_operation_id,
 )
 from sidera_control_plane.domain.handoff_evidence import (
@@ -291,6 +292,35 @@ class HandoffRecoveryService:
             result.append(HandoffRecoveryStrategy.CONFIRM_TARGET_ACTIVE)
 
         return tuple(dict.fromkeys(result))
+
+    def persist_operation_inspection(
+        self,
+        *,
+        transition: HandoffTransition,
+        inspection: HandoffRecoveryInspection,
+    ) -> None:
+        """Persist provider inspection evidence without advancing the Transition."""
+
+        _validate_inspection(transition, inspection)
+        operation = _matching_operation(inspection, GatewayOperationType.START_SESSION)
+        if operation is None:
+            operation = next(iter(inspection.operation_inspections), None)
+        if operation is None:
+            raise HandoffRecoveryError("handoff operation inspection is missing")
+        spec = _operation_spec(transition)
+        if spec is None or operation.operation_id != spec.operation_id:
+            raise HandoffRecoveryError("handoff operation inspection identity changed")
+        with self._uow_factory() as uow:
+            current = uow.gateway_operations.get_by_operation_id(
+                operation.operation_id,
+                transition.workspace_id,
+                for_update=True,
+            )
+            if current is None:
+                raise HandoffRecoveryError("handoff operation was not found")
+            previous_version = current.version
+            current.record_handoff_inspection(outcome=operation.outcome.value)
+            uow.gateway_operations.save(current, previous_version)
 
     def apply_decision(
         self,
@@ -705,6 +735,18 @@ class HandoffRecoveryService:
         *,
         now: datetime,
     ) -> None:
+        execution_requests = getattr(uow, "execution_requests", None)
+        if execution_requests is not None:
+            target_request = execution_requests.get_by_handoff_transition(
+                state.transition.id,
+                state.transition.workspace_id,
+                for_update=True,
+            )
+            if target_request is not None:
+                previous_request_version = target_request.version
+                target_request.retire_handoff_target(now=now)
+                execution_requests.save(target_request, previous_request_version)
+
         target = state.target_execution
         if target is None:
             return
@@ -900,6 +942,9 @@ def _operation_inspection_from_row(
     *,
     now: datetime,
 ) -> HandoffOperationInspection:
+    durable_inspection = handoff_inspection_outcome_from_result_ref(
+        operation.result_ref
+    )
     outcome = {
         GatewayOperationStatus.REQUESTED: HandoffInspectionOutcome.IN_PROGRESS,
         GatewayOperationStatus.RUNNING: HandoffInspectionOutcome.IN_PROGRESS,
@@ -907,6 +952,8 @@ def _operation_inspection_from_row(
         GatewayOperationStatus.FAILED: HandoffInspectionOutcome.FAILED,
         GatewayOperationStatus.UNKNOWN: HandoffInspectionOutcome.UNKNOWN,
     }[operation.status]
+    if durable_inspection is not None:
+        outcome = HandoffInspectionOutcome(durable_inspection)
     return HandoffOperationInspection(
         operation_id=operation.operation_id,
         operation_type=operation.operation_type,

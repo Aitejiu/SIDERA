@@ -162,7 +162,21 @@ def _clear_database(database: Database) -> None:
         )
         session.execute(delete(ExecutionWorkspaceTransferModel))
         session.execute(delete(HandoffContextBundleModel))
-        session.execute(text("DELETE FROM handoff_recovery_decisions"))
+        session.execute(
+            text(
+                "ALTER TABLE handoff_recovery_decisions "
+                "DISABLE TRIGGER trg_handoff_recovery_decisions_append_only"
+            )
+        )
+        try:
+            session.execute(text("DELETE FROM handoff_recovery_decisions"))
+        finally:
+            session.execute(
+                text(
+                    "ALTER TABLE handoff_recovery_decisions "
+                    "ENABLE TRIGGER trg_handoff_recovery_decisions_append_only"
+                )
+            )
         session.execute(delete(HandoffTransitionModel))
         session.execute(delete(HandoffProposalModel))
         for model in (

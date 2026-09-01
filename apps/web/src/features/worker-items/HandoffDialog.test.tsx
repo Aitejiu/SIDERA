@@ -481,6 +481,7 @@ describe("HandoffProgress", () => {
     await user.type(within(progress).getByRole("textbox", { name: "证据引用" }), "event:handoff-2");
     await user.click(within(progress).getByRole("button", { name: "提交恢复策略" }));
     await waitFor(() => expect(requestBody?.command_type).toBe("RecoverWorkerHandoff"));
+    expect(await within(progress).findByText("恢复请求已记录，正在读取新的切换状态。")).toBeVisible();
     expect(requestBody?.target_type).toBe("handoff_transition");
     expect(requestBody?.target_id).toBe(TRANSITION_ID);
   });
