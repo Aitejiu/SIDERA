@@ -69,6 +69,7 @@ from sidera_control_plane.domain.handoff_recovery import HandoffRecoveryDecision
 from sidera_control_plane.domain.handoffs import (
     HandoffProposal,
     HandoffTransition,
+    HandoffTransitionStatus,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
@@ -912,6 +913,16 @@ class ExecutionRequestRepositoryPort(Protocol):
     ) -> ExecutionRequest | None:
         raise NotImplementedError
 
+    def get_by_execution_lineage(
+        self,
+        execution_lineage_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        """Load the normal request that owns a source execution lineage."""
+        raise NotImplementedError
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         raise NotImplementedError
 
@@ -991,7 +1002,13 @@ class HandoffTransitionRepositoryPort(Protocol):
         raise NotImplementedError
 
     def claim_next(
-        self, *, owner_id: str, now: datetime, limit: int
+        self,
+        *,
+        owner_id: str,
+        now: datetime,
+        limit: int,
+        statuses: tuple[HandoffTransitionStatus, ...] | None = None,
+        lease_ttl_seconds: int | None = None,
     ) -> tuple[HandoffTransition, ...]:
         """Claim due transitions with SKIP LOCKED."""
         raise NotImplementedError

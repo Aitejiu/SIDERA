@@ -47,6 +47,7 @@ def _deterministic_artifact_storage_ref(instance_name: str) -> str:
 @dataclass(slots=True)
 class GatewayRuntime:
     gateway: GatewayAssignmentRunner
+    worker_gateway: WorkerGateway
     database: Database
     catalog: KnowledgeHttpAdapter
 
@@ -164,7 +165,12 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
         catalog.close()
         database.dispose()
         raise
-    return GatewayRuntime(gateway=runner, database=database, catalog=catalog)
+    return GatewayRuntime(
+        gateway=runner,
+        worker_gateway=worker_gateway,
+        database=database,
+        catalog=catalog,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

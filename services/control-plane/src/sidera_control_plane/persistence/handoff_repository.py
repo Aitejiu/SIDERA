@@ -246,17 +246,40 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
         return tuple(_to_transition(row) for row in rows)
 
     def claim_next(
-        self, *, owner_id: str, now: datetime, limit: int
+        self,
+        *,
+        owner_id: str,
+        now: datetime,
+        limit: int,
+        statuses: tuple[HandoffTransitionStatus, ...] | None = None,
+        lease_ttl_seconds: int | None = None,
     ) -> tuple[HandoffTransition, ...]:
         owner = owner_id.strip()
         if not owner:
             raise ValidationError("handoff claim owner_id is required")
         if limit < 1:
             raise ValidationError("handoff claim limit must be positive")
+        claim_statuses = statuses or tuple(ACTIVE_HANDOFF_TRANSITION_STATUSES)
+        if not claim_statuses:
+            raise ValidationError("handoff claim statuses cannot be empty")
+        if any(
+            not isinstance(status, HandoffTransitionStatus)
+            for status in claim_statuses
+        ):
+            raise ValidationError("handoff claim statuses are invalid")
+        claim_lease_seconds = (
+            HANDOFF_CLAIM_LEASE_SECONDS
+            if lease_ttl_seconds is None
+            else lease_ttl_seconds
+        )
+        if claim_lease_seconds < 1:
+            raise ValidationError("handoff claim lease ttl must be positive")
         statement = (
             select(HandoffTransitionModel)
             .where(
-                HandoffTransitionModel.status.in_(_active_status_values()),
+                HandoffTransitionModel.status.in_(
+                    _active_status_values(claim_statuses)
+                ),
                 or_(
                     HandoffTransitionModel.next_attempt_at.is_(None),
                     HandoffTransitionModel.next_attempt_at <= now,
@@ -278,7 +301,7 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
             .with_for_update(skip_locked=True)
         )
         rows = self._session.scalars(statement).all()
-        lease_expires_at = now + timedelta(seconds=HANDOFF_CLAIM_LEASE_SECONDS)
+        lease_expires_at = now + timedelta(seconds=claim_lease_seconds)
         for row in rows:
             row.lease_owner = owner
             row.lease_expires_at = lease_expires_at
@@ -675,8 +698,11 @@ class HandoffWorkspaceTransferRepository(HandoffWorkspaceTransferRepositoryPort)
         return tuple(_to_transfer(row) for row in rows)
 
 
-def _active_status_values() -> tuple[str, ...]:
-    return tuple(item.value for item in ACTIVE_HANDOFF_TRANSITION_STATUSES)
+def _active_status_values(
+    statuses: tuple[HandoffTransitionStatus, ...] | None = None,
+) -> tuple[str, ...]:
+    values = statuses or tuple(ACTIVE_HANDOFF_TRANSITION_STATUSES)
+    return tuple(item.value for item in values)
 
 
 def _optional_dict(value: object) -> dict[str, object] | None:

@@ -80,6 +80,31 @@ class ExecutionRequestRepository:
         row = self._session.scalar(statement)
         return _to_request(row) if row is not None else None
 
+    def get_by_execution_lineage(
+        self,
+        execution_lineage_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        statement = (
+            select(ExecutionRequestModel)
+            .where(
+                ExecutionRequestModel.execution_lineage_id == execution_lineage_id,
+                ExecutionRequestModel.workspace_id == workspace_id,
+                ExecutionRequestModel.handoff_transition_id.is_(None),
+            )
+            .order_by(
+                ExecutionRequestModel.created_at.asc(),
+                ExecutionRequestModel.id.asc(),
+            )
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_request(row) if row is not None else None
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         result = self._session.execute(
             update(ExecutionRequestModel)

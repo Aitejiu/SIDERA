@@ -822,6 +822,39 @@ class HandoffTransition:
         self.started_at = now
         self.version += 1
 
+    def resume(self, *, now: datetime) -> None:
+        """Resume a known, retryable block while retaining the same attempt."""
+
+        if self.status is not HandoffTransitionStatus.BLOCKED:
+            raise InvalidTransition("only a blocked handoff can resume")
+        _aware(now, "handoff transition resumed_at")
+        self.status = HandoffTransitionStatus.RUNNING
+        self.failure_code = None
+        self.blocked_operation_id = None
+        self.next_attempt_at = None
+        self.version += 1
+
+    def defer(self, *, now: datetime, next_attempt_at: datetime) -> None:
+        """Release the coordinator claim and retry this phase later."""
+
+        if self.status is not HandoffTransitionStatus.RUNNING:
+            raise InvalidTransition("only a running handoff can be deferred")
+        _aware(now, "handoff transition deferred_at")
+        _aware(next_attempt_at, "handoff transition next_attempt_at")
+        if next_attempt_at < now:
+            raise ValidationError("handoff next_attempt_at cannot precede now")
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.next_attempt_at = next_attempt_at
+        self.version += 1
+
+    def release_claim(self) -> None:
+        """Release a coordinator claim without changing the handoff phase."""
+
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.version += 1
+
     def advance(self, target: HandoffPhase | str, *, now: datetime) -> None:
         if self.status is not HandoffTransitionStatus.RUNNING:
             raise InvalidTransition("only a running handoff can advance")
@@ -842,6 +875,8 @@ class HandoffTransition:
         _aware(now, "handoff phase timestamp")
         self.phase = requested
         self.writer_state = _PHASE_WRITERS[requested]
+        self.lease_owner = None
+        self.lease_expires_at = None
         self.version += 1
 
     def converge(self, *, now: datetime) -> None:
@@ -854,6 +889,8 @@ class HandoffTransition:
         _aware(now, "handoff transition completed_at")
         self.status = HandoffTransitionStatus.CONVERGED
         self.completed_at = now
+        self.lease_owner = None
+        self.lease_expires_at = None
         self.version += 1
 
     def block(
@@ -897,6 +934,8 @@ class HandoffTransition:
         self.failure_code = _text(failure_code, "handoff failure_code")
         self.status = requested
         self.blocked_operation_id = blocked_operation_id
+        self.lease_owner = None
+        self.lease_expires_at = None
         self.version += 1
 
     def record_checkpoint(self, *, sequence: int, facts: Mapping[str, object]) -> None:
