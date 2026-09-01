@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
+from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
@@ -21,6 +22,9 @@ from sidera_control_plane.application.execution_commands import (
 )
 from sidera_control_plane.application.handoff_candidates import HandoffCandidateService
 from sidera_control_plane.application.handoff_commands import HandoffCommandHandler
+from sidera_control_plane.application.handoff_queries import (
+    HandoffQueryService as ActiveHandoffQueryService,
+)
 from sidera_control_plane.application.handoff_recovery import HandoffRecoveryService
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
@@ -78,6 +82,9 @@ from sidera_control_plane.persistence.context_package_query_store import (
     SqlAlchemyContextPackageQueryStore,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.handoff_query_store import (
+    SqlAlchemyHandoffQueryStore,
+)
 from sidera_control_plane.persistence.plan_revision_query_store import (
     SqlAlchemyPlanRevisionQueryStore,
 )
@@ -191,6 +198,34 @@ def get_command_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> CommandQueryService:
     return CommandQueryService(SqlAlchemyCommandQueryStore(database))
+
+
+def get_handoff_public_query_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> HandoffPublicQueryService:
+    factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
+        database,
+        projection_change_retention_seconds=settings.projection_change_retention_seconds,
+    )
+    runtime_resolver = WorkerRuntimeResolver()
+    candidate_service = HandoffCandidateService(
+        factory,
+        runtime_resolver=runtime_resolver,
+    )
+    recovery_service = HandoffRecoveryService(
+        factory,
+        runtime_resolver=runtime_resolver,
+    )
+    return HandoffPublicQueryService(
+        factory,
+        candidate_service=candidate_service,
+        active_handoff_service=ActiveHandoffQueryService(
+            SqlAlchemyHandoffQueryStore(database)
+        ),
+        recovery_service=recovery_service,
+        runtime_resolver=runtime_resolver,
+    )
 
 
 def get_task_query_service(

@@ -100,6 +100,9 @@ AggregateType = Literal[
     "context_assembly",
     "context_package",
     "worker_transition",
+    "worker_item",
+    "handoff_proposal",
+    "handoff_transition",
 ]
 
 
@@ -441,6 +444,8 @@ class AttentionItemProjectionResponse(BaseModel):
     resource_version: int
     correlation_id: UUID
     occurred_at: datetime
+    worker_item_id: UUID | None = None
+    deep_link: str | None = None
 
 
 class PlanHeadProjectionResponse(BaseModel):
@@ -573,6 +578,8 @@ class TaskOverviewProjectionResponse(BaseModel):
     active_revision: PlanRevisionProjectionResponse | None = None
     convergence: PlanConvergenceProjectionResponse | None = None
     revision_attention: PlanRevisionAttentionProjectionResponse | None = None
+    handoff_running_count: int = 0
+    handoff_blocked_count: int = 0
 
 
 class TaskNodeProjectionResponse(BaseModel):
@@ -600,6 +607,9 @@ class TaskNodeProjectionResponse(BaseModel):
     evidence_required: int
     updated_at: datetime | None
     plan_sync: WorkerPlanSyncProjectionResponse | None = None
+    handoff_running: bool = False
+    handoff_blocked: bool = False
+    handoff_worker_item_id: UUID | None = None
 
 
 class TaskEdgeProjectionResponse(BaseModel):
@@ -652,6 +662,8 @@ class TaskConsoleAttentionProjectionResponse(BaseModel):
     waiting_details_summary: str | None = None
     requires_operator: bool = False
     blocked_since: datetime | None = None
+    worker_item_id: UUID | None = None
+    deep_link: str | None = None
 
 
 class TaskConsoleOverviewProjectionResponse(BaseModel):
@@ -679,6 +691,8 @@ class TaskConsoleOverviewProjectionResponse(BaseModel):
     active_revision: PlanRevisionProjectionResponse | None = None
     convergence: PlanConvergenceProjectionResponse | None = None
     revision_attention: PlanRevisionAttentionProjectionResponse | None = None
+    handoff_running_count: int = 0
+    handoff_blocked_count: int = 0
 
 
 class SubtaskNodeProjectionResponse(BaseModel):
@@ -701,6 +715,9 @@ class SubtaskNodeProjectionResponse(BaseModel):
     waiting_details_summary: str | None = None
     requires_operator: bool = False
     blocked_since: datetime | None = None
+    handoff_running_count: int = 0
+    handoff_blocked_count: int = 0
+    handoff_worker_item_ids: tuple[UUID, ...] = ()
 
 
 class SubtaskEdgeProjectionResponse(BaseModel):
@@ -985,6 +1002,232 @@ class TraceDescriptorProjectionResponse(BaseModel):
     raw_ref: str | None
 
 
+class HandoffCandidateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: UUID
+    display_name: str
+    adapter_type: str
+    eligible: bool
+    recommended: bool
+    ineligibility_code: str | None
+    runtime_snapshot: dict[str, Any] | None
+    capability_snapshot_hash: str | None
+    policy_reason: dict[str, Any]
+    workspace_compatibility: dict[str, Any]
+    runtime_profile_label: str | None
+    capabilities_satisfied: tuple[str, ...]
+    health_summary: str
+    policy_reasons: tuple[dict[str, Any], ...]
+    inspected_at: datetime
+
+
+class HandoffCandidateListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    worker_item_id: UUID
+    source_execution_id: UUID
+    source_session_id: UUID
+    source_worker_id: UUID
+    source_worker_item_version: int
+    candidates: tuple[HandoffCandidateResponse, ...]
+    recommended_worker_id: UUID | None
+    blocking_codes: tuple[str, ...]
+    inspected_at: datetime
+
+
+class ActiveHandoffProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transition_id: UUID
+    proposal_id: UUID
+    status: str
+    phase: str
+    writer_state: str
+    source_execution_id: UUID
+    source_session_id: UUID
+    source_worker_id: UUID
+    target_worker_id: UUID
+    target_execution_id: UUID | None
+    target_session_id: UUID | None
+    attention_required: bool
+    failure_code: str | None
+    blocked_operation_id: UUID | None
+    available_recovery_strategies: tuple[str, ...]
+    source_trace_descriptor: TraceDescriptorProjectionResponse | None
+    target_trace_descriptor: TraceDescriptorProjectionResponse | None
+    started_at: datetime | None
+    updated_at: datetime
+
+
+class HandoffRuntimeSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    adapter_module_instance_id: UUID | None
+    adapter_module_config_version: int | None
+    workspace_module_instance_id: UUID | None
+    workspace_module_config_version: int | None
+    capability_snapshot_hash: str | None
+
+
+class HandoffWorkerSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: UUID
+    display_name: str
+    adapter_type: str
+    version: int
+    status: str
+    desired_state: str
+    current_load: int
+    capacity: int
+    capabilities: tuple[str, ...]
+    runtime_profile_label: str | None
+    capability_snapshot_hash: str | None
+
+
+class HandoffExecutionSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    task_id: UUID
+    status: str
+    attempt: int
+    version: int
+    session_id: UUID | None
+    session_status: str | None
+    session_version: int | None
+    last_sequence: int | None
+    trace_descriptor: TraceDescriptorProjectionResponse | None
+
+
+class HandoffParticipantResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker: HandoffWorkerSummaryResponse
+    runtime: HandoffRuntimeSummaryResponse | None
+    execution: HandoffExecutionSummaryResponse | None
+    worker_item_id: UUID
+    context_version: int | None
+    workspace_manifest_id: UUID | None
+    workspace_manifest_version: int | None
+
+
+class HandoffWorkerItemSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_id: UUID
+    title: str
+    responsibility: str
+    status: str
+    version: int
+    context_version: int
+
+
+class HandoffWorkspaceSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transfer_mode: str
+    source_manifest_id: UUID
+    source_manifest_version: int
+    source_lifecycle: str | None
+    target_manifest_id: UUID | None
+    target_manifest_version: int | None
+    target_lifecycle: str | None
+    compatibility: dict[str, Any]
+
+
+class HandoffContextSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_package_id: UUID
+    source_package_hash: str
+    source_context_version: int
+    target_package_id: UUID | None
+    target_package_hash: str | None
+    target_context_version: int | None
+
+
+class HandoffPlanBaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: UUID
+    generation: int
+    head_version: int
+
+
+class HandoffProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID
+    task_title: str | None
+    subtask_title: str | None
+    worker_item: HandoffWorkerItemSummaryResponse
+    status: str
+    stale_reason: str | None
+    version: int
+    proposal_hash: str
+    source_channel: str
+    created_by_type: str
+    created_by_id: str
+    created_at: datetime
+    expires_at: datetime
+    confirmed_at: datetime | None
+    cancelled_at: datetime | None
+    handoff_reason: str
+    handoff_instruction: str
+    transfer_mode: str
+    source: HandoffParticipantResponse
+    target: HandoffParticipantResponse
+    workspace: HandoffWorkspaceSummaryResponse
+    context: HandoffContextSummaryResponse
+    plan_base: HandoffPlanBaseResponse
+    input_plan: dict[str, Any]
+    impact_summary: dict[str, Any]
+
+
+class HandoffTransitionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID
+    task_title: str | None
+    subtask_title: str | None
+    worker_item: HandoffWorkerItemSummaryResponse
+    proposal_id: UUID
+    proposal_status: str
+    proposal_hash: str
+    version: int
+    status: str
+    phase: str
+    writer_state: str
+    logical_attempt: int
+    source_input_cutoff_sequence: int
+    target_context_version: int
+    failure_code: str | None
+    blocked_operation_id: UUID | None
+    next_attempt_at: datetime | None
+    confirmed_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    attention_required: bool
+    available_recovery_strategies: tuple[str, ...]
+    source: HandoffParticipantResponse
+    target: HandoffParticipantResponse
+    workspace: HandoffWorkspaceSummaryResponse
+    context: HandoffContextSummaryResponse
+    source_trace_descriptor: TraceDescriptorProjectionResponse | None
+    target_trace_descriptor: TraceDescriptorProjectionResponse | None
+    recovery_evidence_refs: tuple[str, ...]
+    recovery_inspected_at: datetime | None
+
+
 class WorkerArtifactSummaryProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1051,6 +1294,7 @@ class WorkerWorkspaceProjectionResponse(BaseModel):
     last_change_cursor: int
     as_of: datetime
     plan_sync: WorkerPlanSyncProjectionResponse | None = None
+    active_handoff: ActiveHandoffProjectionResponse | None = None
 
 
 class WorkerItemActivityPageResponse(BaseModel):
@@ -1539,6 +1783,50 @@ class RecoverWorkerTransitionPayload(BaseModel):
     patch_hash: NonEmptyString | None = None
 
 
+class PrepareWorkerHandoffPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_worker_id: UUID
+    handoff_reason: NonEmptyString
+    handoff_instruction: NonEmptyString
+    input_plan: dict[str, Any] = Field(default_factory=dict)
+    proposal_ttl_seconds: int = Field(gt=0, le=86_400)
+
+
+class ConfirmWorkerHandoffPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: UUID
+    expected_proposal_version: int = Field(ge=1)
+    expected_proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_worker_item_version: int = Field(ge=1)
+
+
+class CancelWorkerHandoffPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: NonEmptyString
+
+
+class RecoverWorkerHandoffPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transition_id: UUID
+    expected_transition_version: int = Field(ge=1)
+    strategy: Literal[
+        "retry_current_phase",
+        "retry_same_target",
+        "select_new_target",
+        "continue_with_source_agent",
+        "confirm_source_stopped",
+        "confirm_target_absent",
+        "confirm_target_active",
+    ]
+    reason: NonEmptyString
+    evidence_refs: tuple[NonEmptyString, ...] = Field(min_length=1)
+    replacement_target_worker_id: UUID | None = None
+
+
 class ContinueExecutionSessionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1710,6 +1998,34 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryBlockedExecutionInput":
             self._require_mutation_target("execution_session")
             parsed = RetryBlockedExecutionInputPayload.model_validate(self.payload)
+        elif self.command_type == "PrepareWorkerHandoff":
+            self._require_mutation_target("worker_item")
+            parsed = PrepareWorkerHandoffPayload.model_validate(self.payload)
+        elif self.command_type == "ConfirmWorkerHandoff":
+            self._require_mutation_target("handoff_proposal")
+            parsed = ConfirmWorkerHandoffPayload.model_validate(self.payload)
+            if parsed.proposal_id != self.target_id:
+                raise ValueError("ConfirmWorkerHandoff proposal_id must match target_id")
+            if parsed.expected_proposal_version != self.expected_version:
+                raise ValueError(
+                    "ConfirmWorkerHandoff expected_proposal_version must match "
+                    "expected_version"
+                )
+        elif self.command_type == "CancelWorkerHandoff":
+            self._require_mutation_target("handoff_proposal")
+            parsed = CancelWorkerHandoffPayload.model_validate(self.payload)
+        elif self.command_type == "RecoverWorkerHandoff":
+            self._require_mutation_target("handoff_transition")
+            parsed = RecoverWorkerHandoffPayload.model_validate(self.payload)
+            if parsed.transition_id != self.target_id:
+                raise ValueError(
+                    "RecoverWorkerHandoff transition_id must match target_id"
+                )
+            if parsed.expected_transition_version != self.expected_version:
+                raise ValueError(
+                    "RecoverWorkerHandoff expected_transition_version must match "
+                    "expected_version"
+                )
         elif self.command_type in {
             "ReconcileWorkerTransition",
             "ConfirmWorkerTransitionStopped",
@@ -1724,7 +2040,12 @@ class CommandRequest(BaseModel):
             parsed = payload_types[self.command_type].model_validate(self.payload)
         else:
             return self
-        self.payload = dict(parsed.model_dump(mode="json"))
+        self.payload = dict(
+            parsed.model_dump(
+                mode="json",
+                exclude_none=self.command_type == "RecoverWorkerHandoff",
+            )
+        )
         return self
 
     def _require_create(self, target_type: AggregateType) -> None:

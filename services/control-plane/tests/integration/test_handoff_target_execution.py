@@ -26,6 +26,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV1,
     ContextPurpose,
 )
+from sidera_control_plane.domain.handoffs import (
+    HandoffProposalPayload,
+    HandoffTransferMode,
+)
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     IdempotencyCapability,
@@ -52,6 +56,9 @@ from sidera_control_plane.persistence.models import (
     TaskModel,
     WorkerItemModel,
     WorkerModel,
+)
+from sidera_control_plane.persistence.module_repository import (
+    capability_profile_to_payload,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -182,6 +189,40 @@ def _seed(database: Database, workspace_id: UUID) -> tuple[HandoffFixture, Resol
         expires_at=NOW + timedelta(hours=1),
         idempotency_key=f"target-package-{target_package_id}",
         created_at=NOW,
+    )
+    proposal_payload = HandoffProposalPayload(
+        proposal_schema_version=1,
+        workspace_id=workspace_id,
+        root_task_id=task_id,
+        subtask_id=task_id,
+        worker_item_id=worker_item_id,
+        source_execution_id=source_execution_id,
+        source_execution_version=1,
+        source_session_id=source_session_id,
+        source_session_version=1,
+        source_session_last_sequence=3,
+        source_worker_id=source_worker_id,
+        source_worker_version=1,
+        source_runtime_snapshot={"worker_id": str(source_worker_id)},
+        source_workspace_manifest_id=source_manifest_id,
+        source_workspace_manifest_version=1,
+        source_context_package_id=source_package_id,
+        source_context_package_hash=source_package.package_hash,
+        source_worker_context_version=1,
+        observed_plan_snapshot_id=plan_snapshot_id,
+        observed_plan_generation=1,
+        observed_plan_head_version=1,
+        target_worker_id=target_worker_id,
+        target_worker_version=1,
+        target_runtime_snapshot=target_runtime_snapshot,
+        target_capability_snapshot_hash="d" * 64,
+        target_policy_reason={"policy": "fixed"},
+        target_policy_facts={"selected": True},
+        transfer_mode=HandoffTransferMode.REUSE_EXACT,
+        handoff_reason="test exact assignment",
+        handoff_instruction="continue from the source checkpoint",
+        input_plan={},
+        impact_summary={},
     )
     with database.session() as session:
         session.add_all(
@@ -364,7 +405,7 @@ def _seed(database: Database, workspace_id: UUID) -> tuple[HandoffFixture, Resol
                 adapter_config_version=None,
                 workspace_module_id=None,
                 workspace_config_version=None,
-                capability_snapshot={},
+                capability_snapshot=capability_profile_to_payload(_capability_profile()),
                 process_ref=None,
                 workspace_ref=None,
                 version=1,
@@ -542,9 +583,9 @@ def _seed(database: Database, workspace_id: UUID) -> tuple[HandoffFixture, Resol
                 handoff_instruction="continue from the source checkpoint",
                 input_plan={},
                 impact_summary={},
-                payload={},
+                payload=proposal_payload.to_mapping(),
                 proposal_schema_version=1,
-                proposal_hash="e" * 64,
+                proposal_hash=proposal_payload.content_hash,
                 status="confirmed",
                 stale_reason=None,
                 version=1,

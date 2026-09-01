@@ -16,6 +16,7 @@ from sidera_control_plane.api.execution_queries import (
     router as execution_queries_router,
 )
 from sidera_control_plane.api.gateway_queries import router as gateway_queries_router
+from sidera_control_plane.api.handoff_queries import router as handoff_queries_router
 from sidera_control_plane.api.module_queries import router as module_queries_router
 from sidera_control_plane.api.plan_queries import router as plan_queries_router
 from sidera_control_plane.api.plan_transition_queries import (
@@ -94,6 +95,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(work_context_queries_router)
     app.include_router(execution_queries_router)
     app.include_router(gateway_queries_router)
+    app.include_router(handoff_queries_router)
     app.include_router(artifact_content_router)
 
     @app.get("/healthz")

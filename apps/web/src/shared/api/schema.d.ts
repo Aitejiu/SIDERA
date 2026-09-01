@@ -599,6 +599,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/handoff-proposals/{proposal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Handoff Proposal */
+        get: operations["get_handoff_proposal"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Handoff Transition */
+        get: operations["get_handoff_transition"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/plan-transitions/{plan_transition_id}": {
         parameters: {
             query?: never;
@@ -990,6 +1024,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Worker Item Handoff */
+        get: operations["get_worker_item_handoff"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff-candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Handoff Candidates */
+        get: operations["get_handoff_candidates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions": {
         parameters: {
             query?: never;
@@ -1136,6 +1204,66 @@ export interface components {
             manual_gate: boolean;
             /** Revision Operation */
             revision_operation: string | null;
+        };
+        /** ActiveHandoffProjectionResponse */
+        ActiveHandoffProjectionResponse: {
+            /** Attention Required */
+            attention_required: boolean;
+            /** Available Recovery Strategies */
+            available_recovery_strategies: string[];
+            /** Blocked Operation Id */
+            blocked_operation_id: string | null;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Phase */
+            phase: string;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            /**
+             * Source Execution Id
+             * Format: uuid
+             */
+            source_execution_id: string;
+            /**
+             * Source Session Id
+             * Format: uuid
+             */
+            source_session_id: string;
+            source_trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+            /**
+             * Source Worker Id
+             * Format: uuid
+             */
+            source_worker_id: string;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /** Target Execution Id */
+            target_execution_id: string | null;
+            /** Target Session Id */
+            target_session_id: string | null;
+            target_trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+            /**
+             * Target Worker Id
+             * Format: uuid
+             */
+            target_worker_id: string;
+            /**
+             * Transition Id
+             * Format: uuid
+             */
+            transition_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Writer State */
+            writer_state: string;
         };
         /** ActivePlanHeadResponse */
         ActivePlanHeadResponse: {
@@ -1291,6 +1419,11 @@ export interface components {
         };
         /** CancelPlanningRequestPayload */
         CancelPlanningRequestPayload: Record<string, never>;
+        /** CancelWorkerHandoffPayload */
+        CancelWorkerHandoffPayload: {
+            /** Reason */
+            reason: string;
+        };
         /** CheckpointSummaryProjectionResponse */
         CheckpointSummaryProjectionResponse: {
             /** Artifact Ids */
@@ -1336,7 +1469,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition";
             /**
              * Workspace Id
              * Format: uuid
@@ -1433,6 +1566,20 @@ export interface components {
             proposal_content_hash: string;
             /** Proposal Revision */
             proposal_revision: number;
+        };
+        /** ConfirmWorkerHandoffPayload */
+        ConfirmWorkerHandoffPayload: {
+            /** Expected Proposal Hash */
+            expected_proposal_hash: string;
+            /** Expected Proposal Version */
+            expected_proposal_version: number;
+            /** Expected Worker Item Version */
+            expected_worker_item_version: number;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
         };
         /** ConfirmWorkerTransitionStoppedPayload */
         ConfirmWorkerTransitionStoppedPayload: {
@@ -2255,6 +2402,407 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HandoffCandidateListResponse */
+        HandoffCandidateListResponse: {
+            /** Blocking Codes */
+            blocking_codes: string[];
+            /** Candidates */
+            candidates: components["schemas"]["HandoffCandidateResponse"][];
+            /**
+             * Inspected At
+             * Format: date-time
+             */
+            inspected_at: string;
+            /** Recommended Worker Id */
+            recommended_worker_id: string | null;
+            /**
+             * Source Execution Id
+             * Format: uuid
+             */
+            source_execution_id: string;
+            /**
+             * Source Session Id
+             * Format: uuid
+             */
+            source_session_id: string;
+            /**
+             * Source Worker Id
+             * Format: uuid
+             */
+            source_worker_id: string;
+            /** Source Worker Item Version */
+            source_worker_item_version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** HandoffCandidateResponse */
+        HandoffCandidateResponse: {
+            /** Adapter Type */
+            adapter_type: string;
+            /** Capabilities Satisfied */
+            capabilities_satisfied: string[];
+            /** Capability Snapshot Hash */
+            capability_snapshot_hash: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Eligible */
+            eligible: boolean;
+            /** Health Summary */
+            health_summary: string;
+            /** Ineligibility Code */
+            ineligibility_code: string | null;
+            /**
+             * Inspected At
+             * Format: date-time
+             */
+            inspected_at: string;
+            /** Policy Reason */
+            policy_reason: {
+                [key: string]: unknown;
+            };
+            /** Policy Reasons */
+            policy_reasons: {
+                [key: string]: unknown;
+            }[];
+            /** Recommended */
+            recommended: boolean;
+            /** Runtime Profile Label */
+            runtime_profile_label: string | null;
+            /** Runtime Snapshot */
+            runtime_snapshot: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /** Workspace Compatibility */
+            workspace_compatibility: {
+                [key: string]: unknown;
+            };
+        };
+        /** HandoffContextSummaryResponse */
+        HandoffContextSummaryResponse: {
+            /** Source Context Version */
+            source_context_version: number;
+            /** Source Package Hash */
+            source_package_hash: string;
+            /**
+             * Source Package Id
+             * Format: uuid
+             */
+            source_package_id: string;
+            /** Target Context Version */
+            target_context_version: number | null;
+            /** Target Package Hash */
+            target_package_hash: string | null;
+            /** Target Package Id */
+            target_package_id: string | null;
+        };
+        /** HandoffExecutionSummaryResponse */
+        HandoffExecutionSummaryResponse: {
+            /** Attempt */
+            attempt: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Last Sequence */
+            last_sequence: number | null;
+            /** Session Id */
+            session_id: string | null;
+            /** Session Status */
+            session_status: string | null;
+            /** Session Version */
+            session_version: number | null;
+            /** Status */
+            status: string;
+            /**
+             * Task Id
+             * Format: uuid
+             */
+            task_id: string;
+            trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+            /** Version */
+            version: number;
+        };
+        /** HandoffParticipantResponse */
+        HandoffParticipantResponse: {
+            /** Context Version */
+            context_version: number | null;
+            execution: components["schemas"]["HandoffExecutionSummaryResponse"] | null;
+            runtime: components["schemas"]["HandoffRuntimeSummaryResponse"] | null;
+            worker: components["schemas"]["HandoffWorkerSummaryResponse"];
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Workspace Manifest Id */
+            workspace_manifest_id: string | null;
+            /** Workspace Manifest Version */
+            workspace_manifest_version: number | null;
+        };
+        /** HandoffPlanBaseResponse */
+        HandoffPlanBaseResponse: {
+            /** Generation */
+            generation: number;
+            /** Head Version */
+            head_version: number;
+            /**
+             * Snapshot Id
+             * Format: uuid
+             */
+            snapshot_id: string;
+        };
+        /** HandoffProposalResponse */
+        HandoffProposalResponse: {
+            /** Cancelled At */
+            cancelled_at: string | null;
+            /** Confirmed At */
+            confirmed_at: string | null;
+            context: components["schemas"]["HandoffContextSummaryResponse"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By Id */
+            created_by_id: string;
+            /** Created By Type */
+            created_by_type: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Handoff Instruction */
+            handoff_instruction: string;
+            /** Handoff Reason */
+            handoff_reason: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Impact Summary */
+            impact_summary: {
+                [key: string]: unknown;
+            };
+            /** Input Plan */
+            input_plan: {
+                [key: string]: unknown;
+            };
+            plan_base: components["schemas"]["HandoffPlanBaseResponse"];
+            /** Proposal Hash */
+            proposal_hash: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            source: components["schemas"]["HandoffParticipantResponse"];
+            /** Source Channel */
+            source_channel: string;
+            /** Stale Reason */
+            stale_reason: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Subtask Id
+             * Format: uuid
+             */
+            subtask_id: string;
+            /** Subtask Title */
+            subtask_title: string | null;
+            target: components["schemas"]["HandoffParticipantResponse"];
+            /** Task Title */
+            task_title: string | null;
+            /** Transfer Mode */
+            transfer_mode: string;
+            /** Version */
+            version: number;
+            worker_item: components["schemas"]["HandoffWorkerItemSummaryResponse"];
+            workspace: components["schemas"]["HandoffWorkspaceSummaryResponse"];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** HandoffRuntimeSummaryResponse */
+        HandoffRuntimeSummaryResponse: {
+            /** Adapter Module Config Version */
+            adapter_module_config_version: number | null;
+            /** Adapter Module Instance Id */
+            adapter_module_instance_id: string | null;
+            /** Capability Snapshot Hash */
+            capability_snapshot_hash: string | null;
+            /** Workspace Module Config Version */
+            workspace_module_config_version: number | null;
+            /** Workspace Module Instance Id */
+            workspace_module_instance_id: string | null;
+        };
+        /** HandoffTransitionResponse */
+        HandoffTransitionResponse: {
+            /** Attention Required */
+            attention_required: boolean;
+            /** Available Recovery Strategies */
+            available_recovery_strategies: string[];
+            /** Blocked Operation Id */
+            blocked_operation_id: string | null;
+            /** Completed At */
+            completed_at: string | null;
+            /**
+             * Confirmed At
+             * Format: date-time
+             */
+            confirmed_at: string;
+            context: components["schemas"]["HandoffContextSummaryResponse"];
+            /** Failure Code */
+            failure_code: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Logical Attempt */
+            logical_attempt: number;
+            /** Next Attempt At */
+            next_attempt_at: string | null;
+            /** Phase */
+            phase: string;
+            /** Proposal Hash */
+            proposal_hash: string;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            /** Proposal Status */
+            proposal_status: string;
+            /** Recovery Evidence Refs */
+            recovery_evidence_refs: string[];
+            /** Recovery Inspected At */
+            recovery_inspected_at: string | null;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            source: components["schemas"]["HandoffParticipantResponse"];
+            /** Source Input Cutoff Sequence */
+            source_input_cutoff_sequence: number;
+            source_trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Subtask Id
+             * Format: uuid
+             */
+            subtask_id: string;
+            /** Subtask Title */
+            subtask_title: string | null;
+            target: components["schemas"]["HandoffParticipantResponse"];
+            /** Target Context Version */
+            target_context_version: number;
+            target_trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
+            /** Task Title */
+            task_title: string | null;
+            /** Version */
+            version: number;
+            worker_item: components["schemas"]["HandoffWorkerItemSummaryResponse"];
+            workspace: components["schemas"]["HandoffWorkspaceSummaryResponse"];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+            /** Writer State */
+            writer_state: string;
+        };
+        /** HandoffWorkerItemSummaryResponse */
+        HandoffWorkerItemSummaryResponse: {
+            /** Context Version */
+            context_version: number;
+            /** Responsibility */
+            responsibility: string;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /** Version */
+            version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** HandoffWorkerSummaryResponse */
+        HandoffWorkerSummaryResponse: {
+            /** Adapter Type */
+            adapter_type: string;
+            /** Capabilities */
+            capabilities: string[];
+            /** Capability Snapshot Hash */
+            capability_snapshot_hash: string | null;
+            /** Capacity */
+            capacity: number;
+            /** Current Load */
+            current_load: number;
+            /** Desired State */
+            desired_state: string;
+            /** Display Name */
+            display_name: string;
+            /** Runtime Profile Label */
+            runtime_profile_label: string | null;
+            /** Status */
+            status: string;
+            /** Version */
+            version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+        };
+        /** HandoffWorkspaceSummaryResponse */
+        HandoffWorkspaceSummaryResponse: {
+            /** Compatibility */
+            compatibility: {
+                [key: string]: unknown;
+            };
+            /** Source Lifecycle */
+            source_lifecycle: string | null;
+            /**
+             * Source Manifest Id
+             * Format: uuid
+             */
+            source_manifest_id: string;
+            /** Source Manifest Version */
+            source_manifest_version: number;
+            /** Target Lifecycle */
+            target_lifecycle: string | null;
+            /** Target Manifest Id */
+            target_manifest_id: string | null;
+            /** Target Manifest Version */
+            target_manifest_version: number | null;
+            /** Transfer Mode */
+            transfer_mode: string;
         };
         /** KnowledgeRevisionRefPayload */
         KnowledgeRevisionRefPayload: {
@@ -3473,6 +4021,24 @@ export interface components {
             /** Outcome */
             outcome: string;
         };
+        /** PrepareWorkerHandoffPayload */
+        PrepareWorkerHandoffPayload: {
+            /** Handoff Instruction */
+            handoff_instruction: string;
+            /** Handoff Reason */
+            handoff_reason: string;
+            /** Input Plan */
+            input_plan?: {
+                [key: string]: unknown;
+            };
+            /** Proposal Ttl Seconds */
+            proposal_ttl_seconds: number;
+            /**
+             * Target Worker Id
+             * Format: uuid
+             */
+            target_worker_id: string;
+        };
         /** ReconcileWorkerTransitionPayload */
         ReconcileWorkerTransitionPayload: {
             /** Evidence Refs */
@@ -3489,6 +4055,30 @@ export interface components {
             patch_hash: string | null;
             /** Reason */
             reason: string;
+        };
+        /** RecoverWorkerHandoffPayload */
+        RecoverWorkerHandoffPayload: {
+            /** Evidence Refs */
+            evidence_refs: string[];
+            /** Expected Transition Version */
+            expected_transition_version: number;
+            /** Reason */
+            reason: string;
+            /**
+             * Replacement Target Worker Id
+             * @default null
+             */
+            replacement_target_worker_id: string | null;
+            /**
+             * Strategy
+             * @enum {string}
+             */
+            strategy: "retry_current_phase" | "retry_same_target" | "select_new_target" | "continue_with_source_agent" | "confirm_source_stopped" | "confirm_target_absent" | "confirm_target_active";
+            /**
+             * Transition Id
+             * Format: uuid
+             */
+            transition_id: string;
         };
         /** RecoverWorkerTransitionPayload */
         RecoverWorkerTransitionPayload: {
@@ -4132,6 +4722,21 @@ export interface components {
             evidence_satisfied: number;
             /** Goal Summary */
             goal_summary: string;
+            /**
+             * Handoff Blocked Count
+             * @default 0
+             */
+            handoff_blocked_count: number;
+            /**
+             * Handoff Running Count
+             * @default 0
+             */
+            handoff_running_count: number;
+            /**
+             * Handoff Worker Item Ids
+             * @default []
+             */
+            handoff_worker_item_ids: string[];
             /** Kind */
             kind: string;
             /** Milestone Key */
@@ -4282,6 +4887,8 @@ export interface components {
              * Format: uuid
              */
             correlation_id: string;
+            /** Deep Link */
+            deep_link?: string | null;
             /** Key */
             key: string;
             /** Kind */
@@ -4315,6 +4922,8 @@ export interface components {
             waiting_details_summary?: string | null;
             /** Waiting Reason */
             waiting_reason?: string | null;
+            /** Worker Item Id */
+            worker_item_id?: string | null;
         };
         /** TaskConsoleGraphProjectionResponse */
         TaskConsoleGraphProjectionResponse: {
@@ -4351,6 +4960,16 @@ export interface components {
             generation: number;
             /** Goal Summary */
             goal_summary: string;
+            /**
+             * Handoff Blocked Count
+             * @default 0
+             */
+            handoff_blocked_count: number;
+            /**
+             * Handoff Running Count
+             * @default 0
+             */
+            handoff_running_count: number;
             /** Last Change Cursor */
             last_change_cursor: number;
             /** Next Subtask Keys */
@@ -4437,6 +5056,18 @@ export interface components {
             execution_id: string | null;
             /** Goal Summary */
             goal_summary: string;
+            /**
+             * Handoff Blocked
+             * @default false
+             */
+            handoff_blocked: boolean;
+            /**
+             * Handoff Running
+             * @default false
+             */
+            handoff_running: boolean;
+            /** Handoff Worker Item Id */
+            handoff_worker_item_id?: string | null;
             /** Kind */
             kind: string;
             /** Milestone Key */
@@ -5759,6 +6390,7 @@ export interface components {
         };
         /** WorkerWorkspaceProjectionResponse */
         WorkerWorkspaceProjectionResponse: {
+            active_handoff?: components["schemas"]["ActiveHandoffProjectionResponse"] | null;
             /** Artifacts */
             artifacts: components["schemas"]["WorkerArtifactSummaryProjectionResponse"][];
             /**
@@ -6981,6 +7613,70 @@ export interface operations {
             };
         };
     };
+    get_handoff_proposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HandoffProposalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_handoff_transition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                transition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HandoffTransitionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_plan_transition: {
         parameters: {
             query?: never;
@@ -7729,6 +8425,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkerItemActivityPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_worker_item_handoff: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveHandoffProjectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_handoff_candidates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HandoffCandidateListResponse"];
                 };
             };
             /** @description Validation Error */

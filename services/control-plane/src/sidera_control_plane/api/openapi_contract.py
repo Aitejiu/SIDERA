@@ -11,16 +11,20 @@ from sidera_control_plane.api.schemas import (
     ArchiveWorkContextPayload,
     AttachKnowledgeRevisionPayload,
     CancelPlanningRequestPayload,
+    CancelWorkerHandoffPayload,
     ClearExecutionWorkerPinPayload,
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ConfirmPlanRevisionPayload,
+    ConfirmWorkerHandoffPayload,
     ConfirmWorkerTransitionStoppedPayload,
     ErrorBody,
     ErrorResponse,
     ExecutionContextAddressPayload,
     PinExecutionWorkerPayload,
+    PrepareWorkerHandoffPayload,
     ReconcileWorkerTransitionPayload,
+    RecoverWorkerHandoffPayload,
     RecoverWorkerTransitionPayload,
     RegisterPlannerModulePayload,
     RegisterPlanningProfilePayload,
@@ -68,10 +72,18 @@ _TRANSITION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RecoverWorkerTransition", RecoverWorkerTransitionPayload),
 )
 
+_HANDOFF_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("PrepareWorkerHandoff", PrepareWorkerHandoffPayload),
+    ("ConfirmWorkerHandoff", ConfirmWorkerHandoffPayload),
+    ("CancelWorkerHandoff", CancelWorkerHandoffPayload),
+    ("RecoverWorkerHandoff", RecoverWorkerHandoffPayload),
+)
+
 _COMMAND_PAYLOADS = (
     _PLANNING_COMMAND_PAYLOADS
     + _RUNTIME_COMMAND_PAYLOADS
     + _TRANSITION_COMMAND_PAYLOADS
+    + _HANDOFF_COMMAND_PAYLOADS
 )
 
 

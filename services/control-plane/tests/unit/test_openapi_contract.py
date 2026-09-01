@@ -41,6 +41,10 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/reconcile",
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/confirm-stopped",
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/recover",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff-candidates",
+    "/api/v1/workspaces/{workspace_id}/handoff-proposals/{proposal_id}",
+    "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -64,6 +68,10 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/knowledge-submissions": "KnowledgeSubmissionPageResponse",
     "/api/v1/workspaces/{workspace_id}/plan-transitions/{plan_transition_id}": "PlanTransitionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}": "WorkerTransitionResponse",
+    "/api/v1/workspaces/{workspace_id}/handoff-proposals/{proposal_id}": "HandoffProposalResponse",
+    "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}": "HandoffTransitionResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff": "ActiveHandoffProjectionResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff-candidates": "HandoffCandidateListResponse",
 }
 
 EXPECTED_TYPED_POST_RESPONSES = {
@@ -97,6 +105,10 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "ReconcileWorkerTransition": "ReconcileWorkerTransitionPayload",
     "ConfirmWorkerTransitionStopped": "ConfirmWorkerTransitionStoppedPayload",
     "RecoverWorkerTransition": "RecoverWorkerTransitionPayload",
+    "PrepareWorkerHandoff": "PrepareWorkerHandoffPayload",
+    "ConfirmWorkerHandoff": "ConfirmWorkerHandoffPayload",
+    "CancelWorkerHandoff": "CancelWorkerHandoffPayload",
+    "RecoverWorkerHandoff": "RecoverWorkerHandoffPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {

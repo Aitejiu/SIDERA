@@ -6,10 +6,20 @@ from fastapi import APIRouter, Depends, Response
 from sidera_control_plane.api.dependencies import get_command_service, get_settings
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
 from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.handoff_commands import HandoffCommandError
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.errors import ValidationError
 
 router = APIRouter(prefix="/api/v1")
+
+_HANDOFF_COMMAND_TYPES = frozenset(
+    {
+        "PrepareWorkerHandoff",
+        "ConfirmWorkerHandoff",
+        "CancelWorkerHandoff",
+        "RecoverWorkerHandoff",
+    }
+)
 
 
 @router.post("/commands", response_model=CommandResponse, status_code=201)
@@ -94,6 +104,15 @@ def _execute_command(
     service: CommandService,
     settings: Settings,
 ) -> CommandResponse:
+    if request.command_type in _HANDOFF_COMMAND_TYPES and (
+        request.actor.type != settings.local_actor_type
+        or request.actor.id != settings.local_actor_id
+    ):
+        raise HandoffCommandError(
+            "handoff_actor_forbidden",
+            "handoff commands require the configured local actor",
+            details={"actor_type": settings.local_actor_type},
+        )
     if (
         request.actor.type == settings.local_actor_type
         and request.actor.id != settings.local_actor_id
