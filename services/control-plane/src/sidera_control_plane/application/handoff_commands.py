@@ -15,6 +15,10 @@ from sidera_control_plane.application.handoff_proposal_reconciler import (
     HandoffProposalReconciler,
     collect_handoff_base,
 )
+from sidera_control_plane.application.handoff_recovery import (
+    HandoffRecoveryError,
+    HandoffRecoveryService,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_runtime import (
     WorkerRuntimeInspectionPort,
@@ -23,6 +27,11 @@ from sidera_control_plane.application.worker_runtime import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import DomainError, VersionConflict
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.handoff_recovery import (
+    HandoffRecoveryDecision,
+    HandoffRecoveryResult,
+    HandoffRecoveryStrategy,
+)
 from sidera_control_plane.domain.handoffs import (
     HandoffCandidateInspection,
     HandoffProposal,
@@ -52,6 +61,16 @@ _CONFIRM_KEYS = frozenset(
         "expected_worker_item_version",
     }
 )
+_RECOVER_REQUIRED_KEYS = frozenset(
+    {
+        "transition_id",
+        "expected_transition_version",
+        "strategy",
+        "reason",
+        "evidence_refs",
+    }
+)
+_RECOVER_OPTIONAL_KEYS = frozenset({"replacement_target_worker_id"})
 
 
 class HandoffCommandError(DomainError):
@@ -74,6 +93,7 @@ class HandoffCommandHandler:
             "PrepareWorkerHandoff",
             "CancelWorkerHandoff",
             "ConfirmWorkerHandoff",
+            "RecoverWorkerHandoff",
         }
     )
 
@@ -83,12 +103,14 @@ class HandoffCommandHandler:
         *,
         candidate_service: HandoffCandidateService,
         runtime_resolver: WorkerRuntimeInspectionPort | None = None,
+        recovery_service: HandoffRecoveryService | None = None,
         default_proposal_ttl_seconds: int = 900,
         max_proposal_ttl_seconds: int = 86_400,
     ) -> None:
         self._clock = clock
         self._candidate_service = candidate_service
         self._runtime_resolver = runtime_resolver or WorkerRuntimeResolver()
+        self._recovery_service = recovery_service
         self._default_proposal_ttl_seconds = default_proposal_ttl_seconds
         self._max_proposal_ttl_seconds = max_proposal_ttl_seconds
 
@@ -101,6 +123,8 @@ class HandoffCommandHandler:
             return self._cancel(uow, envelope)
         if envelope.command_type == "ConfirmWorkerHandoff":
             return self._confirm(uow, envelope)
+        if envelope.command_type == "RecoverWorkerHandoff":
+            return self._recover(uow, envelope)
         raise HandoffCommandError(
             "validation_error",
             f"unsupported handoff command: {envelope.command_type}",
@@ -157,7 +181,9 @@ class HandoffCommandHandler:
                 details=exc.details,
             ) from exc
         except NotFound as exc:
-            raise HandoffCommandError("not_found", str(exc), details=exc.details) from exc
+            raise HandoffCommandError(
+                "not_found", str(exc), details=exc.details
+            ) from exc
 
         if candidates.blocking_codes:
             code = candidates.blocking_codes[0]
@@ -541,6 +567,96 @@ class HandoffCommandHandler:
             },
         )
 
+    def _recover(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if self._recovery_service is None:
+            raise HandoffCommandError(
+                "handoff_recovery_not_allowed",
+                "handoff recovery is not configured",
+            )
+        if envelope.target_type != "handoff_transition":
+            raise HandoffCommandError(
+                "validation_error",
+                "RecoverWorkerHandoff targets a handoff_transition",
+            )
+        transition_id = _required_target(envelope)
+        payload = _recover_payload(envelope.payload)
+        if payload["transition_id"] != transition_id:
+            raise HandoffCommandError(
+                "validation_error",
+                "transition_id must match target_id",
+            )
+        if envelope.expected_version != payload["expected_transition_version"]:
+            raise HandoffCommandError(
+                "validation_error",
+                "expected_version must match expected_transition_version",
+            )
+        transition = uow.handoff_transitions.get(
+            transition_id,
+            envelope.workspace_id,
+        )
+        if transition is None:
+            raise HandoffCommandError("not_found", "handoff transition not found")
+
+        now = self._clock()
+        try:
+            inspection = self._recovery_service.inspect_unknown(
+                transition=transition,
+                now=now,
+            )
+            decision = HandoffRecoveryDecision(
+                id=uuid4(),
+                handoff_transition_id=transition.id,
+                expected_transition_version=payload["expected_transition_version"],
+                strategy=payload["strategy"],
+                actor_type=envelope.actor_type,
+                actor_id=envelope.actor_id,
+                source_channel=HandoffSourceChannel.WEB,
+                reason=payload["reason"],
+                evidence_refs=payload["evidence_refs"],
+                replacement_target_snapshot=payload["replacement_target_snapshot"],
+                resulting_operation_refs=(),
+                created_at=now,
+            )
+            result = self._recovery_service.apply_decision_in_uow(
+                uow,
+                transition=transition,
+                decision=decision,
+                inspection=inspection,
+                now=now,
+            )
+        except HandoffRecoveryError as exc:
+            raise HandoffCommandError(
+                exc.code,
+                str(exc),
+                details=exc.details,
+            ) from exc
+
+        event = _handoff_recovery_event(
+            result,
+            decision,
+            envelope,
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=result.transition_id,
+            aggregate_version=result.transition_version,
+            event_ids=(event.id,),
+            data={
+                "transition": _recovery_result_mapping(result),
+                "recovery": {
+                    "decision_id": str(decision.id),
+                    "strategy": decision.strategy.value,
+                    "evidence_refs": list(decision.evidence_refs),
+                    "resulting_operation_refs": [
+                        str(item) for item in result.resulting_operation_refs
+                    ],
+                },
+            },
+        )
+
 
 def _prepare_payload(
     payload: Mapping[str, object],
@@ -577,9 +693,7 @@ def _prepare_payload(
 def _confirm_payload(payload: Mapping[str, object]) -> dict[str, Any]:
     _require_exact_keys(payload, _CONFIRM_KEYS)
     proposal_id = _parse_uuid(payload.get("proposal_id"), "proposal_id")
-    proposal_version = _required_positive_int(
-        payload, "expected_proposal_version"
-    )
+    proposal_version = _required_positive_int(payload, "expected_proposal_version")
     proposal_hash = payload.get("expected_proposal_hash")
     if (
         not isinstance(proposal_hash, str)
@@ -598,6 +712,84 @@ def _confirm_payload(payload: Mapping[str, object]) -> dict[str, Any]:
         "expected_proposal_version": proposal_version,
         "expected_proposal_hash": proposal_hash,
         "expected_worker_item_version": worker_item_version,
+    }
+
+
+def _recover_payload(payload: Mapping[str, object]) -> dict[str, Any]:
+    actual = frozenset(payload)
+    allowed = _RECOVER_REQUIRED_KEYS | _RECOVER_OPTIONAL_KEYS
+    missing = sorted(_RECOVER_REQUIRED_KEYS - actual)
+    extra = sorted(actual - allowed)
+    if missing or extra:
+        raise HandoffCommandError(
+            "validation_error",
+            "handoff recovery payload keys are not allowed",
+            details={"missing": missing, "extra": extra},
+        )
+
+    transition_id = _parse_uuid(payload.get("transition_id"), "transition_id")
+    expected_version = _required_positive_int(
+        payload,
+        "expected_transition_version",
+    )
+    strategy_value = payload.get("strategy")
+    if not isinstance(strategy_value, (HandoffRecoveryStrategy, str)):
+        raise HandoffCommandError(
+            "validation_error",
+            "strategy must be a supported handoff recovery strategy",
+        )
+    try:
+        strategy = (
+            strategy_value
+            if isinstance(strategy_value, HandoffRecoveryStrategy)
+            else HandoffRecoveryStrategy(strategy_value)
+        )
+    except ValueError as exc:
+        raise HandoffCommandError(
+            "validation_error",
+            "strategy must be a supported handoff recovery strategy",
+        ) from exc
+
+    evidence_value = payload.get("evidence_refs")
+    if (
+        not isinstance(evidence_value, (list, tuple))
+        or not evidence_value
+        or any(not isinstance(item, str) or not item.strip() for item in evidence_value)
+    ):
+        raise HandoffCommandError(
+            "validation_error",
+            "evidence_refs must be a non-empty sequence of strings",
+        )
+    evidence_refs = tuple(item.strip() for item in evidence_value)
+
+    replacement_target_snapshot: dict[str, object] | None = None
+    if "replacement_target_worker_id" in payload:
+        if strategy is not HandoffRecoveryStrategy.SELECT_NEW_TARGET:
+            raise HandoffCommandError(
+                "validation_error",
+                "replacement_target_worker_id is only valid for select_new_target",
+            )
+        replacement_target_snapshot = {
+            "worker_id": str(
+                _parse_uuid(
+                    payload.get("replacement_target_worker_id"),
+                    "replacement_target_worker_id",
+                )
+            )
+        }
+    elif strategy is HandoffRecoveryStrategy.SELECT_NEW_TARGET:
+        raise HandoffCommandError(
+            "validation_error",
+            "select_new_target requires replacement_target_worker_id",
+        )
+
+    return {
+        "transition_id": transition_id,
+        "expected_transition_version": expected_version,
+        "strategy": strategy,
+        "reason": _required_text(payload, "reason"),
+        "evidence_refs": evidence_refs,
+        "replacement_target_snapshot": replacement_target_snapshot,
     }
 
 
@@ -688,6 +880,46 @@ def _handoff_transition_event(
     )
 
 
+def _handoff_recovery_event(
+    result: HandoffRecoveryResult,
+    decision: HandoffRecoveryDecision,
+    envelope: CommandEnvelope,
+) -> EventData:
+    replacement_target_worker_id: str | None = None
+    if decision.replacement_target_snapshot is not None:
+        worker_id = decision.replacement_target_snapshot.get("worker_id")
+        if isinstance(worker_id, str):
+            replacement_target_worker_id = worker_id
+    return EventData(
+        id=uuid4(),
+        workspace_id=envelope.workspace_id,
+        aggregate_type="handoff_transition",
+        aggregate_id=result.transition_id,
+        aggregate_version=result.transition_version,
+        event_type="HandoffRecovered",
+        payload={
+            "handoff_transition_id": str(result.transition_id),
+            "decision_id": str(decision.id),
+            "transition_version": result.transition_version,
+            "logical_attempt": result.logical_attempt,
+            "strategy": decision.strategy.value,
+            "status": result.status.value,
+            "phase": result.phase.value,
+            "writer_state": result.writer_state.value,
+            "evidence_refs": list(decision.evidence_refs),
+            "resulting_operation_refs": [
+                str(item) for item in result.resulting_operation_refs
+            ],
+            "replacement_target_worker_id": replacement_target_worker_id,
+            "reason_hash": _sha256_text(decision.reason),
+        },
+        actor_type=envelope.actor_type,
+        actor_id=envelope.actor_id,
+        causation_id=envelope.id,
+        correlation_id=envelope.correlation_id,
+    )
+
+
 def _transition_mapping(transition: HandoffTransition) -> dict[str, object]:
     return {
         "id": str(transition.id),
@@ -713,13 +945,29 @@ def _transition_mapping(transition: HandoffTransition) -> dict[str, object]:
     }
 
 
+def _recovery_result_mapping(result: HandoffRecoveryResult) -> dict[str, object]:
+    return {
+        "id": str(result.transition_id),
+        "version": result.transition_version,
+        "status": result.status.value,
+        "phase": result.phase.value,
+        "writer_state": result.writer_state.value,
+        "logical_attempt": result.logical_attempt,
+        "resulting_operation_refs": [
+            str(item) for item in result.resulting_operation_refs
+        ],
+    }
+
+
 def _required_target(envelope: CommandEnvelope) -> UUID:
     if envelope.target_id is None:
         raise HandoffCommandError("validation_error", "target_id is required")
     return envelope.target_id
 
 
-def _require_exact_keys(payload: Mapping[str, object], expected: frozenset[str]) -> None:
+def _require_exact_keys(
+    payload: Mapping[str, object], expected: frozenset[str]
+) -> None:
     actual = frozenset(payload)
     if actual != expected:
         missing = sorted(expected - actual)
@@ -753,7 +1001,11 @@ def _target_candidate(
     candidate_list: Any, target_worker_id: UUID
 ) -> HandoffCandidateInspection | None:
     return next(
-        (candidate for candidate in candidate_list.candidates if candidate.worker_id == target_worker_id),
+        (
+            candidate
+            for candidate in candidate_list.candidates
+            if candidate.worker_id == target_worker_id
+        ),
         None,
     )
 

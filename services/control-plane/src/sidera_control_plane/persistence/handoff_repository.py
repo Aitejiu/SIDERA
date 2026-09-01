@@ -150,7 +150,10 @@ class HandoffProposalRepository(HandoffProposalRepositoryPort):
             raise VersionConflict(previous_version, 0)
         if row.version != previous_version:
             raise VersionConflict(previous_version, row.version)
-        if row.proposal_hash != proposal.proposal_hash or row.payload != proposal.payload.to_mapping():
+        if (
+            row.proposal_hash != proposal.proposal_hash
+            or row.payload != proposal.payload.to_mapping()
+        ):
             raise ValidationError("handoff proposal payload is immutable")
         result = self._session.execute(
             update(HandoffProposalModel)
@@ -169,7 +172,10 @@ class HandoffProposalRepository(HandoffProposalRepositoryPort):
             )
         )
         if not isinstance(result, CursorResult) or result.rowcount != 1:
-            raise VersionConflict(previous_version, self._current_version(proposal.id, proposal.payload.workspace_id))
+            raise VersionConflict(
+                previous_version,
+                self._current_version(proposal.id, proposal.payload.workspace_id),
+            )
 
     def _current_version(self, proposal_id: UUID, workspace_id: UUID) -> int:
         version = self._session.scalar(
@@ -263,8 +269,7 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
         if not claim_statuses:
             raise ValidationError("handoff claim statuses cannot be empty")
         if any(
-            not isinstance(status, HandoffTransitionStatus)
-            for status in claim_statuses
+            not isinstance(status, HandoffTransitionStatus) for status in claim_statuses
         ):
             raise ValidationError("handoff claim statuses are invalid")
         claim_lease_seconds = (
@@ -315,6 +320,20 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
         self._session.add(_transition_model(transition))
 
     def save(self, transition: HandoffTransition, previous_version: int) -> None:
+        self._save(transition, previous_version, allow_target_replacement=False)
+
+    def save_recovery(
+        self, transition: HandoffTransition, previous_version: int
+    ) -> None:
+        self._save(transition, previous_version, allow_target_replacement=True)
+
+    def _save(
+        self,
+        transition: HandoffTransition,
+        previous_version: int,
+        *,
+        allow_target_replacement: bool,
+    ) -> None:
         row = self._session.scalar(
             select(HandoffTransitionModel)
             .where(
@@ -327,7 +346,11 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
             raise VersionConflict(previous_version, 0)
         if row.version != previous_version:
             raise VersionConflict(previous_version, row.version)
-        if not _transition_immutable_matches(row, transition):
+        if not _transition_immutable_matches(
+            row,
+            transition,
+            allow_target_replacement=allow_target_replacement,
+        ):
             raise ValidationError("handoff transition source facts are immutable")
         result = self._session.execute(
             update(HandoffTransitionModel)
@@ -337,6 +360,8 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
                 HandoffTransitionModel.version == previous_version,
             )
             .values(
+                target_worker_id=transition.target_worker_id,
+                target_runtime_snapshot=dict(transition.target_runtime_snapshot),
                 target_execution_id=transition.target_execution_id,
                 target_session_id=transition.target_session_id,
                 target_workspace_manifest_id=transition.target_workspace_manifest_id,
@@ -347,7 +372,9 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
                 phase=transition.phase.value,
                 writer_state=transition.writer_state.value,
                 source_checkpoint_sequence=transition.source_checkpoint_sequence,
-                source_checkpoint_facts=_optional_dict(transition.source_checkpoint_facts),
+                source_checkpoint_facts=_optional_dict(
+                    transition.source_checkpoint_facts
+                ),
                 source_stop_sequence=transition.source_stop_sequence,
                 source_stop_facts=_optional_dict(transition.source_stop_facts),
                 source_workspace_freeze_operation_id=transition.source_workspace_freeze_operation_id,
@@ -461,7 +488,9 @@ class HandoffContextBundleRepository(HandoffContextBundleRepositoryPort):
                 evidence_refs=list(bundle.evidence_refs),
                 handoff_reason=bundle.handoff_reason,
                 handoff_instruction=bundle.handoff_instruction,
-                delivered_input_refs=[str(item) for item in bundle.delivered_input_refs],
+                delivered_input_refs=[
+                    str(item) for item in bundle.delivered_input_refs
+                ],
                 transferable_input_refs=[
                     str(item) for item in bundle.transferable_input_refs
                 ],
@@ -654,7 +683,9 @@ class HandoffWorkspaceTransferRepository(HandoffWorkspaceTransferRepositoryPort)
     def save(self, transfer: HandoffWorkspaceTransfer, previous_version: int) -> None:
         row = self._session.scalar(
             select(ExecutionWorkspaceTransferModel)
-            .where(ExecutionWorkspaceTransferModel.operation_id == transfer.operation_id)
+            .where(
+                ExecutionWorkspaceTransferModel.operation_id == transfer.operation_id
+            )
             .with_for_update()
         )
         if row is None:
@@ -758,23 +789,32 @@ def _transition_model(transition: HandoffTransition) -> HandoffTransitionModel:
 
 
 def _transition_immutable_matches(
-    row: HandoffTransitionModel, transition: HandoffTransition
+    row: HandoffTransitionModel,
+    transition: HandoffTransition,
+    *,
+    allow_target_replacement: bool = False,
 ) -> bool:
-    return (
+    source_matches = (
         row.workspace_id == transition.workspace_id
         and row.worker_item_id == transition.worker_item_id
         and row.proposal_id == transition.proposal_id
         and row.source_execution_id == transition.source_execution_id
         and row.source_session_id == transition.source_session_id
         and row.source_workspace_manifest_id == transition.source_workspace_manifest_id
-        and row.target_worker_id == transition.target_worker_id
-        and row.target_runtime_snapshot == dict(transition.target_runtime_snapshot)
         and row.target_context_version == transition.target_context_version
         and row.source_input_cutoff_sequence == transition.source_input_cutoff_sequence
         and row.confirmed_by_type == transition.confirmed_by_type
         and row.confirmed_by_id == transition.confirmed_by_id
         and row.confirmed_source_channel == transition.confirmed_source_channel.value
         and row.confirmed_at == transition.confirmed_at
+    )
+    if not source_matches:
+        return False
+    if allow_target_replacement:
+        return True
+    return (
+        row.target_worker_id == transition.target_worker_id
+        and row.target_runtime_snapshot == dict(transition.target_runtime_snapshot)
     )
 
 
@@ -856,9 +896,7 @@ def _to_transition(row: HandoffTransitionModel) -> HandoffTransition:
         source_stop_sequence=row.source_stop_sequence,
         source_stop_facts=_optional_dict(row.source_stop_facts),
         source_workspace_freeze_operation_id=row.source_workspace_freeze_operation_id,
-        source_workspace_freeze_facts=_optional_dict(
-            row.source_workspace_freeze_facts
-        ),
+        source_workspace_freeze_facts=_optional_dict(row.source_workspace_freeze_facts),
         source_input_cutoff_sequence=row.source_input_cutoff_sequence,
         failure_code=row.failure_code,
         blocked_operation_id=row.blocked_operation_id,
@@ -965,7 +1003,10 @@ def _transfer_immutable_matches(
         row.handoff_transition_id == transfer.transition_id
         and row.logical_attempt == transfer.logical_attempt
         and row.operation_id == transfer.operation_id
-        and (row.target_manifest_id == transfer.target_manifest_id or target_manifest_can_be_bound)
+        and (
+            row.target_manifest_id == transfer.target_manifest_id
+            or target_manifest_can_be_bound
+        )
         and row.source_manifest_id == transfer.source_manifest_id
         and row.source_execution_id == transfer.source_execution_id
         and row.target_execution_id == transfer.target_execution_id
@@ -979,7 +1020,9 @@ def _transfer_immutable_matches(
 
 
 def _uuid_values(values: Iterable[object]) -> tuple[UUID, ...]:
-    return tuple(value if isinstance(value, UUID) else UUID(str(value)) for value in values)
+    return tuple(
+        value if isinstance(value, UUID) else UUID(str(value)) for value in values
+    )
 
 
 WorkspaceTransferRepository = HandoffWorkspaceTransferRepository

@@ -343,7 +343,14 @@ class MemoryCommandRepository:
         request_hash: str,
         result: CommandResult,
     ) -> None:
-        self.records[(envelope.workspace_id, envelope.actor_type, envelope.actor_id, envelope.idempotency_key)] = StoredCommand(
+        self.records[
+            (
+                envelope.workspace_id,
+                envelope.actor_type,
+                envelope.actor_id,
+                envelope.idempotency_key,
+            )
+        ] = StoredCommand(
             id=envelope.id,
             workspace_id=envelope.workspace_id,
             actor_type=envelope.actor_type,
@@ -369,7 +376,14 @@ class MemoryCommandRepository:
         error_code: str,
         error_result: dict[str, object],
     ) -> None:
-        self.records[(envelope.workspace_id, envelope.actor_type, envelope.actor_id, envelope.idempotency_key)] = StoredCommand(
+        self.records[
+            (
+                envelope.workspace_id,
+                envelope.actor_type,
+                envelope.actor_id,
+                envelope.idempotency_key,
+            )
+        ] = StoredCommand(
             id=envelope.id,
             workspace_id=envelope.workspace_id,
             actor_type=envelope.actor_type,
@@ -420,8 +434,12 @@ class HandoffUnitOfWork:
         self.executions = SimpleNamespace(get=self._get_execution)
         self.tasks = SimpleNamespace(get=self._get_task)
         self.sessions = SimpleNamespace(get=self._get_session)
-        self.workers = SimpleNamespace(get=self._get_worker, list_for_workspace=lambda _: (source, target))
-        self.workspaces = SimpleNamespace(get_for_execution=lambda *_args, **_kwargs: manifest)
+        self.workers = SimpleNamespace(
+            get=self._get_worker, list_for_workspace=lambda _: (source, target)
+        )
+        self.workspaces = SimpleNamespace(
+            get_for_execution=lambda *_args, **_kwargs: manifest
+        )
         context_package = SimpleNamespace(
             package_id=uuid4(),
             package_hash="a" * 64,
@@ -442,9 +460,15 @@ class HandoffUnitOfWork:
                 version=1,
             )
         )
-        self.plan_transitions = SimpleNamespace(list_for_root=lambda *_args, **_kwargs: ())
-        self.execution_inputs = SimpleNamespace(get_pending_for_session=lambda *_args, **_kwargs: None)
-        self.gateway_operations = SimpleNamespace(list_for_execution=lambda *_args, **_kwargs: ())
+        self.plan_transitions = SimpleNamespace(
+            list_for_root=lambda *_args, **_kwargs: ()
+        )
+        self.execution_inputs = SimpleNamespace(
+            get_pending_for_session=lambda *_args, **_kwargs: None
+        )
+        self.gateway_operations = SimpleNamespace(
+            list_for_execution=lambda *_args, **_kwargs: ()
+        )
         self.handoff_proposals = MemoryProposalRepository((prior,) if prior else ())
         self.handoff_transitions = MemoryTransitionRepository()
         self.events = MemoryEventStore()
@@ -453,11 +477,19 @@ class HandoffUnitOfWork:
         self.adapter_calls = 0
         self.workspace_provider_calls = 0
 
-    def _get_worker_item(self, item_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> WorkerItem | None:
+    def _get_worker_item(
+        self, item_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> WorkerItem | None:
         del for_update
-        return self.worker_item if item_id == self.worker_item.id and workspace_id == WORKSPACE_ID else None
+        return (
+            self.worker_item
+            if item_id == self.worker_item.id and workspace_id == WORKSPACE_ID
+            else None
+        )
 
-    def _get_task(self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> object | None:
+    def _get_task(
+        self, task_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> object | None:
         del for_update
         if workspace_id != WORKSPACE_ID:
             return None
@@ -467,17 +499,38 @@ class HandoffUnitOfWork:
             return self.subtask
         return None
 
-    def _get_execution(self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> Execution | None:
+    def _get_execution(
+        self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> Execution | None:
         del for_update
-        return self.execution if execution_id == self.execution.id and workspace_id == WORKSPACE_ID else None
+        return (
+            self.execution
+            if execution_id == self.execution.id and workspace_id == WORKSPACE_ID
+            else None
+        )
 
-    def _get_session(self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> ExecutionSession | None:
+    def _get_session(
+        self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionSession | None:
         del for_update
-        return self.session if session_id == self.session.id and workspace_id == WORKSPACE_ID else None
+        return (
+            self.session
+            if session_id == self.session.id and workspace_id == WORKSPACE_ID
+            else None
+        )
 
-    def _get_worker(self, worker_id: UUID, workspace_id: UUID, *, for_update: bool = False) -> Worker | None:
+    def _get_worker(
+        self, worker_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> Worker | None:
         del for_update
-        return next((worker for worker in (self.source, self.target) if worker.id == worker_id and worker.workspace_id == workspace_id), None)
+        return next(
+            (
+                worker
+                for worker in (self.source, self.target)
+                if worker.id == worker_id and worker.workspace_id == workspace_id
+            ),
+            None,
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -518,7 +571,12 @@ def _fixture(
         pinned_worker_id=None,
         not_before=NOW,
     )
-    execution = replace(execution, status=ExecutionStatus.RUNNING, assigned_worker_id=source.id, started_at=NOW)
+    execution = replace(
+        execution,
+        status=ExecutionStatus.RUNNING,
+        assigned_worker_id=source.id,
+        started_at=NOW,
+    )
     session = ExecutionSession.start(
         session_id=uuid4(),
         workspace_id=WORKSPACE_ID,
@@ -570,7 +628,9 @@ def _fixture(
     return uow, item, source, target, execution, session
 
 
-def _prepare_envelope(item: WorkerItem, target: Worker, *, key: str = "prepare-1") -> CommandEnvelope:
+def _prepare_envelope(
+    item: WorkerItem, target: Worker, *, key: str = "prepare-1"
+) -> CommandEnvelope:
     return CommandEnvelope(
         id=uuid4(),
         workspace_id=WORKSPACE_ID,
@@ -593,7 +653,9 @@ def _prepare_envelope(item: WorkerItem, target: Worker, *, key: str = "prepare-1
 
 
 def _handler(uow: HandoffUnitOfWork) -> HandoffCommandHandler:
-    resolver = StaticRuntimeResolver({uow.source.id: _runtime(uow.source), uow.target.id: _runtime(uow.target)})
+    resolver = StaticRuntimeResolver(
+        {uow.source.id: _runtime(uow.source), uow.target.id: _runtime(uow.target)}
+    )
     return HandoffCommandHandler(
         lambda: NOW,
         candidate_service=uow.candidate_service,
@@ -617,11 +679,17 @@ def _confirm_envelope(
         actor_type="user",
         actor_id="user:test",
         target_id=proposal.id,
-        expected_version=proposal.version if proposal_version is None else proposal_version,
+        expected_version=proposal.version
+        if proposal_version is None
+        else proposal_version,
         payload={
             "proposal_id": str(proposal.id),
-            "expected_proposal_version": proposal.version if proposal_version is None else proposal_version,
-            "expected_proposal_hash": proposal.proposal_hash if proposal_hash is None else proposal_hash,
+            "expected_proposal_version": proposal.version
+            if proposal_version is None
+            else proposal_version,
+            "expected_proposal_hash": proposal.proposal_hash
+            if proposal_hash is None
+            else proposal_hash,
             "expected_worker_item_version": (
                 proposal.payload.impact_summary["worker_item_version"]
                 if worker_item_version is None
@@ -651,7 +719,9 @@ def test_prepare_captures_web_facts_and_leaves_source_running() -> None:
     assert source.status is WorkerStatus.BUSY
     assert uow.adapter_calls == 0
     assert uow.workspace_provider_calls == 0
-    assert [event.event_type for event in uow.events.events] == ["HandoffProposalPrepared"]
+    assert [event.event_type for event in uow.events.events] == [
+        "HandoffProposalPrepared"
+    ]
 
 
 def test_same_command_identity_replays_the_same_proposal() -> None:
@@ -681,7 +751,10 @@ def test_new_prepare_stales_the_previous_prepared_proposal() -> None:
     old = uow.handoff_proposals.proposals[first.aggregate_id]
     assert old.status is HandoffProposalStatus.STALE
     assert old.stale_reason == "superseded_by_new_proposal"
-    assert uow.handoff_proposals.proposals[second.aggregate_id].status is HandoffProposalStatus.PREPARED
+    assert (
+        uow.handoff_proposals.proposals[second.aggregate_id].status
+        is HandoffProposalStatus.PREPARED
+    )
     assert [event.event_type for event in uow.events.events] == [
         "HandoffProposalPrepared",
         "HandoffProposalStale",
@@ -703,7 +776,9 @@ def test_prepare_rejects_an_ineligible_target_with_a_stable_code() -> None:
 def test_prepare_payload_cannot_override_the_web_source_channel() -> None:
     uow, item, _source, target, _execution, _session = _fixture()
     envelope = _prepare_envelope(item, target)
-    envelope = replace(envelope, payload={**envelope.payload, "source_channel": "main_agent"})
+    envelope = replace(
+        envelope, payload={**envelope.payload, "source_channel": "main_agent"}
+    )
 
     with pytest.raises(HandoffCommandError) as error:
         _handler(uow).handle(uow, envelope)
@@ -730,7 +805,10 @@ def test_cancel_only_accepts_a_prepared_proposal() -> None:
 
     result = _handler(uow).handle(uow, cancel)
     assert result.aggregate_version == 2
-    assert uow.handoff_proposals.proposals[prepared.aggregate_id].status is HandoffProposalStatus.CANCELLED
+    assert (
+        uow.handoff_proposals.proposals[prepared.aggregate_id].status
+        is HandoffProposalStatus.CANCELLED
+    )
     assert uow.events.events[-1].event_type == "HandoffProposalCancelled"
 
     with pytest.raises(HandoffCommandError) as error:
@@ -757,7 +835,10 @@ def test_confirm_creates_one_pending_transition_without_external_operations() ->
     assert transition.writer_state is HandoffWriterState.SOURCE_ACTIVE
     assert transition.status is HandoffTransitionStatus.PENDING
     assert transition.source_input_cutoff_sequence == session.last_sequence
-    assert uow.handoff_proposals.proposals[proposal.id].status is HandoffProposalStatus.CONFIRMED
+    assert (
+        uow.handoff_proposals.proposals[proposal.id].status
+        is HandoffProposalStatus.CONFIRMED
+    )
     assert getattr(execution, "handoff_transition_id", None) is None
     assert transition.target_execution_id is None
     assert transition.target_session_id is None
@@ -782,7 +863,10 @@ def test_confirm_rejects_an_exact_hash_mismatch_as_stale() -> None:
 
     assert error.value.code == "handoff_proposal_stale"
     assert not uow.handoff_transitions.transitions
-    assert uow.handoff_proposals.proposals[proposal.id].status is HandoffProposalStatus.PREPARED
+    assert (
+        uow.handoff_proposals.proposals[proposal.id].status
+        is HandoffProposalStatus.PREPARED
+    )
 
 
 def test_prepare_ttl_must_be_positive_and_bounded() -> None:
@@ -790,16 +874,29 @@ def test_prepare_ttl_must_be_positive_and_bounded() -> None:
     envelope = _prepare_envelope(item, target)
 
     with pytest.raises(HandoffCommandError) as zero:
-        _handler(uow).handle(uow, replace(envelope, payload={**envelope.payload, "proposal_ttl_seconds": 0}))
+        _handler(uow).handle(
+            uow,
+            replace(envelope, payload={**envelope.payload, "proposal_ttl_seconds": 0}),
+        )
     assert zero.value.code == "validation_error"
 
     with pytest.raises(HandoffCommandError) as too_long:
-        _handler(uow).handle(uow, replace(envelope, payload={**envelope.payload, "proposal_ttl_seconds": 86_401}))
+        _handler(uow).handle(
+            uow,
+            replace(
+                envelope, payload={**envelope.payload, "proposal_ttl_seconds": 86_401}
+            ),
+        )
     assert too_long.value.code == "validation_error"
 
 
-def test_handler_exposes_only_the_two_task6_commands() -> None:
+def test_handler_exposes_the_handoff_command_surface() -> None:
     assert HandoffCommandHandler.command_types == frozenset(
-        {"PrepareWorkerHandoff", "CancelWorkerHandoff", "ConfirmWorkerHandoff"}
+        {
+            "PrepareWorkerHandoff",
+            "CancelWorkerHandoff",
+            "ConfirmWorkerHandoff",
+            "RecoverWorkerHandoff",
+        }
     )
     assert HandoffCandidateService is not None

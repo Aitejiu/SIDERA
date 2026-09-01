@@ -1021,6 +1021,12 @@ class HandoffTransitionRepositoryPort(Protocol):
         """Persist mutable coordinator fields using CAS."""
         raise NotImplementedError
 
+    def save_recovery(
+        self, transition: HandoffTransition, previous_version: int
+    ) -> None:
+        """Persist an evidence-backed recovery that may replace the target facts."""
+        raise NotImplementedError
+
 
 class HandoffContextBundleRepositoryPort(Protocol):
     def get(

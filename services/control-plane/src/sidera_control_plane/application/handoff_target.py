@@ -172,7 +172,10 @@ class HandoffTargetService:
         if target_worker is None:
             raise HandoffTargetError("handoff target worker was not found")
         expected_worker_version = proposal.payload.target_worker_version
-        if target_worker.version != expected_worker_version:
+        if (
+            current_transition.logical_attempt == 1
+            and target_worker.version != expected_worker_version
+        ):
             raise HandoffTargetError("handoff target worker facts are stale")
 
         request_id, execution_id = _target_ids(
@@ -225,7 +228,9 @@ class HandoffTargetService:
             for_update=True,
         )
         if existing_execution is not None or existing_request is not None:
-            raise HandoffTargetError("handoff target lineage exists without transition binding")
+            raise HandoffTargetError(
+                "handoff target lineage exists without transition binding"
+            )
 
         target_execution = Execution.create(
             execution_id=execution_id,
@@ -300,13 +305,14 @@ class HandoffTargetService:
             or transition.worker_item_id != payload.worker_item_id
             or transition.source_execution_id != source_execution.id
             or transition.source_session_id != payload.source_session_id
-            or transition.target_worker_id != payload.target_worker_id
         ):
             raise HandoffTargetError("handoff transition source identity changed")
-        if payload.target_runtime_snapshot.get("worker_id") != str(
-            payload.target_worker_id
+        if transition.target_runtime_snapshot.get("worker_id") != str(
+            transition.target_worker_id
         ):
-            raise HandoffTargetError("handoff target runtime worker identity is invalid")
+            raise HandoffTargetError(
+                "handoff target runtime worker identity is invalid"
+            )
         HandoffTargetService._validate_source_request(source_request, transition)
         HandoffTargetService._validate_source_execution(source_execution, transition)
         if source_manifest.workspace_id != transition.workspace_id:
@@ -318,9 +324,13 @@ class HandoffTargetService:
         if source_manifest.task_id != source_execution.task_id:
             raise HandoffTargetError("source workspace task owner changed")
         if source_manifest.lifecycle is not WorkspaceLifecycle.FROZEN:
-            raise HandoffTargetError("target creation requires a frozen source workspace")
+            raise HandoffTargetError(
+                "target creation requires a frozen source workspace"
+            )
         if transition.source_workspace_freeze_facts is None:
-            raise HandoffTargetError("target creation requires source workspace freeze facts")
+            raise HandoffTargetError(
+                "target creation requires source workspace freeze facts"
+            )
         if source_manifest.fencing_token < 1:
             raise HandoffTargetError("source workspace fence is invalid")
 
@@ -330,9 +340,13 @@ class HandoffTargetService:
         transition: HandoffTransition,
     ) -> None:
         if request.workspace_id != transition.workspace_id:
-            raise HandoffTargetError("source request workspace does not match transition")
+            raise HandoffTargetError(
+                "source request workspace does not match transition"
+            )
         if request.worker_item_id != transition.worker_item_id:
-            raise HandoffTargetError("source request WorkerItem does not match transition")
+            raise HandoffTargetError(
+                "source request WorkerItem does not match transition"
+            )
         if request.status is not ExecutionRequestStatus.MATERIALIZED:
             raise HandoffTargetError("source request is not materialized")
         if request.execution_lineage_id is None or request.first_execution_id is None:
@@ -344,13 +358,19 @@ class HandoffTargetService:
         transition: HandoffTransition,
     ) -> None:
         if execution.workspace_id != transition.workspace_id:
-            raise HandoffTargetError("source execution workspace does not match transition")
+            raise HandoffTargetError(
+                "source execution workspace does not match transition"
+            )
         if execution.id != transition.source_execution_id:
             raise HandoffTargetError("source execution identity changed")
         if execution.worker_item_id != transition.worker_item_id:
-            raise HandoffTargetError("source execution WorkerItem does not match transition")
+            raise HandoffTargetError(
+                "source execution WorkerItem does not match transition"
+            )
         if execution.status not in TERMINAL_EXECUTION_STATUSES:
-            raise HandoffTargetError("target creation requires a stopped source execution")
+            raise HandoffTargetError(
+                "target creation requires a stopped source execution"
+            )
         if execution.active_lease_id is not None:
             raise HandoffTargetError("source execution still has an active lease")
         if execution.handoff_transition_id is not None:
@@ -404,7 +424,7 @@ class HandoffTargetService:
             or execution.status is not ExecutionStatus.QUEUED
         ):
             raise HandoffTargetError("handoff target execution facts changed")
-        if target_worker.id != proposal.payload.target_worker_id:
+        if target_worker.id != transition.target_worker_id:
             raise HandoffTargetError("handoff target worker identity changed")
 
 
@@ -445,7 +465,8 @@ class HandoffActivationGate:
             )
         if handoff_gate is not None and (
             handoff_gate.transition_id != transition.id
-            or handoff_gate.target_execution_id not in (None, transition.target_execution_id)
+            or handoff_gate.target_execution_id
+            not in (None, transition.target_execution_id)
         ):
             return _gate_result(
                 execution=execution,
@@ -461,7 +482,8 @@ class HandoffActivationGate:
                 blocking_code="handoff_target_stale",
             )
         if (
-            transition.status not in {
+            transition.status
+            not in {
                 HandoffTransitionStatus.PENDING,
                 HandoffTransitionStatus.RUNNING,
             }
@@ -516,14 +538,18 @@ def _gate_result(
     return HandoffGateResult(
         allowed=allowed,
         blocking_code=blocking_code,
-        transition_id=transition.id if transition is not None else execution.handoff_transition_id,
+        transition_id=transition.id
+        if transition is not None
+        else execution.handoff_transition_id,
         status=transition.status if transition is not None else None,
         phase=transition.phase if transition is not None else None,
         writer_state=transition.writer_state if transition is not None else None,
         target_execution_id=(
             transition.target_execution_id
             if transition is not None
-            else execution.id if execution.handoff_transition_id is not None else None
+            else execution.id
+            if execution.handoff_transition_id is not None
+            else None
         ),
     )
 

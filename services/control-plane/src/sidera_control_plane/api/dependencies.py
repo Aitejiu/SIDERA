@@ -21,6 +21,7 @@ from sidera_control_plane.application.execution_commands import (
 )
 from sidera_control_plane.application.handoff_candidates import HandoffCandidateService
 from sidera_control_plane.application.handoff_commands import HandoffCommandHandler
+from sidera_control_plane.application.handoff_recovery import HandoffRecoveryService
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateSubmissionService,
@@ -133,6 +134,10 @@ def get_command_service(
         factory,
         runtime_resolver=runtime_resolver,
     )
+    handoff_recovery = HandoffRecoveryService(
+        factory,
+        runtime_resolver=runtime_resolver,
+    )
     return CommandService(
         factory,
         (
@@ -176,6 +181,7 @@ def get_command_service(
                 lambda: datetime.now(UTC),
                 candidate_service=handoff_candidates,
                 runtime_resolver=runtime_resolver,
+                recovery_service=handoff_recovery,
             ),
         ),
     )
@@ -292,9 +298,7 @@ def get_task_console_query_service(
 def get_subtask_workspace_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> SubtaskWorkspaceQueryService:
-    return SubtaskWorkspaceQueryService(
-        SqlAlchemySubtaskWorkspaceQueryStore(database)
-    )
+    return SubtaskWorkspaceQueryService(SqlAlchemySubtaskWorkspaceQueryStore(database))
 
 
 def get_worker_trace_query_service(
@@ -306,9 +310,7 @@ def get_worker_trace_query_service(
 def get_worker_workspace_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> WorkerWorkspaceQueryService:
-    return WorkerWorkspaceQueryService(
-        SqlAlchemyWorkerWorkspaceQueryStore(database)
-    )
+    return WorkerWorkspaceQueryService(SqlAlchemyWorkerWorkspaceQueryStore(database))
 
 
 def get_artifact_content_service(

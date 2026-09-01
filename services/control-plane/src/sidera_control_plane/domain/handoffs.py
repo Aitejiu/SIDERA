@@ -879,6 +879,109 @@ class HandoffTransition:
         self.lease_expires_at = None
         self.version += 1
 
+    def recover_to_next_phase(self, *, now: datetime) -> None:
+        """Apply an evidence-backed phase confirmation without replaying work."""
+
+        if self.status not in {
+            HandoffTransitionStatus.BLOCKED,
+            HandoffTransitionStatus.BLOCKED_UNKNOWN,
+            HandoffTransitionStatus.FAILED,
+        }:
+            raise InvalidTransition("only a failed handoff can be recovered")
+        if self.phase is HandoffPhase.COMPLETE:
+            raise InvalidTransition("completed handoff phase cannot be recovered")
+        _aware(now, "handoff recovery timestamp")
+        phases = tuple(HandoffPhase)
+        next_phase = phases[phases.index(self.phase) + 1]
+        self.phase = next_phase
+        self.writer_state = _PHASE_WRITERS[next_phase]
+        self.status = HandoffTransitionStatus.BLOCKED
+        self.failure_code = None
+        self.blocked_operation_id = None
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.next_attempt_at = now
+        self.version += 1
+
+    def prepare_recovery_retry(
+        self,
+        *,
+        now: datetime,
+        new_logical_attempt: bool,
+    ) -> None:
+        """Make one proven no-side-effect phase eligible for a fresh attempt."""
+
+        if self.status not in {
+            HandoffTransitionStatus.BLOCKED,
+            HandoffTransitionStatus.BLOCKED_UNKNOWN,
+            HandoffTransitionStatus.FAILED,
+        }:
+            raise InvalidTransition("only a failed handoff can be retried")
+        if self.phase is HandoffPhase.COMPLETE:
+            raise InvalidTransition("completed handoff phase cannot be retried")
+        _aware(now, "handoff recovery retry timestamp")
+        if new_logical_attempt:
+            self.logical_attempt += 1
+            if self.phase is HandoffPhase.FREEZE_SOURCE_WORKSPACE:
+                self.source_workspace_freeze_operation_id = None
+                self.source_workspace_freeze_facts = None
+            elif self.phase is HandoffPhase.TRANSFER_WORKSPACE:
+                self.target_workspace_manifest_id = None
+        self.status = HandoffTransitionStatus.BLOCKED
+        self.writer_state = _PHASE_WRITERS[self.phase]
+        self.failure_code = None
+        self.blocked_operation_id = None
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.next_attempt_at = now
+        self.version += 1
+
+    def begin_recovery_attempt(
+        self,
+        *,
+        target_worker_id: UUID,
+        target_runtime_snapshot: Mapping[str, object],
+        now: datetime,
+    ) -> None:
+        """Retire the current target pointers and reopen target creation."""
+
+        if self.status not in {
+            HandoffTransitionStatus.BLOCKED,
+            HandoffTransitionStatus.BLOCKED_UNKNOWN,
+            HandoffTransitionStatus.FAILED,
+        }:
+            raise InvalidTransition(
+                "only a failed handoff can start a recovery attempt"
+            )
+        if self.phase is HandoffPhase.COMPLETE:
+            raise InvalidTransition("completed handoff cannot start a recovery attempt")
+        _uuid(target_worker_id, "recovery target_worker_id")
+        snapshot = _mapping(
+            target_runtime_snapshot,
+            "recovery target_runtime_snapshot",
+        )
+        if snapshot.get("worker_id") != str(target_worker_id):
+            raise ValidationError("recovery target runtime worker identity is invalid")
+        _aware(now, "handoff recovery attempt timestamp")
+        self.target_worker_id = target_worker_id
+        self.target_runtime_snapshot = snapshot
+        self.target_execution_id = None
+        self.target_session_id = None
+        self.target_workspace_manifest_id = None
+        self.handoff_context_bundle_id = None
+        self.target_context_package_id = None
+        self.target_context_package_hash = None
+        self.phase = HandoffPhase.CREATE_TARGET_EXECUTION
+        self.writer_state = HandoffWriterState.WRITER_NONE
+        self.status = HandoffTransitionStatus.BLOCKED
+        self.failure_code = None
+        self.blocked_operation_id = None
+        self.logical_attempt += 1
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.next_attempt_at = now
+        self.version += 1
+
     def converge(self, *, now: datetime) -> None:
         if self.status is not HandoffTransitionStatus.RUNNING:
             raise InvalidTransition("only a running handoff can converge")
