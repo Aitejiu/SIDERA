@@ -41,8 +41,8 @@ def downgrade() -> None:
     op.drop_table("handoff_recovery_decisions")
     op.drop_table("handoff_transitions")
     op.drop_table("handoff_proposals")
-    _drop_lineage_columns()
     _restore_execution_request_uniqueness()
+    _drop_lineage_columns()
 
 
 def _timestamps() -> tuple[sa.Column[object], sa.Column[object]]:

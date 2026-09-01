@@ -18,6 +18,22 @@ class WorkspaceRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def get(
+        self,
+        manifest_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionWorkspaceManifest | None:
+        statement = select(ExecutionWorkspaceModel).where(
+            ExecutionWorkspaceModel.id == manifest_id,
+            ExecutionWorkspaceModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_domain_manifest(row) if row is not None else None
+
     def get_for_execution(
         self,
         execution_id: UUID,

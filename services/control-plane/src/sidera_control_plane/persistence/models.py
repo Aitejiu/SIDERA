@@ -4280,13 +4280,19 @@ class HandoffTransitionModel(TimestampMixin, Base):
     phase: Mapped[str] = mapped_column(String(64), nullable=False)
     writer_state: Mapped[str] = mapped_column(String(32), nullable=False)
     source_checkpoint_sequence: Mapped[int | None] = mapped_column(BigInteger)
-    source_checkpoint_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_checkpoint_facts: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     source_stop_sequence: Mapped[int | None] = mapped_column(BigInteger)
-    source_stop_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_stop_facts: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     source_workspace_freeze_operation_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
-    source_workspace_freeze_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    source_workspace_freeze_facts: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     source_input_cutoff_sequence: Mapped[int] = mapped_column(
         BigInteger, nullable=False
     )
@@ -4546,7 +4552,9 @@ class HandoffRecoveryDecisionModel(TimestampMixin, Base):
     source_channel: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
-    replacement_target_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    replacement_target_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     resulting_operation_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1")

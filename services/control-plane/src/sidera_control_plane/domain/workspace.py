@@ -284,6 +284,36 @@ def workspace_manifest_digest(manifest: ExecutionWorkspaceManifest) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def workspace_location_ref_hash(location_ref: str) -> str:
+    """Return a stable digest for an opaque physical location reference."""
+
+    _validate_manifest_values(location_ref, 1, 1)
+    return hashlib.sha256(location_ref.strip().encode("utf-8")).hexdigest()
+
+
+def workspace_repository_state_digest(manifest: ExecutionWorkspaceManifest) -> str:
+    """Hash checkout state without changing the manifest's ownership identity."""
+
+    if not isinstance(manifest, ExecutionWorkspaceManifest):
+        raise ValidationError("workspace repository digest requires a manifest")
+    document = [
+        {
+            "repository_ref": checkout.repository_ref,
+            "base_revision": checkout.base_revision,
+            "branch": checkout.branch,
+            "current_head": checkout.current_head,
+        }
+        for checkout in manifest.checkouts
+    ]
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessDescriptor:
     pid: int

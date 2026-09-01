@@ -13,7 +13,10 @@ if config.config_file_name is not None:
 database_url = os.environ.get("SIDERA_DATABASE_URL")
 if database_url is None:
     raise RuntimeError("SIDERA_DATABASE_URL is required for migrations")
-config.set_main_option("sqlalchemy.url", database_url)
+# ConfigParser treats percent signs as interpolation markers. Database URLs
+# commonly contain percent-encoded query parameters, so escape them before
+# storing the value in Alembic's config object.
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

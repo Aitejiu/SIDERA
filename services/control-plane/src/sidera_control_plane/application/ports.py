@@ -1064,6 +1064,10 @@ class HandoffWorkspaceTransferRepositoryPort(Protocol):
     ) -> None:
         raise NotImplementedError
 
+    def save(self, transfer: HandoffWorkspaceTransfer, previous_version: int) -> None:
+        """Persist mutable outcome fields while retaining immutable provenance."""
+        raise NotImplementedError
+
     def list_for_transition(
         self, transition_id: UUID, workspace_id: UUID
     ) -> tuple[HandoffWorkspaceTransfer, ...]:
@@ -1453,6 +1457,11 @@ class GatewayOperationRepositoryPort(Protocol):
 
 
 class WorkspaceRepositoryPort(Protocol):
+    def get(
+        self, manifest_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ExecutionWorkspaceManifest | None:
+        raise NotImplementedError
+
     def get_for_execution(
         self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionWorkspaceManifest | None:

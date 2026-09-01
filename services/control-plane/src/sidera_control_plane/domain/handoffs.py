@@ -926,15 +926,34 @@ class HandoffTransition:
     def record_workspace_freeze(
         self, *, operation_id: UUID, facts: Mapping[str, object]
     ) -> None:
-        if self.source_workspace_freeze_operation_id is not None:
-            raise InvalidTransition("handoff workspace freeze evidence is write-once")
         _uuid(operation_id, "source_workspace_freeze_operation_id")
         if self.source_stop_sequence is None:
             raise InvalidTransition("workspace freeze requires an exact source stop")
+        if self.source_workspace_freeze_operation_id not in (None, operation_id):
+            raise InvalidTransition("handoff workspace freeze evidence is write-once")
+        if self.source_workspace_freeze_facts is not None:
+            raise InvalidTransition("handoff workspace freeze evidence is write-once")
         self.source_workspace_freeze_operation_id = operation_id
         self.source_workspace_freeze_facts = _mapping(
             facts, "source_workspace_freeze_facts"
         )
+        self.version += 1
+
+    def reserve_workspace_freeze_operation(self, *, operation_id: UUID) -> None:
+        """Reserve the stable freeze identity before crossing the provider boundary."""
+
+        _uuid(operation_id, "source_workspace_freeze_operation_id")
+        if self.source_stop_sequence is None:
+            raise InvalidTransition("workspace freeze requires an exact source stop")
+        if self.source_workspace_freeze_operation_id is not None:
+            if self.source_workspace_freeze_operation_id != operation_id:
+                raise InvalidTransition(
+                    "handoff workspace freeze operation is already reserved"
+                )
+            return
+        if self.source_workspace_freeze_facts is not None:
+            raise InvalidTransition("freeze facts cannot precede the freeze operation")
+        self.source_workspace_freeze_operation_id = operation_id
         self.version += 1
 
 

@@ -622,11 +622,41 @@ class HandoffWorkspaceTransferRepository(HandoffWorkspaceTransferRepositoryPort)
                 provider_operation_id=transfer.operation_id,
                 status=transfer.status.value,
                 failure_code=transfer.failure_code,
-                version=1,
+                version=transfer.version,
                 created_at=transfer.created_at,
                 updated_at=transfer.updated_at,
             )
         )
+
+    def save(self, transfer: HandoffWorkspaceTransfer, previous_version: int) -> None:
+        row = self._session.scalar(
+            select(ExecutionWorkspaceTransferModel)
+            .where(ExecutionWorkspaceTransferModel.operation_id == transfer.operation_id)
+            .with_for_update()
+        )
+        if row is None:
+            raise VersionConflict(previous_version, 0)
+        if row.version != previous_version:
+            raise VersionConflict(previous_version, row.version)
+        if not _transfer_immutable_matches(row, transfer):
+            raise ValidationError("workspace transfer provenance is immutable")
+        result = self._session.execute(
+            update(ExecutionWorkspaceTransferModel)
+            .where(
+                ExecutionWorkspaceTransferModel.id == row.id,
+                ExecutionWorkspaceTransferModel.workspace_id == row.workspace_id,
+                ExecutionWorkspaceTransferModel.version == previous_version,
+            )
+            .values(
+                target_manifest_id=transfer.target_manifest_id,
+                status=transfer.status.value,
+                failure_code=transfer.failure_code,
+                version=transfer.version,
+                updated_at=transfer.updated_at,
+            )
+        )
+        if not isinstance(result, CursorResult) or result.rowcount != 1:
+            raise VersionConflict(previous_version, row.version)
 
     def list_for_transition(
         self, transition_id: UUID, workspace_id: UUID
@@ -892,6 +922,33 @@ def _to_transfer(row: ExecutionWorkspaceTransferModel) -> HandoffWorkspaceTransf
         failure_code=row.failure_code,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        version=row.version,
+    )
+
+
+def _transfer_immutable_matches(
+    row: ExecutionWorkspaceTransferModel,
+    transfer: HandoffWorkspaceTransfer,
+) -> bool:
+    target_manifest_can_be_bound = (
+        row.target_manifest_id is None
+        and transfer.target_manifest_id is not None
+        and row.status == HandoffWorkspaceTransferStatus.REQUESTED.value
+    )
+    return (
+        row.handoff_transition_id == transfer.transition_id
+        and row.logical_attempt == transfer.logical_attempt
+        and row.operation_id == transfer.operation_id
+        and (row.target_manifest_id == transfer.target_manifest_id or target_manifest_can_be_bound)
+        and row.source_manifest_id == transfer.source_manifest_id
+        and row.source_execution_id == transfer.source_execution_id
+        and row.target_execution_id == transfer.target_execution_id
+        and row.source_fencing_token == transfer.source_fencing_token
+        and row.target_fencing_token == transfer.target_fencing_token
+        and row.location_ref_hash == transfer.location_ref_hash
+        and row.repository_state_digest == transfer.repository_state_digest
+        and row.provider_operation_id == transfer.operation_id
+        and row.transfer_mode == HandoffTransferMode.REUSE_EXACT.value
     )
 
 

@@ -14,7 +14,8 @@ from sqlalchemy.engine import make_url
 pytestmark = pytest.mark.integration
 
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[2]
-REVISION = "0019_r6_2_agent_handoff"
+LEGACY_REVISION = "0019_r6_2_agent_handoff"
+REVISION = "0020_r6_2_workspace_transfer_outcome"
 PREVIOUS_REVISION = "0018_r6_1_execution_request_lineage"
 
 
@@ -33,7 +34,7 @@ def isolated_database_url(database_url: str) -> Iterator[str]:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
 
     query = dict(base_url.query)
-    query["options"] = f"-csearch_path={schema},public"
+    query["options"] = f"-csearch_path={schema}"
     isolated_url = base_url.set(query=query).render_as_string(hide_password=False)
     try:
         yield isolated_url
@@ -83,9 +84,9 @@ def _current(database_url: str) -> str:
         engine.dispose()
 
 
-def _migration_module():
-    path = CONTROL_PLANE_ROOT / "migrations" / "versions" / f"{REVISION}.py"
-    spec = importlib.util.spec_from_file_location(REVISION, path)
+def _migration_module(revision: str = LEGACY_REVISION):
+    path = CONTROL_PLANE_ROOT / "migrations" / "versions" / f"{revision}.py"
+    spec = importlib.util.spec_from_file_location(revision, path)
     if spec is None or spec.loader is None:
         raise AssertionError(f"cannot load migration from {path}")
     module = importlib.util.module_from_spec(spec)
@@ -97,7 +98,7 @@ def test_0019_has_0018_as_down_revision() -> None:
     assert _migration_module().down_revision == PREVIOUS_REVISION
 
 
-def test_0019_round_trip_on_isolated_empty_schema(isolated_database_url: str) -> None:
+def test_head_round_trip_on_isolated_empty_schema(isolated_database_url: str) -> None:
     _upgrade(isolated_database_url, REVISION)
     assert _current(isolated_database_url) == REVISION
 
@@ -105,7 +106,7 @@ def test_0019_round_trip_on_isolated_empty_schema(isolated_database_url: str) ->
     assert _current(isolated_database_url) == PREVIOUS_REVISION
 
 
-def test_0019_upgrades_r6_1_fixture_without_backfill(
+def test_head_upgrades_r6_1_fixture_without_backfill(
     isolated_database_url: str,
 ) -> None:
     _upgrade(isolated_database_url, PREVIOUS_REVISION)
@@ -124,7 +125,7 @@ def test_0019_upgrades_r6_1_fixture_without_backfill(
         engine.dispose()
 
 
-def test_0019_exposes_handoff_tables_columns_and_constraints(
+def test_head_exposes_handoff_tables_columns_and_constraints(
     isolated_database_url: str,
 ) -> None:
     _upgrade(isolated_database_url, REVISION)

@@ -702,6 +702,47 @@ def test_workspace_transfer_repository_inspects_by_operation_identity(
         )
 
 
+def test_workspace_transfer_repository_updates_outcome_with_cas(
+    database, workspace_id: UUID
+) -> None:
+    seed = _seed(database, workspace_id, with_transition=True)
+    requested = replace(
+        _transfer(seed),
+        target_manifest_id=None,
+        status=HandoffWorkspaceTransferStatus.REQUESTED,
+        failure_code=None,
+        version=1,
+    )
+    with database.session() as session:
+        repository = HandoffWorkspaceTransferRepository(session)
+        repository.add_append_only(requested, workspace_id)
+        session.commit()
+
+    succeeded = replace(
+        requested,
+        target_manifest_id=seed.target_manifest_id,
+        status=HandoffWorkspaceTransferStatus.SUCCEEDED,
+        version=2,
+        updated_at=NOW,
+    )
+    with database.session() as session:
+        repository = HandoffWorkspaceTransferRepository(session)
+        repository.save(succeeded, previous_version=1)
+        session.commit()
+
+    with database.session() as session:
+        loaded = HandoffWorkspaceTransferRepository(session).get_by_operation(
+            requested.operation_id,
+            workspace_id,
+        )
+        assert loaded == succeeded
+        with pytest.raises(VersionConflict):
+            HandoffWorkspaceTransferRepository(session).save(
+                succeeded,
+                previous_version=1,
+            )
+
+
 def test_all_handoff_repositories_reject_cross_workspace_lookup(
     database, workspace_id: UUID
 ) -> None:

@@ -256,6 +256,7 @@ class HandoffWorkspaceTransfer:
     failure_code: str | None
     created_at: datetime
     updated_at: datetime
+    version: int = 1
 
     def __post_init__(self) -> None:
         for name in (
@@ -288,6 +289,7 @@ class HandoffWorkspaceTransfer:
         )
         _aware(self.created_at, "workspace transfer created_at")
         _aware(self.updated_at, "workspace transfer updated_at")
+        _positive(self.version, "workspace transfer version")
         if self.updated_at < self.created_at:
             raise ValidationError(
                 "workspace transfer updated_at cannot precede created_at"
@@ -297,12 +299,17 @@ class HandoffWorkspaceTransfer:
                 raise ValidationError(
                     "successful workspace transfer requires target manifest"
                 )
-        elif self.status is not HandoffWorkspaceTransferStatus.REQUESTED and (
-            self.failure_code is None
-        ):
-            raise ValidationError(
-                "unsuccessful workspace transfer requires failure_code"
-            )
+        else:
+            if self.target_manifest_id is not None:
+                raise ValidationError(
+                    "unsuccessful workspace transfer cannot have target manifest"
+                )
+            if self.status is not HandoffWorkspaceTransferStatus.REQUESTED and (
+                self.failure_code is None
+            ):
+                raise ValidationError(
+                    "unsuccessful workspace transfer requires failure_code"
+                )
 
 
 @dataclass(frozen=True, slots=True)
