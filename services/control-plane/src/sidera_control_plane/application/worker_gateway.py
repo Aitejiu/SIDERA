@@ -84,6 +84,8 @@ from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
     HandoffOperationInspection,
     HandoffStopEvidence,
+    HandoffTargetStartResult,
+    SessionContextBinding,
 )
 from sidera_control_plane.domain.handoffs import (
     HandoffPhase,
@@ -227,6 +229,16 @@ class _HandoffSourceContext:
     manifest: ExecutionWorkspaceManifest
     package: ContextPackageManifestV1
     acknowledgement: ContextAcknowledgement
+
+
+@dataclass(frozen=True, slots=True)
+class _HandoffTargetContext:
+    transition: HandoffTransition
+    assignment: _AssignmentContext
+    manifest: ExecutionWorkspaceManifest
+    package: ContextPackageManifestV1
+    session: ExecutionSession | None
+    acknowledgement: ContextAcknowledgement | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1002,6 +1014,347 @@ class WorkerGateway:
             ) from exc
         return evidence
 
+    def start_handoff_target(
+        self,
+        *,
+        workspace_id: UUID,
+        transition_id: UUID,
+        expected_transition_version: int,
+    ) -> HandoffTargetStartResult:
+        """Start a transferred target Session while keeping its workspace read-only."""
+
+        target: _HandoffTargetContext | None = None
+        operation_id: UUID | None = None
+        operation_state: _OperationState | None = None
+        with self._uow_factory() as uow:
+            transition = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_transition_version,
+                operation=HandoffGateOperation.COORDINATOR_START_TARGET,
+                phase=HandoffPhase.START_TARGET_SESSION,
+            )
+            target = self._load_handoff_target_context_in_uow(
+                uow,
+                transition=transition,
+                workspace_id=workspace_id,
+                require_session=False,
+                require_acknowledgement=False,
+                allow_active_manifest=False,
+            )
+            operation_id = _operation_id(
+                target.assignment.execution.id, GatewayOperationType.START_SESSION
+            )
+            operation_state = self._begin_operation(
+                uow,
+                target.assignment,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.START_SESSION,
+                session_id=target.session.id if target.session is not None else None,
+            )
+            if operation_state.completed:
+                if target.session is None:
+                    raise GatewayRecoveryRequired(
+                        "target start succeeded without a persisted Session"
+                    )
+                binding = self._target_context_binding(
+                    target,
+                    operation_id=operation_id,
+                    session_id=target.session.id,
+                )
+                return HandoffTargetStartResult(
+                    execution_id=target.assignment.execution.id,
+                    session_id=target.session.id,
+                    adapter_session_id=target.session.adapter_session_id,
+                    context_binding=binding,
+                )
+            if operation_state.recovery_required:
+                pass
+            elif target.session is not None:
+                self._succeed_operation(
+                    uow,
+                    operation_id,
+                    target.assignment,
+                    target.session.adapter_session_id,
+                    session_id=target.session.id,
+                )
+                binding = self._target_context_binding(
+                    target,
+                    operation_id=operation_id,
+                    session_id=target.session.id,
+                )
+                return HandoffTargetStartResult(
+                    execution_id=target.assignment.execution.id,
+                    session_id=target.session.id,
+                    adapter_session_id=target.session.adapter_session_id,
+                    context_binding=binding,
+                )
+
+        assert target is not None
+        assert operation_id is not None
+        assert operation_state is not None
+        if operation_state.recovery_required:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                "gateway_restart_requires_reconciliation",
+            )
+            raise GatewayRecoveryRequired(
+                f"target start operation {operation_id} requires reconciliation"
+            )
+
+        try:
+            materialization = self._prepare_execution_context(target.assignment)
+            if materialization is None:
+                raise GatewayMessageError(
+                    "handoff target requires a ContextPackage",
+                    code="handoff_context_package_missing",
+                )
+            self._validate_handoff_target_materialization(target, materialization)
+            spec = self._spec_factory.create(
+                target.assignment.execution,
+                target.assignment.task,
+                target.assignment.binding,
+                target.assignment.adapter_instance,
+                target.assignment.workspace_instance,
+                context_materialization=materialization,
+            )
+            adapter = self._adapter(
+                target.assignment.adapter_definition,
+                target.assignment.adapter_instance,
+                operation=RuntimeModuleOperation.START,
+            )
+        except GatewayMessageError as exc:
+            self._fail_operation(
+                operation_id,
+                target.assignment,
+                exc.code or _failure_code(exc),
+            )
+            raise
+        except Exception as exc:
+            self._fail_operation(operation_id, target.assignment, _failure_code(exc))
+            raise GatewayError("handoff target preflight failed") from exc
+
+        try:
+            handle = adapter.start_session(
+                spec,
+                target.manifest,
+                operation_id=operation_id,
+            )
+            binding = self._validate_handoff_target_handle(
+                target,
+                handle,
+                operation_id=operation_id,
+            )
+            binding = self._canonicalize_handoff_target_binding(target, binding)
+        except GatewayMessageError as exc:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                exc.code or "handoff_target_session_binding_mismatch",
+            )
+            raise GatewayRecoveryRequired(
+                "handoff target Session start returned an invalid binding"
+            ) from exc
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, target.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                f"handoff target Session start result is unknown: {failure_code}"
+            ) from exc
+        try:
+            return self._persist_handoff_target_session_success(
+                target,
+                handle,
+                operation_id,
+                binding,
+            )
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, target.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                "handoff target Session confirmation could not be persisted"
+            ) from exc
+
+    def enable_handoff_target_writer(
+        self,
+        *,
+        workspace_id: UUID,
+        transition_id: UUID,
+        expected_transition_version: int,
+    ) -> DeliveryResult:
+        """Open the target writer once, after the target Session is durably bound."""
+
+        target: _HandoffTargetContext | None = None
+        operation_id: UUID | None = None
+        operation_state: _OperationState | None = None
+        handle: AdapterSessionHandle | None = None
+        adapter: WorkerAdapter | None = None
+        with self._uow_factory() as uow:
+            transition = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_transition_version,
+                operation=HandoffGateOperation.COORDINATOR_ENABLE_TARGET_WRITER,
+                phase=HandoffPhase.ACKNOWLEDGE_CONTEXT,
+            )
+            target = self._load_handoff_target_context_in_uow(
+                uow,
+                transition=transition,
+                workspace_id=workspace_id,
+                require_session=True,
+                require_acknowledgement=True,
+                allow_active_manifest=True,
+            )
+            operation_id = handoff_step_operation_id(
+                transition.id,
+                HandoffPhase.ACKNOWLEDGE_CONTEXT,
+                logical_attempt=transition.logical_attempt,
+                action="enable_writer",
+            )
+            operation_state = self._begin_operation(
+                uow,
+                target.assignment,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.HANDOFF_ENABLE_WRITER,
+                session_id=target.session.id if target.session is not None else None,
+            )
+            if operation_state.completed:
+                if target.session is None:
+                    raise GatewayRecoveryRequired(
+                        "writer enable succeeded without a target Session"
+                    )
+                return _delivery_from_operation(
+                    operation_id,
+                    operation_state.result_ref,
+                    execution_session_id=target.session.id,
+                )
+            if operation_state.recovery_required:
+                pass
+            else:
+                if target.manifest.lifecycle not in {
+                    WorkspaceLifecycle.READY,
+                    WorkspaceLifecycle.ACTIVE,
+                }:
+                    raise GatewayRecoveryRequired(
+                        "target writer operation has an ambiguous workspace state"
+                    )
+                try:
+                    adapter = self._adapter(
+                        target.assignment.adapter_definition,
+                        target.assignment.adapter_instance,
+                        operation=RuntimeModuleOperation.INPUT,
+                    )
+                    if target.session is None:
+                        raise GatewayMessageError(
+                            "handoff target Session is missing",
+                            code="handoff_target_session_missing",
+                        )
+                    binding = self._target_context_binding(
+                        target,
+                        operation_id=_operation_id(
+                            target.assignment.execution.id,
+                            GatewayOperationType.START_SESSION,
+                        ),
+                        session_id=target.session.id,
+                    )
+                    handle = replace(
+                        _session_handle(target.session),
+                        context_binding=binding,
+                    )
+                    if target.manifest.lifecycle is WorkspaceLifecycle.READY:
+                        previous_manifest_version = target.manifest.version
+                        target.manifest.mark_active()
+                        uow.workspaces.save(target.manifest, previous_manifest_version)
+                except GatewayMessageError as exc:
+                    self._fail_operation_in_uow(
+                        uow,
+                        operation_id,
+                        target.assignment,
+                        exc.code or _failure_code(exc),
+                    )
+                    raise
+                except Exception:
+                    raise
+
+        assert target is not None
+        assert operation_id is not None
+        assert operation_state is not None
+        if operation_state.recovery_required:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                "gateway_restart_requires_reconciliation",
+            )
+            raise GatewayRecoveryRequired(
+                f"writer enable operation {operation_id} requires reconciliation"
+            )
+        if adapter is None or handle is None:
+            raise GatewayRecoveryRequired("handoff target writer adapter is unavailable")
+        try:
+            delivery = adapter.enable_handoff_writer(
+                handle,
+                fencing_token=target.assignment.binding.fencing_token,
+                operation_id=operation_id,
+            )
+            if not isinstance(delivery, DeliveryResult):
+                raise GatewayMessageError(
+                    "worker adapter returned an invalid writer result",
+                    code="handoff_writer_result_invalid",
+                )
+            if (
+                delivery.operation_id != operation_id
+                or delivery.execution_session_id != handle.execution_session_id
+            ):
+                raise GatewayMessageError(
+                    "worker adapter returned a mismatched writer result",
+                    code="handoff_writer_result_mismatch",
+                )
+            if delivery.outcome is DeliveryOutcome.UNKNOWN:
+                raise GatewayRecoveryRequired(
+                    "handoff target writer result is unknown"
+                )
+            if delivery.outcome is not DeliveryOutcome.DELIVERED:
+                self._fail_operation(
+                    operation_id,
+                    target.assignment,
+                    delivery.failure_code or delivery.outcome.value,
+                )
+                return delivery
+            with self._uow_factory() as uow:
+                self._succeed_operation(
+                    uow,
+                    operation_id,
+                    target.assignment,
+                    f"sequence:{delivery.accepted_sequence}",
+                    session_id=handle.execution_session_id,
+                )
+            return delivery
+        except GatewayRecoveryRequired as exc:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                "handoff_writer_result_unknown",
+            )
+            raise GatewayRecoveryRequired(str(exc)) from exc
+        except GatewayMessageError as exc:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                exc.code or "handoff_writer_result_invalid",
+            )
+            raise GatewayRecoveryRequired(
+                "handoff target writer result is not trustworthy"
+            ) from exc
+        except Exception as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, target.assignment, failure_code)
+            raise GatewayRecoveryRequired(
+                f"handoff target writer result is unknown: {failure_code}"
+            ) from exc
+
     def _load_handoff_transition_for_operation(
         self,
         uow: ControlPlaneUnitOfWork,
@@ -1037,6 +1390,7 @@ class WorkerGateway:
             workspace_id=workspace_id,
             operation=operation,
             transition_id=transition_id,
+            target_execution_id=transition.target_execution_id,
         )
         if not result.allowed:
             raise GatewayMessageError(
@@ -1057,6 +1411,501 @@ class WorkerGateway:
                 code="handoff_transition_blocked",
             )
         return transition
+
+    def _load_handoff_target_context_in_uow(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        transition: HandoffTransition,
+        workspace_id: UUID,
+        require_session: bool,
+        require_acknowledgement: bool,
+        allow_active_manifest: bool,
+    ) -> _HandoffTargetContext:
+        target_execution_id = transition.target_execution_id
+        target_manifest_id = transition.target_workspace_manifest_id
+        target_package_id = transition.target_context_package_id
+        if target_execution_id is None:
+            raise GatewayMessageError(
+                "handoff target execution is missing",
+                code="handoff_target_execution_missing",
+            )
+        if target_manifest_id is None:
+            raise GatewayMessageError(
+                "handoff target Workspace is missing",
+                code="handoff_target_workspace_missing",
+            )
+        if target_package_id is None or transition.target_context_package_hash is None:
+            raise GatewayMessageError(
+                "handoff target ContextPackage identity is missing",
+                code="handoff_context_package_missing",
+            )
+
+        execution = uow.executions.get(target_execution_id, workspace_id, for_update=True)
+        if execution is None:
+            raise GatewayMessageError(
+                "handoff target execution was not found",
+                code="handoff_target_execution_missing",
+            )
+        if execution.worker_item_id != transition.worker_item_id:
+            raise GatewayMessageError(
+                "handoff target execution does not match WorkerItem",
+                code="handoff_target_execution_mismatch",
+            )
+        if execution.handoff_transition_id != transition.id:
+            raise GatewayMessageError(
+                "handoff target execution is bound to another Transition",
+                code="handoff_target_execution_mismatch",
+            )
+        if execution.assigned_worker_id != transition.target_worker_id:
+            raise GatewayMessageError(
+                "handoff target worker does not match Transition",
+                code="handoff_target_worker_mismatch",
+            )
+        if execution.active_lease_id is None:
+            raise GatewayMessageError(
+                "handoff target execution has no active Lease",
+                code="handoff_target_lease_missing",
+            )
+        if require_session and execution.status is not ExecutionStatus.RUNNING:
+            raise GatewayMessageError(
+                "handoff target execution is not running",
+                code="handoff_target_not_running",
+            )
+        if not require_session and execution.status not in {
+            ExecutionStatus.LEASED,
+            ExecutionStatus.RUNNING,
+        }:
+            raise GatewayMessageError(
+                "handoff target execution is not startable",
+                code="handoff_target_not_startable",
+            )
+
+        assignment = self._load_context_by_ids_in_uow(
+            uow,
+            workspace_id=workspace_id,
+            execution_id=target_execution_id,
+            lease_id=execution.active_lease_id,
+            fencing_token=execution.last_fencing_token,
+            operation=RuntimeModuleOperation.START,
+        )
+        manifest = uow.workspaces.get_for_execution(
+            target_execution_id,
+            workspace_id,
+            for_update=True,
+        )
+        if manifest is None or manifest.id != target_manifest_id:
+            raise GatewayMessageError(
+                "handoff target Workspace does not match Transition",
+                code="handoff_target_workspace_mismatch",
+            )
+        allowed_lifecycles = {WorkspaceLifecycle.READY}
+        if allow_active_manifest:
+            allowed_lifecycles.add(WorkspaceLifecycle.ACTIVE)
+        if manifest.lifecycle not in allowed_lifecycles:
+            raise GatewayMessageError(
+                "handoff target Workspace is not at the expected lifecycle",
+                code="handoff_target_workspace_state_mismatch",
+            )
+        if manifest.fencing_token != assignment.binding.fencing_token:
+            raise GatewayMessageError(
+                "handoff target Workspace fence does not match Binding",
+                code="handoff_target_workspace_fence_mismatch",
+            )
+
+        source_manifest = uow.workspaces.get_for_execution(
+            transition.source_execution_id,
+            workspace_id,
+            for_update=True,
+        )
+        if (
+            source_manifest is None
+            or source_manifest.id != transition.source_workspace_manifest_id
+            or source_manifest.lifecycle is not WorkspaceLifecycle.FROZEN
+        ):
+            raise GatewayMessageError(
+                "handoff source Workspace is not frozen at the expected identity",
+                code="handoff_source_workspace_not_frozen",
+            )
+
+        assembly = uow.context_assemblies.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            target_execution_id,
+            workspace_id,
+            for_update=True,
+        )
+        if assembly is None or assembly.status is not ContextAssemblyStatus.READY:
+            raise GatewayMessageError(
+                "handoff target ContextPackage is not ready",
+                code="handoff_context_package_pending",
+            )
+        package = uow.context_packages.get(
+            target_package_id,
+            workspace_id,
+            for_update=True,
+        )
+        if package is None:
+            raise GatewayMessageError(
+                "handoff target ContextPackage is missing",
+                code="handoff_context_package_missing",
+            )
+        if package.status is not ContextPackageStatus.ACTIVE:
+            raise GatewayMessageError(
+                "handoff target ContextPackage is not active",
+                code="handoff_context_package_blocked",
+            )
+        if package.expires_at <= self._clock():
+            raise GatewayMessageError(
+                "handoff target ContextPackage is expired",
+                code="handoff_context_package_expired",
+            )
+        if (
+            package.package_hash != transition.target_context_package_hash
+            or package.consumer_type is not ContextConsumerType.WORKER
+            or package.consumer_id != target_execution_id
+            or package.worker_item_id != transition.worker_item_id
+            or package.context_version != transition.target_context_version
+            or package.work_context_revision_id != assembly.work_context_revision_id
+        ):
+            raise GatewayMessageError(
+                "handoff target ContextPackage identity is stale",
+                code="handoff_context_package_mismatch",
+            )
+        if assembly.consumer_id != target_execution_id or assembly.context_version != package.context_version:
+            raise GatewayMessageError(
+                "handoff target ContextPackage assembly is stale",
+                code="handoff_context_package_stale",
+            )
+
+        bundles = getattr(uow, "handoff_context_bundles", None)
+        if bundles is None or transition.handoff_context_bundle_id is None:
+            raise GatewayMessageError(
+                "handoff context Bundle is missing",
+                code="handoff_context_bundle_missing",
+            )
+        bundle = bundles.get(
+            transition.handoff_context_bundle_id,
+            workspace_id,
+            for_update=True,
+        )
+        if (
+            bundle is None
+            or bundle.target_execution_id != target_execution_id
+            or bundle.worker_item_id != transition.worker_item_id
+            or bundle.target_context_version != transition.target_context_version
+        ):
+            raise GatewayMessageError(
+                "handoff context Bundle identity is stale",
+                code="handoff_context_bundle_stale",
+            )
+        handoff_facts = package.control_plane_fact_snapshot.get("handoff")
+        if (
+            not isinstance(handoff_facts, Mapping)
+            or str(handoff_facts.get("bundle_id")) != str(bundle.id)
+            or handoff_facts.get("bundle_hash") != bundle.bundle_hash
+            or str(handoff_facts.get("transition_id")) != str(transition.id)
+            or handoff_facts.get("logical_attempt") != transition.logical_attempt
+            or not isinstance(handoff_facts.get("instruction"), str)
+            or not str(handoff_facts["instruction"]).strip()
+        ):
+            raise GatewayMessageError(
+                "handoff target ContextPackage facts are incomplete",
+                code="handoff_context_package_stale",
+            )
+
+        acknowledgement = uow.context_packages.get_ack(
+            package.package_id,
+            ContextConsumerType.WORKER,
+            target_execution_id,
+            workspace_id,
+            for_update=True,
+        )
+        if require_acknowledgement and acknowledgement is None:
+            raise GatewayMessageError(
+                "handoff target ContextPackage acknowledgement is missing",
+                code="handoff_context_ack_missing",
+            )
+        if acknowledgement is not None and (
+            acknowledgement.package_hash != package.package_hash
+            or acknowledgement.consumer_type is not ContextConsumerType.WORKER
+            or acknowledgement.consumer_id != target_execution_id
+            or acknowledgement.context_version != package.context_version
+            or acknowledgement.adapter_module_id != assignment.binding.adapter_module_id
+            or acknowledgement.adapter_config_version
+            != assignment.binding.adapter_config_version
+        ):
+            raise GatewayMessageError(
+                "handoff target ContextPackage acknowledgement does not match",
+                code="handoff_context_ack_mismatch",
+            )
+
+        session = None
+        if transition.target_session_id is not None:
+            session = uow.sessions.get_any(
+                transition.target_session_id,
+                workspace_id,
+                for_update=True,
+            )
+            if session is None or session.execution_id != target_execution_id:
+                raise GatewayMessageError(
+                    "handoff target Session does not match execution",
+                    code="handoff_target_session_mismatch",
+                )
+            if session.worker_id != assignment.binding.worker_id:
+                raise GatewayMessageError(
+                    "handoff target Session does not match worker",
+                    code="handoff_target_session_mismatch",
+                )
+            if require_session and session.status is not ExecutionSessionStatus.ACTIVE:
+                raise GatewayMessageError(
+                    "handoff target Session is not active",
+                    code="handoff_target_session_not_active",
+                )
+        if require_session and session is None:
+            raise GatewayMessageError(
+                "handoff target Session is missing",
+                code="handoff_target_session_missing",
+            )
+        return _HandoffTargetContext(
+            transition=transition,
+            assignment=assignment,
+            manifest=manifest,
+            package=package,
+            session=session,
+            acknowledgement=acknowledgement,
+        )
+
+    @staticmethod
+    def _target_context_binding(
+        target: _HandoffTargetContext,
+        *,
+        operation_id: UUID,
+        session_id: UUID,
+    ) -> SessionContextBinding:
+        acknowledgement = target.acknowledgement
+        if acknowledgement is None:
+            raise GatewayMessageError(
+                "handoff target ContextPackage acknowledgement is missing",
+                code="handoff_context_ack_missing",
+            )
+        return SessionContextBinding(
+            operation_id=operation_id,
+            execution_session_id=session_id,
+            consumer_execution_id=target.assignment.execution.id,
+            package_id=target.package.package_id,
+            package_hash=target.package.package_hash,
+            context_version=target.package.context_version or 0,
+            acknowledged_at=acknowledgement.acknowledged_at,
+        )
+
+    @staticmethod
+    def _validate_handoff_target_materialization(
+        target: _HandoffTargetContext,
+        materialization: ContextMaterializationV1,
+    ) -> None:
+        metadata = materialization.metadata
+        if (
+            metadata.package_id != target.package.package_id
+            or metadata.package_hash != target.package.package_hash
+            or metadata.consumer_id != target.assignment.execution.id
+            or metadata.context_version != target.package.context_version
+        ):
+            raise GatewayMessageError(
+                "handoff target materialization does not match ContextPackage",
+                code="handoff_context_package_mismatch",
+            )
+        facts = materialization.control_plane_facts.facts.get("handoff")
+        if not isinstance(facts, Mapping) or facts != target.package.control_plane_fact_snapshot.get(
+            "handoff"
+        ):
+            raise GatewayMessageError(
+                "handoff target materialization facts changed",
+                code="handoff_context_package_stale",
+            )
+
+    @staticmethod
+    def _validate_handoff_target_handle(
+        target: _HandoffTargetContext,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> SessionContextBinding:
+        if not isinstance(handle, AdapterSessionHandle):
+            raise GatewayMessageError(
+                "worker adapter returned an invalid target Session handle",
+                code="handoff_target_session_invalid",
+            )
+        binding = handle.context_binding
+        if binding is None:
+            raise GatewayMessageError(
+                "worker adapter did not return a target Session context binding",
+                code="handoff_context_binding_missing",
+            )
+        try:
+            binding.assert_matches(
+                execution_session_id=handle.execution_session_id,
+                consumer_execution_id=target.assignment.execution.id,
+                package_id=target.package.package_id,
+                package_hash=target.package.package_hash,
+                context_version=target.package.context_version or 0,
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            raise GatewayMessageError(
+                "worker adapter returned a mismatched target Session binding",
+                code="handoff_context_binding_mismatch",
+            ) from exc
+        return binding
+
+    def _canonicalize_handoff_target_binding(
+        self,
+        target: _HandoffTargetContext,
+        binding: SessionContextBinding,
+    ) -> SessionContextBinding:
+        with self._uow_factory() as uow:
+            acknowledgement = uow.context_packages.get_ack(
+                target.package.package_id,
+                ContextConsumerType.WORKER,
+                target.assignment.execution.id,
+                target.assignment.execution.workspace_id,
+            )
+        if acknowledgement is None:
+            raise GatewayMessageError(
+                "handoff target ContextPackage acknowledgement is missing",
+                code="handoff_context_ack_missing",
+            )
+        if (
+            acknowledgement.package_hash != target.package.package_hash
+            or acknowledgement.context_version != target.package.context_version
+            or acknowledgement.adapter_module_id
+            != target.assignment.binding.adapter_module_id
+            or acknowledgement.adapter_config_version
+            != target.assignment.binding.adapter_config_version
+        ):
+            raise GatewayMessageError(
+                "handoff target ContextPackage acknowledgement does not match",
+                code="handoff_context_ack_mismatch",
+            )
+        return replace(binding, acknowledged_at=acknowledgement.acknowledged_at)
+
+    def _persist_handoff_target_session_success(
+        self,
+        target: _HandoffTargetContext,
+        handle: AdapterSessionHandle,
+        operation_id: UUID,
+        binding: SessionContextBinding,
+    ) -> HandoffTargetStartResult:
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                target.assignment.execution.id,
+                target.assignment.execution.workspace_id,
+                for_update=True,
+            )
+            lease = uow.leases.get(
+                target.assignment.lease.id,
+                target.assignment.execution.workspace_id,
+                for_update=True,
+            )
+            worker = uow.workers.get(
+                target.assignment.binding.worker_id,
+                target.assignment.execution.workspace_id,
+                for_update=True,
+            )
+            transition = uow.handoff_transitions.get(
+                target.transition.id,
+                target.assignment.execution.workspace_id,
+                for_update=True,
+            )
+            existing = uow.sessions.get_active_for_execution(
+                target.assignment.execution.id,
+                for_update=True,
+            )
+            manifest = uow.workspaces.get_for_execution(
+                target.assignment.execution.id,
+                target.assignment.execution.workspace_id,
+                for_update=True,
+            )
+            if execution is None or lease is None or worker is None or transition is None:
+                raise GatewayMessageError(
+                    "handoff target runtime facts disappeared during startup"
+                )
+            if manifest is None or manifest.id != target.transition.target_workspace_manifest_id:
+                raise GatewayMessageError(
+                    "handoff target Workspace changed during startup"
+                )
+            if manifest.lifecycle is not WorkspaceLifecycle.READY:
+                raise GatewayMessageError(
+                    "handoff target Workspace is not READY during startup"
+                )
+            execution.assert_fence(
+                lease_id=target.assignment.binding.lease_id,
+                fencing_token=target.assignment.binding.fencing_token,
+            )
+            lease.assert_owner(
+                target.assignment.binding.worker_id,
+                target.assignment.binding.fencing_token,
+                self._clock(),
+            )
+            if transition.target_session_id is not None and transition.target_session_id != binding.execution_session_id:
+                raise GatewayMessageError(
+                    "handoff target Session identity changed during startup"
+                )
+            if existing is not None and existing.id != binding.execution_session_id:
+                raise GatewayMessageError(
+                    "another target Session is already active"
+                )
+            if existing is None:
+                previous_execution_version = execution.version
+                previous_worker_version = worker.version
+                execution.start(
+                    lease_id=target.assignment.binding.lease_id,
+                    fencing_token=target.assignment.binding.fencing_token,
+                    now=self._clock(),
+                )
+                worker.mark_running()
+                session = ExecutionSession.start(
+                    session_id=binding.execution_session_id,
+                    workspace_id=execution.workspace_id,
+                    execution_id=execution.id,
+                    worker_id=worker.id,
+                    adapter_session_id=handle.adapter_session_id,
+                    now=handle.started_at,
+                    adapter_module_id=target.assignment.binding.adapter_module_id,
+                    adapter_config_version=target.assignment.binding.adapter_config_version,
+                    workspace_module_id=target.assignment.binding.workspace_module_id,
+                    workspace_config_version=target.assignment.binding.workspace_config_version,
+                    capability_snapshot=handle.capability_snapshot,
+                    process_ref=handle.process_ref,
+                    workspace_ref=target.assignment.workspace_instance.instance_name,
+                )
+                session.input_mode = handle.capability_snapshot.input.value
+                uow.executions.save(execution, previous_execution_version)
+                uow.workers.save(worker, previous_worker_version)
+                uow.sessions.add(session)
+            else:
+                session = existing
+                if execution.status is not ExecutionStatus.RUNNING:
+                    raise GatewayMessageError(
+                        "persisted target Session is not paired with a running execution"
+                    )
+            if transition.target_session_id is None:
+                previous_transition_version = transition.version
+                transition.target_session_id = session.id
+                transition.version += 1
+                uow.handoff_transitions.save(transition, previous_transition_version)
+            self._succeed_operation(
+                uow,
+                operation_id,
+                target.assignment,
+                handle.adapter_session_id,
+                session_id=session.id,
+            )
+            return HandoffTargetStartResult(
+                execution_id=execution.id,
+                session_id=session.id,
+                adapter_session_id=session.adapter_session_id,
+                context_binding=binding,
+            )
 
     def _load_handoff_source_context_in_uow(
         self,
@@ -3413,7 +4262,10 @@ def _session_handle(session: ExecutionSession) -> AdapterSessionHandle:
 
 
 def _delivery_from_operation(
-    operation_id: UUID, result_ref: str | None
+    operation_id: UUID,
+    result_ref: str | None,
+    *,
+    execution_session_id: UUID | None = None,
 ) -> DeliveryResult:
     if result_ref is None or not result_ref.startswith("sequence:"):
         raise GatewayRecoveryRequired("succeeded input operation has no sequence result")
@@ -3428,6 +4280,7 @@ def _delivery_from_operation(
         outcome=DeliveryOutcome.DELIVERED,
         accepted_sequence=accepted_sequence,
         failure_code=None,
+        execution_session_id=execution_session_id,
     )
 
 

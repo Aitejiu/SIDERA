@@ -30,6 +30,7 @@ from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
     HandoffInspectionOutcome,
     HandoffOperationInspection,
+    SessionContextBinding,
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
@@ -66,6 +67,8 @@ class FakeWorkerAdapter:
         context_patch_versions=(1,),
         handoff_checkpoint_mode=HandoffCheckpointMode.NATIVE,
         handoff_checkpoint_versions=(1,),
+        handoff_session_context_versions=(1,),
+        handoff_writer_gate_versions=(1,),
         handoff_inspection=True,
     )
 
@@ -112,6 +115,8 @@ class FakeWorkerAdapter:
         self._applied_context_patches: list[ContextPatchMaterializationV1] = []
         self._sessions: dict[str, _FakeSession] = {}
         self._handoff_operations: dict[UUID, _FakeHandoffOperation] = {}
+        self._handoff_resume_count = 0
+        self._handoff_resume_instructions: list[str] = []
         self._checkpoint_call_count = 0
         self._inspect_call_count = 0
         self._lock = RLock()
@@ -151,13 +156,31 @@ class FakeWorkerAdapter:
         *,
         operation_id: UUID,
     ) -> AdapterSessionHandle:
-        del operation_id
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
         self._maybe_fail("start_session")
         now = datetime.now(UTC)
         execution_session_id = uuid5(
             NAMESPACE_URL, f"sidera.fake.execution-session:{spec.execution_id}"
         )
         adapter_session_id = f"fake-session-{spec.execution_id}"
+        handoff_facts = _handoff_facts(getattr(spec, "context_package", None))
+        context_binding = None
+        handoff_instruction = None
+        if handoff_facts is not None:
+            context = getattr(spec, "context_package", None)
+            assert context is not None
+            metadata = context.metadata
+            context_binding = SessionContextBinding(
+                operation_id=operation_id,
+                execution_session_id=execution_session_id,
+                consumer_execution_id=spec.execution_id,
+                package_id=metadata.package_id,
+                package_hash=metadata.package_hash,
+                context_version=metadata.context_version or 0,
+                acknowledged_at=now,
+            )
+            handoff_instruction = _handoff_instruction(handoff_facts)
         handle = AdapterSessionHandle(
             execution_session_id=execution_session_id,
             adapter_session_id=adapter_session_id,
@@ -165,6 +188,7 @@ class FakeWorkerAdapter:
             capability_snapshot=self._CAPABILITIES,
             last_accepted_sequence=0,
             started_at=now,
+            context_binding=context_binding,
         )
         with self._lock:
             self._sessions[adapter_session_id] = _FakeSession(
@@ -186,6 +210,9 @@ class FakeWorkerAdapter:
                     or workspace_manifest_digest(workspace)
                 ),
                 handoff_context=self._handoff_context,
+                handoff_held=handoff_facts is not None,
+                handoff_instruction=handoff_instruction,
+                handoff_fencing_token=getattr(spec, "fencing_token", 1),
             )
         return handle
 
@@ -222,6 +249,13 @@ class FakeWorkerAdapter:
                     outcome=DeliveryOutcome.FAILED,
                     accepted_sequence=None,
                     failure_code="session_stopped",
+                )
+            if session.handoff_held and not session.writer_enabled:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="handoff_writer_disabled",
                 )
             if session.checkpointed:
                 return DeliveryResult(
@@ -284,6 +318,16 @@ class FakeWorkerAdapter:
                         patch_hash=patch_hash,
                         accepted_sequence=None,
                         error_code="session_identity_mismatch",
+                    )
+                )
+            if session.handoff_held and not session.writer_enabled:
+                return self._remember_patch_result(
+                    ContextPatchDeliveryResult(
+                        outcome="blocked",
+                        operation_id=operation_id,
+                        patch_hash=patch_hash,
+                        accepted_sequence=None,
+                        error_code="handoff_writer_disabled",
                     )
                 )
             if session.checkpointed:
@@ -580,7 +624,61 @@ class FakeWorkerAdapter:
         fencing_token: int,
         operation_id: UUID,
     ) -> DeliveryResult:
-        raise NotImplementedError("FakeWorkerAdapter does not enable handoff writers")
+        if not isinstance(fencing_token, int) or fencing_token < 1:
+            raise ValueError("fencing_token must be positive")
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        with self._lock:
+            previous = self._handoff_operations.get(operation_id)
+            if previous is not None:
+                if previous.operation_type is not GatewayOperationType.HANDOFF_ENABLE_WRITER:
+                    raise FakeAdapterError("operation_id_reused")
+                if not isinstance(previous.result, DeliveryResult):
+                    raise FakeAdapterError("writer_result_mismatch")
+                return previous.result
+            session = self._session(handle)
+            if session.handle.execution_session_id != handle.execution_session_id:
+                raise FakeAdapterError("session_identity_mismatch")
+            if handle.context_binding is None or not session.handoff_held:
+                raise FakeAdapterError("handoff_context_binding_missing")
+            if fencing_token != session.handoff_fencing_token:
+                raise FakeAdapterError("handoff_fencing_mismatch")
+            if session.stopped:
+                raise FakeAdapterError("session_stopped")
+            if session.writer_enabled:
+                raise FakeAdapterError("handoff_writer_operation_missing")
+            self._maybe_fail("handoff_enable_writer_before")
+            session.writer_enabled = True
+            sequence = session.next_sequence
+            session.next_sequence += 1
+            session.last_accepted_sequence = sequence
+            session.events.append(
+                AdapterEvent(
+                    event_type="handoff.writer_enabled",
+                    sequence=sequence,
+                    payload={
+                        "context_version": handle.context_binding.context_version,
+                    },
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            self._handoff_resume_count += 1
+            self._handoff_resume_instructions.append(
+                session.handoff_instruction
+                or "continue from the transferred context"
+            )
+            result = DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.DELIVERED,
+                accepted_sequence=sequence,
+                failure_code=None,
+                execution_session_id=session.handle.execution_session_id,
+            )
+            self._maybe_fail("handoff_enable_writer_after")
+            self._remember_handoff_operation(
+                operation_id, GatewayOperationType.HANDOFF_ENABLE_WRITER, result
+            )
+            return result
 
     def release_boundary(self, handle: AdapterSessionHandle) -> None:
         """Make the current prompt safe for the next queued input."""
@@ -589,6 +687,8 @@ class FakeWorkerAdapter:
         with self._lock:
             if session.stopped:
                 raise FakeAdapterError("session_stopped")
+            if session.handoff_held and not session.writer_enabled:
+                raise FakeAdapterError("handoff_writer_disabled")
             if session.checkpointed:
                 raise FakeAdapterError("handoff_checkpointed")
             session.prompt_busy = False
@@ -618,6 +718,15 @@ class FakeWorkerAdapter:
     @property
     def inspect_call_count(self) -> int:
         return self._inspect_call_count
+
+    @property
+    def handoff_resume_count(self) -> int:
+        return self._handoff_resume_count
+
+    @property
+    def handoff_resume_instructions(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._handoff_resume_instructions)
 
     def pending_events(self, handle: AdapterSessionHandle) -> tuple[AdapterEvent, ...]:
         session = self._session(handle)
@@ -712,6 +821,9 @@ class _FakeSession:
         execution_id: UUID,
         workspace_digest: str,
         handoff_context: tuple[UUID, str, int],
+        handoff_held: bool,
+        handoff_instruction: str | None,
+        handoff_fencing_token: int,
     ) -> None:
         self.handle = handle
         self.events = events
@@ -719,12 +831,33 @@ class _FakeSession:
         self.execution_id = execution_id
         self.workspace_digest = workspace_digest
         self.handoff_context = handoff_context
+        self.handoff_held = handoff_held
+        self.handoff_instruction = handoff_instruction
+        self.handoff_fencing_token = handoff_fencing_token
+        self.writer_enabled = not handoff_held
         self.last_accepted_sequence = 0
         self.checkpointed = False
         self.checkpoint_sequence = 0
         self.expected_stop_operation_id: UUID | None = None
         self.prompt_busy = False
         self.stopped = False
+
+
+def _handoff_facts(
+    materialization: ContextMaterializationV1 | None,
+) -> Mapping[str, object] | None:
+    if materialization is None:
+        return None
+    facts = materialization.control_plane_facts.facts
+    handoff = facts.get("handoff")
+    return handoff if isinstance(handoff, Mapping) else None
+
+
+def _handoff_instruction(facts: Mapping[str, object]) -> str:
+    instruction = facts.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise ValueError("handoff context is missing its resume instruction")
+    return instruction.strip()
 
 
 def _validate_context(
