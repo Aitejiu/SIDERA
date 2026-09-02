@@ -44,6 +44,10 @@ from sidera_control_plane.domain.plan_revisions import (
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
 if TYPE_CHECKING:
+    from sidera_control_plane.application.collaboration_decisions import (
+        CollaborationDecisionApplicationResult,
+        CollaborationDecisionService,
+    )
     from sidera_control_plane.application.collaboration_runtime_invoker import (
         RuntimeInvocationFailure,
         RuntimeInvocationResult,
@@ -81,6 +85,7 @@ class CollaborationReconciler:
         fact_store_factory: FactStoreFactory,
         runtime_resolver_factory: RuntimeResolverFactory,
         projection_assembler: CollaborationProjectionAssembler | None = None,
+        decision_service: CollaborationDecisionService | None = None,
         evaluation_lease_ttl: timedelta = timedelta(minutes=5),
         recovery_limit: int = 100,
         default_workspace_id: UUID | None = None,
@@ -98,6 +103,7 @@ class CollaborationReconciler:
         self._projection_assembler = (
             projection_assembler or CollaborationProjectionAssembler()
         )
+        self._decision_service = decision_service
         self._evaluation_lease_ttl = evaluation_lease_ttl
         self._recovery_limit = recovery_limit
         self._default_workspace_id = default_workspace_id
@@ -180,6 +186,20 @@ class CollaborationReconciler:
             )
             uow.collaboration_evaluations.save(evaluation, previous_version)
             return True
+
+    def complete_decision(
+        self,
+        prepared: PreparedCollaborationEvaluation,
+        result: RuntimeInvocationResult,
+        *,
+        now: datetime,
+        decision_service: CollaborationDecisionService | None = None,
+    ) -> CollaborationDecisionApplicationResult:
+        """Apply a parsed Runtime result through the phase-C transaction."""
+        service = decision_service or self._decision_service
+        if service is None or not hasattr(service, "apply"):
+            raise RuntimeError("a collaboration decision service is required")
+        return service.apply(prepared, result, now=now)
 
     def complete_failure(
         self,

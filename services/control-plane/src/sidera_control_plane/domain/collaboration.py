@@ -651,6 +651,29 @@ class CollaborationRun:
         self.next_evaluation_at = None
         self._bump(now)
 
+    def record_decision(
+        self,
+        *,
+        decision_id: UUID,
+        fact_cursor: int,
+        now: datetime,
+    ) -> None:
+        """Record the last applied Decision and consume its wakeups."""
+        if self.status is CollaborationRunStatus.PENDING:
+            raise InvalidTransition(
+                "a pending collaboration run cannot record a Decision"
+            )
+        _uuid(decision_id, "decision_id")
+        _non_negative_int(fact_cursor, "fact_cursor")
+        if fact_cursor < self.last_evaluated_change_cursor:
+            raise ValidationError("decision cursor cannot move backwards")
+        _aware(now, "collaboration decision time")
+        self.last_decision_id = decision_id
+        self.last_evaluated_change_cursor = fact_cursor
+        if self.status is CollaborationRunStatus.ACTIVE:
+            self.next_evaluation_at = None
+        self._bump(now)
+
     def _bump(self, now: datetime) -> None:
         self.resource_version += 1
         self.updated_at = now

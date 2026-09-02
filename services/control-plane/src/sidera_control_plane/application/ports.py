@@ -1088,7 +1088,11 @@ class CollaborationLedgerRepositoryPort(Protocol):
         raise NotImplementedError
 
     def get_release_for_request(
-        self, workspace_id: UUID, request_id: UUID
+        self,
+        workspace_id: UUID,
+        request_id: UUID,
+        *,
+        for_update: bool = False,
     ) -> RuntimeRelease | None:
         raise NotImplementedError
 

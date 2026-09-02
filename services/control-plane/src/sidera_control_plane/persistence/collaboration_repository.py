@@ -505,14 +505,19 @@ class CollaborationLedgerRepository:
         self._session.add_all(_release_model(item) for item in releases)
 
     def get_release_for_request(
-        self, workspace_id: UUID, request_id: UUID
+        self,
+        workspace_id: UUID,
+        request_id: UUID,
+        *,
+        for_update: bool = False,
     ) -> RuntimeRelease | None:
-        row = self._session.scalar(
-            select(RuntimeReleaseModel).where(
-                RuntimeReleaseModel.workspace_id == workspace_id,
-                RuntimeReleaseModel.execution_request_id == request_id,
-            )
+        statement = select(RuntimeReleaseModel).where(
+            RuntimeReleaseModel.workspace_id == workspace_id,
+            RuntimeReleaseModel.execution_request_id == request_id,
         )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
         return _to_release(row) if row is not None else None
 
 
