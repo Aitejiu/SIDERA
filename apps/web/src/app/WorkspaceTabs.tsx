@@ -134,6 +134,7 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
     const title = graph?.overview.title;
     const route = currentRoute.kind === "task-index"
       || currentRoute.kind === "chat"
+      || currentRoute.kind === "collaboration"
       || title === undefined
       ? currentRoute
       : { ...currentRoute, title };
@@ -209,6 +210,20 @@ export function semanticTabForLocation(
       id: "planning-new",
       kind: "planning-new",
       title: "新建任务",
+      href: `${location.pathname}${location.search}`,
+      closeable: true,
+    };
+  }
+
+  const collaborationMatch = location.pathname.match(
+    new RegExp(`^/workspaces/${escapeRegExp(workspaceId)}/tasks/([^/]+)/collaboration$`),
+  );
+  if (collaborationMatch?.[1] !== undefined) {
+    const rootTaskId = decodeURIComponent(collaborationMatch[1]);
+    return {
+      id: `collaboration:${rootTaskId}`,
+      kind: "collaboration",
+      title: "协同记录",
       href: `${location.pathname}${location.search}`,
       closeable: true,
     };
@@ -364,6 +379,8 @@ function tabDetail(tab: WorkspaceTab): string {
       return "规划请求";
     case "root-task":
       return "任务";
+    case "collaboration":
+      return "协同记录";
     case "subtask":
       return "子任务";
     case "worker-item":

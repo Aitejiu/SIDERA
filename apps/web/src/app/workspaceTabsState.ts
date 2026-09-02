@@ -5,6 +5,7 @@ export type WorkspaceTabId =
   | "planning-new"
   | `planning:${string}`
   | `root-task:${string}`
+  | `collaboration:${string}`
   | `subtask:${string}:${string}`
   | `worker-item:${string}`
   | `chat:${string}`
@@ -38,6 +39,13 @@ export type WorkspaceTab =
       id: `root-task:${string}`;
       kind: "root-task";
       title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `collaboration:${string}`;
+      kind: "collaboration";
+      title: "协同记录";
       href: string;
       closeable: true;
     }
@@ -314,6 +322,7 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
   return value.closeable === true
     && ((value.id.startsWith("planning:") && value.kind === "planning")
       || (value.id.startsWith("root-task:") && value.kind === "root-task")
+      || (value.id.startsWith("collaboration:") && value.kind === "collaboration" && value.title === "协同记录")
       || (value.id.startsWith("subtask:") && value.kind === "subtask")
       || (value.id.startsWith("worker-item:") && value.kind === "worker-item"))
     && isWorkspaceHref(value.href, workspaceId);
@@ -336,6 +345,7 @@ function isTabId(value: unknown): value is WorkspaceTabId {
       value === "planning-new"
       || value.startsWith("planning:")
       || value.startsWith("root-task:")
+      || value.startsWith("collaboration:")
       || value.startsWith("subtask:")
       || value.startsWith("worker-item:")
       || value.startsWith("chat:")

@@ -47,6 +47,23 @@ const overviews = [
     ],
     last_change_cursor: 42,
     as_of: "2026-08-21T08:01:00Z",
+    collaboration: {
+      enabled: true,
+      status: "completed",
+      strategy_label: "all_required",
+      run_id: "60000000-0000-0000-0000-000000000002",
+      plan_generation: 1,
+      released_count: 1,
+      running_count: 0,
+      waiting_count: 0,
+      completed_count: 1,
+      blocked_subtask_count: 0,
+      blocked_subtasks: [],
+      latest_decision_summary: "已完成全部协同放行",
+      latest_decision_at: "2026-08-21T08:00:00Z",
+      attention_required: false,
+      detail_href: `/workspaces/${WORKSPACE_ID}/tasks/30000000-0000-0000-0000-000000000002/collaboration`,
+    },
   },
   {
     schema_version: 1,
@@ -106,6 +123,7 @@ describe("TaskListPage", () => {
     expect(screen.getByText("运行中 2")).toBeVisible();
     expect(screen.getByText("失败 1")).toBeVisible();
     expect(screen.getByText("下一个 trace-viewer")).toBeVisible();
+    expect(screen.getByText("协同已完成")).toBeVisible();
     expect(screen.getByText("Ship control room / Trace viewer needs input")).toBeVisible();
     expect(screen.getByText("调度等待")).toBeVisible();
     expect(screen.getByText("1 个候选执行节点未配置运行环境")).toBeVisible();

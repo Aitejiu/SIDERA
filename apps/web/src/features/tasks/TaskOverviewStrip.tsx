@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowRight, Check, CirclePlay, Clock3, GitBranch, Layers
 import { Link } from "react-router-dom";
 
 import type { TaskOverview } from "./api";
+import { collaborationStatus } from "@/features/collaboration/CollaborationSummary";
 
 export function TaskOverviewStrip({
   workspaceId,
@@ -10,6 +11,10 @@ export function TaskOverviewStrip({
   workspaceId: string;
   overview: TaskOverview;
 }) {
+  const collaboration = overview.collaboration;
+  const collaborationAttention = collaboration?.attention_required === true
+    ? collaboration.blocked_subtasks[0]
+    : undefined;
   return (
     <Link
       className="task-row"
@@ -36,6 +41,11 @@ export function TaskOverviewStrip({
           {overview.failed_subtask_count > 0 ? <AlertTriangle size={13} aria-hidden="true" /> : null}
           失败 {overview.failed_subtask_count}
         </span>
+        {collaboration ? (
+          <span className={`task-row__collaboration task-row__collaboration--${collaboration.status}`}>
+            {collaborationStatus(collaboration.status).label}
+          </span>
+        ) : null}
       </div>
       <div className="task-row__metric task-row__metric--next">
         <span className="eyebrow">下一节点</span>
@@ -44,7 +54,14 @@ export function TaskOverviewStrip({
       </div>
       <div className="task-row__attention">
         <span className="eyebrow">需要我</span>
-        {overview.attention_items[0] ? (
+        {collaborationAttention ? (
+          <>
+            <strong className="attention-value"><AlertTriangle size={14} aria-hidden="true" />{overview.title} / {collaborationAttention.title}</strong>
+            <span className="task-row__attention-label">协同卡点</span>
+            <span>{collaborationAttention.reason}</span>
+            {collaboration !== null && collaboration !== undefined && collaboration.blocked_subtask_count > 1 ? <span>另有 {collaboration.blocked_subtask_count - 1} 个子任务待处理</span> : null}
+          </>
+        ) : overview.attention_items[0] ? (
           <>
             <strong className="attention-value"><AlertTriangle size={14} aria-hidden="true" />{overview.title} / {overview.attention_items[0].subtask_title}</strong>
             <span className="task-row__attention-label">

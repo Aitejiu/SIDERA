@@ -6,6 +6,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 import { AttentionPanel } from "@/features/attention/AttentionPanel";
+import { CollaborationSummary } from "@/features/collaboration/CollaborationSummary";
 
 import {
   getTask,
@@ -192,6 +193,11 @@ function TaskDeliveryContent({
           <span className="mono-label">CURSOR {graph.overview.last_change_cursor}</span>
         </div>
       </header>
+
+      <CollaborationSummary
+        summary={graph.overview.collaboration}
+        onOpenSubtask={onOpenSubtask}
+      />
 
       <div className="task-detail-main">
         <PlanConvergenceStrip

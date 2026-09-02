@@ -83,6 +83,29 @@ const graph = {
     },
     last_change_cursor: 17,
     as_of: "2026-08-22T08:01:00Z",
+    collaboration: {
+      enabled: true,
+      status: "attention",
+      strategy_label: "all_required",
+      run_id: "60000000-0000-0000-0000-000000000001",
+      plan_generation: 2,
+      released_count: 2,
+      running_count: 1,
+      waiting_count: 1,
+      completed_count: 1,
+      blocked_subtask_count: 1,
+      blocked_subtasks: [{
+        subtask_key: "verification",
+        title: "验收支付链路",
+        reason: "等待必要证据",
+        last_failure_at: "2026-08-22T08:00:00Z",
+        href: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/verification`,
+      }],
+      latest_decision_summary: "等待回调证据",
+      latest_decision_at: "2026-08-22T08:00:00Z",
+      attention_required: true,
+      detail_href: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/collaboration`,
+    },
   },
   nodes: [
     {
@@ -384,6 +407,19 @@ describe("TaskDetailPage", () => {
     expect(screen.getByTestId("route-location")).toHaveTextContent(
       `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/callback-idempotency`,
     );
+  });
+
+  it("shows the collaboration checkpoint on the root task before the board", async () => {
+    renderPage();
+
+    const collaboration = await screen.findByRole("region", { name: "协同调度" });
+    expect(within(collaboration).getByText("验收支付链路")).toBeVisible();
+    expect(within(collaboration).getByText("等待必要证据")).toBeVisible();
+    expect(within(collaboration).getByRole("link", { name: "查看协同记录" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/collaboration`,
+    );
+    expect(within(collaboration).queryByText("60000000-0000-0000-0000-000000000001")).not.toBeInTheDocument();
   });
 
   it("shows exact knowledge refs, delivery retry state, and review counts without loading body", async () => {

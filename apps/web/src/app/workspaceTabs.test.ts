@@ -114,6 +114,16 @@ function contextPackageTab(packageId: string): WorkspaceTab {
   };
 }
 
+function collaborationTab(rootTaskId: string): WorkspaceTab {
+  return {
+    id: `collaboration:${rootTaskId}`,
+    kind: "collaboration",
+    title: "协同记录",
+    href: `/workspaces/ws-1/tasks/${rootTaskId}/collaboration`,
+    closeable: true,
+  };
+}
+
 function stateWithTaskSubtaskAndWorker() {
   let state = taskIndex();
   state = reduceTabs(state, openTab(rootTaskTab("task-1")));
@@ -212,6 +222,23 @@ describe("workspace tabs", () => {
       "planning:request-1",
       "root-task:task-1",
     ]);
+  });
+
+  it("keeps a collaboration record as a separate tab from its root task", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(rootTaskTab("task-1")));
+    state = reduceTabs(state, openTab(collaborationTab("task-1")));
+
+    expect(state.tabs.map((tab) => tab.id)).toEqual([
+      "task-index",
+      "root-task:task-1",
+      "collaboration:task-1",
+    ]);
+    expect(state.activeTabId).toBe("collaboration:task-1");
+
+    const closed = reduceTabs(state, closeTab("collaboration:task-1"));
+    expect(closed.activeTabId).toBe("root-task:task-1");
+    expect(closed.navigationHref).toBe("/workspaces/ws-1/tasks/task-1");
   });
 
   it("keeps multiple chat threads as separate semantic tabs", () => {
@@ -315,6 +342,13 @@ describe("workspace tabs", () => {
       href: "/workspaces/ws-1/tasks/task-1/revisions/request-1",
       closeable: true,
     });
+  });
+
+  it("maps a collaboration route to its own semantic tab", () => {
+    expect(semanticTabForLocation("ws-1", {
+      pathname: "/workspaces/ws-1/tasks/task-1/collaboration",
+      search: "",
+    })).toEqual(collaborationTab("task-1"));
   });
 
   it("discards damaged or cross-workspace session data", () => {

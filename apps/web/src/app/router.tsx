@@ -31,6 +31,7 @@ import { PlanningBriefForm } from "@/features/planning/PlanningBriefForm";
 import { PlanningPage } from "@/features/planning/PlanningPage";
 import { PlanRevisionPage } from "@/features/planning/PlanRevisionPage";
 import { ContextPackagePage } from "@/features/context/ContextPackagePage";
+import { CollaborationDetailPage } from "@/features/collaboration/CollaborationDetailPage";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -81,6 +82,10 @@ export const routes: RouteObject[] = [
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId",
         element: <TaskDetailPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/tasks/:rootTaskId/collaboration",
+        element: <CollaborationDetailPage />,
       },
       {
         path: "/workspaces/:workspaceId/tasks/:rootTaskId/revisions/:planningRequestId",
