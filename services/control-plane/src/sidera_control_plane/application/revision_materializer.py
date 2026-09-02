@@ -12,6 +12,10 @@ from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_item_materializer import (
     WorkerItemMaterializer,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicySnapshotV1,
+    resolve_collaboration_policy,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import (
     DomainError,
@@ -48,6 +52,7 @@ from sidera_control_plane.domain.planning_proposals import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import (
     SubtaskPlanItem,
@@ -112,11 +117,19 @@ class RevisionMaterializer:
         envelope: CommandEnvelope,
         now: datetime,
     ) -> RevisionMaterializationResult:
-        payload = self._validate_input(
+        proposal_payload = self._validate_input(
             request=request,
             proposal=proposal,
             profile=profile,
             envelope=envelope,
+        )
+        collaboration_policy = self._resolve_collaboration_policy(
+            request, proposal_payload
+        )
+        payload = (
+            proposal_payload.as_v3()
+            if isinstance(proposal_payload, PlanningRevisionProposalPayloadV4)
+            else proposal_payload
         )
         existing = uow.proposal_materializations.get_by_request(
             request.id, request.workspace_id
@@ -186,7 +199,11 @@ class RevisionMaterializer:
             != proposal.content_hash
         ):
             raise ValidationError("proposal content hash is invalid")
-        diff = self._diff_normalizer.normalize(base_snapshot, payload)
+        diff = self._diff_normalizer.normalize(
+            base_snapshot,
+            proposal_payload,
+            collaboration_policy=collaboration_policy,
+        )
         expected_diff_hash = _required_hash(envelope.payload, "expected_diff_hash")
         if diff.diff_hash != expected_diff_hash:
             raise ValidationError(
@@ -312,6 +329,7 @@ class RevisionMaterializer:
             worker_ids=target_worker_ids,
             published_by=envelope.actor_id,
             now=now,
+            collaboration_policy=collaboration_policy,
         )
         uow.plans.add(target_snapshot)
         uow.flush()
@@ -446,7 +464,7 @@ class RevisionMaterializer:
         proposal: ProposalRevision,
         profile: PlanningProfile,
         envelope: CommandEnvelope,
-    ) -> PlanningRevisionProposalPayloadV3:
+    ) -> PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4:
         if request.kind is not PlanningRequestKind.REVISION:
             raise ValidationError("ConfirmPlanRevision requires a revision request")
         if proposal.kind is not PlanningRequestKind.REVISION:
@@ -454,8 +472,11 @@ class RevisionMaterializer:
         if proposal.planning_request_id != request.id:
             raise ValidationError("proposal does not belong to the planning request")
         payload = proposal.payload
-        if not isinstance(payload, PlanningRevisionProposalPayloadV3):
-            raise ValidationError("revision proposal schema v3 is required")
+        if not isinstance(
+            payload,
+            (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+        ):
+            raise ValidationError("revision proposal schema v3 or v4 is required")
         if request.base_descriptor != payload.base_descriptor:
             raise ValidationError("proposal base does not match the planning request")
         if request.current_proposal_revision != proposal.revision:
@@ -516,11 +537,39 @@ class RevisionMaterializer:
         if (
             proposal.profile_descriptor.profile_id != profile.id
             or proposal.profile_descriptor.profile_version != profile.version
+            or proposal.profile_descriptor.planner_module_instance_id
+            != profile_snapshot.planner_module_instance_id
+            or proposal.profile_descriptor.planner_module_config_version
+            != profile_snapshot.planner_module_config_version
             or proposal.proposal_schema_version
             != profile_snapshot.proposal_schema_version
         ):
             raise ValidationError("proposal profile does not match confirmation")
+
+        try:
+            current_snapshot = profile.snapshot(profile_snapshot.planner_capabilities)
+        except ValidationError as exc:
+            raise ValidationError(
+                "planning profile snapshot does not match confirmation"
+            ) from exc
+        if current_snapshot != profile_snapshot:
+            raise ValidationError(
+                "planning profile snapshot does not match confirmation"
+            )
         return payload
+
+    @staticmethod
+    def _resolve_collaboration_policy(
+        request: PlanningRequest,
+        payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    ) -> CollaborationPolicySnapshotV1 | None:
+        if not isinstance(payload, PlanningRevisionProposalPayloadV4):
+            return None
+        return resolve_collaboration_policy(
+            payload.collaboration_policy_request,
+            request.profile_snapshot.collaboration_runtime_binding,
+            subtask_keys=frozenset(item.key for item in payload.subtasks),
+        )
 
     @staticmethod
     def _validate_previous_transitions(
@@ -799,6 +848,7 @@ class RevisionMaterializer:
         worker_ids: Mapping[str, UUID],
         published_by: str,
         now: datetime,
+        collaboration_policy: CollaborationPolicySnapshotV1 | None,
     ) -> TaskPlanSnapshot:
         subtasks = tuple(
             SubtaskPlanItem(
@@ -832,7 +882,11 @@ class RevisionMaterializer:
         )
         return TaskPlanSnapshot.create(
             snapshot_id=uuid4(),
-            schema_version=2,
+            schema_version=(
+                3
+                if isinstance(proposal.payload, PlanningRevisionProposalPayloadV4)
+                else 2
+            ),
             workspace_id=request.workspace_id,
             root_task_id=payload.base_descriptor.root_task_id,
             generation=payload.base_descriptor.plan_generation + 1,
@@ -852,6 +906,7 @@ class RevisionMaterializer:
             subtask_milestones=payload.subtask_milestones,
             subtask_dependencies=payload.subtask_dependencies,
             worker_item_dependencies=payload.worker_item_dependencies,
+            collaboration_policy=collaboration_policy,
         )
 
     @staticmethod

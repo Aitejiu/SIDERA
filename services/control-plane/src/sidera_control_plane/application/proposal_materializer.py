@@ -16,6 +16,11 @@ from sidera_control_plane.application.worker_item_materializer import (
     MaterializedPlan,
     WorkerItemMaterializer,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationGateMode,
+    CollaborationPolicySnapshotV1,
+    resolve_collaboration_policy,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.events import EventData
@@ -68,8 +73,12 @@ class ProposalMaterializationResult:
 class ProposalMaterializer:
     """Materialize one confirmed proposal without dispatching another command."""
 
-    def __init__(self, worker_item_materializer: WorkerItemMaterializer | None = None) -> None:
-        self._worker_item_materializer = worker_item_materializer or WorkerItemMaterializer()
+    def __init__(
+        self, worker_item_materializer: WorkerItemMaterializer | None = None
+    ) -> None:
+        self._worker_item_materializer = (
+            worker_item_materializer or WorkerItemMaterializer()
+        )
         self._work_context_factory = WorkContextRevisionFactory()
 
     def materialize(
@@ -84,6 +93,7 @@ class ProposalMaterializer:
     ) -> ProposalMaterializationResult:
         previous_request_version = request.version
         self._validate_input(request, proposal, profile, envelope)
+        collaboration_policy = self._resolve_collaboration_policy(request, proposal)
 
         existing = uow.proposal_materializations.get_by_request(
             request.id, request.workspace_id
@@ -166,6 +176,7 @@ class ProposalMaterializer:
             subtask_task_mapping=subtask_task_mapping,
             published_by=envelope.actor_id,
             now=now,
+            collaboration_policy=collaboration_policy,
         )
         materialized_plan = self._worker_item_materializer.materialize(
             uow, snapshot, now=now
@@ -180,10 +191,9 @@ class ProposalMaterializer:
             materialized_plan=materialized_plan,
             subtask_task_mapping=subtask_task_mapping,
             now=now,
+            collaboration_policy=collaboration_policy,
         )
-        self._evaluate_initial_gates(
-            execution_requests, dependencies, now=now
-        )
+        self._evaluate_initial_gates(execution_requests, dependencies, now=now)
         for execution_request in execution_requests:
             uow.execution_requests.add(execution_request)
         for dependency in dependencies:
@@ -194,9 +204,13 @@ class ProposalMaterializer:
             for item in materialized_plan.canonical.worker_items
         }
         if any(value is None for value in worker_item_mapping.values()):
-            raise ValidationError("WorkerItem materialization did not resolve every key")
+            raise ValidationError(
+                "WorkerItem materialization did not resolve every key"
+            )
         resolved_worker_item_mapping = {
-            key: value for key, value in worker_item_mapping.items() if value is not None
+            key: value
+            for key, value in worker_item_mapping.items()
+            if value is not None
         }
         execution_request_mapping = {
             item.worker_item_key: item.id for item in execution_requests
@@ -212,9 +226,7 @@ class ProposalMaterializer:
             subtask_task_mapping=subtask_task_mapping,
             worker_item_mapping=resolved_worker_item_mapping,
             execution_request_mapping=execution_request_mapping,
-            deep_link=(
-                f"/workspaces/{request.workspace_id}/tasks/{root_task.id}"
-            ),
+            deep_link=(f"/workspaces/{request.workspace_id}/tasks/{root_task.id}"),
             confirmed_by=envelope.actor_id,
             created_at=now,
         )
@@ -302,33 +314,42 @@ class ProposalMaterializer:
         if request.current_proposal_revision != proposal.revision:
             raise ValidationError("proposal revision does not match current proposal")
         if request.current_proposal_content_hash != proposal.content_hash:
-            raise ValidationError("proposal content hash does not match current proposal")
+            raise ValidationError(
+                "proposal content hash does not match current proposal"
+            )
         revision = _positive_int(envelope.payload, "proposal_revision")
         content_hash = _content_hash(envelope.payload, "proposal_content_hash")
         if revision != proposal.revision:
             raise ValidationError("proposal revision does not match current proposal")
         if content_hash != proposal.content_hash:
-            raise ValidationError("proposal content hash does not match current proposal")
+            raise ValidationError(
+                "proposal content hash does not match current proposal"
+            )
         profile_id = _uuid(envelope.payload, "profile_id")
         profile_version = _positive_int(envelope.payload, "profile_version")
         if profile.id != profile_id or profile.version != profile_version:
             raise ValidationError("planning profile does not match confirmation")
         if request.planning_profile_id != profile.id:
-            raise ValidationError("planning request profile does not match confirmation")
+            raise ValidationError(
+                "planning request profile does not match confirmation"
+            )
         if request.planning_profile_version != profile.version:
-            raise ValidationError("planning request profile version does not match confirmation")
+            raise ValidationError(
+                "planning request profile version does not match confirmation"
+            )
         snapshot = request.profile_snapshot
         if (
             snapshot.profile_id != profile.id
             or snapshot.profile_version != profile.version
             or snapshot.workspace_id != request.workspace_id
-            or snapshot.planner_module_instance_id
-            != profile.planner_module_instance_id
+            or snapshot.planner_module_instance_id != profile.planner_module_instance_id
             or snapshot.planner_module_config_version
             != profile.planner_module_config_version
             or snapshot.proposal_schema_version != profile.proposal_schema_version
         ):
-            raise ValidationError("planning profile snapshot does not match confirmation")
+            raise ValidationError(
+                "planning profile snapshot does not match confirmation"
+            )
         descriptor = proposal.profile_descriptor
         if (
             descriptor.profile_id != profile.id
@@ -338,9 +359,13 @@ class ProposalMaterializer:
             or descriptor.planner_module_config_version
             != snapshot.planner_module_config_version
         ):
-            raise ValidationError("proposal profile descriptor does not match confirmation")
+            raise ValidationError(
+                "proposal profile descriptor does not match confirmation"
+            )
         if proposal.proposal_schema_version != snapshot.proposal_schema_version:
-            raise ValidationError("proposal schema version does not match profile snapshot")
+            raise ValidationError(
+                "proposal schema version does not match profile snapshot"
+            )
         expected_hash = proposal_content_hash(
             proposal.payload,
             brief_revision=proposal.brief_revision,
@@ -348,6 +373,30 @@ class ProposalMaterializer:
         )
         if expected_hash != proposal.content_hash:
             raise ValidationError("proposal content hash is invalid")
+
+        try:
+            current_snapshot = profile.snapshot(snapshot.planner_capabilities)
+        except ValidationError as exc:
+            raise ValidationError(
+                "planning profile snapshot does not match confirmation"
+            ) from exc
+        if current_snapshot != snapshot:
+            raise ValidationError(
+                "planning profile snapshot does not match confirmation"
+            )
+
+    @staticmethod
+    def _resolve_collaboration_policy(
+        request: PlanningRequest, proposal: ProposalRevision
+    ) -> CollaborationPolicySnapshotV1 | None:
+        payload = proposal.payload
+        if not isinstance(payload, PlanningProposalPayloadV4):
+            return None
+        return resolve_collaboration_policy(
+            payload.collaboration_policy_request,
+            request.profile_snapshot.collaboration_runtime_binding,
+            subtask_keys=frozenset(item.key for item in payload.subtasks),
+        )
 
     @staticmethod
     def _snapshot(
@@ -358,6 +407,7 @@ class ProposalMaterializer:
         subtask_task_mapping: Mapping[str, UUID],
         published_by: str,
         now: datetime,
+        collaboration_policy: CollaborationPolicySnapshotV1 | None,
     ) -> TaskPlanSnapshot:
         payload = proposal.payload
         source_ref = (
@@ -396,7 +446,7 @@ class ProposalMaterializer:
         )
         return TaskPlanSnapshot.create(
             snapshot_id=uuid4(),
-            schema_version=2,
+            schema_version=3 if isinstance(payload, PlanningProposalPayloadV4) else 2,
             workspace_id=request.workspace_id,
             root_task_id=root_task_id,
             generation=1,
@@ -413,6 +463,7 @@ class ProposalMaterializer:
             subtask_milestones=payload.subtask_milestones,
             subtask_dependencies=payload.subtask_dependencies,
             worker_item_dependencies=_plan_worker_dependencies(payload),
+            collaboration_policy=collaboration_policy,
         )
 
     @staticmethod
@@ -423,6 +474,7 @@ class ProposalMaterializer:
         materialized_plan: MaterializedPlan,
         subtask_task_mapping: Mapping[str, UUID],
         now: datetime,
+        collaboration_policy: CollaborationPolicySnapshotV1 | None,
     ) -> tuple[tuple[ExecutionRequest, ...], tuple[ExecutionRequestDependency, ...]]:
         payload = proposal.payload
         worker_by_key = {
@@ -439,7 +491,9 @@ class ProposalMaterializer:
             subtask_key = worker.subtask_key
             subtask_plan = subtask_by_key.get(subtask_key)
             if subtask_plan is None:
-                raise ValidationError(f"WorkerItem references unknown subtask: {subtask_key}")
+                raise ValidationError(
+                    f"WorkerItem references unknown subtask: {subtask_key}"
+                )
             execution_request = ExecutionRequest.create(
                 request_id=uuid4(),
                 workspace_id=request.workspace_id,
@@ -462,6 +516,12 @@ class ProposalMaterializer:
                 expected_artifact_refs=intent.expected_artifact_refs,
                 expected_evidence_refs=intent.required_evidence_refs,
                 expected_outputs=subtask_plan.expected_outputs,
+                collaboration_gate_mode=(
+                    CollaborationGateMode.RELEASE_REQUIRED
+                    if collaboration_policy is not None
+                    and collaboration_policy.effective_policy(subtask_key).enabled
+                    else CollaborationGateMode.UNMANAGED
+                ),
                 now=now,
             )
             requests_by_worker[worker.key] = execution_request
@@ -480,7 +540,9 @@ class ProposalMaterializer:
             evidence: tuple[str, ...] = (),
         ) -> None:
             if upstream == downstream:
-                raise ValidationError("execution request dependency cannot be a self edge")
+                raise ValidationError(
+                    "execution request dependency cannot be a self edge"
+                )
             key = (downstream, upstream)
             current = edges.get(key)
             if current is None:
@@ -577,7 +639,10 @@ class ProposalMaterializer:
         materialization: ProposalMaterialization,
     ) -> tuple[EventData, ...]:
         events: list[EventData] = []
-        for task, task_kind in ((root_task, "root"), *((task, "subtask") for task in subtasks)):
+        for task, task_kind in (
+            (root_task, "root"),
+            *((task, "subtask") for task in subtasks),
+        ):
             events.append(
                 _event(
                     envelope,

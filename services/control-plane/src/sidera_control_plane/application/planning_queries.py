@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -61,6 +62,101 @@ class PlanningUsageView:
     cost_microunits: int
     runtime_seconds: int
     context_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningCollaborationView:
+    mode: str
+    default_strategy: str | None
+    subtask_overrides: tuple[dict[str, object], ...]
+    provider: str | None
+    runtime_interface: str | None
+    runtime_config_version: int | None
+
+    @classmethod
+    def from_request_mapping(
+        cls,
+        request: object,
+        profile_snapshot: object,
+        *,
+        provider: str | None = None,
+    ) -> PlanningCollaborationView:
+        request_mapping = request if isinstance(request, Mapping) else {}
+        mode_value = request_mapping.get("mode")
+        mode = (
+            mode_value
+            if isinstance(mode_value, str) and mode_value in {"disabled", "enabled"}
+            else "disabled"
+        )
+        default_policy = request_mapping.get("default_policy")
+        default_mapping = default_policy if isinstance(default_policy, Mapping) else {}
+        default_strategy = (
+            _safe_text(default_mapping.get("strategy_id"))
+            if mode == "enabled"
+            else None
+        )
+        raw_overrides = request_mapping.get("subtask_overrides")
+        overrides: list[dict[str, object]] = []
+        if isinstance(raw_overrides, (list, tuple)):
+            for raw_override in raw_overrides:
+                if not isinstance(raw_override, Mapping):
+                    continue
+                subtask_key = _safe_text(raw_override.get("subtask_key"))
+                strategy_id = _safe_text(raw_override.get("strategy_id"))
+                enabled = raw_override.get("enabled")
+                if (
+                    subtask_key is None
+                    or strategy_id is None
+                    or not isinstance(enabled, bool)
+                ):
+                    continue
+                overrides.append(
+                    {
+                        "subtask_key": subtask_key,
+                        "enabled": enabled,
+                        "strategy_id": strategy_id,
+                    }
+                )
+
+        binding_value = (
+            profile_snapshot.get("collaboration_runtime_binding")
+            if isinstance(profile_snapshot, Mapping)
+            else None
+        )
+        binding = binding_value if isinstance(binding_value, Mapping) else {}
+        runtime_interface = (
+            _safe_text(binding.get("runtime_interface_version"))
+            if mode == "enabled"
+            else None
+        )
+        config_version = binding.get("runtime_config_version")
+        runtime_config_version = (
+            config_version
+            if mode == "enabled"
+            and isinstance(config_version, int)
+            and not isinstance(config_version, bool)
+            and config_version >= 1
+            else None
+        )
+        safe_provider = _safe_text(provider) if mode == "enabled" else None
+        return cls(
+            mode=mode,
+            default_strategy=default_strategy,
+            subtask_overrides=tuple(overrides),
+            provider=safe_provider,
+            runtime_interface=runtime_interface,
+            runtime_config_version=runtime_config_version,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "default_strategy": self.default_strategy,
+            "subtask_overrides": [dict(item) for item in self.subtask_overrides],
+            "provider": self.provider,
+            "runtime_interface": self.runtime_interface,
+            "runtime_config_version": self.runtime_config_version,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +242,7 @@ class PlanningProposalView:
     content_hash: str
     derived_diff: dict[str, object]
     display: dict[str, object]
+    collaboration: PlanningCollaborationView
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +273,13 @@ class PlanningRequestPage:
     items: tuple[PlanningRequestSummaryView, ...]
     next_cursor: str | None
     last_change_cursor: int
+
+
+def _safe_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 class PlanningQueryStore(Protocol):

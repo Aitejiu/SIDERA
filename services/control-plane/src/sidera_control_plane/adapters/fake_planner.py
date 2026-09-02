@@ -21,7 +21,10 @@ from sidera_control_plane.application.planner_runtime import (
 from sidera_control_plane.application.revision_planning_context import (
     RevisionPlanningContextV1,
 )
-from sidera_control_plane.domain.collaboration import CollaborationPolicyRequestV1
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicyRequestV1,
+    resolve_collaboration_policy,
+)
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextMaterializationV1,
@@ -136,7 +139,10 @@ class FakePlannerAdapter:
 
     def probe(self, config: Mapping[str, object]) -> PlannerAdapterCapabilityProfile:
         configured_scenario = config.get("scenario")
-        if configured_scenario is not None and configured_scenario != self.config.scenario:
+        if (
+            configured_scenario is not None
+            and configured_scenario != self.config.scenario
+        ):
             raise ValueError("fake planner scenario must be explicitly configured")
         return self._CAPABILITIES
 
@@ -148,7 +154,10 @@ class FakePlannerAdapter:
     ) -> ContextAcknowledgement:
         if not isinstance(operation_id, UUID):
             raise TypeError("fake planner operation_id must be a UUID")
-        if materialization.schema_version not in self._CAPABILITIES.context_package_versions:
+        if (
+            materialization.schema_version
+            not in self._CAPABILITIES.context_package_versions
+        ):
             raise ValueError("fake planner context materialization is unsupported")
         if materialization.total_byte_count > self._CAPABILITIES.max_context_bytes:
             raise ValueError("fake planner context materialization exceeds its limit")
@@ -165,7 +174,9 @@ class FakePlannerAdapter:
             operation_id=operation_id,
         )
 
-    def plan(self, planner_input: PlannerInput, control: PlannerRunControl) -> PlannerResult:
+    def plan(
+        self, planner_input: PlannerInput, control: PlannerRunControl
+    ) -> PlannerResult:
         if control.operation_id != planner_input.operation_id:
             return self._failure(
                 PlannerExplicitFailure,
@@ -174,7 +185,10 @@ class FakePlannerAdapter:
                 retryable=False,
                 unknown_outcome=False,
             )
-        if control.cancel_requested or control.operation_id in self._cancelled_operations:
+        if (
+            control.cancel_requested
+            or control.operation_id in self._cancelled_operations
+        ):
             return self._failure(
                 PlannerExplicitFailure,
                 code="cancelled",
@@ -182,7 +196,10 @@ class FakePlannerAdapter:
                 retryable=False,
                 unknown_outcome=False,
             )
-        if self.config.scenario == "clarification" and not planner_input.brief.user_feedback:
+        if (
+            self.config.scenario == "clarification"
+            and not planner_input.brief.user_feedback
+        ):
             return PlannerClarificationResult(
                 clarifications=(
                     PlanningClarification.create(
@@ -250,11 +267,19 @@ class FakePlannerAdapter:
                     payload = _revision_proposal_payload_v4(
                         payload, self.config.collaboration_mode
                     )
+                collaboration_policy = (
+                    resolve_collaboration_policy(
+                        payload.collaboration_policy_request,
+                        planner_input.profile_snapshot.collaboration_runtime_binding,
+                        subtask_keys=frozenset(item.key for item in payload.subtasks),
+                    )
+                    if isinstance(payload, PlanningRevisionProposalPayloadV4)
+                    else None
+                )
                 derived_diff = RevisionDiffNormalizer().normalize(
                     base_plan,
-                    payload._as_v3()
-                    if isinstance(payload, PlanningRevisionProposalPayloadV4)
-                    else payload,
+                    payload,
+                    collaboration_policy=collaboration_policy,
                 )
             except (DomainError, TypeError, ValueError):
                 return self._failure(
@@ -876,8 +901,7 @@ def _revision_control_room_payload(
 
     subtasks = tuple(target_subtask(key) for key in target_subtask_keys)
     workers = tuple(
-        target_worker(key)
-        for key in ("worker-a", "worker-b", "worker-c", "worker-e")
+        target_worker(key) for key in ("worker-a", "worker-b", "worker-c", "worker-e")
     )
     retired_subtask_id = base_subtasks["subtask-d"].task_id
     retired_worker_item_id = base_workers["worker-d"].worker_item_id

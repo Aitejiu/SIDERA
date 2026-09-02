@@ -3548,6 +3548,23 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** PlanningCollaborationResponse */
+        PlanningCollaborationResponse: {
+            /** Default Strategy */
+            default_strategy: string | null;
+            /** Mode */
+            mode: string;
+            /** Provider */
+            provider: string | null;
+            /** Runtime Config Version */
+            runtime_config_version: number | null;
+            /** Runtime Interface */
+            runtime_interface: string | null;
+            /** Subtask Overrides */
+            subtask_overrides: {
+                [key: string]: unknown;
+            }[];
+        };
         /** PlanningContextPatchDeliveryMetricResponse */
         PlanningContextPatchDeliveryMetricResponse: {
             /** Adapter */
@@ -3731,6 +3748,7 @@ export interface components {
         PlanningProposalResponse: {
             /** Brief Revision */
             brief_revision: number;
+            collaboration: components["schemas"]["PlanningCollaborationResponse"];
             /** Content Hash */
             content_hash: string;
             /**
@@ -4293,6 +4311,9 @@ export interface components {
             /** Affected Branch Paths */
             affected_branch_paths: string[];
             base: components["schemas"]["RevisionBaseResponse"];
+            collaboration: components["schemas"]["PlanningCollaborationResponse"];
+            /** Collaboration Policy Changes */
+            collaboration_policy_changes: components["schemas"]["RevisionFieldChangeResponse"][];
             /** Diff Hash */
             diff_hash: string;
             freshness: components["schemas"]["RevisionFreshnessResponse"];

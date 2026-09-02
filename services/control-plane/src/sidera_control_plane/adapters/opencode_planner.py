@@ -32,6 +32,7 @@ from sidera_control_plane.application.planner_runtime import (
 from sidera_control_plane.application.revision_planning_context import (
     RevisionPlanningContextV1,
 )
+from sidera_control_plane.domain.collaboration import resolve_collaboration_policy
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextMaterializationV1,
@@ -182,7 +183,10 @@ class OpenCodePlannerAdapter:
         """Validate the local context contract without starting an ACP session."""
         if not isinstance(operation_id, UUID):
             raise OpenCodePlannerError("planner operation_id must be a UUID")
-        if materialization.schema_version not in self._CAPABILITIES.context_package_versions:
+        if (
+            materialization.schema_version
+            not in self._CAPABILITIES.context_package_versions
+        ):
             raise OpenCodePlannerError("context materialization schema is unsupported")
         if materialization.total_byte_count > self._CAPABILITIES.max_context_bytes:
             raise OpenCodePlannerError("context materialization exceeds planner limit")
@@ -240,7 +244,9 @@ class OpenCodePlannerAdapter:
                 "session/prompt",
                 {
                     "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": _planner_prompt(planner_input)}],
+                    "prompt": [
+                        {"type": "text", "text": _planner_prompt(planner_input)}
+                    ],
                 },
                 timeout=self._remaining_timeout(control),
             )
@@ -342,7 +348,9 @@ class OpenCodePlannerAdapter:
                 },
             )
         except ACPProcessError as exc:
-            raise OpenCodePlannerError("OpenCode planner process is unavailable") from exc
+            raise OpenCodePlannerError(
+                "OpenCode planner process is unavailable"
+            ) from exc
 
     def _make_run_directory(self) -> Path:
         root = self._temp_root.resolve()
@@ -448,7 +456,9 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         "context_refs": [item.ref for item in planner_input.context_refs],
     }
     if planner_input.context_materialization is not None:
-        document["context_materialization"] = planner_input.context_materialization.to_mapping()
+        document["context_materialization"] = (
+            planner_input.context_materialization.to_mapping()
+        )
     if is_revision:
         if not isinstance(planner_input.planning_context, RevisionPlanningContextV1):
             raise OpenCodePlannerError(
@@ -502,7 +512,9 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
             separators=(",", ":"),
         )
         + "\n"
-        + json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + json.dumps(
+            document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
     )
     if planner_input.proposal_schema_version == 4:
         prompt += (
@@ -771,8 +783,7 @@ def _repair_prompt(diagnostic: str | None = None) -> str:
         "acceptance_criterion:0001, bare criterion-1, evidence:criterion-1, or "
         "free-form text. "
         "Keep the result directly executable and wait for SIDERA to handle Proposal "
-        "confirmation."
-        + detail
+        "confirmation." + detail
     )
 
 
@@ -821,11 +832,19 @@ def _parse_result(
                     kind=PlanningRequestKind.REVISION,
                     base_snapshot=base_plan,
                 )
+                collaboration_policy = (
+                    resolve_collaboration_policy(
+                        payload.collaboration_policy_request,
+                        planner_input.profile_snapshot.collaboration_runtime_binding,
+                        subtask_keys=frozenset(item.key for item in payload.subtasks),
+                    )
+                    if isinstance(payload, PlanningRevisionProposalPayloadV4)
+                    else None
+                )
                 derived_diff = RevisionDiffNormalizer().normalize(
                     base_plan,
-                    payload._as_v3()
-                    if isinstance(payload, PlanningRevisionProposalPayloadV4)
-                    else payload,
+                    payload,
+                    collaboration_policy=collaboration_policy,
                 )
             else:
                 payload = (
@@ -991,7 +1010,11 @@ def _response_text(
             content = content.get("text")
         if isinstance(content, str):
             message_id = update.get("messageId")
-            key = message_id if isinstance(message_id, str) and message_id else "__default__"
+            key = (
+                message_id
+                if isinstance(message_id, str) and message_id
+                else "__default__"
+            )
             if key not in message_chunks:
                 message_chunks[key] = []
                 message_order.append(key)

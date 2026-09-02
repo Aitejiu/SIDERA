@@ -52,6 +52,7 @@ from sidera_control_plane.application.secret_resolution import (
     SecretResolutionError,
     SecretResolver,
 )
+from sidera_control_plane.domain.collaboration import resolve_collaboration_policy
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -100,6 +101,7 @@ from sidera_control_plane.domain.planning_proposals import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.proposal_validation import validate_proposal
 from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
@@ -174,9 +176,7 @@ class RegistryPlannerAdapterFactory:
             raise PlanningAdapterUnavailable(
                 "planning_profile_unavailable", blocked=False
             )
-        if not isinstance(
-            definition.capabilities, PlannerAdapterCapabilityProfile
-        ):
+        if not isinstance(definition.capabilities, PlannerAdapterCapabilityProfile):
             raise PlanningAdapterUnavailable(
                 "planning_profile_unavailable", blocked=False
             )
@@ -321,7 +321,10 @@ class PlanningLeaseKeeper:
             request = uow.planning_requests.get(
                 self._request_id_for_run(uow), self._workspace_id
             )
-            if request is not None and request.status is PlanningRequestStatus.CANCELLED:
+            if (
+                request is not None
+                and request.status is PlanningRequestStatus.CANCELLED
+            ):
                 self._cancel_event.set()
                 return False
             if lease is None or not self._owns_active_lease(lease, now):
@@ -382,12 +385,9 @@ class PlanningRunner:
             raise ValueError("planning runner limits must be positive")
         if lease_renew_interval_seconds >= lease_ttl_seconds / 2:
             raise ValueError("lease renewal interval must be less than half the TTL")
-        if (
-            context_package_cutover_at is not None
-            and (
-                context_package_cutover_at.tzinfo is None
-                or context_package_cutover_at.utcoffset() is None
-            )
+        if context_package_cutover_at is not None and (
+            context_package_cutover_at.tzinfo is None
+            or context_package_cutover_at.utcoffset() is None
         ):
             raise ValueError("context_package_cutover_at must be timezone aware")
         self._uow_factory = uow_factory
@@ -437,16 +437,14 @@ class PlanningRunner:
         return PlanningBatchResult(
             claimed=len(claim_batch.items) + len(claim_batch.preblocked),
             succeeded=sum(
-                outcome.status is PlanningRunStatus.SUCCEEDED
-                for outcome in outcomes
+                outcome.status is PlanningRunStatus.SUCCEEDED for outcome in outcomes
             ),
             clarifications=sum(
                 outcome.status is PlanningRunStatus.NEEDS_CLARIFICATION
                 for outcome in outcomes
             ),
             failed=sum(
-                outcome.status == PlanningRunStatus.FAILED
-                for outcome in outcomes
+                outcome.status == PlanningRunStatus.FAILED for outcome in outcomes
             ),
             blocked=sum(
                 outcome.status is PlanningRunStatus.BLOCKED for outcome in outcomes
@@ -473,9 +471,7 @@ class PlanningRunner:
                 if self._context_materializer is not None and not self._legacy_run(
                     request_run.queued_at
                 ):
-                    gate = self._context_claim_gate(
-                        uow, request_run, now=now
-                    )
+                    gate = self._context_claim_gate(uow, request_run, now=now)
                     if gate == "wait":
                         continue
                     if isinstance(gate, str):
@@ -632,7 +628,11 @@ class PlanningRunner:
             dict.fromkeys(
                 (
                     snapshot.root_task_id,
-                    *(item.task_id for item in snapshot.subtasks if item.task_id is not None),
+                    *(
+                        item.task_id
+                        for item in snapshot.subtasks
+                        if item.task_id is not None
+                    ),
                 )
             )
         )
@@ -1099,7 +1099,9 @@ class PlanningRunner:
             )
 
     def _context_command(self, item: _ClaimedRun, *, action: str) -> CommandEnvelope:
-        package_id = item.context_package.package_id if item.context_package else item.run_id
+        package_id = (
+            item.context_package.package_id if item.context_package else item.run_id
+        )
         command_id = uuid5(
             NAMESPACE_URL,
             f"sidera:planner-context:{action}:{item.run_id}:{item.attempt}",
@@ -1214,12 +1216,27 @@ class PlanningRunner:
                 )
                 if not isinstance(
                     validated_payload,
-                    PlanningRevisionProposalPayloadV3,
+                    (
+                        PlanningRevisionProposalPayloadV3,
+                        PlanningRevisionProposalPayloadV4,
+                    ),
                 ):
-                    raise ValueError("revision proposal schema v3 is required")
+                    raise ValueError("revision proposal schema v3 or v4 is required")
+                collaboration_policy = (
+                    resolve_collaboration_policy(
+                        validated_payload.collaboration_policy_request,
+                        request.profile_snapshot.collaboration_runtime_binding,
+                        subtask_keys=frozenset(
+                            item.key for item in validated_payload.subtasks
+                        ),
+                    )
+                    if isinstance(validated_payload, PlanningRevisionProposalPayloadV4)
+                    else None
+                )
                 derived_diff = RevisionDiffNormalizer().normalize(
                     base_snapshot,
                     validated_payload,
+                    collaboration_policy=collaboration_policy,
                 )
             proposals = uow.planning_records.list_proposals(
                 item.request_id, item.workspace_id
@@ -1295,7 +1312,12 @@ class PlanningRunner:
                                 planning_run_id=run.id,
                                 actor_id=self._owner_id,
                             )
-                    except (CandidateProposalSpoolError, DomainError, TypeError, ValueError):
+                    except (
+                        CandidateProposalSpoolError,
+                        DomainError,
+                        TypeError,
+                        ValueError,
+                    ):
                         logger.warning(
                             "planner knowledge candidate was not queued",
                             extra={

@@ -6,6 +6,7 @@ from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.planning_queries import PlanningCollaborationView
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
 
@@ -123,6 +124,8 @@ class RevisionDiffView:
     base: RevisionBaseView
     target_descriptor_preview: RevisionTargetDescriptorView
     root_changes: tuple[RevisionFieldChangeView, ...]
+    collaboration_policy_changes: tuple[RevisionFieldChangeView, ...]
+    collaboration: PlanningCollaborationView
     subtask_changes: tuple[RevisionSubtaskChangeView, ...]
     worker_item_changes: tuple[RevisionWorkerItemChangeView, ...]
     subtask_dependency_changes: tuple[RevisionDependencyChangeView, ...]

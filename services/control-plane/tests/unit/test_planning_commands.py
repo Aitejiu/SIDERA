@@ -114,9 +114,7 @@ def module_facts(
     return definition, instance
 
 
-def profile(
-    instance_id: UUID, *, proposal_schema_version: int = 2
-) -> PlanningProfile:
+def profile(instance_id: UUID, *, proposal_schema_version: int = 2) -> PlanningProfile:
     return PlanningProfile(
         id=uuid4(),
         workspace_id=WORKSPACE_ID,
@@ -277,7 +275,10 @@ class PlanRepository:
         return None
 
     def get(self, snapshot_id: UUID, workspace_id: UUID):
-        if self.snapshot.id == snapshot_id and self.snapshot.workspace_id == workspace_id:
+        if (
+            self.snapshot.id == snapshot_id
+            and self.snapshot.workspace_id == workspace_id
+        ):
             return self.snapshot
         return None
 
@@ -685,7 +686,10 @@ def test_register_planner_module_requires_operator_and_rejects_secret_values() -
     secret_payload = register_module_payload()
     secret_payload["config"] = {"planning.api_key": "raw-secret"}
     with pytest.raises(ValidationError, match="secret"):
-        handler.handle(unit(definition, instance), envelope("RegisterPlannerModule", secret_payload))
+        handler.handle(
+            unit(definition, instance),
+            envelope("RegisterPlannerModule", secret_payload),
+        )
 
 
 def test_register_planner_module_creates_definition_and_instance() -> None:
@@ -721,15 +725,19 @@ def test_register_planning_profile_validates_module_and_persists_version() -> No
         ),
     )
 
-    assert result.data["planning_profile_id"] == str(unit_of_work.planning_profiles.stored.id)
-    assert result.data["profile_version"] == 1
-    assert unit_of_work.planning_profiles.stored.planner_module_instance_id == instance.id
-
-
-def test_register_planning_profile_pins_an_active_runtime_by_trusted_references() -> None:
-    planner_definition, planner_instance = module_facts(
-        proposal_schema_versions=(4,)
+    assert result.data["planning_profile_id"] == str(
+        unit_of_work.planning_profiles.stored.id
     )
+    assert result.data["profile_version"] == 1
+    assert (
+        unit_of_work.planning_profiles.stored.planner_module_instance_id == instance.id
+    )
+
+
+def test_register_planning_profile_pins_an_active_runtime_by_trusted_references() -> (
+    None
+):
+    planner_definition, planner_instance = module_facts(proposal_schema_versions=(4,))
     runtime_definition_id = uuid4()
     runtime_instance_id = uuid4()
     runtime_capabilities = CollaborationRuntimeCapabilityProfile(
@@ -798,7 +806,9 @@ def test_register_planning_profile_pins_an_active_runtime_by_trusted_references(
     assert "secret://runtime/key" not in repr(binding)
 
 
-def test_profile_payload_accepts_only_trusted_collaboration_runtime_references() -> None:
+def test_profile_payload_accepts_only_trusted_collaboration_runtime_references() -> (
+    None
+):
     payload = register_profile_payload(uuid4())
     payload["proposal_schema_version"] = 4
     payload.update(
@@ -847,10 +857,14 @@ def test_submit_planning_request_returns_request_and_run_ids() -> None:
     assert UUID(str(result.data["planning_run_id"]))
     assert result.data["brief_revision"] == 1
     assert unit_of_work.planning_requests.request is not None
-    assert unit_of_work.planning_requests.request.status is PlanningRequestStatus.SUBMITTED
+    assert (
+        unit_of_work.planning_requests.request.status is PlanningRequestStatus.SUBMITTED
+    )
 
 
-def test_cancel_planning_request_requires_expected_version_and_updates_request() -> None:
+def test_cancel_planning_request_requires_expected_version_and_updates_request() -> (
+    None
+):
     definition, instance = module_facts()
     stored_profile = profile(instance.id)
     request = PlanningRequest.create(
@@ -929,7 +943,9 @@ def test_answer_planning_clarification_creates_one_new_brief_and_run() -> None:
     assert len(unit_of_work.planning_records.saved_clarifications) == 1
 
 
-def test_answer_planning_clarification_rejects_partial_answers_without_mutation() -> None:
+def test_answer_planning_clarification_rejects_partial_answers_without_mutation() -> (
+    None
+):
     definition, instance = module_facts()
     stored_profile = profile(instance.id)
     request = waiting_request(stored_profile)
@@ -1263,7 +1279,10 @@ def test_submit_plan_revision_creates_queued_run_and_reuses_context_lineage() ->
     revision = unit_of_work.work_contexts.appended[-1][0]
     assert revision.reason is WorkContextRevisionReason.REPLANNED
     assert revision.brief_planning_request_id == revision_request.id
-    assert unit_of_work.context_assemblies.added[-1].consumer_id == revision_request.current_run_id
+    assert (
+        unit_of_work.context_assemblies.added[-1].consumer_id
+        == revision_request.current_run_id
+    )
     assert [event.event_type for event in unit_of_work.events.events[-2:]] == [
         "WorkContextRevised",
         "PlanRevisionRequested",
@@ -1354,3 +1373,21 @@ def test_submit_plan_revision_rejects_v2_profile_and_existing_active_revision() 
             unit_of_work,
             _submit_revision_envelope(root_task, snapshot, v3_profile),
         )
+
+
+def test_submit_plan_revision_accepts_v4_profile() -> None:
+    unit_of_work, root_task, snapshot, v4_profile = _revision_fixture(
+        proposal_schema_versions=(3, 4),
+        proposal_schema_version=4,
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        _submit_revision_envelope(root_task, snapshot, v4_profile),
+    )
+
+    assert result.data["planning_request_id"]
+    assert result.data["planning_run_id"]

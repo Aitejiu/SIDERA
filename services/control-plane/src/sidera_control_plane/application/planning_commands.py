@@ -520,9 +520,9 @@ class PlanningCommandHandler:
         if profile is None:
             raise NotFound("planning profile not found")
         profile.assert_user_selectable()
-        if profile.proposal_schema_version != 3:
+        if profile.proposal_schema_version not in {3, 4}:
             raise ValidationError(
-                "plan revision requires a planning profile with proposal schema v3"
+                "plan revision requires a planning profile with proposal schema v3 or v4"
             )
         instance = uow.modules.get_instance(
             profile.planner_module_instance_id, envelope.workspace_id
@@ -536,9 +536,12 @@ class PlanningCommandHandler:
             definition.capabilities, PlannerAdapterCapabilityProfile
         ):
             raise ValidationError("planning profile planner capability is unavailable")
-        if 3 not in definition.capabilities.proposal_schema_versions:
+        if (
+            profile.proposal_schema_version
+            not in definition.capabilities.proposal_schema_versions
+        ):
             raise ValidationError(
-                "planner adapter does not support revision proposal schema v3"
+                "planner adapter does not support the selected revision proposal schema"
             )
         profile_snapshot = profile.snapshot(
             definition.capabilities,
@@ -1500,9 +1503,7 @@ def _resolve_collaboration_runtime_binding(
             "collaboration runtime binding requires proposal schema version 4"
         )
 
-    definition_id = _uuid_value(
-        definition_value, "collaboration_runtime_definition_id"
-    )
+    definition_id = _uuid_value(definition_value, "collaboration_runtime_definition_id")
     instance_id = _uuid_value(instance_value, "collaboration_runtime_instance_id")
     config_version = _positive_value(
         config_value, "collaboration_runtime_config_version"

@@ -104,8 +104,7 @@ class PlanningRevisionProposalPayloadV3:
                 _milestone_mapping(item) for item in self.subtask_milestones
             ],
             "subtask_dependencies": [
-                _subtask_dependency_mapping(item)
-                for item in self.subtask_dependencies
+                _subtask_dependency_mapping(item) for item in self.subtask_dependencies
             ],
             "worker_item_dependencies": [
                 _worker_dependency_mapping(item)
@@ -186,9 +185,7 @@ class PlanningRevisionProposalPayloadV3:
                 base_descriptor=_base_descriptor(
                     _mapping(value.get("base_descriptor"), "base_descriptor")
                 ),
-                root_task=_root_task(
-                    _mapping(value.get("root_task"), "root_task")
-                ),
+                root_task=_root_task(_mapping(value.get("root_task"), "root_task")),
                 subtasks=tuple(
                     _subtask(_mapping(item, "subtask"))
                     for item in _sequence(value, "subtasks")
@@ -218,9 +215,7 @@ class PlanningRevisionProposalPayloadV3:
                     for item in _sequence(value, "subtask_identity_decisions")
                 ),
                 worker_item_identity_decisions=tuple(
-                    _worker_identity(
-                        _mapping(item, "WorkerItem identity decision")
-                    )
+                    _worker_identity(_mapping(item, "WorkerItem identity decision"))
                     for item in _sequence(value, "worker_item_identity_decisions")
                 ),
                 retired_subtask_ids=tuple(
@@ -244,9 +239,7 @@ class PlanningRevisionProposalPayloadV3:
             raise ValidationError(f"invalid revision proposal payload: {exc}") from exc
 
     def validate(self) -> None:
-        subtask_keys = _unique_keys(
-            (item.key for item in self.subtasks), "subtask"
-        )
+        subtask_keys = _unique_keys((item.key for item in self.subtasks), "subtask")
         worker_keys = _unique_keys(
             (item.key for item in self.worker_items), "WorkerItem"
         )
@@ -261,10 +254,11 @@ class PlanningRevisionProposalPayloadV3:
         ):
             raise ValidationError("subtask identity decisions must cover every target")
         if {
-            item.target_worker_item_key
-            for item in self.worker_item_identity_decisions
+            item.target_worker_item_key for item in self.worker_item_identity_decisions
         } != set(worker_keys):
-            raise ValidationError("WorkerItem identity decisions must cover every target")
+            raise ValidationError(
+                "WorkerItem identity decisions must cover every target"
+            )
         validate_subtask_identity_decisions(self.subtask_identity_decisions)
         validate_worker_item_identity_decisions(
             self.worker_item_identity_decisions,
@@ -380,7 +374,9 @@ class PlanningRevisionProposalPayloadV3:
             ):
                 raise ValidationError("derived subtask source is outside the base")
         for decision in self.worker_item_identity_decisions:
-            if not set(decision.derived_from_worker_item_ids).issubset(existing_workers):
+            if not set(decision.derived_from_worker_item_ids).issubset(
+                existing_workers
+            ):
                 raise ValidationError("derived WorkerItem source is outside the base")
 
 
@@ -474,9 +470,7 @@ class PlanningRevisionProposalPayloadV4:
             raise ValidationError("revision proposal schema_version must be 4")
         policy_value = value.get("collaboration_policy_request")
         if not isinstance(policy_value, Mapping):
-            raise ValidationError(
-                "collaboration_policy_request must be a mapping"
-            )
+            raise ValidationError("collaboration_policy_request must be a mapping")
         legacy_mapping = dict(value)
         legacy_mapping.pop("collaboration_policy_request", None)
         legacy_mapping["schema_version"] = 3
@@ -503,7 +497,7 @@ class PlanningRevisionProposalPayloadV4:
             ),
         )
 
-    def _as_v3(self) -> PlanningRevisionProposalPayloadV3:
+    def as_v3(self) -> PlanningRevisionProposalPayloadV3:
         return PlanningRevisionProposalPayloadV3(
             schema_version=3,
             kind=self.kind,
@@ -523,14 +517,18 @@ class PlanningRevisionProposalPayloadV4:
             impact_policy=self.impact_policy,
         )
 
+    def _as_v3(self) -> PlanningRevisionProposalPayloadV3:
+        """Keep the private alias for adapters released before v4."""
+        return self.as_v3()
+
     def validate(self) -> None:
-        self._as_v3().validate()
+        self.as_v3().validate()
 
     def validate_against_base(self, base_snapshot: TaskPlanSnapshot) -> None:
-        self._as_v3().validate_against_base(base_snapshot)
+        self.as_v3().validate_against_base(base_snapshot)
 
     def to_mapping(self) -> dict[str, object]:
-        mapping = self._as_v3().canonical_payload()
+        mapping = self.as_v3().canonical_payload()
         mapping["schema_version"] = 4
         mapping["collaboration_policy_request"] = (
             self.collaboration_policy_request.to_mapping()
@@ -565,7 +563,10 @@ def validate_revision_proposal(
         (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
     ):
         raise ValidationError("revision proposal must use schema v3 or v4")
-    if getattr(profile_snapshot, "proposal_schema_version", None) != payload.schema_version:
+    if (
+        getattr(profile_snapshot, "proposal_schema_version", None)
+        != payload.schema_version
+    ):
         raise ValidationError(
             f"revision proposal schema v{payload.schema_version} is not selected by the profile"
         )
@@ -716,9 +717,7 @@ def _worker_identity(value: Mapping[str, object]) -> WorkerItemIdentityDecision:
             for item in _sequence(value, "derived_from_worker_item_ids")
         ),
         target_subtask_key=_string(value, "target_subtask_key"),
-        context_disposition=ContextDisposition(
-            _string(value, "context_disposition")
-        ),
+        context_disposition=ContextDisposition(_string(value, "context_disposition")),
         change_reasons=_strings(value, "change_reasons"),
     )
 

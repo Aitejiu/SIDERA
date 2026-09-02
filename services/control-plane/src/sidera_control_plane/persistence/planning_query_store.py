@@ -28,6 +28,7 @@ from sidera_control_plane.application.planning_queries import (
     PlanningBriefView,
     PlanningCapabilityView,
     PlanningClarificationView,
+    PlanningCollaborationView,
     PlanningMaterializationView,
     PlanningPage,
     PlanningProfileView,
@@ -114,9 +115,7 @@ class SqlAlchemyPlanningQueryStore:
             else None
         )
         return PlanningPage(
-            items=tuple(
-                _profile_view(row[0], row[1], row[2]) for row in page_rows
-            ),
+            items=tuple(_profile_view(row[0], row[1], row[2]) for row in page_rows),
             next_cursor=next_cursor,
         )
 
@@ -219,9 +218,7 @@ class SqlAlchemyPlanningQueryStore:
                         PlanningRunModel.workspace_id == workspace_id,
                         PlanningRunModel.planning_request_id == request_id,
                     )
-                    .order_by(
-                        PlanningRunModel.attempt.asc(), PlanningRunModel.id.asc()
-                    )
+                    .order_by(PlanningRunModel.attempt.asc(), PlanningRunModel.id.asc())
                 ).all()
             )
             clarifications = tuple(
@@ -242,9 +239,7 @@ class SqlAlchemyPlanningQueryStore:
                 if profile_row is not None
                 else None
             )
-            run_views = tuple(
-                _run_view(row, request.profile_snapshot) for row in runs
-            )
+            run_views = tuple(_run_view(row, request.profile_snapshot) for row in runs)
             active_run = run_views[-1] if run_views else None
             pending = tuple(
                 _clarification_view(row)
@@ -331,7 +326,31 @@ class SqlAlchemyPlanningQueryStore:
                     PlanningProposalRevisionModel.revision == revision,
                 )
             )
-        return _proposal_view(row) if row is not None else None
+            if row is None:
+                return None
+            profile_snapshot = session.scalar(
+                select(PlanningRequestModel.profile_snapshot).where(
+                    PlanningRequestModel.workspace_id == workspace_id,
+                    PlanningRequestModel.id == request_id,
+                )
+            )
+            policy_request = _mapping(row.plan_template).get(
+                "collaboration_policy_request"
+            )
+            collaboration = PlanningCollaborationView.from_request_mapping(
+                policy_request,
+                profile_snapshot,
+                provider=_collaboration_runtime_provider(
+                    session,
+                    workspace_id,
+                    profile_snapshot,
+                    enabled=(
+                        isinstance(policy_request, Mapping)
+                        and policy_request.get("mode") == "enabled"
+                    ),
+                ),
+            )
+            return _proposal_view(row, collaboration)
 
     def get_materialization(
         self, workspace_id: UUID, request_id: UUID
@@ -437,43 +456,58 @@ class SqlAlchemyPlanningMetricsStore:
                     .where(ProposalMaterializationModel.workspace_id == workspace_id)
                 )
             )
-            retry_count = session.scalar(
-                select(func.count())
-                .select_from(PlanningRunModel)
-                .where(
-                    PlanningRunModel.workspace_id == workspace_id,
-                    PlanningRunModel.attempt > 1,
+            retry_count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanningRunModel)
+                    .where(
+                        PlanningRunModel.workspace_id == workspace_id,
+                        PlanningRunModel.attempt > 1,
+                    )
                 )
-            ) or 0
+                or 0
+            )
             timeout_count = _error_count(session, workspace_id, "%timeout%")
             unknown_count = _error_count(session, workspace_id, "%unknown%")
             invalid_count = _error_count(session, workspace_id, "%invalid%")
-            clarifications = session.scalar(
-                select(func.count())
-                .select_from(PlanningClarificationModel)
-                .where(PlanningClarificationModel.workspace_id == workspace_id)
-            ) or 0
-            revisions = session.scalar(
-                select(func.count())
-                .select_from(PlanningProposalRevisionModel)
-                .where(
-                    PlanningProposalRevisionModel.workspace_id == workspace_id,
-                    PlanningProposalRevisionModel.revision > 1,
+            clarifications = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanningClarificationModel)
+                    .where(PlanningClarificationModel.workspace_id == workspace_id)
                 )
-            ) or 0
-            confirmed = session.scalar(
-                select(func.count())
-                .select_from(ProposalMaterializationModel)
-                .where(ProposalMaterializationModel.workspace_id == workspace_id)
-            ) or 0
-            rejected = session.scalar(
-                select(func.count())
-                .select_from(PlanningRequestModel)
-                .where(
-                    PlanningRequestModel.workspace_id == workspace_id,
-                    PlanningRequestModel.status == "rejected",
+                or 0
+            )
+            revisions = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanningProposalRevisionModel)
+                    .where(
+                        PlanningProposalRevisionModel.workspace_id == workspace_id,
+                        PlanningProposalRevisionModel.revision > 1,
+                    )
                 )
-            ) or 0
+                or 0
+            )
+            confirmed = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ProposalMaterializationModel)
+                    .where(ProposalMaterializationModel.workspace_id == workspace_id)
+                )
+                or 0
+            )
+            rejected = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanningRequestModel)
+                    .where(
+                        PlanningRequestModel.workspace_id == workspace_id,
+                        PlanningRequestModel.status == "rejected",
+                    )
+                )
+                or 0
+            )
             execution_counts = session.execute(
                 select(ExecutionRequestModel.status, func.count())
                 .where(ExecutionRequestModel.workspace_id == workspace_id)
@@ -495,23 +529,26 @@ class SqlAlchemyPlanningMetricsStore:
                     )
                 )
             )
-            active_revisions = session.scalar(
-                select(func.count())
-                .select_from(PlanningRequestModel)
-                .where(
-                    PlanningRequestModel.workspace_id == workspace_id,
-                    PlanningRequestModel.kind == "revision",
-                    PlanningRequestModel.status.in_(
-                        (
-                            "submitted",
-                            "planning",
-                            "waiting_for_user",
-                            "proposal_ready",
-                            "failed",
-                        )
-                    ),
+            active_revisions = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanningRequestModel)
+                    .where(
+                        PlanningRequestModel.workspace_id == workspace_id,
+                        PlanningRequestModel.kind == "revision",
+                        PlanningRequestModel.status.in_(
+                            (
+                                "submitted",
+                                "planning",
+                                "waiting_for_user",
+                                "proposal_ready",
+                                "failed",
+                            )
+                        ),
+                    )
                 )
-            ) or 0
+                or 0
+            )
             conflict_rows = session.execute(
                 select(
                     func.coalesce(PlanningRequestModel.conflict_reason, "unknown"),
@@ -524,14 +561,17 @@ class SqlAlchemyPlanningMetricsStore:
                 )
                 .group_by(PlanningRequestModel.conflict_reason)
             ).all()
-            active_transitions = session.scalar(
-                select(func.count())
-                .select_from(PlanTransitionModel)
-                .where(
-                    PlanTransitionModel.workspace_id == workspace_id,
-                    PlanTransitionModel.status == "converging",
+            active_transitions = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanTransitionModel)
+                    .where(
+                        PlanTransitionModel.workspace_id == workspace_id,
+                        PlanTransitionModel.status == "converging",
+                    )
                 )
-            ) or 0
+                or 0
+            )
             worker_transition_rows = session.execute(
                 select(
                     WorkerTransitionModel.action,
@@ -542,12 +582,15 @@ class SqlAlchemyPlanningMetricsStore:
                 .group_by(WorkerTransitionModel.action, WorkerTransitionModel.status)
             ).all()
             patch_rows = session.execute(
-                select(ContextPatchModel.id, ContextPatchAcknowledgementModel.adapter_ref)
+                select(
+                    ContextPatchModel.id, ContextPatchAcknowledgementModel.adapter_ref
+                )
                 .select_from(ContextPatchModel)
                 .outerjoin(
                     ContextPatchAcknowledgementModel,
                     and_(
-                        ContextPatchAcknowledgementModel.patch_id == ContextPatchModel.id,
+                        ContextPatchAcknowledgementModel.patch_id
+                        == ContextPatchModel.id,
                         ContextPatchAcknowledgementModel.workspace_id == workspace_id,
                     ),
                 )
@@ -565,14 +608,17 @@ class SqlAlchemyPlanningMetricsStore:
                     WorkerTransitionModel.writer_state,
                 )
             ).all()
-            degraded_transitions = session.scalar(
-                select(func.count())
-                .select_from(PlanTransitionModel)
-                .where(
-                    PlanTransitionModel.workspace_id == workspace_id,
-                    PlanTransitionModel.status == "degraded",
+            degraded_transitions = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlanTransitionModel)
+                    .where(
+                        PlanTransitionModel.workspace_id == workspace_id,
+                        PlanTransitionModel.status == "degraded",
+                    )
                 )
-            ) or 0
+                or 0
+            )
 
         conflict_metrics = tuple(
             PlanningMetricReasonView(reason=str(reason), count=int(count))
@@ -589,7 +635,10 @@ class SqlAlchemyPlanningMetricsStore:
             )
             for action, status, count in sorted(
                 worker_transition_rows,
-                key=lambda item: (str(item[0]), _worker_transition_metric_outcome(str(item[1]))),
+                key=lambda item: (
+                    str(item[0]),
+                    _worker_transition_metric_outcome(str(item[1])),
+                ),
             )
         )
         patch_counts: dict[tuple[str, str], int] = {}
@@ -755,9 +804,7 @@ def _brief_view(row: PlanningBriefRevisionModel) -> PlanningBriefView:
     )
 
 
-def _run_view(
-    row: PlanningRunModel, snapshot: Mapping[str, object]
-) -> PlanningRunView:
+def _run_view(row: PlanningRunModel, snapshot: Mapping[str, object]) -> PlanningRunView:
     capability = row.capability_snapshot or snapshot.get("planner_capabilities", {})
     return PlanningRunView(
         id=row.id,
@@ -798,7 +845,10 @@ def _clarification_view(row: PlanningClarificationModel) -> PlanningClarificatio
     )
 
 
-def _proposal_view(row: PlanningProposalRevisionModel) -> PlanningProposalView:
+def _proposal_view(
+    row: PlanningProposalRevisionModel,
+    collaboration: PlanningCollaborationView,
+) -> PlanningProposalView:
     return PlanningProposalView(
         id=row.id,
         planning_request_id=row.planning_request_id,
@@ -811,12 +861,20 @@ def _proposal_view(row: PlanningProposalRevisionModel) -> PlanningProposalView:
         created_at=row.created_at,
         content_hash=row.content_hash,
         derived_diff=dict(row.derived_diff),
-        display=_safe_proposal_display(row.plan_template, row.decision_summary),
+        display=_safe_proposal_display(
+            row.plan_template,
+            row.decision_summary,
+            collaboration=collaboration,
+        ),
+        collaboration=collaboration,
     )
 
 
 def _safe_proposal_display(
-    plan_template: Mapping[str, object], decision_summary: Mapping[str, object]
+    plan_template: Mapping[str, object],
+    decision_summary: Mapping[str, object],
+    *,
+    collaboration: PlanningCollaborationView,
 ) -> dict[str, object]:
     safe_summary = {
         key: decision_summary[key]
@@ -839,12 +897,11 @@ def _safe_proposal_display(
         "worker_items": plan_template.get("worker_items", []),
         "milestones": plan_template.get("milestones", []),
         "subtask_dependencies": plan_template.get("subtask_dependencies", []),
-        "worker_item_dependencies": plan_template.get(
-            "worker_item_dependencies", []
-        ),
+        "worker_item_dependencies": plan_template.get("worker_item_dependencies", []),
         "execution_intents": plan_template.get("execution_intents", []),
         "decision_summary": safe_summary,
         "impact_policy": plan_template.get("impact_policy", {}),
+        "collaboration": collaboration.to_mapping(),
     }
 
 
@@ -914,9 +971,7 @@ def _sum_usage(runs: tuple[PlanningRunView, ...]) -> PlanningUsageView:
     )
 
 
-def _profile_keys(
-    session: Any, workspace_id: UUID, rows: object
-) -> dict[UUID, str]:
+def _profile_keys(session: Any, workspace_id: UUID, rows: object) -> dict[UUID, str]:
     request_rows = rows if isinstance(rows, list) else []
     ids = tuple({row.planning_profile_id for row in request_rows})
     if not ids:
@@ -1010,6 +1065,31 @@ def _optional_text(value: object) -> str | None:
     return None if value is None else str(value)
 
 
+def _collaboration_runtime_provider(
+    session: Any,
+    workspace_id: UUID,
+    profile_snapshot: object,
+    *,
+    enabled: bool,
+) -> str | None:
+    if not enabled:
+        return None
+    snapshot = _mapping(profile_snapshot)
+    binding = _mapping(snapshot.get("collaboration_runtime_binding"))
+    raw_definition_id = binding.get("runtime_definition_id")
+    try:
+        definition_id = _uuid(raw_definition_id)
+    except (TypeError, ValueError):
+        return None
+    provider = session.scalar(
+        select(ModuleDefinitionModel.provider).where(
+            ModuleDefinitionModel.workspace_id == workspace_id,
+            ModuleDefinitionModel.id == definition_id,
+        )
+    )
+    return _optional_text(provider)
+
+
 def _texts(value: object) -> tuple[str, ...]:
     return tuple(str(item) for item in value) if isinstance(value, list | tuple) else ()
 
@@ -1048,11 +1128,7 @@ def _error_count(session: Any, workspace_id: UUID, pattern: str) -> int:
 def _status_count(rows: object, status: str) -> int:
     if not isinstance(rows, list | tuple):
         return 0
-    return sum(
-        int(row[1])
-        for row in rows
-        if len(row) >= 2 and row[0] == status
-    )
+    return sum(int(row[1]) for row in rows if len(row) >= 2 and row[0] == status)
 
 
 def _worker_transition_metric_outcome(status: str) -> str:
@@ -1067,4 +1143,8 @@ def _adapter_metric_label(adapter_ref: str | None) -> str:
     if adapter_ref is None:
         return "unknown"
     prefix = adapter_ref.split(":", 1)[0].strip().lower()
-    return prefix if prefix in {"akashic", "dsh", "fake", "opencode", "session"} else "other"
+    return (
+        prefix
+        if prefix in {"akashic", "dsh", "fake", "opencode", "session"}
+        else "other"
+    )

@@ -43,6 +43,7 @@ from sidera_control_plane.application.planning_queries import (
     PlanningBriefView,
     PlanningCapabilityView,
     PlanningClarificationView,
+    PlanningCollaborationView,
     PlanningMaterializationView,
     PlanningProfileView,
     PlanningProposalView,
@@ -2008,7 +2009,9 @@ class CommandRequest(BaseModel):
             self._require_mutation_target("handoff_proposal")
             parsed = ConfirmWorkerHandoffPayload.model_validate(self.payload)
             if parsed.proposal_id != self.target_id:
-                raise ValueError("ConfirmWorkerHandoff proposal_id must match target_id")
+                raise ValueError(
+                    "ConfirmWorkerHandoff proposal_id must match target_id"
+                )
             if parsed.expected_proposal_version != self.expected_version:
                 raise ValueError(
                     "ConfirmWorkerHandoff expected_proposal_version must match "
@@ -2337,13 +2340,35 @@ class RevisionFieldChangeResponse(BaseModel):
     after: Any
 
     @classmethod
-    def from_view(
-        cls, view: RevisionFieldChangeView
-    ) -> "RevisionFieldChangeResponse":
+    def from_view(cls, view: RevisionFieldChangeView) -> "RevisionFieldChangeResponse":
         return cls(
             field_path=view.field_path,
             before=view.before,
             after=view.after,
+        )
+
+
+class PlanningCollaborationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    default_strategy: str | None
+    subtask_overrides: tuple[dict[str, Any], ...]
+    provider: str | None
+    runtime_interface: str | None
+    runtime_config_version: int | None
+
+    @classmethod
+    def from_view(
+        cls, view: PlanningCollaborationView
+    ) -> "PlanningCollaborationResponse":
+        return cls(
+            mode=view.mode,
+            default_strategy=view.default_strategy,
+            subtask_overrides=tuple(dict(item) for item in view.subtask_overrides),
+            provider=view.provider,
+            runtime_interface=view.runtime_interface,
+            runtime_config_version=view.runtime_config_version,
         )
 
 
@@ -2522,6 +2547,8 @@ class RevisionDiffResponse(BaseModel):
     base: RevisionBaseResponse
     target_descriptor_preview: RevisionTargetDescriptorResponse
     root_changes: tuple[RevisionFieldChangeResponse, ...]
+    collaboration_policy_changes: tuple[RevisionFieldChangeResponse, ...]
+    collaboration: PlanningCollaborationResponse
     subtask_changes: tuple[RevisionSubtaskChangeResponse, ...]
     worker_item_changes: tuple[RevisionWorkerItemChangeResponse, ...]
     subtask_dependency_changes: tuple[RevisionDependencyChangeResponse, ...]
@@ -2552,6 +2579,11 @@ class RevisionDiffResponse(BaseModel):
                 RevisionFieldChangeResponse.from_view(item)
                 for item in view.root_changes
             ),
+            collaboration_policy_changes=tuple(
+                RevisionFieldChangeResponse.from_view(item)
+                for item in view.collaboration_policy_changes
+            ),
+            collaboration=PlanningCollaborationResponse.from_view(view.collaboration),
             subtask_changes=tuple(
                 RevisionSubtaskChangeResponse.from_view(item)
                 for item in view.subtask_changes
@@ -3457,6 +3489,7 @@ class PlanningProposalResponse(BaseModel):
     content_hash: str
     derived_diff: dict[str, Any]
     display: dict[str, Any]
+    collaboration: PlanningCollaborationResponse
 
     @classmethod
     def from_view(cls, view: PlanningProposalView) -> "PlanningProposalResponse":
@@ -3473,6 +3506,7 @@ class PlanningProposalResponse(BaseModel):
             content_hash=view.content_hash,
             derived_diff=view.derived_diff,
             display=view.display,
+            collaboration=PlanningCollaborationResponse.from_view(view.collaboration),
         )
 
 
@@ -4219,9 +4253,7 @@ class PlanningRevisionMetricsResponse(BaseModel):
     plan_revision_conflicts_total: tuple[PlanningMetricReasonResponse, ...]
     plan_transitions_active: int
     worker_transitions_total: tuple[PlanningWorkerTransitionMetricResponse, ...]
-    context_patch_delivery_total: tuple[
-        PlanningContextPatchDeliveryMetricResponse, ...
-    ]
+    context_patch_delivery_total: tuple[PlanningContextPatchDeliveryMetricResponse, ...]
     revision_confirmation_blocked_total: tuple[PlanningMetricReasonResponse, ...]
 
 

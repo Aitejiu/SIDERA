@@ -49,7 +49,7 @@ class PlanNormalizer:
     def normalize(self, snapshot: TaskPlanSnapshot) -> CanonicalTaskPlan:
         if snapshot.schema_version == 1:
             return self._normalize_v1(snapshot)
-        if snapshot.schema_version == 2:
+        if snapshot.schema_version in {2, 3}:
             return self._normalize_v2(snapshot)
         raise ValueError(f"unsupported plan schema version: {snapshot.schema_version}")
 
@@ -78,7 +78,9 @@ class PlanNormalizer:
                 title=item.title,
                 role=slots[item.worker_slot_key].role,
                 responsibility=item.goal_summary,
-                capability_requirements=slots[item.worker_slot_key].capability_requirements,
+                capability_requirements=slots[
+                    item.worker_slot_key
+                ].capability_requirements,
                 worker_policy_ref=slots[item.worker_slot_key].worker_policy_ref,
                 configuration_ref=slots[item.worker_slot_key].configuration_ref,
                 concurrency_limit=slots[item.worker_slot_key].concurrency_limit,

@@ -4,7 +4,17 @@ from uuid import UUID
 
 import pytest
 
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicyRequestV1,
+    CollaborationPolicySnapshotV1,
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.modules import (
+    CollaborationRuntimeCapabilityProfile,
+    IdempotencyCapability,
+    StabilityLevel,
+)
 from sidera_control_plane.domain.plan_revisions import (
     ContextDisposition,
     IdentityStrategy,
@@ -25,6 +35,7 @@ from sidera_control_plane.domain.planning_proposals import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import (
     SubtaskMilestone,
@@ -225,9 +236,7 @@ def test_normalized_diff_is_stable_and_exposes_patch_fallback() -> None:
         worker_items=tuple(reversed(payload.worker_items)),
         subtask_milestones=tuple(reversed(payload.subtask_milestones)),
         execution_intents=tuple(reversed(payload.execution_intents)),
-        subtask_identity_decisions=tuple(
-            reversed(payload.subtask_identity_decisions)
-        ),
+        subtask_identity_decisions=tuple(reversed(payload.subtask_identity_decisions)),
         worker_item_identity_decisions=tuple(
             reversed(payload.worker_item_identity_decisions)
         ),
@@ -254,6 +263,79 @@ def test_normalized_diff_round_trips_through_its_persisted_mapping() -> None:
     restored = NormalizedRevisionDiff.from_mapping(diff.to_mapping())
 
     assert restored == diff
+
+
+def test_v4_revision_diff_includes_collaboration_policy_change() -> None:
+    binding = CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=UUID("61000000-0000-0000-0000-000000000001"),
+        runtime_instance_id=UUID("62000000-0000-0000-0000-000000000001"),
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=3,
+        runtime_capability_snapshot=CollaborationRuntimeCapabilityProfile(
+            interface_version="collaboration-runtime-v1",
+            projection_schema_versions=(1,),
+            decision_schema_versions=(1,),
+            strategy_ids=("all_required",),
+            idempotency=IdempotencyCapability.OPERATION_ID,
+            max_projection_bytes=262_144,
+            max_decision_bytes=65_536,
+            max_intents_per_decision=128,
+            max_strategy_state_bytes=16_384,
+            stability=StabilityLevel.EXPERIMENTAL,
+        ),
+    )
+    enabled = CollaborationPolicyRequestV1.from_mapping(
+        {
+            "mode": "enabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+        }
+    )
+    disabled = CollaborationPolicyRequestV1.from_mapping(
+        {
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+        }
+    )
+    snapshot = replace(
+        base_snapshot(),
+        schema_version=3,
+        collaboration_policy=CollaborationPolicySnapshotV1.from_request(
+            enabled, binding
+        ),
+    )
+    legacy = revision_payload(snapshot)
+    payload = PlanningRevisionProposalPayloadV4(
+        schema_version=4,
+        kind=legacy.kind,
+        base_descriptor=legacy.base_descriptor,
+        root_task=legacy.root_task,
+        subtasks=legacy.subtasks,
+        worker_items=legacy.worker_items,
+        subtask_milestones=legacy.subtask_milestones,
+        subtask_dependencies=legacy.subtask_dependencies,
+        worker_item_dependencies=legacy.worker_item_dependencies,
+        execution_intents=legacy.execution_intents,
+        subtask_identity_decisions=legacy.subtask_identity_decisions,
+        worker_item_identity_decisions=legacy.worker_item_identity_decisions,
+        retired_subtask_ids=legacy.retired_subtask_ids,
+        retired_worker_item_ids=legacy.retired_worker_item_ids,
+        decision_summary=legacy.decision_summary,
+        impact_policy=legacy.impact_policy,
+        collaboration_policy_request=disabled,
+    )
+
+    diff = RevisionDiffNormalizer().normalize(snapshot, payload)
+
+    assert diff.collaboration_policy_changes
+    assert any(
+        item.field_path == "mode"
+        and item.before == "enabled"
+        and item.after == "disabled"
+        for item in diff.collaboration_policy_changes
+    )
+    assert NormalizedRevisionDiff.from_mapping(diff.to_mapping()) == diff
 
 
 def test_normalizer_rejects_unchanged_context_when_effective_fields_change() -> None:

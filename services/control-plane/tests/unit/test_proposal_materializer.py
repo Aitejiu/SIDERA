@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
@@ -12,6 +13,11 @@ from sidera_control_plane.application.proposal_materializer import ProposalMater
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationGateMode,
+    CollaborationPolicyRequestV1,
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution_requests import (
@@ -22,6 +28,7 @@ from sidera_control_plane.domain.execution_requests import (
 )
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
+    CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     PlannerAdapterCapabilityProfile,
     StabilityLevel,
@@ -52,6 +59,7 @@ from sidera_control_plane.domain.planning_proposals import (
     ImpactPolicy,
     PlanningProfileDescriptor,
     PlanningProposalPayload,
+    PlanningProposalPayloadV4,
     ProposalRevision,
     ProposedRootTask,
     ProposedSubtask,
@@ -268,6 +276,28 @@ def capabilities() -> PlannerAdapterCapabilityProfile:
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
         proposal_schema_versions=(2,),
+    )
+
+
+def collaboration_binding() -> CollaborationRuntimeBindingSnapshot:
+    capability = CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime-v1",
+        projection_schema_versions=(1,),
+        decision_schema_versions=(1,),
+        strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
+    )
+    return CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=uuid4(),
+        runtime_instance_id=uuid4(),
+        runtime_interface_version=capability.interface_version,
+        runtime_config_version=3,
+        runtime_capability_snapshot=capability,
     )
 
 
@@ -545,6 +575,60 @@ def proposal_fixture() -> tuple[PlanningProfile, PlanningRequest, ProposalRevisi
     return stored_profile, request, proposal
 
 
+def v4_proposal_fixture(
+    *, overrides: tuple[dict[str, object], ...] = ()
+) -> tuple[PlanningProfile, PlanningRequest, ProposalRevision]:
+    stored_profile, legacy_request, legacy_proposal = proposal_fixture()
+    stored_profile = replace(
+        stored_profile,
+        proposal_schema_version=4,
+        collaboration_runtime_binding=collaboration_binding(),
+    )
+    profile_snapshot = stored_profile.snapshot(
+        replace(capabilities(), proposal_schema_versions=(4,))
+    )
+    legacy = legacy_proposal.payload
+    assert isinstance(legacy, PlanningProposalPayload)
+    payload = PlanningProposalPayloadV4(
+        schema_version=4,
+        kind=legacy.kind,
+        root_task=legacy.root_task,
+        subtasks=legacy.subtasks,
+        worker_items=legacy.worker_items,
+        subtask_milestones=legacy.subtask_milestones,
+        subtask_dependencies=legacy.subtask_dependencies,
+        worker_item_dependencies=legacy.worker_item_dependencies,
+        execution_intents=legacy.execution_intents,
+        decision_summary=legacy.decision_summary,
+        impact_policy=legacy.impact_policy,
+        collaboration_policy_request=CollaborationPolicyRequestV1.from_mapping(
+            {
+                "mode": "enabled",
+                "default_policy": {"strategy_id": "all_required"},
+                "subtask_overrides": list(overrides),
+            }
+        ),
+    )
+    proposal = ProposalRevision.create(
+        planning_request_id=legacy_request.id,
+        revision=1,
+        brief_revision=legacy_proposal.brief_revision,
+        planning_run_id=legacy_proposal.planning_run_id,
+        kind=legacy_proposal.kind,
+        payload=payload,
+        profile_descriptor=PlanningProfileDescriptor.from_snapshot(profile_snapshot),
+        profile_snapshot=profile_snapshot,
+        created_at=NOW,
+    )
+    request = replace(
+        legacy_request,
+        profile_snapshot=profile_snapshot,
+        current_proposal_revision=proposal.revision,
+        current_proposal_content_hash=proposal.content_hash,
+    )
+    return stored_profile, request, proposal
+
+
 def envelope(request: PlanningRequest) -> CommandEnvelope:
     return CommandEnvelope(
         id=uuid4(),
@@ -617,11 +701,14 @@ def test_materializes_tasks_plan_worker_items_requests_and_mapping() -> None:
         for request_item in uow.execution_requests.added
         if request_item.worker_item_key != "design-worker"
     )
-    assert next(
-        item
-        for item in uow.execution_requests.added
-        if item.worker_item_key == "design-worker"
-    ).status is ExecutionRequestStatus.READY
+    assert (
+        next(
+            item
+            for item in uow.execution_requests.added
+            if item.worker_item_key == "design-worker"
+        ).status
+        is ExecutionRequestStatus.READY
+    )
     assert uow.execution_requests.dependencies
     assert all(
         dependency.downstream_request_id != dependency.upstream_request_id
@@ -649,7 +736,53 @@ def test_materializes_tasks_plan_worker_items_requests_and_mapping() -> None:
     ]
 
 
-def test_dependency_expansion_deduplicates_edges_and_preserves_informational_edges() -> None:
+def test_v4_materialization_resolves_policy_and_classifies_requests() -> None:
+    stored_profile, request, proposal = v4_proposal_fixture(
+        overrides=(
+            {
+                "subtask_key": "design",
+                "enabled": False,
+                "strategy_id": "all_required",
+            },
+        )
+    )
+    command = envelope(request)
+    command.payload["proposal_content_hash"] = proposal.content_hash
+    uow = FakeUnitOfWork(request)
+
+    result = ProposalMaterializer().materialize(
+        cast(ControlPlaneUnitOfWork, uow),
+        request=request,
+        proposal=proposal,
+        profile=stored_profile,
+        envelope=command,
+        now=NOW,
+    )
+
+    assert result.snapshot is not None
+    assert result.snapshot.schema_version == 3
+    assert result.snapshot.collaboration_policy is not None
+    assert (
+        result.snapshot.collaboration_policy.effective_policy("design").enabled is False
+    )
+    requests = {item.worker_item_key: item for item in uow.execution_requests.added}
+    assert (
+        requests["design-worker"].collaboration_gate_mode
+        is CollaborationGateMode.UNMANAGED
+    )
+    assert (
+        requests["backend-worker"].collaboration_gate_mode
+        is CollaborationGateMode.RELEASE_REQUIRED
+    )
+    assert (
+        requests["web-worker"].collaboration_gate_mode
+        is CollaborationGateMode.RELEASE_REQUIRED
+    )
+
+
+def test_dependency_expansion_deduplicates_edges_and_preserves_informational_edges() -> (
+    None
+):
     stored_profile, request, proposal = proposal_fixture()
     command = envelope(request)
     command.payload["proposal_content_hash"] = proposal.content_hash
@@ -679,10 +812,13 @@ def test_dependency_expansion_deduplicates_edges_and_preserves_informational_edg
         item.enforcement is DependencyEnforcement.INFORMATIONAL
         for item in uow.execution_requests.dependencies
     )
-    assert sum(
-        item.downstream_request_id == verify and item.upstream_request_id == design
-        for item in uow.execution_requests.dependencies
-    ) == 1
+    assert (
+        sum(
+            item.downstream_request_id == verify and item.upstream_request_id == design
+            for item in uow.execution_requests.dependencies
+        )
+        == 1
+    )
 
 
 def test_materializer_does_not_create_executions_or_call_scheduler() -> None:

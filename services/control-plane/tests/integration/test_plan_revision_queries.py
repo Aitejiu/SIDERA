@@ -35,15 +35,11 @@ def test_revision_queries_expose_base_diff_paths_policy_and_active_head(
 
     detail = client.get(f"{base}/planning-requests/{seed['request'].id}")
     diff = client.get(f"{base}/planning-requests/{seed['request'].id}/diff")
-    active_plan = client.get(
-        f"{base}/tasks/{seed['root_task'].id}/active-plan"
-    )
+    active_plan = client.get(f"{base}/tasks/{seed['root_task'].id}/active-plan")
 
     assert detail.status_code == 200, detail.text
     detail_body = detail.json()
-    assert detail_body["revision_base"]["plan_snapshot_id"] == str(
-        seed["snapshot"].id
-    )
+    assert detail_body["revision_base"]["plan_snapshot_id"] == str(seed["snapshot"].id)
     assert detail_body["revision_base"]["plan_generation"] == 1
     assert detail_body["revision_freshness"]["base_fresh"] is True
     assert detail_body["revision_freshness"]["stale_reasons"] == []
@@ -59,8 +55,7 @@ def test_revision_queries_expose_base_diff_paths_policy_and_active_head(
         "Task/Running control room > Subtask/Implementation"
     )
     assert diff_body["worker_item_changes"][0]["path"] == (
-        "Task/Running control room > Subtask/Implementation > "
-        "WorkerItem/Backend worker"
+        "Task/Running control room > Subtask/Implementation > WorkerItem/Backend worker"
     )
     assert diff_body["impact_counts"]["patch"] == 1
     assert diff_body["transition_preview"][0]["allowed_actions"] == [
@@ -74,6 +69,15 @@ def test_revision_queries_expose_base_diff_paths_policy_and_active_head(
         "manual_gate": False,
         "revision_operation": "revise",
     }
+    assert diff_body["collaboration"] == {
+        "mode": "disabled",
+        "default_strategy": None,
+        "subtask_overrides": [],
+        "provider": None,
+        "runtime_interface": None,
+        "runtime_config_version": None,
+    }
+    assert diff_body["collaboration_policy_changes"] == []
     assert "patch_body" not in diff_body
 
     assert active_plan.status_code == 200, active_plan.text
@@ -114,8 +118,7 @@ def test_stale_revision_queries_are_read_only_and_report_reasons(
         ).one()
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace_id}/planning-requests/"
-        f"{seed['request'].id}"
+        f"/api/v1/workspaces/{workspace_id}/planning-requests/{seed['request'].id}"
     )
 
     assert response.status_code == 200, response.text
@@ -146,8 +149,7 @@ def test_revision_query_endpoints_enforce_workspace_isolation(
         f"{seed['request'].id}/diff"
     )
     active_plan = client.get(
-        f"/api/v1/workspaces/{other_workspace}/tasks/"
-        f"{seed['root_task'].id}/active-plan"
+        f"/api/v1/workspaces/{other_workspace}/tasks/{seed['root_task'].id}/active-plan"
     )
 
     assert diff.status_code == 404

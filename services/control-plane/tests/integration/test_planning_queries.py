@@ -5,6 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.planning_queries import (
+    PlanningCollaborationView,
+)
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from tests.integration.test_planning_command_api import _seed_waiting_request
@@ -18,6 +21,51 @@ def client(database_url: str) -> Iterator[TestClient]:
         create_app(Settings(database_url=database_url, local_actor_id="operator"))
     ) as test_client:
         yield test_client
+
+
+def test_planning_collaboration_view_redacts_runtime_details() -> None:
+    view = PlanningCollaborationView.from_request_mapping(
+        {
+            "mode": "enabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [
+                {
+                    "subtask_key": "docs",
+                    "enabled": False,
+                    "strategy_id": "all_required",
+                },
+            ],
+        },
+        {
+            "collaboration_runtime_binding": {
+                "runtime_interface_version": "collaboration-runtime-v1",
+                "runtime_config_version": 3,
+                "runtime_capability_snapshot": {
+                    "max_projection_bytes": 262144,
+                    "max_decision_bytes": 65536,
+                },
+                "secret_ref": "secret://runtime/key",
+            },
+        },
+        provider="dsh",
+    )
+
+    assert view.mode == "enabled"
+    assert view.default_strategy == "all_required"
+    assert view.runtime_interface == "collaboration-runtime-v1"
+    assert view.runtime_config_version == 3
+    assert view.provider == "dsh"
+    assert view.subtask_overrides == (
+        {
+            "subtask_key": "docs",
+            "enabled": False,
+            "strategy_id": "all_required",
+        },
+    )
+    encoded = str(view.to_mapping())
+    assert "secret://runtime/key" not in encoded
+    assert "max_projection_bytes" not in encoded
+    assert "max_decision_bytes" not in encoded
 
 
 def test_planning_queries_return_safe_request_views(
@@ -40,9 +88,7 @@ def test_planning_queries_return_safe_request_views(
     detail = client.get(f"{base}/planning-requests/{request_id}")
     briefs = client.get(f"{base}/planning-requests/{request_id}/briefs")
     runs = client.get(f"{base}/planning-requests/{request_id}/runs")
-    clarifications = client.get(
-        f"{base}/planning-requests/{request_id}/clarifications"
-    )
+    clarifications = client.get(f"{base}/planning-requests/{request_id}/clarifications")
 
     assert profiles.status_code == 200, profiles.text
     assert profiles.json()["items"][0]["profile_key"] == "integration"

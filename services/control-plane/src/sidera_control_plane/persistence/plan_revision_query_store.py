@@ -22,6 +22,7 @@ from sidera_control_plane.application.plan_revision_queries import (
     RevisionTransitionPreviewView,
     RevisionWorkerItemChangeView,
 )
+from sidera_control_plane.application.planning_queries import PlanningCollaborationView
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
@@ -37,6 +38,7 @@ from sidera_control_plane.domain.revision_diff import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ModuleDefinitionModel,
     PlanningProposalRevisionModel,
     PlanningRequestModel,
     PlanSnapshotModel,
@@ -108,8 +110,24 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                 if proposal.proposal_schema_version == 4
                 else PlanningRevisionProposalPayloadV3.from_mapping(payload_mapping)
             )
-            diff = NormalizedRevisionDiff.from_mapping(
-                dict(proposal.derived_diff)
+            diff = NormalizedRevisionDiff.from_mapping(dict(proposal.derived_diff))
+            policy_request = (
+                payload.collaboration_policy_request.to_mapping()
+                if isinstance(payload, PlanningRevisionProposalPayloadV4)
+                else None
+            )
+            collaboration = PlanningCollaborationView.from_request_mapping(
+                policy_request,
+                request.profile_snapshot,
+                provider=_collaboration_runtime_provider(
+                    session,
+                    workspace_id,
+                    request.profile_snapshot,
+                    enabled=(
+                        isinstance(payload, PlanningRevisionProposalPayloadV4)
+                        and payload.collaboration_policy_request.mode.value == "enabled"
+                    ),
+                ),
             )
             return _revision_diff_view(
                 request=request,
@@ -118,6 +136,7 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                 payload=payload,
                 diff=diff,
                 freshness=_revision_freshness(session, request),
+                collaboration=collaboration,
             )
 
     def get_active_plan(
@@ -238,6 +257,7 @@ def _revision_diff_view(
     payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
     diff: NormalizedRevisionDiff,
     freshness: RevisionFreshnessView,
+    collaboration: PlanningCollaborationView,
 ) -> RevisionDiffView:
     base = freshness.base
     subtask_paths, worker_paths = _path_maps(base_snapshot, payload)
@@ -257,6 +277,10 @@ def _revision_diff_view(
             ),
         ),
         root_changes=tuple(_field_view(item) for item in diff.root_changes),
+        collaboration_policy_changes=tuple(
+            _field_view(item) for item in diff.collaboration_policy_changes
+        ),
+        collaboration=collaboration,
         subtask_changes=tuple(
             _subtask_view(item, subtask_paths) for item in diff.subtask_changes
         ),
@@ -272,8 +296,7 @@ def _revision_diff_view(
             for item in diff.worker_dependency_changes
         ),
         transition_preview=tuple(
-            _transition_view(item, worker_paths)
-            for item in diff.transition_preview
+            _transition_view(item, worker_paths) for item in diff.transition_preview
         ),
         impact_counts=RevisionImpactCountsView(
             preserve=diff.impact_counts.preserve,
@@ -302,6 +325,34 @@ def _revision_diff_view(
     )
 
 
+def _collaboration_runtime_provider(
+    session: Any,
+    workspace_id: UUID,
+    profile_snapshot: object,
+    *,
+    enabled: bool,
+) -> str | None:
+    if not enabled:
+        return None
+    snapshot = _mapping(profile_snapshot, "profile snapshot")
+    binding = _mapping(
+        snapshot.get("collaboration_runtime_binding"),
+        "collaboration runtime binding",
+    )
+    raw_definition_id = binding.get("runtime_definition_id")
+    try:
+        definition_id = UUID(str(raw_definition_id))
+    except (TypeError, ValueError):
+        return None
+    provider = session.scalar(
+        select(ModuleDefinitionModel.provider).where(
+            ModuleDefinitionModel.workspace_id == workspace_id,
+            ModuleDefinitionModel.id == definition_id,
+        )
+    )
+    return provider if isinstance(provider, str) and provider.strip() else None
+
+
 def _path_maps(
     base_snapshot: TaskPlanSnapshot,
     payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
@@ -309,9 +360,7 @@ def _path_maps(
     subtask_titles = {item.key: item.title for item in base_snapshot.subtasks}
     subtask_titles.update({item.key: item.title for item in payload.subtasks})
     target_worker_items = {item.key: item for item in payload.worker_items}
-    base_worker_items = {
-        item.key: item for item in base_snapshot.worker_item_plans
-    }
+    base_worker_items = {item.key: item for item in base_snapshot.worker_item_plans}
     worker_items = {**base_worker_items, **target_worker_items}
     root_title = payload.root_task.title
     subtask_paths = {

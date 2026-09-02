@@ -8,6 +8,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration import (
+    CollaborationMode,
+    CollaborationPolicySnapshotV1,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plan_revisions import (
     ContextDisposition,
@@ -18,6 +22,7 @@ from sidera_control_plane.domain.plan_revisions import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
@@ -92,6 +97,7 @@ class NormalizedRevisionDiff:
     base_descriptor: RevisionBaseDescriptorV1
     target_descriptor_preview: TargetPlanDescriptorPreview
     root_changes: tuple[FieldChange, ...]
+    collaboration_policy_changes: tuple[FieldChange, ...]
     subtask_changes: tuple[SubtaskChange, ...]
     worker_changes: tuple[WorkerItemChange, ...]
     subtask_dependency_changes: tuple[DependencyChange, ...]
@@ -103,7 +109,7 @@ class NormalizedRevisionDiff:
     diff_hash: str
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        mapping: dict[str, object] = {
             "base_descriptor": self.base_descriptor.to_mapping(),
             "target_descriptor_preview": {
                 "target_generation": self.target_descriptor_preview.target_generation,
@@ -144,6 +150,11 @@ class NormalizedRevisionDiff:
             "risk_flags": list(self.risk_flags),
             "diff_hash": self.diff_hash,
         }
+        if self.collaboration_policy_changes:
+            mapping["collaboration_policy_changes"] = [
+                _field_mapping(item) for item in self.collaboration_policy_changes
+            ]
+        return mapping
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> NormalizedRevisionDiff:
@@ -154,6 +165,9 @@ class NormalizedRevisionDiff:
                 raw.get("target_descriptor_preview")
             ),
             root_changes=_field_changes_from_mapping(raw.get("root_changes")),
+            collaboration_policy_changes=_field_changes_from_mapping(
+                raw.get("collaboration_policy_changes", [])
+            ),
             subtask_changes=_subtask_changes_from_mapping(raw.get("subtask_changes")),
             worker_changes=_worker_changes_from_mapping(raw.get("worker_changes")),
             subtask_dependency_changes=_dependency_changes_from_mapping(
@@ -185,9 +199,17 @@ class RevisionDiffNormalizer:
     def normalize(
         self,
         base_plan: TaskPlanSnapshot,
-        payload: PlanningRevisionProposalPayloadV3,
+        payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+        *,
+        collaboration_policy: CollaborationPolicySnapshotV1 | None = None,
     ) -> NormalizedRevisionDiff:
         payload.validate_against_base(base_plan)
+        legacy_payload = (
+            payload.as_v3()
+            if isinstance(payload, PlanningRevisionProposalPayloadV4)
+            else payload
+        )
+        target_policy = _target_collaboration_policy(payload, collaboration_policy)
         base = payload.base_descriptor
         if base.plan_content_hash != plan_snapshot_content_hash(base_plan):
             raise ValidationError("revision base content hash does not match snapshot")
@@ -198,22 +220,27 @@ class RevisionDiffNormalizer:
             for item in base_plan.subtasks
             if item.task_id is not None
         }
-        target_subtasks = {item.key: item for item in payload.subtasks}
+        target_subtasks = {item.key: item for item in legacy_payload.subtasks}
         subtask_decisions = {
-            item.target_subtask_key: item for item in payload.subtask_identity_decisions
+            item.target_subtask_key: item
+            for item in legacy_payload.subtask_identity_decisions
         }
         base_workers = {
             item.worker_item_id: item
             for item in base_plan.worker_item_plans
             if item.worker_item_id is not None
         }
-        target_workers = {item.key: item for item in payload.worker_items}
+        target_workers = {item.key: item for item in legacy_payload.worker_items}
         worker_decisions = {
             item.target_worker_item_key: item
-            for item in payload.worker_item_identity_decisions
+            for item in legacy_payload.worker_item_identity_decisions
         }
 
-        root_changes = _root_changes(base_plan, payload)
+        root_changes = _root_changes(base_plan, legacy_payload)
+        collaboration_policy_changes = _collaboration_policy_changes(
+            base_plan.collaboration_policy,
+            target_policy,
+        )
         subtask_changes = tuple(
             _subtask_change(
                 target_subtasks[key], base_subtasks_by_id, subtask_decisions[key]
@@ -226,7 +253,7 @@ class RevisionDiffNormalizer:
                 base_workers,
                 worker_decisions[key],
                 base_subtasks_by_key,
-                payload,
+                legacy_payload,
             )
             for key in sorted(target_workers)
         )
@@ -234,15 +261,15 @@ class RevisionDiffNormalizer:
         subtask_dependency_changes = _dependency_changes(
             "subtask",
             _base_subtask_edges(base_plan),
-            _target_subtask_edges(payload),
+            _target_subtask_edges(legacy_payload),
         )
         worker_dependency_changes = _dependency_changes(
             "worker_item",
             _base_worker_edges(base_plan),
-            _target_worker_edges(payload),
+            _target_worker_edges(legacy_payload),
         )
         transitions = _transition_preview(
-            payload,
+            legacy_payload,
             worker_changes,
         )
         affected = tuple(
@@ -258,16 +285,16 @@ class RevisionDiffNormalizer:
                 }
             )
         )
-        counts = _impact_counts(transitions, payload, affected)
+        counts = _impact_counts(transitions, legacy_payload, affected)
         risks = _risk_flags(
             root_changes,
             subtask_changes,
             worker_changes,
             subtask_dependency_changes,
             worker_dependency_changes,
-            payload,
+            legacy_payload,
         )
-        target_hash = _target_plan_hash(payload)
+        target_hash = _target_plan_hash(payload, target_policy)
         preview = TargetPlanDescriptorPreview(
             target_generation=base_plan.generation + 1,
             parent_snapshot_id=base_plan.id,
@@ -277,6 +304,7 @@ class RevisionDiffNormalizer:
             base_descriptor=base,
             target_descriptor_preview=preview,
             root_changes=root_changes,
+            collaboration_policy_changes=collaboration_policy_changes,
             subtask_changes=subtask_changes,
             worker_changes=worker_changes,
             subtask_dependency_changes=subtask_dependency_changes,
@@ -292,6 +320,7 @@ class RevisionDiffNormalizer:
             base_descriptor=diff.base_descriptor,
             target_descriptor_preview=diff.target_descriptor_preview,
             root_changes=diff.root_changes,
+            collaboration_policy_changes=diff.collaboration_policy_changes,
             subtask_changes=diff.subtask_changes,
             worker_changes=diff.worker_changes,
             subtask_dependency_changes=diff.subtask_dependency_changes,
@@ -654,8 +683,114 @@ def _dependency_changes(
     return tuple(changes)
 
 
-def _target_plan_hash(payload: PlanningRevisionProposalPayloadV3) -> str:
-    target = payload.canonical_payload()
+def _target_collaboration_policy(
+    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    resolved: CollaborationPolicySnapshotV1 | None,
+) -> CollaborationPolicySnapshotV1 | None:
+    if not isinstance(payload, PlanningRevisionProposalPayloadV4):
+        return None
+    if payload.collaboration_policy_request.mode is CollaborationMode.DISABLED:
+        if resolved is not None:
+            raise ValidationError(
+                "disabled collaboration policy cannot have a resolved snapshot"
+            )
+        return None
+    if resolved is None:
+        raise ValidationError(
+            "enabled revision requires a resolved collaboration policy"
+        )
+    if resolved.default_policy != payload.collaboration_policy_request.default_policy:
+        raise ValidationError(
+            "resolved collaboration default policy does not match proposal"
+        )
+    if (
+        resolved.subtask_overrides
+        != payload.collaboration_policy_request.subtask_overrides
+    ):
+        raise ValidationError("resolved collaboration overrides do not match proposal")
+    return resolved
+
+
+def _collaboration_policy_changes(
+    base: CollaborationPolicySnapshotV1 | None,
+    target: CollaborationPolicySnapshotV1 | None,
+) -> tuple[FieldChange, ...]:
+    before = _collaboration_policy_values(base)
+    after = _collaboration_policy_values(target)
+    return tuple(
+        FieldChange(path, before[path], after[path])
+        for path in before
+        if before[path] != after[path]
+    )
+
+
+def _collaboration_policy_values(
+    policy: CollaborationPolicySnapshotV1 | None,
+) -> dict[str, object]:
+    if policy is None:
+        return {
+            "mode": "disabled",
+            "default_policy.enabled": None,
+            "default_policy.strategy_id": None,
+            "subtask_overrides": [],
+            "runtime_binding.runtime_definition_id": None,
+            "runtime_binding.runtime_instance_id": None,
+            "runtime_binding.runtime_interface_version": None,
+            "runtime_binding.runtime_config_version": None,
+            "runtime_binding.capability_hash": None,
+        }
+    capability = policy.runtime_capability_snapshot
+    capability_mapping = {
+        "interface_version": capability.interface_version,
+        "projection_schema_versions": list(capability.projection_schema_versions),
+        "decision_schema_versions": list(capability.decision_schema_versions),
+        "strategy_ids": list(capability.strategy_ids),
+        "idempotency": capability.idempotency.value,
+        "max_projection_bytes": capability.max_projection_bytes,
+        "max_decision_bytes": capability.max_decision_bytes,
+        "max_intents_per_decision": capability.max_intents_per_decision,
+        "max_strategy_state_bytes": capability.max_strategy_state_bytes,
+        "stability": capability.stability.value,
+    }
+    return {
+        "mode": "enabled",
+        "default_policy.enabled": policy.default_policy.enabled,
+        "default_policy.strategy_id": policy.default_policy.strategy_id.value,
+        "subtask_overrides": [
+            item.to_mapping()
+            for item in sorted(
+                policy.subtask_overrides, key=lambda item: item.subtask_key
+            )
+        ],
+        "runtime_binding.runtime_definition_id": str(policy.runtime_definition_id),
+        "runtime_binding.runtime_instance_id": str(policy.runtime_instance_id),
+        "runtime_binding.runtime_interface_version": policy.runtime_interface_version,
+        "runtime_binding.runtime_config_version": policy.runtime_config_version,
+        "runtime_binding.capability_hash": hashlib.sha256(
+            json.dumps(
+                capability_mapping,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _target_plan_hash(
+    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    collaboration_policy: CollaborationPolicySnapshotV1 | None,
+) -> str:
+    if isinstance(payload, PlanningRevisionProposalPayloadV4):
+        target = payload.as_v3().canonical_payload()
+        target["collaboration_policy"] = (
+            collaboration_policy.to_mapping()
+            if collaboration_policy is not None
+            else None
+        )
+    else:
+        target = payload.canonical_payload()
     target.pop("decision_summary", None)
     target.pop("impact_policy", None)
     target.pop("base_descriptor", None)

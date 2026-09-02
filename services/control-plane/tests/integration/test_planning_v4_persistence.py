@@ -33,6 +33,9 @@ from sidera_control_plane.persistence.models import (
     ModuleDefinitionModel,
     ModuleInstanceModel,
 )
+from sidera_control_plane.persistence.planning_query_store import (
+    SqlAlchemyPlanningQueryStore,
+)
 from sidera_control_plane.persistence.planning_repository import (
     PlanningProfileRepository,
     PlanningRecordRepository,
@@ -160,6 +163,20 @@ def test_v4_profile_snapshot_and_proposal_round_trip_without_runtime_config_body
                 lifecycle="active",
             )
         )
+        runtime_binding = profile.collaboration_runtime_binding
+        assert runtime_binding is not None
+        session.add(
+            ModuleDefinitionModel(
+                id=runtime_binding.runtime_definition_id,
+                workspace_id=workspace_id,
+                module_type="collaboration_runtime",
+                provider="dsh",
+                interface_version=runtime_binding.runtime_interface_version,
+                config_schema_version=1,
+                capabilities={},
+                lifecycle="active",
+            )
+        )
         session.flush()
         session.add(
             ModuleInstanceModel(
@@ -196,7 +213,9 @@ def test_v4_profile_snapshot_and_proposal_round_trip_without_runtime_config_body
             profile.collaboration_runtime_binding
         )
         assert "runtime.mode" not in repr(stored_profile.collaboration_runtime_binding)
-        assert "secret://runtime" not in repr(stored_profile.collaboration_runtime_binding)
+        assert "secret://runtime" not in repr(
+            stored_profile.collaboration_runtime_binding
+        )
 
         payload = proposal_v4()
         proposal = ProposalRevision.create(
@@ -226,3 +245,18 @@ def test_v4_profile_snapshot_and_proposal_round_trip_without_runtime_config_body
         proposal_v4().collaboration_policy_request
     )
     assert restored.content_hash == proposal.content_hash
+
+    view = SqlAlchemyPlanningQueryStore(database).get_proposal(
+        workspace_id, request.id, 1
+    )
+    assert view is not None
+    assert view.collaboration.mode == "enabled"
+    assert view.collaboration.default_strategy == "all_required"
+    assert view.collaboration.provider == "dsh"
+    assert view.collaboration.runtime_interface == "collaboration-runtime-v1"
+    assert view.collaboration.runtime_config_version == 3
+    assert view.display["collaboration"] == view.collaboration.to_mapping()
+    encoded_view = repr(view)
+    assert "secret://planner/key" not in encoded_view
+    assert "max_projection_bytes" not in encoded_view
+    assert "max_decision_bytes" not in encoded_view

@@ -58,6 +58,15 @@ const revisionDiff: RevisionDiff = {
   risk_flags: ["worker_context_patch", "dependency_change"],
   affected_branch_keys: ["api", "verification"],
   affected_branch_paths: ["支付重构 / API", "支付重构 / 验证"],
+  collaboration: {
+    mode: "disabled",
+    default_strategy: null,
+    subtask_overrides: [],
+    provider: null,
+    runtime_interface: null,
+    runtime_config_version: null,
+  },
+  collaboration_policy_changes: [],
   root_changes: [{
     field_path: "acceptance_criteria",
     before: ["旧验收"],
