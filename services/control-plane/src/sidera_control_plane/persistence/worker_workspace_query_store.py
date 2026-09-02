@@ -9,6 +9,8 @@ from sqlalchemy import select, text
 from sidera_control_plane.application.worker_workspace_queries import (
     WorkerWorkspaceQuerySnapshot,
 )
+from sidera_control_plane.domain.plan_normalization import PlanNormalizer
+from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.worker_item_projections import (
     ArtifactSummaryProjection,
     BindingFact,
@@ -21,6 +23,9 @@ from sidera_control_plane.domain.worker_item_projections import (
     WorkerFact,
     WorkerItemFact,
     WorkerItemPlacementFact,
+)
+from sidera_control_plane.persistence.collaboration_query_store import (
+    SqlAlchemyCollaborationQueryStore,
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.handoff_query_store import (
@@ -35,7 +40,9 @@ from sidera_control_plane.persistence.models import (
     ExecutionInputModel,
     ExecutionModel,
     ExecutionSessionModel,
+    PlanSnapshotModel,
     ProjectionChangeModel,
+    RootTaskPlanHeadModel,
     SchedulingBlockModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
@@ -51,6 +58,8 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
     def __init__(self, database: Database) -> None:
         self._database = database
         self._handoff_store = SqlAlchemyHandoffQueryStore(database)
+        self._normalizer = PlanNormalizer()
+        self._collaboration_store = SqlAlchemyCollaborationQueryStore(database)
 
     def load(
         self, workspace_id: UUID, worker_item_id: UUID
@@ -232,6 +241,34 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 workspace_id,
                 worker_item_ids=(worker_item_id,),
             ).get(worker_item_id)
+            collaboration_facts = None
+            plan_row = session.scalar(
+                select(PlanSnapshotModel)
+                .join(
+                    RootTaskPlanHeadModel,
+                    (RootTaskPlanHeadModel.active_snapshot_id == PlanSnapshotModel.id)
+                    & (
+                        RootTaskPlanHeadModel.workspace_id
+                        == PlanSnapshotModel.workspace_id
+                    )
+                    & (
+                        RootTaskPlanHeadModel.root_task_id
+                        == PlanSnapshotModel.root_task_id
+                    ),
+                )
+                .where(
+                    PlanSnapshotModel.workspace_id == workspace_id,
+                    PlanSnapshotModel.root_task_id == worker_item.root_task_id,
+                )
+            )
+            if plan_row is not None:
+                plan = self._normalizer.normalize(_plan(plan_row))
+                collaboration_facts = self._collaboration_store.load_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    root_task_id=worker_item.root_task_id,
+                    plan=plan,
+                )
             as_of = max((
                 worker_item.updated_at,
                 *(execution.updated_at for execution in execution_rows),
@@ -273,7 +310,14 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 as_of=as_of,
                 convergence_facts=convergence_facts,
                 active_handoff=active_handoff,
+                collaboration_facts=collaboration_facts,
             )
+
+def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
+    snapshot = TaskPlanSnapshot.from_payload(dict(row.payload))
+    if snapshot.id != row.id or snapshot.generation != row.generation:
+        raise ValueError("task plan snapshot payload does not match identity columns")
+    return snapshot
 
 
 def _worker_item(row: WorkerItemModel) -> WorkerItemFact:

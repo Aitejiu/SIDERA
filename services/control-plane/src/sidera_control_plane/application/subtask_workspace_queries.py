@@ -6,6 +6,11 @@ from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.domain.collaboration_projections import (
+    CollaborationProjectionFacts,
+    CollaborationProjectionService,
+    WorkerItemCollaborationSummaryProjection,
+)
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
 )
@@ -43,6 +48,7 @@ class SubtaskWorkspaceQuerySnapshot:
     last_change_cursor: int
     as_of: datetime
     convergence_facts: PlanConvergenceFacts | None = None
+    collaboration_facts: CollaborationProjectionFacts | None = None
 
 
 class SubtaskWorkspaceQueryStore(Protocol):
@@ -59,6 +65,7 @@ class SubtaskWorkspaceQueryService:
     def __init__(self, store: SubtaskWorkspaceQueryStore) -> None:
         self._store = store
         self._composer = SubtaskWorkspaceProjectionService()
+        self._collaboration = CollaborationProjectionService()
 
     def get(
         self,
@@ -70,6 +77,7 @@ class SubtaskWorkspaceQueryService:
         if loaded is None:
             raise NotFound("subtask not found")
         try:
+            collaboration_facts = loaded.collaboration_facts
             return self._composer.compose(
                 loaded.plan,
                 subtask_key=subtask_key,
@@ -86,6 +94,34 @@ class SubtaskWorkspaceQueryService:
                 last_change_cursor=loaded.last_change_cursor,
                 as_of=loaded.as_of,
                 convergence_facts=loaded.convergence_facts,
+                collaboration=(
+                    self._collaboration.subtask_summary(
+                        collaboration_facts, subtask_key=subtask_key
+                    )
+                    if collaboration_facts is not None
+                    else None
+                ),
+                collaboration_workers=(
+                    self._collaboration_workers(collaboration_facts, loaded.plan)
+                    if collaboration_facts is not None
+                    else None
+                ),
             )
         except KeyError as exc:
             raise NotFound("subtask not found") from exc
+
+    def _collaboration_workers(
+        self,
+        facts: CollaborationProjectionFacts,
+        plan: CanonicalTaskPlan,
+    ) -> dict[UUID, WorkerItemCollaborationSummaryProjection]:
+        result: dict[UUID, WorkerItemCollaborationSummaryProjection] = {}
+        for item in plan.worker_items:
+            if item.worker_item_id is None:
+                continue
+            summary = self._collaboration.worker_summary(
+                facts, worker_item_id=item.worker_item_id
+            )
+            if summary is not None:
+                result[item.worker_item_id] = summary
+        return result

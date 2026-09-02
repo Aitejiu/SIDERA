@@ -22,6 +22,9 @@ from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleTaskFact,
     TaskConsoleWorkerItemFact,
 )
+from sidera_control_plane.persistence.collaboration_query_store import (
+    SqlAlchemyCollaborationQueryStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.handoff_query_store import (
     SqlAlchemyHandoffQueryStore,
@@ -51,6 +54,7 @@ class SqlAlchemyTaskConsoleQueryStore:
         self._database = database
         self._normalizer = PlanNormalizer()
         self._handoff_store = SqlAlchemyHandoffQueryStore(database)
+        self._collaboration_store = SqlAlchemyCollaborationQueryStore(database)
 
     def load(
         self,
@@ -267,6 +271,12 @@ class SqlAlchemyTaskConsoleQueryStore:
                 as_of=as_of,
                 convergence_facts=convergence_facts,
                 handoffs=handoffs,
+                collaboration_facts=self._collaboration_store.load_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    root_task_id=root_task_id,
+                    plan=plan,
+                ),
             )
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:

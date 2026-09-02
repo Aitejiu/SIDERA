@@ -27,6 +27,9 @@ from sidera_control_plane.domain.subtask_projections import (
     SubtaskWorkerFact,
     SubtaskWorkerItemFact,
 )
+from sidera_control_plane.persistence.collaboration_query_store import (
+    SqlAlchemyCollaborationQueryStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
@@ -53,6 +56,7 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
     def __init__(self, database: Database) -> None:
         self._database = database
         self._normalizer = PlanNormalizer()
+        self._collaboration_store = SqlAlchemyCollaborationQueryStore(database)
 
     def load(
         self,
@@ -300,6 +304,12 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
                 convergence_facts=convergence_facts,
+                collaboration_facts=self._collaboration_store.load_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    root_task_id=root_task_id,
+                    plan=plan,
+                ),
             )
 
 

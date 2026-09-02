@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration_projections import (
+    SubtaskCollaborationSummaryProjection,
+    WorkerItemCollaborationSummaryProjection,
+)
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
     PlanConvergenceProjectionService,
@@ -162,6 +166,8 @@ class WorkerItemSummaryProjection:
     current_agent_summary: str | None
     recent_activity_at: datetime | None
     plan_sync: WorkerPlanSyncProjection | None = None
+    collaboration_state: str | None = None
+    collaboration_waiting_summary: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +254,7 @@ class SubtaskWorkspaceProjection:
     last_change_cursor: int
     as_of: datetime
     convergence: SubtaskConvergenceProjection | None = None
+    collaboration: SubtaskCollaborationSummaryProjection | None = None
 
 
 class SubtaskWorkspaceProjectionService:
@@ -272,6 +279,9 @@ class SubtaskWorkspaceProjectionService:
         last_change_cursor: int,
         as_of: datetime,
         convergence_facts: PlanConvergenceFacts | None = None,
+        collaboration: SubtaskCollaborationSummaryProjection | None = None,
+        collaboration_workers: Mapping[UUID, WorkerItemCollaborationSummaryProjection]
+        | None = None,
     ) -> SubtaskWorkspaceProjection:
         subtask = _find_subtask(plan, subtask_key)
         task = tasks.get(subtask.task_id) if subtask.task_id else None
@@ -302,6 +312,7 @@ class SubtaskWorkspaceProjectionService:
         activity_by_worker_item = _group_activity_by_worker_item(activity_values)
         activity_by_task = _group_activity_by_task(activity_values)
         canonical_worker_items = {item.key: item for item in plan.worker_items}
+        collaboration_worker_values = collaboration_workers or {}
         placement_by_key = {
             placement.worker_item_key: placement for placement in placement_values
         }
@@ -399,6 +410,16 @@ class SubtaskWorkspaceProjectionService:
                             plan, item.id, convergence_facts
                         )
                         if convergence_facts is not None
+                        else None
+                    ),
+                    collaboration_state=(
+                        collaboration_worker_values[item.id].state
+                        if item.id in collaboration_worker_values
+                        else None
+                    ),
+                    collaboration_waiting_summary=(
+                        collaboration_worker_values[item.id].waiting_summary
+                        if item.id in collaboration_worker_values
                         else None
                     ),
                 )

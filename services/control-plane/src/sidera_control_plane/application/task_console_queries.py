@@ -7,6 +7,10 @@ from uuid import UUID
 
 from sidera_control_plane.application.errors import NoCurrentPlan
 from sidera_control_plane.domain.attention import AttentionAcknowledgement
+from sidera_control_plane.domain.collaboration_projections import (
+    CollaborationProjectionFacts,
+    CollaborationProjectionService,
+)
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
 )
@@ -41,6 +45,7 @@ class TaskConsoleQuerySnapshot:
     as_of: datetime
     convergence_facts: PlanConvergenceFacts | None = None
     handoffs: dict[UUID, ActiveHandoffProjection] | None = None
+    collaboration_facts: CollaborationProjectionFacts | None = None
 
 
 class TaskConsoleQueryStore(Protocol):
@@ -68,6 +73,7 @@ class TaskConsoleQueryService:
     ) -> None:
         self._store = store
         self._composer = TaskConsoleProjectionService()
+        self._collaboration = CollaborationProjectionService()
         self._actor_type = actor_type
         self._actor_id = actor_id
 
@@ -106,6 +112,11 @@ class TaskConsoleQueryService:
             acknowledgements=loaded.acknowledgements,
             convergence_facts=loaded.convergence_facts,
             handoffs=loaded.handoffs or {},
+            collaboration=(
+                self._collaboration.root_summary(loaded.collaboration_facts)
+                if loaded.collaboration_facts is not None
+                else None
+            ),
         )
 
     def get_activity(

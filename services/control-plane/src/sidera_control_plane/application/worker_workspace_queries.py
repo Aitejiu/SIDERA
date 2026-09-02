@@ -6,6 +6,10 @@ from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.errors import InvalidCursor, NotFound
+from sidera_control_plane.domain.collaboration_projections import (
+    CollaborationProjectionFacts,
+    CollaborationProjectionService,
+)
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
 )
@@ -47,6 +51,7 @@ class WorkerWorkspaceQuerySnapshot:
     projection_stale: bool = False
     convergence_facts: PlanConvergenceFacts | None = None
     active_handoff: ActiveHandoffProjection | None = None
+    collaboration_facts: CollaborationProjectionFacts | None = None
 
 
 class WorkerWorkspaceQueryStore(Protocol):
@@ -98,6 +103,14 @@ class WorkerWorkspaceQueryService:
 
     @staticmethod
     def _composer(snapshot: WorkerWorkspaceQuerySnapshot) -> WorkerItemProjectionService:
+        collaboration = (
+            CollaborationProjectionService().worker_summary(
+                snapshot.collaboration_facts,
+                worker_item_id=snapshot.worker_item.id,
+            )
+            if snapshot.collaboration_facts is not None
+            else None
+        )
         return WorkerItemProjectionService(
             worker_item=snapshot.worker_item,
             placements=snapshot.placements,
@@ -115,4 +128,5 @@ class WorkerWorkspaceQueryService:
             projection_stale=snapshot.projection_stale,
             convergence_facts=snapshot.convergence_facts,
             active_handoff=snapshot.active_handoff,
+            collaboration=collaboration,
         )

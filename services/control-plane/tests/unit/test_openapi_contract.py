@@ -45,6 +45,8 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/handoff-proposals/{proposal_id}",
     "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff",
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration",
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -72,6 +74,8 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}": "HandoffTransitionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff": "ActiveHandoffProjectionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff-candidates": "HandoffCandidateListResponse",
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration": "CollaborationDetailResponse",
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions": "CollaborationDecisionPageResponse",
 }
 
 EXPECTED_TYPED_POST_RESPONSES = {

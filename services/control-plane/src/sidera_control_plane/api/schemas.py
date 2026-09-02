@@ -670,6 +670,132 @@ class TaskConsoleAttentionProjectionResponse(BaseModel):
     deep_link: str | None = None
 
 
+class CollaborationLinkResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtask_key: str
+    title: str
+    href: str
+
+
+class BlockedSubtaskResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtask_key: str
+    title: str
+    reason: str
+    last_failure_at: datetime | None
+    href: str
+
+
+class RootCollaborationSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    status: Literal["running", "waiting", "attention", "completed"]
+    strategy_label: str
+    run_id: UUID
+    plan_generation: int
+    released_count: int
+    running_count: int
+    waiting_count: int
+    completed_count: int
+    blocked_subtask_count: int
+    blocked_subtasks: tuple[BlockedSubtaskResponse, ...]
+    latest_decision_summary: str | None
+    latest_decision_at: datetime | None
+    attention_required: bool
+    detail_href: str
+
+
+class SubtaskCollaborationSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    effective_strategy: str
+    required_input_count: int
+    satisfied_input_count: int
+    waiting_upstream_subtasks: tuple[CollaborationLinkResponse, ...]
+    missing_artifact_refs: tuple[str, ...]
+    missing_evidence_refs: tuple[str, ...]
+    released_worker_item_count: int
+    waiting_worker_item_count: int
+
+
+class WorkerItemCollaborationSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    state: Literal[
+        "unmanaged",
+        "waiting_dependency",
+        "waiting_artifact",
+        "waiting_evidence",
+        "waiting_release",
+        "released",
+        "materialized",
+    ]
+    waiting_summary: str | None
+    upstream_links: tuple[CollaborationLinkResponse, ...]
+
+
+class CollaborationDecisionApplicationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_id: UUID
+    status: Literal["pending", "applied", "rejected", "stale", "duplicate"]
+    result_code: str
+    result_summary: str
+    release_id: UUID | None
+    error_code: str | None
+
+
+class CollaborationDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision_id: UUID
+    sequence: int
+    outcome: Literal["intents", "no_change"]
+    reason_code: str
+    summary: str
+    created_at: datetime
+    projection_id: UUID
+    projection_hash: str
+    target_paths: tuple[CollaborationLinkResponse, ...]
+    applications: tuple[CollaborationDecisionApplicationResponse, ...]
+
+
+class CollaborationDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    status: Literal["running", "waiting", "attention", "completed"]
+    strategy_label: str
+    run_id: UUID
+    plan_generation: int
+    released_count: int
+    running_count: int
+    waiting_count: int
+    completed_count: int
+    blocked_subtask_count: int
+    blocked_subtasks: tuple[BlockedSubtaskResponse, ...]
+    latest_decision_summary: str | None
+    latest_decision_at: datetime | None
+    attention_required: bool
+    detail_href: str
+    provider: str
+    interface_version: str
+    config_version: int
+    config_summary: str
+
+
+class CollaborationDecisionPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: tuple[CollaborationDecisionResponse, ...]
+    next_cursor: str | None
+
+
 class TaskConsoleOverviewProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -697,6 +823,7 @@ class TaskConsoleOverviewProjectionResponse(BaseModel):
     revision_attention: PlanRevisionAttentionProjectionResponse | None = None
     handoff_running_count: int = 0
     handoff_blocked_count: int = 0
+    collaboration: RootCollaborationSummaryResponse | None = None
 
 
 class SubtaskNodeProjectionResponse(BaseModel):
@@ -794,6 +921,8 @@ class WorkerItemSummaryProjectionResponse(BaseModel):
     current_agent_summary: str | None
     recent_activity_at: datetime | None
     plan_sync: WorkerPlanSyncProjectionResponse | None = None
+    collaboration_state: str | None = None
+    collaboration_waiting_summary: str | None = None
 
 
 class WorkerItemGraphEdgeProjectionResponse(BaseModel):
@@ -888,6 +1017,7 @@ class SubtaskWorkspaceProjectionResponse(BaseModel):
     last_change_cursor: int
     as_of: datetime
     convergence: SubtaskConvergenceProjectionResponse | None = None
+    collaboration: SubtaskCollaborationSummaryResponse | None = None
 
 
 class WorkerItemIdentityProjectionResponse(BaseModel):
@@ -1299,6 +1429,7 @@ class WorkerWorkspaceProjectionResponse(BaseModel):
     as_of: datetime
     plan_sync: WorkerPlanSyncProjectionResponse | None = None
     active_handoff: ActiveHandoffProjectionResponse | None = None
+    collaboration: WorkerItemCollaborationSummaryResponse | None = None
 
 
 class WorkerItemActivityPageResponse(BaseModel):

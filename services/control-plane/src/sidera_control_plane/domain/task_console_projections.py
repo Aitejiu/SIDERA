@@ -11,6 +11,9 @@ from sidera_control_plane.domain.attention import (
     AttentionAcknowledgement,
     AttentionSource,
 )
+from sidera_control_plane.domain.collaboration_projections import (
+    RootCollaborationSummaryProjection,
+)
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
     PlanConvergenceProjection,
@@ -181,6 +184,7 @@ class TaskConsoleOverviewProjection:
     revision_attention: PlanRevisionAttentionProjection | None = None
     handoff_running_count: int = 0
     handoff_blocked_count: int = 0
+    collaboration: RootCollaborationSummaryProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +238,7 @@ class TaskConsoleProjectionService:
         acknowledgements: Iterable[AttentionAcknowledgement] = (),
         convergence_facts: PlanConvergenceFacts | None = None,
         handoffs: Mapping[UUID, ActiveHandoffProjection] | None = None,
+        collaboration: RootCollaborationSummaryProjection | None = None,
     ) -> TaskConsoleGraphProjection:
         handoff_values = handoffs or {}
         placement_values = tuple(
@@ -388,6 +393,7 @@ class TaskConsoleProjectionService:
             acknowledgements=tuple(acknowledgements),
             convergence=convergence,
             handoffs=handoff_values,
+            collaboration=collaboration,
         )
         return TaskConsoleGraphProjection(
             schema_version=1,
@@ -521,6 +527,7 @@ class TaskConsoleProjectionService:
         acknowledgements: tuple[AttentionAcknowledgement, ...],
         convergence: PlanRootProjection | None,
         handoffs: Mapping[UUID, ActiveHandoffProjection],
+        collaboration: RootCollaborationSummaryProjection | None,
     ) -> TaskConsoleOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
@@ -697,6 +704,7 @@ class TaskConsoleProjectionService:
             ),
             handoff_running_count=sum(node.handoff_running_count for node in nodes),
             handoff_blocked_count=sum(node.handoff_blocked_count for node in nodes),
+            collaboration=collaboration,
         )
 
 

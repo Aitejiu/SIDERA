@@ -9,6 +9,9 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.domain.collaboration_projections import (
+    WorkerItemCollaborationSummaryProjection,
+)
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
     PlanConvergenceProjectionService,
@@ -391,6 +394,7 @@ class WorkerWorkspaceProjection:
     as_of: datetime
     plan_sync: WorkerPlanSyncProjection | None = None
     active_handoff: ActiveHandoffProjection | None = None
+    collaboration: WorkerItemCollaborationSummaryProjection | None = None
 
 
 class WorkerItemProjectionService:
@@ -413,6 +417,7 @@ class WorkerItemProjectionService:
         projection_stale: bool = False,
         convergence_facts: PlanConvergenceFacts | None = None,
         active_handoff: ActiveHandoffProjection | None = None,
+        collaboration: WorkerItemCollaborationSummaryProjection | None = None,
     ) -> None:
         self.worker_item = worker_item
         self.placements = tuple(placements)
@@ -430,6 +435,7 @@ class WorkerItemProjectionService:
         self.projection_stale = projection_stale
         self.convergence_facts = convergence_facts
         self.active_handoff = active_handoff
+        self.collaboration = collaboration
         self._convergence_service = PlanConvergenceProjectionService()
 
     def compose_workspace(self) -> WorkerWorkspaceProjection:
@@ -536,6 +542,7 @@ class WorkerItemProjectionService:
             as_of=self.as_of,
             plan_sync=plan_sync,
             active_handoff=self.active_handoff,
+            collaboration=self.collaboration,
         )
 
     def activity_facts(self) -> tuple[WorkerActivityFact, ...]:

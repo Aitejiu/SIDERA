@@ -939,6 +939,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collaboration Detail */
+        get: operations["get_collaboration_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Collaboration Decisions */
+        get: operations["list_collaboration_decisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/plan-transitions": {
         parameters: {
             query?: never;
@@ -1417,6 +1451,19 @@ export interface components {
             /** Selection Reason */
             selection_reason: string;
         };
+        /** BlockedSubtaskResponse */
+        BlockedSubtaskResponse: {
+            /** Href */
+            href: string;
+            /** Last Failure At */
+            last_failure_at: string | null;
+            /** Reason */
+            reason: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Title */
+            title: string;
+        };
         /** CancelPlanningRequestPayload */
         CancelPlanningRequestPayload: Record<string, never>;
         /** CancelWorkerHandoffPayload */
@@ -1440,6 +1487,125 @@ export interface components {
         };
         /** ClearExecutionWorkerPinPayload */
         ClearExecutionWorkerPinPayload: Record<string, never>;
+        /** CollaborationDecisionApplicationResponse */
+        CollaborationDecisionApplicationResponse: {
+            /** Error Code */
+            error_code: string | null;
+            /**
+             * Intent Id
+             * Format: uuid
+             */
+            intent_id: string;
+            /** Release Id */
+            release_id: string | null;
+            /** Result Code */
+            result_code: string;
+            /** Result Summary */
+            result_summary: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "applied" | "rejected" | "stale" | "duplicate";
+        };
+        /** CollaborationDecisionPageResponse */
+        CollaborationDecisionPageResponse: {
+            /** Items */
+            items: components["schemas"]["CollaborationDecisionResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** CollaborationDecisionResponse */
+        CollaborationDecisionResponse: {
+            /** Applications */
+            applications: components["schemas"]["CollaborationDecisionApplicationResponse"][];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Decision Id
+             * Format: uuid
+             */
+            decision_id: string;
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "intents" | "no_change";
+            /** Projection Hash */
+            projection_hash: string;
+            /**
+             * Projection Id
+             * Format: uuid
+             */
+            projection_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Sequence */
+            sequence: number;
+            /** Summary */
+            summary: string;
+            /** Target Paths */
+            target_paths: components["schemas"]["CollaborationLinkResponse"][];
+        };
+        /** CollaborationDetailResponse */
+        CollaborationDetailResponse: {
+            /** Attention Required */
+            attention_required: boolean;
+            /** Blocked Subtask Count */
+            blocked_subtask_count: number;
+            /** Blocked Subtasks */
+            blocked_subtasks: components["schemas"]["BlockedSubtaskResponse"][];
+            /** Completed Count */
+            completed_count: number;
+            /** Config Summary */
+            config_summary: string;
+            /** Config Version */
+            config_version: number;
+            /** Detail Href */
+            detail_href: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Interface Version */
+            interface_version: string;
+            /** Latest Decision At */
+            latest_decision_at: string | null;
+            /** Latest Decision Summary */
+            latest_decision_summary: string | null;
+            /** Plan Generation */
+            plan_generation: number;
+            /** Provider */
+            provider: string;
+            /** Released Count */
+            released_count: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Running Count */
+            running_count: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "waiting" | "attention" | "completed";
+            /** Strategy Label */
+            strategy_label: string;
+            /** Waiting Count */
+            waiting_count: number;
+        };
+        /** CollaborationLinkResponse */
+        CollaborationLinkResponse: {
+            /** Href */
+            href: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Title */
+            title: string;
+        };
         /** CommandRequest */
         CommandRequest: {
             actor: components["schemas"]["ActorRequest"];
@@ -4487,6 +4653,45 @@ export interface components {
              */
             revocation_scope: "new_starts" | "all_materialization";
         };
+        /** RootCollaborationSummaryResponse */
+        RootCollaborationSummaryResponse: {
+            /** Attention Required */
+            attention_required: boolean;
+            /** Blocked Subtask Count */
+            blocked_subtask_count: number;
+            /** Blocked Subtasks */
+            blocked_subtasks: components["schemas"]["BlockedSubtaskResponse"][];
+            /** Completed Count */
+            completed_count: number;
+            /** Detail Href */
+            detail_href: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Latest Decision At */
+            latest_decision_at: string | null;
+            /** Latest Decision Summary */
+            latest_decision_summary: string | null;
+            /** Plan Generation */
+            plan_generation: number;
+            /** Released Count */
+            released_count: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Running Count */
+            running_count: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "waiting" | "attention" | "completed";
+            /** Strategy Label */
+            strategy_label: string;
+            /** Waiting Count */
+            waiting_count: number;
+        };
         /** RuntimeDurationMetricsResponse */
         RuntimeDurationMetricsResponse: {
             /** Average Seconds */
@@ -4681,6 +4886,27 @@ export interface components {
             /** Title */
             title: string;
         };
+        /** SubtaskCollaborationSummaryResponse */
+        SubtaskCollaborationSummaryResponse: {
+            /** Effective Strategy */
+            effective_strategy: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Missing Artifact Refs */
+            missing_artifact_refs: string[];
+            /** Missing Evidence Refs */
+            missing_evidence_refs: string[];
+            /** Released Worker Item Count */
+            released_worker_item_count: number;
+            /** Required Input Count */
+            required_input_count: number;
+            /** Satisfied Input Count */
+            satisfied_input_count: number;
+            /** Waiting Upstream Subtasks */
+            waiting_upstream_subtasks: components["schemas"]["CollaborationLinkResponse"][];
+            /** Waiting Worker Item Count */
+            waiting_worker_item_count: number;
+        };
         /** SubtaskConvergenceProjectionResponse */
         SubtaskConvergenceProjectionResponse: {
             /** Blocked Count */
@@ -4838,6 +5064,7 @@ export interface components {
             attention_items: components["schemas"]["SubtaskAttentionProjectionResponse"][];
             /** Checkpoints */
             checkpoints: components["schemas"]["SubtaskCheckpointSummaryProjectionResponse"][];
+            collaboration?: components["schemas"]["SubtaskCollaborationSummaryResponse"] | null;
             convergence?: components["schemas"]["SubtaskConvergenceProjectionResponse"] | null;
             /** Downstream Subtasks */
             downstream_subtasks: components["schemas"]["RelatedSubtaskProjectionResponse"][];
@@ -4985,6 +5212,7 @@ export interface components {
             as_of: string;
             /** Attention Items */
             attention_items: components["schemas"]["TaskConsoleAttentionProjectionResponse"][];
+            collaboration?: components["schemas"]["RootCollaborationSummaryResponse"] | null;
             /** Completed Subtask Count */
             completed_subtask_count: number;
             convergence?: components["schemas"]["PlanConvergenceProjectionResponse"] | null;
@@ -5994,6 +6222,20 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /** WorkerItemCollaborationSummaryResponse */
+        WorkerItemCollaborationSummaryResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unmanaged" | "waiting_dependency" | "waiting_artifact" | "waiting_evidence" | "waiting_release" | "released" | "materialized";
+            /** Upstream Links */
+            upstream_links: components["schemas"]["CollaborationLinkResponse"][];
+            /** Waiting Summary */
+            waiting_summary: string | null;
+        };
         /** WorkerItemGraphEdgeProjectionResponse */
         WorkerItemGraphEdgeProjectionResponse: {
             /**
@@ -6072,6 +6314,10 @@ export interface components {
         WorkerItemSummaryProjectionResponse: {
             /** Blocker */
             blocker: string | null;
+            /** Collaboration State */
+            collaboration_state?: string | null;
+            /** Collaboration Waiting Summary */
+            collaboration_waiting_summary?: string | null;
             /** Context Version */
             context_version: number;
             /** Current Agent Summary */
@@ -6436,6 +6682,7 @@ export interface components {
             as_of: string;
             /** Can Intervene */
             can_intervene: boolean;
+            collaboration?: components["schemas"]["WorkerItemCollaborationSummaryResponse"] | null;
             current_placement: components["schemas"]["WorkerItemPlacementProjectionResponse"];
             current_runtime: components["schemas"]["WorkerRuntimeProjectionResponse"] | null;
             /** Current Step */
@@ -8291,6 +8538,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActivePlanHeadResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_collaboration_detail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollaborationDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_collaboration_decisions: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollaborationDecisionPageResponse"];
                 };
             };
             /** @description Validation Error */

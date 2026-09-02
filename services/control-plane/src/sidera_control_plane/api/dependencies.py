@@ -10,6 +10,9 @@ from sidera_control_plane.application.artifact_content import ArtifactContentSer
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
 )
+from sidera_control_plane.application.collaboration_queries import (
+    CollaborationQueryService,
+)
 from sidera_control_plane.application.command_queries import CommandQueryService
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.context_package_queries import (
@@ -74,6 +77,9 @@ from sidera_control_plane.application.worker_workspace_queries import (
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
+)
+from sidera_control_plane.persistence.collaboration_query_store import (
+    SqlAlchemyCollaborationQueryStore,
 )
 from sidera_control_plane.persistence.command_query_store import (
     SqlAlchemyCommandQueryStore,
@@ -317,6 +323,12 @@ def get_task_first_query_service(
         actor_type=settings.local_actor_type,
         actor_id=settings.local_actor_id,
     )
+
+
+def get_collaboration_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> CollaborationQueryService:
+    return CollaborationQueryService(SqlAlchemyCollaborationQueryStore(database))
 
 
 def get_task_console_query_service(
