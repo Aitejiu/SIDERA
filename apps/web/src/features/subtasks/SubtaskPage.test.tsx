@@ -37,6 +37,21 @@ const workspace = {
     evidence_required: 2,
     current_action: "等待确认重试规则",
   },
+  collaboration: {
+    enabled: true,
+    effective_strategy: "all_required",
+    required_input_count: 2,
+    satisfied_input_count: 1,
+    waiting_upstream_subtasks: [{
+      subtask_key: "payment-implementation",
+      title: "支付实现",
+      href: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/payment-implementation`,
+    }],
+    missing_artifact_refs: ["artifact:payment-contract"],
+    missing_evidence_refs: ["evidence:payment-contract"],
+    waiting_worker_item_count: 1,
+    released_worker_item_count: 1,
+  },
   upstream_subtasks: [
     { subtask_key: "design", title: "设计回调", state: "succeeded" },
   ],
@@ -53,6 +68,8 @@ const workspace = {
       status: "running",
       current_step: "运行回调测试",
       blocker: null,
+      collaboration_state: "materialized",
+      collaboration_waiting_summary: null,
       current_agent_summary: "OpenCode callback worker",
       context_version: 3,
       recent_activity_at: "2026-08-23T08:00:00Z",
@@ -66,6 +83,8 @@ const workspace = {
       status: "waiting_dependency",
       current_step: "等待实现者完成",
       blocker: "等待实现者完成",
+      collaboration_state: "waiting_release",
+      collaboration_waiting_summary: "等待协同放行",
       current_agent_summary: null,
       context_version: 1,
       recent_activity_at: "2026-08-23T07:55:00Z",
@@ -241,6 +260,20 @@ describe("SubtaskPage", () => {
     );
   });
 
+  it("shows fan-in progress and opens the waiting upstream subtask", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("输入就绪 1 / 2")).toBeVisible();
+    expect(screen.getByText("缺少 Artifact · artifact:payment-contract")).toBeVisible();
+    expect(screen.getByText("缺少 Evidence · evidence:payment-contract")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "打开上游子任务：支付实现" }));
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/payment-implementation`,
+    );
+  });
+
   it("scopes knowledge candidates to the current subtask provenance", async () => {
     server.use(
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/work-context`, () => HttpResponse.json(workContext)),
@@ -325,7 +358,7 @@ describe("SubtaskPage", () => {
     expect(screen.getByText("test-report")).toBeVisible();
     expect(screen.getByText("重复通知测试通过。")).toBeVisible();
     expect(screen.getByText("回调测试通过")).toBeVisible();
-    expect(screen.getByText("1 / 2")).toBeVisible();
+    expect(screen.getAllByText("1 / 2").length).toBeGreaterThan(0);
   });
 
   it("shows an explicit empty state when no WorkerItem is planned", async () => {
@@ -336,6 +369,7 @@ describe("SubtaskPage", () => {
           ...workspace,
           worker_items: [],
           worker_graph: { worker_item_ids: [], edges: [] },
+          collaboration: null,
         }),
       ),
     );
@@ -343,6 +377,7 @@ describe("SubtaskPage", () => {
 
     expect(await screen.findByText("这个子任务还没有 WorkerItem")).toBeVisible();
     expect(screen.getByText("等待 WorkerItem 配置")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "输入汇聚" })).not.toBeInTheDocument();
   });
 
   it("offers a retry when the Subtask workspace cannot be read", async () => {

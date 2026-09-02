@@ -12092,3 +12092,225 @@ a.knowledge-table__row:focus-visible {
     gap: 2px;
   }
 }
+
+.subtask-collaboration {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  margin-top: 20px;
+  padding: 15px 0 16px;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--structure);
+}
+
+.subtask-collaboration__heading,
+.worker-item-collaboration__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.subtask-collaboration__heading h2 {
+  margin: 4px 0 0;
+  font-size: 17px;
+  line-height: 1.15;
+}
+
+.subtask-collaboration__heading .mono-label {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.subtask-collaboration__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--structure);
+  background: var(--structure);
+}
+
+.subtask-collaboration__facts > * {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 50px;
+  padding: 10px 12px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.subtask-collaboration__facts strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.subtask-collaboration__facts svg {
+  flex: 0 0 auto;
+  color: var(--dispatch);
+}
+
+.subtask-collaboration__group,
+.subtask-collaboration__missing {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.subtask-collaboration__waiting-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.subtask-collaboration__waiting-list button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 29px;
+  max-width: 100%;
+  padding: 0 9px;
+  border: 1px solid var(--structure);
+  color: var(--dispatch);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.subtask-collaboration__waiting-list button:hover,
+.subtask-collaboration__waiting-list button:focus-visible {
+  border-color: var(--dispatch);
+  background: #f4f8ff;
+}
+
+.subtask-collaboration__waiting-list button svg {
+  flex: 0 0 auto;
+}
+
+.subtask-collaboration__missing span,
+.subtask-collaboration__ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.subtask-collaboration__missing svg {
+  flex: 0 0 auto;
+  color: var(--attention);
+}
+
+.subtask-collaboration__ready {
+  color: var(--complete);
+}
+
+.subtask-summary__collaboration-facts {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.subtask-summary__collaboration-facts strong {
+  font-size: 18px;
+}
+
+.subtask-summary__collaboration-facts span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.worker-board-card__collaboration,
+.worker-board-card__waiting-summary {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.worker-board-card__collaboration {
+  padding-top: 6px;
+  border-top: 1px solid #e5e8eb;
+}
+
+.worker-board-card__waiting-summary {
+  color: var(--muted);
+}
+
+.worker-item-collaboration__heading {
+  align-items: center;
+}
+
+.worker-item-collaboration__heading h3 {
+  margin: 0;
+}
+
+.worker-item-collaboration__waiting {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.worker-item-collaboration__upstream {
+  display: grid;
+  gap: 7px;
+  padding-top: 3px;
+}
+
+.worker-item-collaboration__link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid #e5e8eb;
+  color: var(--dispatch);
+  font-size: 11px;
+}
+
+.worker-item-collaboration__link span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.worker-item-collaboration__link svg {
+  flex: 0 0 auto;
+}
+
+.worker-item-collaboration__link:hover,
+.worker-item-collaboration__link:focus-visible {
+  color: var(--ink);
+}
+
+@media (max-width: 639px) {
+  .subtask-collaboration__heading,
+  .worker-item-collaboration__heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .subtask-collaboration__heading .mono-label {
+    text-align: left;
+  }
+
+  .subtask-collaboration__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .subtask-collaboration__facts > strong {
+    grid-column: 1 / -1;
+  }
+}

@@ -187,6 +187,12 @@ const workspace = {
   },
   last_change_cursor: 42,
   as_of: "2026-08-23T08:05:00Z",
+  collaboration: {
+    enabled: true,
+    state: "materialized",
+    upstream_links: [],
+    waiting_summary: null,
+  },
   plan_sync: {
     worker_transition_id: WORKER_TRANSITION_ID,
     plan_transition_id: PLAN_TRANSITION_ID,
@@ -567,6 +573,43 @@ describe("WorkerItemPage", () => {
     expect(screen.queryByRole("button", { name: "调整执行 Agent" })).not.toBeInTheDocument();
   });
 
+  it("keeps the WorkerItem workspace primary while showing release wait", async () => {
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+        () => HttpResponse.json({
+          ...workspace,
+          collaboration: {
+            enabled: true,
+            state: "waiting_release",
+            upstream_links: [{
+              subtask_key: "payment-implementation",
+              title: "支付实现",
+              href: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/payment-implementation`,
+            }],
+            waiting_summary: "等待协同放行",
+          },
+          current_runtime: null,
+          execution_history: [],
+          can_intervene: false,
+          read_only_reason: "no_active_session",
+          intervention_context: null,
+        }),
+      ),
+    );
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(screen.getByText("等待协同放行")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeDisabled();
+    expect(screen.getByRole("link", { name: "查看上游：支付实现" })).toHaveAttribute(
+      "href",
+      `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/payment-implementation`,
+    );
+    expect(screen.queryByRole("button", { name: /强制放行/ })).not.toBeInTheDocument();
+  });
+
   it("shows plan sync state and keeps transition facts separate from Agent Trace", async () => {
     renderPage();
 
@@ -674,6 +717,7 @@ describe("WorkerItemPage", () => {
           ...workspace,
           worker_item: { ...workspace.worker_item, status: "retired" },
           current_runtime: null,
+          collaboration: null,
           can_intervene: false,
           read_only_reason: "worker_item_retired",
           intervention_context: null,
@@ -685,5 +729,6 @@ describe("WorkerItemPage", () => {
     const readOnly = await screen.findByRole("status");
     expect(within(readOnly).getByText("只读")).toBeVisible();
     expect(screen.getAllByText("这个 WorkerItem 已退役，只能查看历史上下文").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("region", { name: "协同状态" })).not.toBeInTheDocument();
   });
 });

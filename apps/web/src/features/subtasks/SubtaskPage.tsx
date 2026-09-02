@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Clock3, GitBranch, List, MessageSquareText } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, Clock3, FileCheck2, GitBranch, List, MessageSquareText, PackageCheck } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { collaborationStrategyLabel } from "../collaboration/types";
 import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
 import { PlanConvergenceStrip } from "../tasks/PlanConvergenceStrip";
 import { getSubtaskWorkspace, subtaskWorkspaceQueryKey } from "./api";
@@ -136,6 +137,11 @@ function SubtaskContent({
         onOpen={onOpenSubtask}
       />
 
+      <SubtaskCollaborationStrip
+        collaboration={workspace.collaboration}
+        onOpenSubtask={onOpenSubtask}
+      />
+
       <PlanConvergenceStrip
         label="分支收敛"
         convergence={workspace.convergence}
@@ -212,6 +218,67 @@ function SubtaskContent({
         <WorkerSummary workspace={workspace} />
       </div>
     </>
+  );
+}
+
+function SubtaskCollaborationStrip({
+  collaboration,
+  onOpenSubtask,
+}: {
+  collaboration: SubtaskWorkspace["collaboration"];
+  onOpenSubtask: (subtaskKey: string) => void;
+}) {
+  if (collaboration === null || collaboration === undefined) {
+    return null;
+  }
+
+  return (
+    <section className="subtask-collaboration" aria-labelledby="subtask-collaboration-title">
+      <div className="subtask-collaboration__heading">
+        <div>
+          <span className="eyebrow">COLLABORATION FAN-IN</span>
+          <h2 id="subtask-collaboration-title">输入汇聚</h2>
+        </div>
+        <span className="mono-label">策略 · {collaborationStrategyLabel(collaboration.effective_strategy)}</span>
+      </div>
+
+      <div className="subtask-collaboration__facts" aria-label="子任务协同进度">
+        <strong>输入就绪 {collaboration.satisfied_input_count} / {collaboration.required_input_count}</strong>
+        <span><PackageCheck size={14} aria-hidden="true" />已放行 {collaboration.released_worker_item_count} 个 WorkerItem</span>
+        <span><ArrowRight size={14} aria-hidden="true" />等待 {collaboration.waiting_worker_item_count} 个 WorkerItem</span>
+      </div>
+
+      {collaboration.waiting_upstream_subtasks.length > 0 ? (
+        <div className="subtask-collaboration__group">
+          <span className="eyebrow">等待上游</span>
+          <div className="subtask-collaboration__waiting-list">
+            {collaboration.waiting_upstream_subtasks.map((item) => (
+              <button
+                key={item.subtask_key}
+                type="button"
+                onClick={() => onOpenSubtask(item.subtask_key)}
+                aria-label={`打开上游子任务：${item.title}`}
+              >
+                {item.title} <ArrowRight size={13} aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {collaboration.missing_artifact_refs.length > 0 || collaboration.missing_evidence_refs.length > 0 ? (
+        <div className="subtask-collaboration__missing" aria-label="缺失协同输入">
+          {collaboration.missing_artifact_refs.map((reference) => (
+            <span key={`artifact:${reference}`}><PackageCheck size={13} aria-hidden="true" />缺少 Artifact · {reference}</span>
+          ))}
+          {collaboration.missing_evidence_refs.map((reference) => (
+            <span key={`evidence:${reference}`}><FileCheck2 size={13} aria-hidden="true" />缺少 Evidence · {reference}</span>
+          ))}
+        </div>
+      ) : (
+        <span className="subtask-collaboration__ready">当前没有缺失的 Artifact 或 Evidence。</span>
+      )}
+    </section>
   );
 }
 

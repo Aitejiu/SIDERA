@@ -8,3 +8,4 @@ export type WorkerItemGraphEdge = components["schemas"]["WorkerItemGraphEdgeProj
 export type RelatedSubtask = components["schemas"]["RelatedSubtaskProjectionResponse"];
 export type SubtaskActivity = components["schemas"]["SubtaskActivityProjectionResponse"];
 export type SubtaskConvergence = components["schemas"]["SubtaskConvergenceProjectionResponse"];
+export type SubtaskCollaborationSummary = NonNullable<SubtaskWorkspace["collaboration"]>;

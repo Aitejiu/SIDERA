@@ -1,8 +1,9 @@
-import { CheckCircle2, FileCheck2, PackageCheck, ShieldAlert } from "lucide-react";
+import { CheckCircle2, FileCheck2, GitBranch, PackageCheck, ShieldAlert } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { collaborationStrategyLabel } from "../collaboration/types";
 import type { SubtaskWorkspace } from "./types";
 
 export function WorkerSummary({ workspace }: { workspace: SubtaskWorkspace }) {
@@ -16,6 +17,22 @@ export function WorkerSummary({ workspace }: { workspace: SubtaskWorkspace }) {
         </div>
         <StatusMark kind={subtaskStatusKind(subtask.state)} />
       </div>
+
+      {workspace.collaboration ? (
+        <section className="subtask-summary__section" aria-labelledby="subtask-summary-collaboration-title">
+          <h3 id="subtask-summary-collaboration-title"><GitBranch size={15} aria-hidden="true" />协同汇聚</h3>
+          <div className="subtask-summary__collaboration-facts">
+            <strong>{workspace.collaboration.satisfied_input_count} / {workspace.collaboration.required_input_count}</strong>
+            <span>输入就绪</span>
+          </div>
+          <span className="muted-copy">
+            策略 · {collaborationStrategyLabel(workspace.collaboration.effective_strategy)}
+          </span>
+          <span className="muted-copy">
+            已放行 {workspace.collaboration.released_worker_item_count} · 等待 {workspace.collaboration.waiting_worker_item_count}
+          </span>
+        </section>
+      ) : null}
 
       <section className="subtask-summary__section">
         <h3><ShieldAlert size={15} aria-hidden="true" />目标与验收</h3>

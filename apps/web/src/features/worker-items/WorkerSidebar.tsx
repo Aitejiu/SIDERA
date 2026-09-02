@@ -1,5 +1,6 @@
 import {
   Activity,
+  ArrowRight,
   ArrowRightLeft,
   CheckCircle2,
   CircleAlert,
@@ -16,9 +17,10 @@ import { Link } from "react-router-dom";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { workerCollaborationLabel } from "../collaboration/types";
 import { WorkerContextSummary } from "../context/WorkerContextSummary";
 import { ExecutionRoutingPanel } from "./ExecutionRoutingPanel";
-import type { WorkerPlacement, WorkerWorkspace } from "./types";
+import type { WorkerItemCollaborationSummary, WorkerPlacement, WorkerWorkspace } from "./types";
 
 export function WorkerSidebar({
   workspace,
@@ -47,6 +49,8 @@ export function WorkerSidebar({
         </div>
         <StatusMark kind={workerStatusKind(workerItem.status)} />
       </div>
+
+      {workspace.collaboration ? <WorkerCollaborationSection collaboration={workspace.collaboration} /> : null}
 
       <ExecutionRoutingPanel
         workspaceId={workspace.workspace_id}
@@ -179,6 +183,47 @@ export function WorkerSidebar({
       </div>
     </aside>
   );
+}
+
+function WorkerCollaborationSection({
+  collaboration,
+}: {
+  collaboration: WorkerItemCollaborationSummary;
+}) {
+  const label = workerCollaborationLabel(collaboration.state) ?? "按现有流程调度";
+  return (
+    <section className="worker-item-sidebar__section worker-item-collaboration" aria-labelledby="worker-item-collaboration-title">
+      <div className="worker-item-collaboration__heading">
+        <h3 id="worker-item-collaboration-title"><GitBranch size={15} aria-hidden="true" />协同状态</h3>
+        <StatusMark kind={collaborationStatusKind(collaboration.state)} label={label} />
+      </div>
+      {collaboration.waiting_summary && collaboration.waiting_summary !== label ? (
+        <p className="worker-item-collaboration__waiting">{collaboration.waiting_summary}</p>
+      ) : collaboration.waiting_summary === null ? (
+        <span className="muted-copy">当前没有等待中的协同输入</span>
+      ) : null}
+      {collaboration.upstream_links.length > 0 ? (
+        <div className="worker-item-collaboration__upstream">
+          <span className="eyebrow">上游依赖</span>
+          {collaboration.upstream_links.map((link) => (
+            <Link
+              className="worker-item-collaboration__link"
+              key={link.href}
+              to={link.href}
+              aria-label={`查看上游：${link.title}`}
+            >
+              <span>{link.title}</span>
+              <ArrowRight size={13} aria-hidden="true" />
+            </Link>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function collaborationStatusKind(state: WorkerItemCollaborationSummary["state"]): StatusMarkKind {
+  return state === "materialized" ? "running" : "planned";
 }
 
 function PlacementRow({ placement }: { placement: WorkerPlacement }) {

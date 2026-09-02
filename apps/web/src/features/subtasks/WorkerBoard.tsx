@@ -2,6 +2,7 @@ import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, LoaderCircle, Move
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import { workerCollaborationLabel } from "../collaboration/types";
 import type { WorkerItemSummary } from "./types";
 
 type WorkerColumnKey = "attention" | "running" | "waiting" | "next" | "completed";
@@ -94,6 +95,7 @@ function WorkerCard({
   worker: WorkerItemSummary;
   onOpen: (workerItemId: string) => void;
 }) {
+  const collaborationLabel = workerCollaborationLabel(worker.collaboration_state);
   return (
     <button
       className="worker-board-card"
@@ -111,6 +113,16 @@ function WorkerCard({
         <span className="eyebrow">当前步骤</span>
         {worker.current_step ?? "尚未开始"}
       </span>
+      {collaborationLabel ? (
+        <span className="worker-board-card__collaboration">
+          {collaborationLabel}
+        </span>
+      ) : null}
+      {worker.collaboration_waiting_summary && worker.collaboration_waiting_summary !== collaborationLabel ? (
+        <span className="worker-board-card__waiting-summary">
+          {worker.collaboration_waiting_summary}
+        </span>
+      ) : null}
       {worker.plan_sync ? (
         <span className="worker-board-card__sync">
           计划 {syncStatusLabel(worker.plan_sync.status)} · GEN {worker.plan_sync.target_generation}
