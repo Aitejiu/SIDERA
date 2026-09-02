@@ -531,6 +531,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/collaboration-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collaboration Metrics */
+        get: operations["get_collaboration_metrics_api_v1_workspaces__workspace_id__collaboration_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/commands/{command_id}": {
         parameters: {
             query?: never;
@@ -1605,6 +1622,55 @@ export interface components {
             subtask_key: string;
             /** Title */
             title: string;
+        };
+        /** CollaborationMetricSampleResponse */
+        CollaborationMetricSampleResponse: {
+            /** Labels */
+            labels: {
+                [key: string]: string;
+            };
+            /** Name */
+            name: string;
+            /** Value */
+            value: number;
+        };
+        /** CollaborationMetricsResponse */
+        CollaborationMetricsResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Samples */
+            samples: components["schemas"]["CollaborationMetricSampleResponse"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** CollaborationRuntimeCapabilityPayload */
+        CollaborationRuntimeCapabilityPayload: {
+            /** Decision Schema Versions */
+            decision_schema_versions: number[];
+            /** Idempotency */
+            idempotency: string;
+            /** Interface Version */
+            interface_version: string;
+            /** Max Decision Bytes */
+            max_decision_bytes: number;
+            /** Max Intents Per Decision */
+            max_intents_per_decision: number;
+            /** Max Projection Bytes */
+            max_projection_bytes: number;
+            /** Max Strategy State Bytes */
+            max_strategy_state_bytes: number;
+            /** Projection Schema Versions */
+            projection_schema_versions: number[];
+            /** Stability */
+            stability: string;
+            /** Strategy Ids */
+            strategy_ids: string[];
         };
         /** CommandRequest */
         CommandRequest: {
@@ -4285,6 +4351,26 @@ export interface components {
              * @enum {string}
              */
             strategy: "reconcile_adapter" | "continue_after_confirmed_stop" | "fail_closed_branch" | "continue_after_confirmed_patch_absence";
+        };
+        /** RegisterCollaborationRuntimeModulePayload */
+        RegisterCollaborationRuntimeModulePayload: {
+            capabilities: components["schemas"]["CollaborationRuntimeCapabilityPayload"];
+            /** Config */
+            config?: {
+                [key: string]: unknown;
+            };
+            /** Config Namespace */
+            config_namespace: string;
+            /** Config Schema Version */
+            config_schema_version: number;
+            /** Instance Name */
+            instance_name: string;
+            /** Interface Version */
+            interface_version: string;
+            /** Provider */
+            provider: string;
+            /** Secret Refs */
+            secret_refs?: string[];
         };
         /** RegisterPlannerModulePayload */
         RegisterPlannerModulePayload: {
@@ -7755,6 +7841,37 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_collaboration_metrics_api_v1_workspaces__workspace_id__collaboration_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollaborationMetricsResponse"];
                 };
             };
             /** @description Validation Error */

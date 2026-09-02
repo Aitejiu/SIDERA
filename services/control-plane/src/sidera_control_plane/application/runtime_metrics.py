@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from sidera_control_plane.application.collaboration_metrics import (
+    CollaborationMetricsView,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeDurationMetricsView:
@@ -86,6 +90,10 @@ class RuntimeReadinessView:
 class RuntimeMetricsStore(Protocol):
     def get_metrics(self, workspace_id: UUID) -> RuntimeMetricsView: ...
 
+    def get_collaboration_metrics(
+        self, workspace_id: UUID
+    ) -> CollaborationMetricsView: ...
+
 
 class RuntimeReadinessStore(Protocol):
     def get_readiness(self, workspace_id: UUID) -> RuntimeReadinessView: ...
@@ -97,3 +105,6 @@ class RuntimeMetricsService:
 
     def get_metrics(self, workspace_id: UUID) -> RuntimeMetricsView:
         return self._store.get_metrics(workspace_id)
+
+    def get_collaboration_metrics(self, workspace_id: UUID) -> CollaborationMetricsView:
+        return self._store.get_collaboration_metrics(workspace_id)

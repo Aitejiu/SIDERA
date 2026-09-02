@@ -710,6 +710,97 @@ def test_register_planner_module_creates_definition_and_instance() -> None:
     assert unit_of_work.events.events
 
 
+def test_register_collaboration_runtime_requires_operator_and_creates_module() -> None:
+    definition, instance = module_facts()
+    unit_of_work = unit(definition, instance)
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "RegisterCollaborationRuntimeModule",
+            {
+                "provider": "reference",
+                "interface_version": "collaboration-runtime.v1",
+                "config_schema_version": 1,
+                "capabilities": {
+                    "interface_version": "collaboration-runtime.v1",
+                    "projection_schema_versions": [1],
+                    "decision_schema_versions": [1],
+                    "strategy_ids": ["all_required"],
+                    "idempotency": "operation-id",
+                    "max_projection_bytes": 262_144,
+                    "max_decision_bytes": 65_536,
+                    "max_intents_per_decision": 128,
+                    "max_strategy_state_bytes": 16_384,
+                    "stability": "stable",
+                },
+                "instance_name": "sidera-reference",
+                "config_namespace": "collaboration",
+                "config": {},
+                "secret_refs": [],
+            },
+        ),
+    )
+
+    added_definition, added_instance = unit_of_work.modules.added
+    assert result.data["module_definition_id"] == str(added_definition.id)
+    assert result.data["module_instance_id"] == str(added_instance.id)
+    assert added_definition.module_type == COLLABORATION_RUNTIME_MODULE_TYPE
+    assert added_definition.provider == "reference"
+    assert added_instance.definition_id == added_definition.id
+    assert [event.event_type for event in unit_of_work.events.events] == [
+        "CollaborationRuntimeModuleRegistered",
+        "CollaborationRuntimeModuleInstanceRegistered",
+    ]
+
+
+def test_register_collaboration_runtime_rejects_non_operator_and_raw_secrets() -> None:
+    definition, instance = module_facts()
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+    payload = {
+        "provider": "reference",
+        "interface_version": "collaboration-runtime.v1",
+        "config_schema_version": 1,
+        "capabilities": {
+            "interface_version": "collaboration-runtime.v1",
+            "projection_schema_versions": [1],
+            "decision_schema_versions": [1],
+            "strategy_ids": ["all_required"],
+            "idempotency": "operation-id",
+            "max_projection_bytes": 262_144,
+            "max_decision_bytes": 65_536,
+            "max_intents_per_decision": 128,
+            "max_strategy_state_bytes": 16_384,
+            "stability": "stable",
+        },
+        "instance_name": "sidera-reference",
+        "config_namespace": "collaboration",
+        "config": {"runtime.api_key": "raw-secret"},
+        "secret_refs": [],
+    }
+
+    with pytest.raises(OperatorRequired, match="operator"):
+        handler.handle(
+            unit(definition, instance),
+            envelope(
+                "RegisterCollaborationRuntimeModule",
+                {**payload, "config": {}},
+                actor_type="user",
+                actor_id="user:1",
+            ),
+        )
+    with pytest.raises(ValidationError, match="secret"):
+        handler.handle(
+            unit(definition, instance),
+            envelope("RegisterCollaborationRuntimeModule", payload),
+        )
+
+
 def test_register_planning_profile_validates_module_and_persists_version() -> None:
     definition, instance = module_facts()
     unit_of_work = unit(definition, instance)

@@ -47,6 +47,7 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions",
+    "/api/v1/workspaces/{workspace_id}/collaboration-metrics",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -76,6 +77,7 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff-candidates": "HandoffCandidateListResponse",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration": "CollaborationDetailResponse",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions": "CollaborationDecisionPageResponse",
+    "/api/v1/workspaces/{workspace_id}/collaboration-metrics": "CollaborationMetricsResponse",
 }
 
 EXPECTED_TYPED_POST_RESPONSES = {
@@ -87,6 +89,7 @@ EXPECTED_TYPED_POST_RESPONSES = {
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "RegisterPlannerModule": "RegisterPlannerModulePayload",
+    "RegisterCollaborationRuntimeModule": "RegisterCollaborationRuntimeModulePayload",
     "RegisterPlanningProfile": "RegisterPlanningProfilePayload",
     "SubmitPlanningRequest": "SubmitPlanningRequestPayload",
     "SubmitPlanRevision": "SubmitPlanRevisionPayload",

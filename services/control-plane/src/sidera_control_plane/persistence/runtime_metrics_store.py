@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import and_, select
 
+from sidera_control_plane.application.collaboration_metrics import (
+    CollaborationMetricSample,
+    CollaborationMetricsView,
+)
 from sidera_control_plane.application.runtime_metrics import (
     RuntimeDurationMetricsView,
     RuntimeMetricsView,
@@ -15,9 +19,15 @@ from sidera_control_plane.application.runtime_metrics import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    CollaborationEvaluationModel,
+    CollaborationRunModel,
     EventModel,
     ExecutionBindingModel,
     ExecutionModel,
+    RuntimeDecisionModel,
+    RuntimeIntentApplicationModel,
+    RuntimeIntentModel,
+    RuntimeReleaseModel,
     SchedulingBlockModel,
 )
 from sidera_control_plane.persistence.resource_query_store import (
@@ -128,6 +138,128 @@ class SqlAlchemyRuntimeMetricsStore:
             module_mismatches=mismatches,
         )
 
+    def get_collaboration_metrics(self, workspace_id: UUID) -> CollaborationMetricsView:
+        now = datetime.now(UTC)
+        with self._database.session() as session:
+            evaluations = tuple(
+                session.scalars(
+                    select(CollaborationEvaluationModel).where(
+                        CollaborationEvaluationModel.workspace_id == workspace_id
+                    )
+                ).all()
+            )
+            runs = tuple(
+                session.scalars(
+                    select(CollaborationRunModel).where(
+                        CollaborationRunModel.workspace_id == workspace_id
+                    )
+                ).all()
+            )
+            decisions = tuple(
+                session.scalars(
+                    select(RuntimeDecisionModel).where(
+                        RuntimeDecisionModel.workspace_id == workspace_id
+                    )
+                ).all()
+            )
+            intents = tuple(
+                session.scalars(
+                    select(RuntimeIntentModel).where(
+                        RuntimeIntentModel.workspace_id == workspace_id
+                    )
+                ).all()
+            )
+            applications = tuple(
+                session.scalars(
+                    select(RuntimeIntentApplicationModel).where(
+                        RuntimeIntentApplicationModel.workspace_id == workspace_id
+                    )
+                ).all()
+            )
+            releases = tuple(
+                session.scalars(
+                    select(RuntimeReleaseModel).where(
+                        RuntimeReleaseModel.workspace_id == workspace_id
+                    )
+                ).all()
+            )
+
+        counts: Counter[tuple[str, tuple[tuple[str, str], ...]]] = Counter()
+        values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(float)
+
+        for evaluation in evaluations:
+            _increment_metric(
+                counts,
+                "sidera_collaboration_evaluations_total",
+                {"outcome": _evaluation_outcome(evaluation.status)},
+            )
+            if evaluation.status in {"pending", "retry_wait"}:
+                age = _queue_age(evaluation.next_attempt_at, now)
+                key = _metric_key(
+                    "sidera_collaboration_evaluation_queue_age_seconds",
+                    {"outcome": evaluation.status},
+                )
+                values[key] = max(values[key], age)
+            if evaluation.attempt > 1:
+                _increment_metric(
+                    counts,
+                    "sidera_collaboration_retries_total",
+                    {"reason": _stable_retry_reason(evaluation.last_error_code)},
+                )
+        for run in runs:
+            _increment_metric(
+                counts,
+                "sidera_collaboration_runs",
+                {"status": _stable_run_status(run.status)},
+            )
+        for decision in decisions:
+            outcome = _stable_outcome(decision.outcome)
+            _increment_metric(
+                counts,
+                "sidera_collaboration_decisions_total",
+                {"outcome": outcome},
+            )
+            duration_key = _metric_key(
+                "sidera_collaboration_evaluation_duration_seconds",
+                {"outcome": outcome},
+            )
+            values[duration_key] += max(0.0, float(decision.runtime_duration_ms) / 1000)
+        for _intent in intents:
+            # Applications are the authoritative result for an intent. Missing
+            # applications remain visible as pending without exposing intent IDs.
+            application = next(
+                (
+                    item
+                    for item in applications
+                    if item.intent_id == _intent.id
+                ),
+                None,
+            )
+            _increment_metric(
+                counts,
+                "sidera_collaboration_intents_total",
+                {"outcome": _stable_intent_outcome(application.status if application else "pending")},
+            )
+        for _release in releases:
+            _increment_metric(
+                counts,
+                "sidera_collaboration_releases_total",
+                {"outcome": "issued"},
+            )
+
+        _add_collaboration_zero_series(counts, values)
+        samples = tuple(
+            CollaborationMetricSample(name=name, labels=labels, value=float(value))
+            for (name, labels), value in sorted(
+                (*((key, float(value)) for key, value in counts.items()), *values.items())
+            )
+        )
+        return CollaborationMetricsView(
+            workspace_id=workspace_id,
+            as_of=now,
+            samples=samples,
+        )
+
 
 def _duration_metrics(values: tuple[float, ...]) -> RuntimeDurationMetricsView:
     if not values:
@@ -163,3 +295,114 @@ def _stable_code(value: object) -> str:
 
 def _sorted_counts(values: Counter[str]) -> dict[str, int]:
     return {key: int(values[key]) for key in sorted(values)}
+
+
+def _metric_key(name: str, labels: dict[str, str]) -> tuple[str, tuple[tuple[str, str], ...]]:
+    return name, tuple(sorted(labels.items()))
+
+
+def _increment_metric(
+    counts: Counter[tuple[str, tuple[tuple[str, str], ...]]],
+    name: str,
+    labels: dict[str, str],
+) -> None:
+    counts[_metric_key(name, labels)] += 1
+
+
+def _add_collaboration_zero_series(
+    counts: Counter[tuple[str, tuple[tuple[str, str], ...]]],
+    values: dict[tuple[str, tuple[tuple[str, str], ...]], float],
+) -> None:
+    for outcome in ("pending", "evaluating", "retry_wait", "completed", "blocked"):
+        counts.setdefault(
+            _metric_key("sidera_collaboration_evaluations_total", {"outcome": outcome}),
+            0,
+        )
+    for outcome in ("intents", "no_change"):
+        counts.setdefault(
+            _metric_key("sidera_collaboration_decisions_total", {"outcome": outcome}),
+            0,
+        )
+        values.setdefault(
+            _metric_key(
+                "sidera_collaboration_evaluation_duration_seconds",
+                {"outcome": outcome},
+            ),
+            0.0,
+        )
+    for outcome in ("pending", "applied", "rejected", "stale", "duplicate"):
+        counts.setdefault(
+            _metric_key("sidera_collaboration_intents_total", {"outcome": outcome}),
+            0,
+        )
+    counts.setdefault(
+        _metric_key("sidera_collaboration_releases_total", {"outcome": "issued"}),
+        0,
+    )
+    for status in ("pending", "active", "blocked", "completed", "superseded"):
+        counts.setdefault(
+            _metric_key("sidera_collaboration_runs", {"status": status}),
+            0,
+        )
+    for outcome in ("pending", "retry_wait"):
+        values.setdefault(
+            _metric_key(
+                "sidera_collaboration_evaluation_queue_age_seconds",
+                {"outcome": outcome},
+            ),
+            0.0,
+        )
+    for reason in (
+        "evaluation_lease_expired",
+        "runtime_timeout",
+        "runtime_unavailable",
+        "runtime_output_invalid",
+        "projection_too_large",
+        "unsupported_runtime_capability",
+        "runtime_config_mismatch",
+        "worker_phase_failed",
+    ):
+        counts.setdefault(
+            _metric_key("sidera_collaboration_retries_total", {"reason": reason}),
+            0,
+        )
+
+
+def _evaluation_outcome(status: str) -> str:
+    return status if status in {"pending", "evaluating", "retry_wait", "completed", "blocked"} else "blocked"
+
+
+def _stable_run_status(status: str) -> str:
+    return status if status in {"pending", "active", "blocked", "completed", "superseded"} else "blocked"
+
+
+def _stable_outcome(outcome: str) -> str:
+    return outcome if outcome in {"intents", "no_change"} else "no_change"
+
+
+def _stable_intent_outcome(status: str) -> str:
+    return status if status in {"pending", "applied", "rejected", "stale", "duplicate"} else "rejected"
+
+
+def _stable_retry_reason(reason: str | None) -> str:
+    allowed = {
+        "evaluation_lease_expired",
+        "runtime_timeout",
+        "runtime_unavailable",
+        "runtime_output_invalid",
+        "projection_too_large",
+        "unsupported_runtime_capability",
+        "runtime_config_mismatch",
+        "worker_phase_failed",
+    }
+    return reason if reason in allowed else "unknown"
+
+
+def _queue_age(value: object, now: datetime) -> float:
+    if not isinstance(value, datetime):
+        return 0.0
+    return max(0.0, (now - _as_utc(value)).total_seconds())
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)

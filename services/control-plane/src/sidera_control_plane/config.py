@@ -26,6 +26,31 @@ class Settings(BaseSettings):
     plan_transition_poll_interval_seconds: float = Field(default=1.0, gt=0)
     plan_transition_lease_ttl_seconds: int = Field(default=60, gt=0)
     plan_transition_backoff_max_seconds: int = Field(default=60, gt=0)
+    collaboration_batch_size: int = Field(default=20, gt=0, le=200)
+    collaboration_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    collaboration_lease_ttl_seconds: int = Field(default=60, gt=5, le=600)
+    collaboration_evaluation_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=300
+    )
+    collaboration_max_attempts: int = Field(default=5, gt=0, le=20)
+    collaboration_backoff_seconds: int = Field(default=2, gt=0, le=300)
+    collaboration_backoff_max_seconds: int = Field(default=60, gt=0, le=3600)
+    collaboration_recovery_sweep_seconds: int = Field(default=30, gt=0, le=3600)
+    collaboration_max_projection_bytes: int = Field(
+        default=262_144, gt=0, le=1_048_576
+    )
+    collaboration_max_decision_bytes: int = Field(
+        default=65_536, gt=0, le=262_144
+    )
+    collaboration_max_intents_per_decision: int = Field(
+        default=128, gt=0, le=1_000
+    )
+    collaboration_max_strategy_state_bytes: int = Field(
+        default=16_384, gt=0, le=65_536
+    )
+    collaboration_max_diagnostic_bytes: int = Field(
+        default=4_096, gt=0, le=16_384
+    )
     handoff_batch_size: int = Field(default=20, gt=0)
     handoff_poll_interval_seconds: float = Field(default=1.0, gt=0)
     handoff_lease_ttl_seconds: int = Field(default=30, gt=0)
@@ -118,5 +143,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "assignment_lease_renew_interval_seconds must be less than half "
                 "assignment_lease_seconds"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_collaboration_deadline(self) -> "Settings":
+        safety_margin_seconds = 5.0
+        if (
+            self.collaboration_evaluation_timeout_seconds + safety_margin_seconds
+            >= self.collaboration_lease_ttl_seconds
+        ):
+            raise ValueError(
+                "collaboration evaluation timeout must be below collaboration "
+                "lease ttl with a safety margin"
             )
         return self

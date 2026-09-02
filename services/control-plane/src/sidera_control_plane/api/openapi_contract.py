@@ -13,6 +13,7 @@ from sidera_control_plane.api.schemas import (
     CancelPlanningRequestPayload,
     CancelWorkerHandoffPayload,
     ClearExecutionWorkerPinPayload,
+    CollaborationMetricsResponse,
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ConfirmPlanRevisionPayload,
@@ -26,6 +27,7 @@ from sidera_control_plane.api.schemas import (
     ReconcileWorkerTransitionPayload,
     RecoverWorkerHandoffPayload,
     RecoverWorkerTransitionPayload,
+    RegisterCollaborationRuntimeModulePayload,
     RegisterPlannerModulePayload,
     RegisterPlanningProfilePayload,
     RejectPlanningProposalPayload,
@@ -42,6 +44,10 @@ from sidera_control_plane.config import Settings
 
 _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RegisterPlannerModule", RegisterPlannerModulePayload),
+    (
+        "RegisterCollaborationRuntimeModule",
+        RegisterCollaborationRuntimeModulePayload,
+    ),
     ("RegisterPlanningProfile", RegisterPlanningProfilePayload),
     ("SubmitPlanningRequest", SubmitPlanningRequestPayload),
     ("SubmitPlanRevision", SubmitPlanRevisionPayload),
@@ -96,6 +102,7 @@ def export_openapi(output: Path) -> dict[str, Any]:
     _add_component_schema(schemas, ExecutionContextAddressPayload)
     _add_component_schema(schemas, ErrorBody)
     _add_component_schema(schemas, ErrorResponse)
+    _add_component_schema(schemas, CollaborationMetricsResponse)
     for _command_name, model in _COMMAND_PAYLOADS:
         _add_component_schema(schemas, model)
     document["x-sidera-command-payloads"] = {

@@ -76,6 +76,7 @@ class PlanningCommandHandler:
     command_types = frozenset(
         {
             "RegisterPlannerModule",
+            "RegisterCollaborationRuntimeModule",
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
             "SubmitPlanRevision",
@@ -119,6 +120,8 @@ class PlanningCommandHandler:
     ) -> CommandResult:
         if envelope.command_type == "RegisterPlannerModule":
             return self._register_module(uow, envelope)
+        if envelope.command_type == "RegisterCollaborationRuntimeModule":
+            return self._register_collaboration_runtime_module(uow, envelope)
         if envelope.command_type == "RegisterPlanningProfile":
             return self._register_profile(uow, envelope)
         if envelope.command_type == "SubmitPlanningRequest":
@@ -197,6 +200,82 @@ class PlanningCommandHandler:
             aggregate_type="module_instance",
             aggregate_id=instance.id,
             event_type="PlannerModuleInstanceRegistered",
+            payload={
+                "definition_id": str(definition.id),
+                "instance_name": instance.instance_name,
+                "config_version": instance.config_version,
+            },
+        )
+        uow.events.append_with_outbox(definition_event)
+        uow.events.append_with_outbox(instance_event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=instance.id,
+            aggregate_version=1,
+            event_ids=(definition_event.id, instance_event.id),
+            data={
+                "module_definition_id": str(definition.id),
+                "module_instance_id": str(instance.id),
+            },
+        )
+
+    def _register_collaboration_runtime_module(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        self._require_operator(envelope)
+        payload = envelope.payload
+        config = _mapping(payload.get("config"), "config")
+        _assert_no_secret_values(config)
+        secret_refs = _string_tuple(payload.get("secret_refs", ()), "secret_refs")
+        _validate_secret_refs(secret_refs)
+        capabilities = _collaboration_capabilities(
+            _mapping(payload.get("capabilities"), "capabilities")
+        )
+        definition = ModuleDefinition(
+            id=uuid4(),
+            workspace_id=envelope.workspace_id,
+            module_type=COLLABORATION_RUNTIME_MODULE_TYPE,
+            provider=_required_string(payload, "provider"),
+            interface_version=_required_string(payload, "interface_version"),
+            config_schema_version=_positive_int(payload, "config_schema_version"),
+            capabilities=capabilities,
+            lifecycle=ModuleLifecycle.ACTIVE,
+        )
+        if capabilities.interface_version != definition.interface_version:
+            raise ValidationError(
+                "collaboration capability interface_version must match module "
+                "interface_version"
+            )
+        instance = ModuleInstance(
+            id=uuid4(),
+            workspace_id=envelope.workspace_id,
+            definition_id=definition.id,
+            instance_name=_required_string(payload, "instance_name"),
+            config_version=1,
+            config_namespace=_required_string(payload, "config_namespace"),
+            config=config,
+            secret_refs=secret_refs,
+            lifecycle=ModuleLifecycle.ACTIVE,
+        )
+        uow.modules.add_definition(definition)
+        uow.modules.add_instance(instance)
+        definition_event = _event(
+            envelope,
+            aggregate_type="module_definition",
+            aggregate_id=definition.id,
+            event_type="CollaborationRuntimeModuleRegistered",
+            payload={
+                "module_type": definition.module_type,
+                "provider": definition.provider,
+                "interface_version": definition.interface_version,
+                "config_schema_version": definition.config_schema_version,
+            },
+        )
+        instance_event = _event(
+            envelope,
+            aggregate_type="module_instance",
+            aggregate_id=instance.id,
+            event_type="CollaborationRuntimeModuleInstanceRegistered",
             payload={
                 "definition_id": str(definition.id),
                 "instance_name": instance.instance_name,
@@ -1477,6 +1556,33 @@ def _planner_capabilities(
                 "context_package_versions",
             )
         ),
+    )
+
+
+def _collaboration_capabilities(
+    value: Mapping[str, object],
+) -> CollaborationRuntimeCapabilityProfile:
+    return CollaborationRuntimeCapabilityProfile(
+        interface_version=_required_string(value, "interface_version"),
+        projection_schema_versions=tuple(
+            _positive_ints(
+                value.get("projection_schema_versions"),
+                "projection_schema_versions",
+            )
+        ),
+        decision_schema_versions=tuple(
+            _positive_ints(
+                value.get("decision_schema_versions"),
+                "decision_schema_versions",
+            )
+        ),
+        strategy_ids=_string_tuple(value.get("strategy_ids"), "strategy_ids"),
+        idempotency=_enum_string(value, "idempotency"),  # type: ignore[arg-type]
+        max_projection_bytes=_positive_int(value, "max_projection_bytes"),
+        max_decision_bytes=_positive_int(value, "max_decision_bytes"),
+        max_intents_per_decision=_positive_int(value, "max_intents_per_decision"),
+        max_strategy_state_bytes=_positive_int(value, "max_strategy_state_bytes"),
+        stability=_enum_string(value, "stability"),  # type: ignore[arg-type]
     )
 
 

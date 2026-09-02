@@ -89,3 +89,26 @@ def test_workspace_settings_have_safe_defaults_and_validate_retention():
             database_url="postgresql+psycopg://test",
             workspace_retention_seconds=0,
         )
+
+
+def test_collaboration_settings_have_bounded_defaults():
+    settings = Settings(database_url="postgresql+psycopg://test")
+
+    assert settings.collaboration_batch_size == 20
+    assert settings.collaboration_poll_seconds == 1.0
+    assert settings.collaboration_lease_ttl_seconds == 60
+    assert settings.collaboration_evaluation_timeout_seconds == 30.0
+    assert settings.collaboration_max_projection_bytes == 262_144
+
+    with pytest.raises(ValueError, match="evaluation timeout"):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            collaboration_lease_ttl_seconds=30,
+            collaboration_evaluation_timeout_seconds=30,
+        )
+
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            collaboration_batch_size=201,
+        )

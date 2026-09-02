@@ -12,6 +12,9 @@ from pydantic import (
     model_validator,
 )
 
+from sidera_control_plane.application.collaboration_metrics import (
+    CollaborationMetricsView,
+)
 from sidera_control_plane.application.command_queries import CommandStatusView
 from sidera_control_plane.application.context_package_queries import (
     ContextPackageAcknowledgementView,
@@ -155,6 +158,34 @@ class RegisterPlannerModulePayload(BaseModel):
     interface_version: NonEmptyString
     config_schema_version: int = Field(ge=1)
     capabilities: PlannerCapabilityPayload
+    instance_name: NonEmptyString
+    config_namespace: NonEmptyString
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+
+
+class CollaborationRuntimeCapabilityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interface_version: NonEmptyString
+    projection_schema_versions: tuple[int, ...] = Field(min_length=1)
+    decision_schema_versions: tuple[int, ...] = Field(min_length=1)
+    strategy_ids: tuple[NonEmptyString, ...] = Field(min_length=1)
+    idempotency: NonEmptyString
+    max_projection_bytes: int = Field(gt=0)
+    max_decision_bytes: int = Field(gt=0)
+    max_intents_per_decision: int = Field(gt=0)
+    max_strategy_state_bytes: int = Field(gt=0)
+    stability: NonEmptyString
+
+
+class RegisterCollaborationRuntimeModulePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: NonEmptyString
+    interface_version: NonEmptyString
+    config_schema_version: int = Field(ge=1)
+    capabilities: CollaborationRuntimeCapabilityPayload
     instance_name: NonEmptyString
     config_namespace: NonEmptyString
     config: dict[str, Any] = Field(default_factory=dict)
@@ -2004,6 +2035,11 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RegisterPlannerModule":
             self._require_create("workspace")
             parsed = RegisterPlannerModulePayload.model_validate(self.payload)
+        elif self.command_type == "RegisterCollaborationRuntimeModule":
+            self._require_create("workspace")
+            parsed = RegisterCollaborationRuntimeModulePayload.model_validate(
+                self.payload
+            )
         elif self.command_type == "RegisterPlanningProfile":
             self._require_create("workspace")
             parsed = RegisterPlanningProfilePayload.model_validate(self.payload)
@@ -4508,6 +4544,37 @@ class RuntimeMetricsResponse(BaseModel):
                 total_seconds=view.scheduler_assignment_duration_seconds.total_seconds,
                 average_seconds=view.scheduler_assignment_duration_seconds.average_seconds,
                 max_seconds=view.scheduler_assignment_duration_seconds.max_seconds,
+            ),
+        )
+
+
+class CollaborationMetricSampleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    labels: dict[str, str]
+    value: float
+
+
+class CollaborationMetricsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    as_of: datetime
+    samples: tuple[CollaborationMetricSampleResponse, ...]
+
+    @classmethod
+    def from_view(cls, view: CollaborationMetricsView) -> "CollaborationMetricsResponse":
+        return cls(
+            workspace_id=view.workspace_id,
+            as_of=view.as_of,
+            samples=tuple(
+                CollaborationMetricSampleResponse(
+                    name=sample.name,
+                    labels=dict(sample.labels),
+                    value=sample.value,
+                )
+                for sample in view.samples
             ),
         )
 

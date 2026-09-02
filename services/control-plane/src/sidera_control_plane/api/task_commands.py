@@ -130,6 +130,7 @@ def _execute_command(
             "CreateExecution",
             "RetryExecution",
             "RegisterPlannerModule",
+            "RegisterCollaborationRuntimeModule",
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
             "SubmitPlanRevision",

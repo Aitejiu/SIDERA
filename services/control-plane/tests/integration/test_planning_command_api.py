@@ -293,6 +293,51 @@ def test_command_response_keeps_legacy_fields_and_adds_data(
     assert set(body["data"]) == {"module_definition_id", "module_instance_id"}
 
 
+def test_collaboration_runtime_registration_is_an_operator_create_command(
+    client: TestClient, workspace_id: UUID
+) -> None:
+    request = _command(
+        workspace_id,
+        "RegisterCollaborationRuntimeModule",
+        "workspace",
+        {
+            "provider": "reference",
+            "interface_version": "collaboration-runtime.v1",
+            "config_schema_version": 1,
+            "capabilities": {
+                "interface_version": "collaboration-runtime.v1",
+                "projection_schema_versions": [1],
+                "decision_schema_versions": [1],
+                "strategy_ids": ["all_required"],
+                "idempotency": "operation-id",
+                "max_projection_bytes": 262_144,
+                "max_decision_bytes": 65_536,
+                "max_intents_per_decision": 128,
+                "max_strategy_state_bytes": 16_384,
+                "stability": "stable",
+            },
+            "instance_name": "sidera-reference",
+            "config_namespace": "collaboration",
+            "config": {},
+            "secret_refs": [],
+        },
+        idempotency_key=f"collaboration-runtime-api-{uuid4()}",
+    )
+
+    created = client.post("/api/v1/commands", json=request)
+
+    assert created.status_code == 201, created.text
+    data = created.json()["data"]
+    assert set(data) == {"module_definition_id", "module_instance_id"}
+
+    replay = client.post(
+        "/api/v1/commands",
+        json={**request, "correlation_id": str(uuid4())},
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.json() == created.json()
+
+
 def _command(
     workspace_id: UUID,
     command_type: str,
