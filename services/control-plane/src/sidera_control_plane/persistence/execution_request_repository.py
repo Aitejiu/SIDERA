@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.errors import VersionConflict
 from sidera_control_plane.domain.execution_requests import (
     DependencyEnforcement,
@@ -272,6 +273,7 @@ def _request_model(request: ExecutionRequest) -> ExecutionRequestModel:
         expected_artifact_refs=list(request.expected_artifact_refs),
         expected_evidence_refs=list(request.expected_evidence_refs),
         status=request.status.value,
+        collaboration_gate_mode=request.collaboration_gate_mode.value,
         gate_reason=request.gate_reason,
         gate_details=_json_value(request.gate_details),
         gate_evaluated_at=request.gate_evaluated_at,
@@ -308,6 +310,7 @@ def _to_request(row: ExecutionRequestModel) -> ExecutionRequest:
         expected_artifact_refs=tuple(row.expected_artifact_refs),
         expected_evidence_refs=tuple(row.expected_evidence_refs),
         status=ExecutionRequestStatus(row.status),
+        collaboration_gate_mode=CollaborationGateMode(row.collaboration_gate_mode),
         gate_reason=row.gate_reason,
         gate_details=MappingProxyType(dict(row.gate_details)),
         gate_evaluated_at=row.gate_evaluated_at,

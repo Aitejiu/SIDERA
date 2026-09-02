@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.execution_requests import (
     DependencyEnforcement,
@@ -24,6 +25,7 @@ WORKER_ITEM_ID = UUID("26000000-0000-0000-0000-000000000001")
 def make_request(
     *,
     request_id: UUID = REQUEST_ID,
+    collaboration_gate_mode: CollaborationGateMode = CollaborationGateMode.UNMANAGED,
     source_execution_id: UUID | None = None,
     source_session_id: UUID | None = None,
     handoff_transition_id: UUID | None = None,
@@ -50,6 +52,7 @@ def make_request(
         expected_artifact_refs=("artifact_type:diff",),
         expected_evidence_refs=("acceptance:tests-pass",),
         now=NOW,
+        collaboration_gate_mode=collaboration_gate_mode,
         source_execution_id=source_execution_id,
         source_session_id=source_session_id,
         handoff_transition_id=handoff_transition_id,
@@ -77,6 +80,7 @@ def test_execution_request_starts_blocked_and_materializes_once() -> None:
     request = make_request()
 
     assert request.status is ExecutionRequestStatus.BLOCKED
+    assert request.collaboration_gate_mode is CollaborationGateMode.UNMANAGED
     assert request.plan_snapshot_id == PLAN_ID
     assert request.plan_generation == 1
     assert request.adapter_forbidden == frozenset({"unsafe"})
@@ -161,6 +165,30 @@ def test_materialized_handoff_target_retirement_releases_attempt_slot() -> None:
         "retired_first_execution_id": str(first_execution_id),
         "retired_handoff_transition_id": str(transition_id),
     }
+
+
+def test_handoff_target_is_always_unmanaged_even_when_source_is_released() -> None:
+    source = make_request(
+        collaboration_gate_mode=CollaborationGateMode.RELEASE_REQUIRED,
+    )
+    source.mark_ready(now=NOW)
+    source.materialize(
+        execution_lineage_id=uuid4(),
+        first_execution_id=uuid4(),
+        now=NOW,
+    )
+
+    target = source.build_handoff_target(
+        request_id=uuid4(),
+        execution_lineage_id=uuid4(),
+        first_execution_id=uuid4(),
+        source_execution_id=uuid4(),
+        source_session_id=uuid4(),
+        handoff_transition_id=uuid4(),
+        now=NOW,
+    )
+
+    assert target.collaboration_gate_mode is CollaborationGateMode.UNMANAGED
 
 
 def test_request_rejects_unscoped_required_refs_and_invalid_snapshot() -> None:

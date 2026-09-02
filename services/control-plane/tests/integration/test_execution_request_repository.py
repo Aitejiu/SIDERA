@@ -4,6 +4,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.errors import VersionConflict
 from sidera_control_plane.domain.execution_requests import (
     DependencyEnforcement,
@@ -31,6 +32,7 @@ def test_execution_request_round_trip_save_and_dependency_queries(
         upstream = request_row(ids, worker_key="upstream")
         downstream = request_row(ids, worker_key="downstream")
         downstream.adapter_forbidden = ["unsafe"]
+        downstream.collaboration_gate_mode = CollaborationGateMode.RELEASE_REQUIRED.value
         downstream.not_before = NOW + timedelta(seconds=5)
         session.add_all((upstream, downstream))
         session.flush()
@@ -53,6 +55,7 @@ def test_execution_request_round_trip_save_and_dependency_queries(
         assert stored.expected_outputs == ("diff",)
         assert stored.status is ExecutionRequestStatus.BLOCKED
         assert stored.adapter_forbidden == frozenset({"unsafe"})
+        assert stored.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED
         dependencies = repository.list_dependencies(downstream.id, workspace_id)
         assert len(dependencies) == 1
         assert dependencies[0].upstream_request_id == upstream.id
@@ -65,10 +68,25 @@ def test_execution_request_round_trip_save_and_dependency_queries(
         ) == (downstream.id,)
 
         previous_version = stored.version
+        stored.collaboration_gate_mode = CollaborationGateMode.UNMANAGED
         stored.mark_ready(now=NOW)
         repository.save(stored, previous_version)
         session.commit()
 
+    with database.session() as session:
+        persisted = ExecutionRequestRepository(session).get(
+            downstream.id, workspace_id
+        )
+        assert persisted is not None
+        assert persisted.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED
+
+    with database.session() as session:
+        repository = ExecutionRequestRepository(session)
+        stored = repository.get(
+            downstream.id, workspace_id, for_update=True
+        )
+        assert stored is not None
+        previous_version = stored.version - 1
         with pytest.raises(VersionConflict):
             repository.save(stored, previous_version)
 

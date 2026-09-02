@@ -9,6 +9,7 @@ from types import MappingProxyType
 from uuid import UUID
 
 from sidera_control_plane.domain.artifacts import ArtifactType, EvidenceClaimStatus
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.execution import ExecutionStatus
 
@@ -241,6 +242,7 @@ class ExecutionRequest:
     source_execution_id: UUID | None = None
     source_session_id: UUID | None = None
     handoff_transition_id: UUID | None = None
+    collaboration_gate_mode: CollaborationGateMode = CollaborationGateMode.UNMANAGED
 
     @classmethod
     def create(
@@ -268,6 +270,9 @@ class ExecutionRequest:
         now: datetime,
         expected_outputs: tuple[str, ...] | Iterable[str] = (),
         adapter_forbidden: tuple[str, ...] | Iterable[str] = (),
+        collaboration_gate_mode: CollaborationGateMode | str = (
+            CollaborationGateMode.UNMANAGED
+        ),
         source_execution_id: UUID | None = None,
         source_session_id: UUID | None = None,
         handoff_transition_id: UUID | None = None,
@@ -323,6 +328,7 @@ class ExecutionRequest:
         artifact_refs = _artifact_refs(expected_artifact_refs, "expected artifact refs")
         evidence_refs = _evidence_refs(expected_evidence_refs, "expected evidence refs")
         outputs = _clean_strings(expected_outputs, "expected outputs")
+        gate_mode = _collaboration_gate_mode(collaboration_gate_mode)
         return cls(
             id=request_id,
             workspace_id=workspace_id,
@@ -358,6 +364,7 @@ class ExecutionRequest:
             source_execution_id=source_execution_id,
             source_session_id=source_session_id,
             handoff_transition_id=handoff_transition_id,
+            collaboration_gate_mode=gate_mode,
         )
 
     @property
@@ -594,6 +601,7 @@ def _materialized_handoff_target(
         source_execution_id=source_execution_id,
         source_session_id=source_session_id,
         handoff_transition_id=handoff_transition_id,
+        collaboration_gate_mode=CollaborationGateMode.UNMANAGED,
     )
     target.mark_ready(now=now)
     target.materialize(
@@ -615,6 +623,21 @@ def _dependency_enforcement(
         )
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"unsupported dependency enforcement: {value!r}") from exc
+
+
+def _collaboration_gate_mode(
+    value: CollaborationGateMode | str,
+) -> CollaborationGateMode:
+    try:
+        return (
+            value
+            if isinstance(value, CollaborationGateMode)
+            else CollaborationGateMode(value)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"unsupported collaboration gate mode: {value!r}"
+        ) from exc
 
 
 def _execution_status(value: ExecutionStatus | str) -> ExecutionStatus:

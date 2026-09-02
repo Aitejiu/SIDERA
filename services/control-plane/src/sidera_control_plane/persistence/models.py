@@ -724,6 +724,13 @@ class ProjectionChangeModel(Base):
             "workspace_id",
             "occurred_at",
         ),
+        Index(
+            "ix_projection_changes_collaboration_target_cursor",
+            "workspace_id",
+            "projection_type",
+            "resource_id",
+            "cursor",
+        ),
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
@@ -2872,6 +2879,10 @@ class ExecutionRequestModel(TimestampMixin, Base):
             name="ck_execution_requests_status",
         ),
         CheckConstraint(
+            "collaboration_gate_mode IN ('unmanaged', 'release_required')",
+            name="ck_execution_requests_collaboration_gate_mode",
+        ),
+        CheckConstraint(
             "jsonb_typeof(capability_requirements) = 'array'",
             name="ck_execution_requests_capabilities_array",
         ),
@@ -3057,6 +3068,9 @@ class ExecutionRequestModel(TimestampMixin, Base):
     expected_artifact_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     expected_evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    collaboration_gate_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unmanaged"
+    )
     gate_reason: Mapped[str] = mapped_column(String(255), nullable=False)
     gate_details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     gate_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -3140,6 +3154,634 @@ class ExecutionRequestDependencyModel(Base):
     required_evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CollaborationRunModel(TimestampMixin, Base):
+    __tablename__ = "collaboration_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_generation >= 1", name="ck_collaboration_runs_generation"
+        ),
+        CheckConstraint(
+            "runtime_config_version >= 1",
+            name="ck_collaboration_runs_runtime_config_version",
+        ),
+        CheckConstraint(
+            "last_evaluated_change_cursor >= 0",
+            name="ck_collaboration_runs_change_cursor",
+        ),
+        CheckConstraint(
+            "consecutive_failure_count >= 0",
+            name="ck_collaboration_runs_failure_count",
+        ),
+        CheckConstraint(
+            "resource_version >= 1", name="ck_collaboration_runs_resource_version"
+        ),
+        CheckConstraint(
+            "plan_content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_collaboration_runs_plan_hash",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'blocked', 'completed', 'superseded')",
+            name="ck_collaboration_runs_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(runtime_capability_snapshot_json) = 'object'",
+            name="ck_collaboration_runs_capability_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(policy_snapshot_json) = 'object'",
+            name="ck_collaboration_runs_policy_object",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_plan_snapshot_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["runtime_definition_id", "workspace_id"],
+            ["module_definitions.id", "module_definitions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_runtime_definition_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["runtime_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_runtime_instance_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["last_projection_snapshot_id", "workspace_id"],
+            [
+                "runtime_projection_snapshots.id",
+                "runtime_projection_snapshots.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_projection_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["last_decision_id", "workspace_id"],
+            ["runtime_decisions.id", "runtime_decisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_runs_decision_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_collaboration_runs_identity"),
+        UniqueConstraint(
+            "workspace_id",
+            "root_task_id",
+            "plan_snapshot_id",
+            "plan_generation",
+            name="uq_collaboration_runs_plan_identity",
+        ),
+        Index(
+            "uq_collaboration_runs_root_active",
+            "workspace_id",
+            "root_task_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'active', 'blocked')"),
+        ),
+        Index(
+            "ix_collaboration_runs_recovery",
+            "workspace_id",
+            "status",
+            "next_evaluation_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    runtime_definition_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    runtime_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    runtime_interface_version: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+    runtime_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    runtime_capability_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    policy_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_projection_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    last_decision_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    last_evaluated_change_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    next_evaluation_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    consecutive_failure_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    blocked_reason: Mapped[str | None] = mapped_column(String(16384))
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RuntimeProjectionSnapshotModel(TimestampMixin, Base):
+    __tablename__ = "runtime_projection_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version >= 1", name="ck_runtime_projection_schema_version"
+        ),
+        CheckConstraint(
+            "plan_generation >= 1", name="ck_runtime_projection_generation"
+        ),
+        CheckConstraint(
+            "fact_cursor >= 0", name="ck_runtime_projection_fact_cursor"
+        ),
+        CheckConstraint("size_bytes >= 1", name="ck_runtime_projection_size"),
+        CheckConstraint(
+            "plan_content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_runtime_projection_plan_hash",
+        ),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_runtime_projection_content_hash",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload_json) = 'object'",
+            name="ck_runtime_projection_payload_object",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["collaboration_runs.id", "collaboration_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_projection_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_projection_plan_snapshot_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_runtime_projection_identity"),
+        UniqueConstraint(
+            "run_id",
+            "schema_version",
+            "content_hash",
+            name="uq_runtime_projection_run_schema_hash",
+        ),
+        Index(
+            "ix_runtime_projection_run_created",
+            "workspace_id",
+            "run_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    fact_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class CollaborationEvaluationModel(TimestampMixin, Base):
+    __tablename__ = "collaboration_evaluations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'evaluating', 'retry_wait', 'completed', 'blocked')",
+            name="ck_collaboration_evaluations_status",
+        ),
+        CheckConstraint(
+            "attempt >= 1", name="ck_collaboration_evaluations_attempt"
+        ),
+        CheckConstraint(
+            "resource_version >= 1",
+            name="ck_collaboration_evaluations_resource_version",
+        ),
+        CheckConstraint(
+            "response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_collaboration_evaluations_response_hash",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["collaboration_runs.id", "collaboration_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_collaboration_evaluations_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["projection_snapshot_id", "workspace_id"],
+            [
+                "runtime_projection_snapshots.id",
+                "runtime_projection_snapshots.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_collaboration_evaluations_projection_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_collaboration_evaluations_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "run_id",
+            "projection_snapshot_id",
+            name="uq_collaboration_evaluations_run_projection",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "operation_id",
+            name="uq_collaboration_evaluations_operation",
+        ),
+        Index(
+            "ix_collaboration_evaluations_claimable",
+            "workspace_id",
+            "status",
+            "next_attempt_at",
+            "lease_expires_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    projection_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    diagnostic_summary: Mapped[str | None] = mapped_column(String(16384))
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RuntimeDecisionModel(TimestampMixin, Base):
+    __tablename__ = "runtime_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version >= 1", name="ck_runtime_decisions_schema_version"
+        ),
+        CheckConstraint("sequence >= 1", name="ck_runtime_decisions_sequence"),
+        CheckConstraint(
+            "runtime_duration_ms >= 0", name="ck_runtime_decisions_duration"
+        ),
+        CheckConstraint(
+            "outcome IN ('intents', 'no_change')",
+            name="ck_runtime_decisions_outcome",
+        ),
+        CheckConstraint(
+            "projection_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_runtime_decisions_projection_hash",
+        ),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_runtime_decisions_content_hash",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(strategy_state_json) = 'object'",
+            name="ck_runtime_decisions_strategy_state_object",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["collaboration_runs.id", "collaboration_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_decisions_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["evaluation_id", "workspace_id"],
+            [
+                "collaboration_evaluations.id",
+                "collaboration_evaluations.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_runtime_decisions_evaluation_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["projection_snapshot_id", "workspace_id"],
+            [
+                "runtime_projection_snapshots.id",
+                "runtime_projection_snapshots.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_runtime_decisions_projection_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_runtime_decisions_identity"),
+        UniqueConstraint(
+            "workspace_id", "run_id", "sequence", name="uq_runtime_decisions_sequence"
+        ),
+        Index(
+            "ix_runtime_decisions_run_sequence",
+            "workspace_id",
+            "run_id",
+            "sequence",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    evaluation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    projection_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(String(16384), nullable=False)
+    strategy_state_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    runtime_duration_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class RuntimeIntentModel(TimestampMixin, Base):
+    __tablename__ = "runtime_intents"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 0", name="ck_runtime_intents_ordinal"),
+        CheckConstraint(
+            "target_request_version >= 1",
+            name="ck_runtime_intents_request_version",
+        ),
+        CheckConstraint(
+            "intent_type = 'release_execution_request'",
+            name="ck_runtime_intents_type",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload_json) = 'object'",
+            name="ck_runtime_intents_payload_object",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["collaboration_runs.id", "collaboration_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_intents_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "workspace_id"],
+            ["runtime_decisions.id", "runtime_decisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_intents_decision_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_execution_request_id", "workspace_id"],
+            ["execution_requests.id", "execution_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_intents_request_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_runtime_intents_identity"),
+        UniqueConstraint(
+            "workspace_id",
+            "decision_id",
+            "ordinal",
+            name="uq_runtime_intents_decision_ordinal",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_runtime_intents_idempotency",
+        ),
+        Index(
+            "ix_runtime_intents_decision_ordinal",
+            "workspace_id",
+            "decision_id",
+            "ordinal",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    decision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    intent_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_execution_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_request_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(String(16384), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class RuntimeReleaseModel(TimestampMixin, Base):
+    __tablename__ = "runtime_releases"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_generation >= 1", name="ck_runtime_releases_generation"
+        ),
+        CheckConstraint(
+            "request_version_at_release >= 1",
+            name="ck_runtime_releases_request_version",
+        ),
+        CheckConstraint(
+            "plan_content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_runtime_releases_plan_hash",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["collaboration_runs.id", "collaboration_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_releases_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_releases_plan_snapshot_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "workspace_id"],
+            ["runtime_decisions.id", "runtime_decisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_releases_decision_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["intent_id", "workspace_id"],
+            ["runtime_intents.id", "runtime_intents.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_releases_intent_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_request_id", "workspace_id"],
+            ["execution_requests.id", "execution_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_releases_request_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_runtime_releases_identity"),
+        UniqueConstraint(
+            "workspace_id",
+            "execution_request_id",
+            name="uq_runtime_releases_workspace_request",
+        ),
+        UniqueConstraint("intent_id", name="uq_runtime_releases_intent"),
+        Index(
+            "ix_runtime_releases_run_issued",
+            "workspace_id",
+            "run_id",
+            "issued_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    intent_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    execution_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    request_version_at_release: Mapped[int] = mapped_column(Integer, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class RuntimeIntentApplicationModel(TimestampMixin, Base):
+    __tablename__ = "runtime_intent_applications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'applied', 'rejected', 'stale', 'duplicate')",
+            name="ck_runtime_intent_applications_status",
+        ),
+        CheckConstraint(
+            "expected_run_version >= 1 AND observed_run_version >= 1",
+            name="ck_runtime_intent_applications_run_versions",
+        ),
+        CheckConstraint(
+            "expected_request_version >= 1 AND "
+            "(observed_request_version IS NULL OR observed_request_version >= 1)",
+            name="ck_runtime_intent_applications_request_versions",
+        ),
+        CheckConstraint(
+            "resource_version >= 1",
+            name="ck_runtime_intent_applications_resource_version",
+        ),
+        ForeignKeyConstraint(
+            ["intent_id", "workspace_id"],
+            ["runtime_intents.id", "runtime_intents.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_intent_applications_intent_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["release_id", "workspace_id"],
+            ["runtime_releases.id", "runtime_releases.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_runtime_intent_applications_release_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_runtime_intent_applications_identity"
+        ),
+        UniqueConstraint(
+            "intent_id", name="uq_runtime_intent_applications_intent"
+        ),
+        Index(
+            "ix_runtime_intent_applications_status",
+            "workspace_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    intent_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    expected_run_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_run_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_request_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_request_version: Mapped[int | None] = mapped_column(Integer)
+    release_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    result_code: Mapped[str] = mapped_column(String(255), nullable=False)
+    result_summary: Mapped[str] = mapped_column(String(16384), nullable=False)
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
 
 
