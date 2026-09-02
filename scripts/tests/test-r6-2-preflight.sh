@@ -4,21 +4,35 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/sidera-r6-2-preflight.XXXXXX")
 RUNTIME_DIR="$ROOT/.r6-2-preflight-runtime-$PPID"
-trap 'rm -rf "$TMP"; rm -rf "$RUNTIME_DIR"; rm -f "$ROOT/.r6-2-preflight-symlink-$PPID"' EXIT HUP INT TERM
 
 FAKE_BIN="$TMP/bin"
 ENV_FILE="$TMP/r6-2.local.env"
 AKASHIC_NOT_ALLOWED="$TMP/should-not-be-read"
 OPENCODE="$FAKE_BIN/opencode"
 UV_LOG="$TMP/uv.log"
+CURL_LOG="$TMP/curl.log"
+CONTROL_PID=''
+GATEWAY_PID=''
+WEB_PID=''
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   exit 1
 }
 
+cleanup() {
+  for owned_pid in "$CONTROL_PID" "$GATEWAY_PID" "$WEB_PID"; do
+    [ -z "$owned_pid" ] || kill "$owned_pid" >/dev/null 2>&1 || true
+  done
+  rm -rf "$TMP"
+  rm -rf "$RUNTIME_DIR"
+  rm -f "$ROOT/.r6-2-preflight-symlink-$PPID"
+}
+
+trap cleanup EXIT HUP INT TERM
+
 make_fake_commands() {
-  mkdir -p "$FAKE_BIN" "$RUNTIME_DIR"
+  mkdir -p "$FAKE_BIN" "$RUNTIME_DIR" "$RUNTIME_DIR/pids" "$RUNTIME_DIR/identity"
   chmod 700 "$RUNTIME_DIR"
 
   printf '%s\n' \
@@ -57,22 +71,70 @@ make_fake_commands() {
   printf '%s\n' \
     '#!/bin/sh' \
     'if [ "${1:-}" = "--version" ]; then printf "11.17.0\\n"; else printf "npm ok\\n"; fi' > "$FAKE_BIN/npm"
-  printf '%s\n' '#!/bin/sh' 'printf "{}\\n"' > "$FAKE_BIN/curl"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\\n" "$*" >> "$SIDERA_R6_2_FAKE_CURL_LOG"' \
+    'printf "{}\\n"' > "$FAKE_BIN/curl"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/git"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/pg_isready"
   printf '%s\n' '#!/bin/sh' 'printf "Python 3.12.14\\n"' > "$FAKE_BIN/python3"
   printf '%s\n' \
     '#!/bin/sh' \
     'case "$*" in' \
-    '  *"-iTCP:8000"*) [ "${SIDERA_FAKE_PORT_CONFLICT:-0}" = "1" ] && printf "42424\\n" ;;' \
+    '  *"-iTCP:8000"*) if [ "${SIDERA_FAKE_PORT_CONFLICT:-0}" = "1" ]; then printf "42424\\n"; else printf "%s\\n" "$SIDERA_FAKE_CONTROL_LISTENER_PID"; fi ;;' \
+    '  *"-iTCP:8010"*) printf "%s\\n" "$SIDERA_FAKE_GATEWAY_LISTENER_PID" ;;' \
+    '  *"-iTCP:4173"*) printf "%s\\n" "$SIDERA_FAKE_WEB_LISTENER_PID" ;;' \
     'esac' > "$FAKE_BIN/lsof"
-  printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/ps"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'pid=${2:-}' \
+    'field=${4:-}' \
+    'case "$field:$pid" in' \
+    '  "ppid=:$SIDERA_FAKE_CONTROL_LISTENER_PID") printf "%s\\n" "$SIDERA_FAKE_CONTROL_PID" ;;' \
+    '  "ppid=:$SIDERA_FAKE_GATEWAY_LISTENER_PID") printf "%s\\n" "$SIDERA_FAKE_GATEWAY_PID" ;;' \
+    '  "ppid=:$SIDERA_FAKE_WEB_LISTENER_PID") printf "%s\\n" "$SIDERA_FAKE_WEB_PID" ;;' \
+    '  "lstart=:$SIDERA_FAKE_CONTROL_PID"|"lstart=:$SIDERA_FAKE_GATEWAY_PID"|"lstart=:$SIDERA_FAKE_WEB_PID") printf "Mon Sep  2 12:00:00 2026\\n" ;;' \
+    '  "args=:$SIDERA_FAKE_CONTROL_PID") printf "python -m uvicorn sidera_control_plane.api.app:app\\n" ;;' \
+    '  "args=:$SIDERA_FAKE_GATEWAY_PID") printf "python -m uvicorn sidera_main_agent_gateway.api.app:app\\n" ;;' \
+    '  "args=:$SIDERA_FAKE_WEB_PID") printf "npm run dev\\n" ;;' \
+    'esac' > "$FAKE_BIN/ps"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/shasum"
 
   printf '%s\n' \
     '#!/bin/sh' \
     'if [ "${1:-}" = "--version" ]; then printf "opencode 1.18.19\\n"; fi' > "$OPENCODE"
   chmod +x "$FAKE_BIN"/*
+}
+
+start_fake_runtime() {
+  sleep 300 &
+  CONTROL_PID=$!
+  sleep 300 &
+  GATEWAY_PID=$!
+  sleep 300 &
+  WEB_PID=$!
+
+  export SIDERA_FAKE_CONTROL_PID=$CONTROL_PID
+  export SIDERA_FAKE_GATEWAY_PID=$GATEWAY_PID
+  export SIDERA_FAKE_WEB_PID=$WEB_PID
+  export SIDERA_FAKE_CONTROL_LISTENER_PID=$((CONTROL_PID + 100000))
+  export SIDERA_FAKE_GATEWAY_LISTENER_PID=$((GATEWAY_PID + 100000))
+  export SIDERA_FAKE_WEB_LISTENER_PID=$((WEB_PID + 100000))
+
+  printf '%s\n' "$CONTROL_PID" > "$RUNTIME_DIR/pids/control-plane.pid"
+  printf '%s\n' "$GATEWAY_PID" > "$RUNTIME_DIR/pids/main-agent-gateway.pid"
+  printf '%s\n' "$WEB_PID" > "$RUNTIME_DIR/pids/web.pid"
+
+  write_identity control-plane "$CONTROL_PID" sidera_control_plane.api.app
+  write_identity main-agent-gateway "$GATEWAY_PID" sidera_main_agent_gateway.api.app
+  write_identity web "$WEB_PID" npm
+}
+
+write_identity() {
+  local component=$1 pid=$2 command_label=$3 release=${4:-r5-3}
+  printf 'pid=%s\ncomponent=%s\nrepo=%s\nmarker=sidera-%s:%s\nstarted_at=2026-09-02T12:00:00Z\nprocess_start=Mon Sep  2 12:00:00 2026\ncommand=%s\n' \
+    "$pid" "$component" "$ROOT" "$release" "$component" "$command_label" \
+    > "$RUNTIME_DIR/identity/$component.identity"
 }
 
 write_env() {
@@ -104,6 +166,7 @@ run_preflight() {
     SIDERA_R6_2_ENV_FILE="$env_file" \
     SIDERA_R6_2_RUNTIME_DIR="$RUNTIME_DIR" \
     SIDERA_R6_2_FAKE_UV_LOG="$UV_LOG" \
+    SIDERA_R6_2_FAKE_CURL_LOG="$CURL_LOG" \
     /bin/bash "$ROOT/scripts/r6-2-preflight.sh" "$@"
 }
 
@@ -123,6 +186,7 @@ assert_failure() {
 }
 
 make_fake_commands
+start_fake_runtime
 write_env
 
 if output=$(run_preflight 2>&1); then
@@ -143,6 +207,31 @@ else
   printf '%s\n' "$output" >&2
   fail "valid preflight should pass"
 fi
+
+case "$(cat "$CURL_LOG")" in
+  *"http://127.0.0.1:8000/healthz"*) ;; *) fail "control-plane health route was not checked" ;;
+esac
+case "$(cat "$CURL_LOG")" in
+  *"http://127.0.0.1:8010/main-agent/v1/health"*) ;; *) fail "main-agent health route was not checked" ;;
+esac
+case "$(cat "$CURL_LOG")" in
+  *"http://127.0.0.1:4173/"*) ;; *) fail "Web root health route was not checked" ;;
+esac
+
+for release in r6-1 r6-2; do
+  write_identity control-plane "$CONTROL_PID" sidera_control_plane.api.app "$release"
+  write_identity main-agent-gateway "$GATEWAY_PID" sidera_main_agent_gateway.api.app "$release"
+  write_identity web "$WEB_PID" npm "$release"
+  run_preflight >/dev/null
+done
+
+write_identity control-plane "$CONTROL_PID" sidera_control_plane.api.app foreign
+assert_failure "foreign identity marker" run_preflight
+kill -0 "$CONTROL_PID" "$GATEWAY_PID" "$WEB_PID" >/dev/null 2>&1 \
+  || fail "identity rejection terminated an owned service process"
+write_identity control-plane "$CONTROL_PID" sidera_control_plane.api.app
+write_identity main-agent-gateway "$GATEWAY_PID" sidera_main_agent_gateway.api.app
+write_identity web "$WEB_PID" npm
 
 case "$(cat "$UV_LOG")" in
   *"db=sidera_r62_test"*) ;; *) fail "migration checks did not use the disposable test database" ;;
@@ -204,6 +293,8 @@ write_env
 export SIDERA_FAKE_PORT_CONFLICT=1
 assert_failure "occupied port" run_preflight
 unset SIDERA_FAKE_PORT_CONFLICT
+kill -0 "$CONTROL_PID" "$GATEWAY_PID" "$WEB_PID" >/dev/null 2>&1 \
+  || fail "foreign listener rejection terminated an owned service process"
 
 export SIDERA_FAKE_MIGRATION_MISMATCH=1
 assert_failure "migration mismatch" run_preflight

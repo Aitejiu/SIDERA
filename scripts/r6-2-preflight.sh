@@ -313,25 +313,84 @@ check_database_identity() {
     || fail "runtime and test database identities must be distinct"
 }
 
-check_ports() {
-  local entry port component owners
-  for entry in \
-    "$CONTROL_PLANE_PORT control-plane" \
-    "$MAIN_AGENT_GATEWAY_PORT main-agent-gateway" \
-    "$WEB_PORT web"; do
-    port=${entry%% *}
-    component=${entry#* }
-    owners=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
-    [ -z "$owners" ] || fail "$component port is occupied; owner was left untouched"
+pid_is_descendant_of() {
+  local child=$1 ancestor=$2 current
+  case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ancestor" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$child" = "$ancestor" ] && return 0
+  while [ "$child" != "$ancestor" ]; do
+    current=$(ps -p "$child" -o ppid= 2>/dev/null || true)
+    current=${current//[[:space:]]/}
+    case "$current" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$current" in
+      0|1|"$child") return 1 ;;
+    esac
+    child=$current
   done
+  return 0
+}
+
+check_port_identity() {
+  local port=$1 component=$2 pid_list pid_file pid port_pid command expected
+  local identity identity_pid identity_component identity_repo identity_marker
+  local process_start current_process_start
+  pid_list=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  [ -z "$pid_list" ] && return 0
+  pid_file="$RUNTIME_DIR/pids/$component.pid"
+  [ -f "$pid_file" ] || fail "service port is occupied outside SIDERA runtime: $component"
+  pid=$(sed -n '1p' "$pid_file" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) fail "service port identity is invalid: $component" ;;
+  esac
+  for port_pid in $pid_list; do
+    pid_is_descendant_of "$port_pid" "$pid" \
+      || fail "service port is outside the recorded process tree: $component"
+  done
+  kill -0 "$pid" >/dev/null 2>&1 \
+    || fail "service port owner is not alive: $component"
+  identity="$RUNTIME_DIR/identity/$component.identity"
+  [ -f "$identity" ] || fail "service port runtime identity is missing: $component"
+  identity_pid=$(sed -n '1p' "$identity" 2>/dev/null || true)
+  identity_component=$(sed -n '2p' "$identity" 2>/dev/null || true)
+  identity_repo=$(sed -n '3p' "$identity" 2>/dev/null || true)
+  identity_marker=$(sed -n '4p' "$identity" 2>/dev/null || true)
+  process_start=$(sed -n '6p' "$identity" 2>/dev/null || true)
+  [ "$identity_pid" = "pid=$pid" ] \
+    || fail "service port identity PID mismatch: $component"
+  [ "$identity_component" = "component=$component" ] \
+    || fail "service port identity component mismatch: $component"
+  [ "$identity_repo" = "repo=$REPO_ROOT" ] \
+    || fail "service port identity repository mismatch: $component"
+  case "$identity_marker" in
+    "marker=sidera-r5-3:$component"|"marker=sidera-r6-1:$component"|"marker=sidera-r6-2:$component") ;;
+    *) fail "service port identity marker mismatch: $component" ;;
+  esac
+  [ -n "$process_start" ] || fail "service port identity start time is missing: $component"
+  process_start=${process_start#process_start=}
+  current_process_start=$(ps -p "$pid" -o lstart= 2>/dev/null || true)
+  [ "$current_process_start" = "$process_start" ] \
+    || fail "service port process start mismatch: $component"
+  command=$(ps -p "$pid" -o args= 2>/dev/null || true)
+  case "$component" in
+    control-plane) expected='sidera_control_plane.api.app' ;;
+    main-agent-gateway) expected='sidera_main_agent_gateway.api.app' ;;
+    web) expected='npm' ;;
+    *) fail "service port component is unsupported: $component" ;;
+  esac
+  case "$command" in
+    *"$expected"*) ;;
+    *) fail "service port process command mismatch: $component" ;;
+  esac
 }
 
 check_health() {
   local entry component url
   for entry in \
-    "control-plane $SIDERA_CONTROL_PLANE_URL/health" \
-    "main-agent-gateway $SIDERA_MAIN_AGENT_GATEWAY_URL/health" \
-    "web $SIDERA_WEB_URL"; do
+    "control-plane $SIDERA_CONTROL_PLANE_URL/healthz" \
+    "main-agent-gateway $SIDERA_MAIN_AGENT_GATEWAY_URL/main-agent/v1/health" \
+    "web $SIDERA_WEB_URL/"; do
     component=${entry%% *}
     url=${entry#* }
     curl -fsS --max-time 2 "$url" >/dev/null 2>&1 \
@@ -523,7 +582,9 @@ check_runtime_directory
 check_source_identity
 check_required_commands
 check_database_identity
-check_ports
+check_port_identity "$CONTROL_PLANE_PORT" control-plane
+check_port_identity "$MAIN_AGENT_GATEWAY_PORT" main-agent-gateway
+check_port_identity "$WEB_PORT" web
 check_health
 check_migration
 check_opencode_preflight
