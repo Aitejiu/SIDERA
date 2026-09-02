@@ -579,27 +579,13 @@ class OpenCodeACPAdapter:
             if session.stopped and session.transport.process.poll() is None:
                 raise OpenCodeAdapterError("stopped session has a live process")
             try:
-                result = subprocess.run(
-                    [
-                        self._git_executable,
-                        "diff",
-                        "--binary",
-                        "--no-ext-diff",
-                        "--no-color",
-                        "--",
-                        ".",
-                    ],
-                    cwd=session.cwd,
-                    check=True,
-                    capture_output=True,
-                )
+                diff = _git_workspace_diff(self._git_executable, session.cwd)
             except (OSError, subprocess.CalledProcessError) as exc:
                 raise OpenCodeAdapterError(
                     f"OpenCode Git diff collection failed: {type(exc).__name__}: {exc}"[
                         :500
                     ]
                 ) from exc
-            diff = result.stdout
             if not diff:
                 return ()
             content_hash = hashlib.sha256(diff).hexdigest()
@@ -1509,6 +1495,69 @@ def _rpc_error(error: object) -> str:
 def _failure_code(error: Exception) -> str:
     value = re.sub(r"[^a-z0-9]+", "_", str(error).lower()).strip("_")
     return value[:100] or "acp_error"
+
+
+def _git_workspace_diff(git_executable: str, cwd: Path) -> bytes:
+    tracked = subprocess.run(
+        [
+            git_executable,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-color",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+    untracked = subprocess.run(
+        [
+            git_executable,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+    chunks = [tracked.stdout]
+    for raw_path in untracked.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        relative_path = Path(os.fsdecode(raw_path))
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise OpenCodeAdapterError("Git returned an unsafe untracked path")
+        command = [
+            git_executable,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-color",
+            "--no-index",
+            "--",
+            os.devnull,
+            str(relative_path),
+        ]
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        chunks.append(result.stdout)
+    return b"".join(chunks)
 
 
 _SECRET_KEY = re.compile(r"(key|token|secret|password|credential)", re.IGNORECASE)

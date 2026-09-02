@@ -240,8 +240,9 @@ def test_opencode_acp_collects_git_diff_and_acceptance_provenance(
         capture_output=True,
     )
     (workspace_path / "README.md").write_text("base\n")
+    (workspace_path / ".gitignore").write_text("ignored.txt\n")
     subprocess.run(
-        ["git", "-C", str(workspace_path), "add", "README.md"],
+        ["git", "-C", str(workspace_path), "add", "README.md", ".gitignore"],
         check=True,
         capture_output=True,
     )
@@ -251,6 +252,14 @@ def test_opencode_acp_collects_git_diff_and_acceptance_provenance(
         capture_output=True,
     )
     (workspace_path / "README.md").write_text("changed\n")
+    subprocess.run(
+        ["git", "-C", str(workspace_path), "add", "README.md"],
+        check=True,
+        capture_output=True,
+    )
+    (workspace_path / "NEW_FILE.txt").write_text("new artifact\n")
+    (workspace_path / "EMPTY_FILE.txt").touch()
+    (workspace_path / "ignored.txt").write_text("must not be collected\n")
 
     handle = adapter.start_session(spec, _workspace(spec), operation_id=uuid4())
     candidates = adapter.collect_artifacts(handle, operation_id=uuid4())
@@ -264,6 +273,12 @@ def test_opencode_acp_collects_git_diff_and_acceptance_provenance(
     assert candidates[0].size_bytes > 0
     assert isinstance(candidates[0].content, bytes)
     assert len(candidates[0].content) == candidates[0].size_bytes
+    assert b"README.md" in candidates[0].content
+    assert b"NEW_FILE.txt" in candidates[0].content
+    assert b"new artifact" in candidates[0].content
+    assert b"EMPTY_FILE.txt" in candidates[0].content
+    assert b"ignored.txt" not in candidates[0].content
+    assert b"must not be collected" not in candidates[0].content
     adapter.stop_session(handle, operation_id=uuid4())
 
 
