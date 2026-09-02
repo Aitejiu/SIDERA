@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.collaboration_decisions import (
+    CollaborationGateFact,
+    ComposedActivationGate,
+)
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.work_context_commands import (
@@ -29,6 +33,7 @@ from sidera_control_plane.domain.execution_requests import (
     DependencyEnforcement,
     ExecutionRequest,
     ExecutionRequestDependency,
+    collaboration_gate_mode_for_policy,
 )
 from sidera_control_plane.domain.planning import (
     PlanningRequest,
@@ -516,11 +521,9 @@ class ProposalMaterializer:
                 expected_artifact_refs=intent.expected_artifact_refs,
                 expected_evidence_refs=intent.required_evidence_refs,
                 expected_outputs=subtask_plan.expected_outputs,
-                collaboration_gate_mode=(
-                    CollaborationGateMode.RELEASE_REQUIRED
-                    if collaboration_policy is not None
-                    and collaboration_policy.effective_policy(subtask_key).enabled
-                    else CollaborationGateMode.UNMANAGED
+                collaboration_gate_mode=collaboration_gate_mode_for_policy(
+                    collaboration_policy,
+                    subtask_key=subtask_key,
                 ),
                 now=now,
             )
@@ -618,8 +621,18 @@ class ProposalMaterializer:
                 dependency.downstream_request_id, []
             ).append(dependency)
         for request in requests:
-            decision = ActivationGate.evaluate(
+            static_decision = ActivationGate.evaluate(
                 dependencies=dependencies_by_downstream.get(request.id, ())
+            )
+            collaboration = (
+                CollaborationGateFact.run_pending()
+                if request.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED
+                else CollaborationGateFact.unmanaged()
+            )
+            decision = ComposedActivationGate.evaluate(
+                plan_transition_allows=True,
+                static_decision=static_decision,
+                collaboration=collaboration,
             )
             if decision.ready:
                 request.mark_ready(now=now, decision=decision)

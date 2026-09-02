@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_control_plane.application.collaboration_decisions import (
+    CollaborationGateFact,
+    ComposedActivationGate,
+)
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
@@ -19,6 +23,7 @@ from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGateResult,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import InvalidTransition
 from sidera_control_plane.domain.events import EventData
@@ -602,9 +607,43 @@ class ActivationReconciler:
             request.id, request.workspace_id
         )
         facts = self._upstream_facts(uow, request, dependencies)
-        return ActivationGate.evaluate(
+        static_decision = ActivationGate.evaluate(
             dependencies=dependencies,
             upstream_facts=facts,
+        )
+        return ComposedActivationGate.evaluate(
+            plan_transition_allows=True,
+            static_decision=static_decision,
+            collaboration=self._collaboration_gate(uow, request),
+        )
+
+    @staticmethod
+    def _collaboration_gate(
+        uow: ControlPlaneUnitOfWork,
+        request: ExecutionRequest,
+    ) -> CollaborationGateFact:
+        if request.collaboration_gate_mode is CollaborationGateMode.UNMANAGED:
+            return CollaborationGateFact.unmanaged()
+
+        # Keep this read-only and lock-free. Collaboration decision application
+        # locks the run/head/request in its own fixed order; activation must not
+        # introduce a competing lock order while it is refreshing a gate.
+        runs = getattr(uow, "collaboration_runs", None)
+        plans = getattr(uow, "plans", None)
+        ledger = getattr(uow, "collaboration_ledger", None)
+        if runs is None or plans is None or ledger is None:
+            return CollaborationGateFact.run_pending()
+        run = runs.get_current(request.workspace_id, request.root_task_id)
+        head = plans.get_head(request.root_task_id, request.workspace_id)
+        release = ledger.get_release_for_request(
+            request.workspace_id,
+            request.id,
+        )
+        return CollaborationGateFact.for_request(
+            request,
+            run=run,
+            release=release,
+            plan_head=head,
         )
 
     def _upstream_facts(

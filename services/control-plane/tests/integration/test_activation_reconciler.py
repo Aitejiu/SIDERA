@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,6 +13,8 @@ from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.config import Settings
 from sidera_control_plane.context_package_worker import ContextPackageWorker
+from sidera_control_plane.domain.execution_requests import ExecutionRequestStatus
+from sidera_control_plane.domain.task import TaskStatus
 from sidera_control_plane.persistence.context_package_repository import (
     ContextAssemblyRepository,
 )
@@ -25,6 +28,7 @@ from sidera_control_plane.persistence.models import (
     GatewayOperationModel,
     TaskModel,
 )
+from tests.integration.test_collaboration_evaluation_recovery import _prepare_fixture
 from tests.integration.test_context_package_worker import EmptyCatalog
 from tests.integration.test_proposal_confirmation import command, seed_proposal
 
@@ -58,6 +62,31 @@ def _materialize_plan(client: TestClient, uow_factory, workspace_id: UUID) -> UU
     )
     assert response.status_code == 201, response.text
     return request_id
+
+
+def test_release_required_request_stays_blocked_before_run_exists(
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    ids, _snapshot, _collaboration_reconciler = _prepare_fixture(
+        database, workspace_id, uow_factory
+    )
+
+    reconciler = _reconciler(database, uow_factory)
+    with uow_factory() as uow:
+        request = uow.execution_requests.get(ids["request"], workspace_id)
+        assert request is not None
+        decision = reconciler._decision(
+            uow,
+            request,
+            SimpleNamespace(task=SimpleNamespace(status=TaskStatus.READY)),
+            now=NOW,
+        )
+
+    assert request.status is ExecutionRequestStatus.BLOCKED
+    assert not decision.ready
+    assert decision.reason == "collaboration_run_pending"
 
 
 def test_root_ready_request_creates_execution_and_marks_subtask_ready(

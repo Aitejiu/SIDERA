@@ -34,6 +34,7 @@ from sidera_control_plane.domain.execution_requests import (
     ExecutionRequest,
     ExecutionRequestDependency,
     ExecutionRequestStatus,
+    collaboration_gate_mode_for_policy,
 )
 from sidera_control_plane.domain.gateway import (
     GatewayOperationStatus,
@@ -890,6 +891,10 @@ class PlanTransitionCoordinator:
             expected_artifact_refs=intent.expected_artifact_refs,
             expected_evidence_refs=intent.required_evidence_refs,
             expected_outputs=subtask.expected_outputs,
+            collaboration_gate_mode=collaboration_gate_mode_for_policy(
+                snapshot.collaboration_policy,
+                subtask_key=worker_plan.subtask_key,
+            ),
             now=now,
             source_execution_id=source_execution_id,
             source_session_id=source_session_id,

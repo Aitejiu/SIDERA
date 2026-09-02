@@ -778,6 +778,36 @@ def test_v4_materialization_resolves_policy_and_classifies_requests() -> None:
         requests["web-worker"].collaboration_gate_mode
         is CollaborationGateMode.RELEASE_REQUIRED
     )
+    assert requests["backend-worker"].status is ExecutionRequestStatus.BLOCKED
+    assert requests["web-worker"].status is ExecutionRequestStatus.BLOCKED
+
+
+def test_release_required_initial_gate_waits_for_run_when_static_facts_are_ready() -> None:
+    stored_profile, request, proposal = v4_proposal_fixture()
+    command = envelope(request)
+    command.payload["proposal_content_hash"] = proposal.content_hash
+    uow = FakeUnitOfWork(request)
+
+    ProposalMaterializer().materialize(
+        cast(ControlPlaneUnitOfWork, uow),
+        request=request,
+        proposal=proposal,
+        profile=stored_profile,
+        envelope=command,
+        now=NOW,
+    )
+    release_required = next(
+        item
+        for item in uow.execution_requests.added
+        if item.worker_item_key == "backend-worker"
+    )
+
+    ProposalMaterializer._evaluate_initial_gates(
+        (release_required,), (), now=NOW
+    )
+
+    assert release_required.status is ExecutionRequestStatus.BLOCKED
+    assert release_required.gate_reason == "collaboration_run_pending"
 
 
 def test_dependency_expansion_deduplicates_edges_and_preserves_informational_edges() -> (

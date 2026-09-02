@@ -3,13 +3,14 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Self
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.plan_transition_coordinator import (
     PlanTransitionCoordinator,
 )
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.execution import (
     Execution,
     ExecutionSession,
@@ -29,6 +30,7 @@ from sidera_control_plane.domain.plan_transitions import (
     WorkerTransitionStatus,
     WriterState,
 )
+from sidera_control_plane.domain.planning import PlanningRequestStatus
 from sidera_control_plane.domain.plans import (
     SubtaskPlanItem,
     TaskPlanSnapshot,
@@ -591,3 +593,86 @@ def test_dependency_order_is_stable_even_when_claim_query_is_reversed() -> None:
     assert first.claimed == 1
     assert second.claimed == 1
     assert state.worker_transitions.claimed_ids == [upstream.id, downstream.id]
+
+
+def test_new_transition_request_inherits_collaboration_gate_mode() -> None:
+    policy = SimpleNamespace(
+        effective_policy=lambda _subtask_key: SimpleNamespace(enabled=True)
+    )
+    worker_item_id = uuid4()
+    snapshot = SimpleNamespace(
+        id=uuid4(),
+        generation=2,
+        root_task_id=ROOT_TASK_ID,
+        collaboration_policy=policy,
+        worker_item_plans=(
+            SimpleNamespace(
+                key="backend",
+                worker_item_id=worker_item_id,
+                subtask_key="implementation",
+            ),
+        ),
+        subtasks=(SimpleNamespace(key="implementation", task_id=uuid4(), expected_outputs=()),),
+    )
+    plan = SimpleNamespace(
+        id=uuid4(),
+        planning_request_id=uuid4(),
+        proposal_revision_id=uuid4(),
+        to_snapshot_id=snapshot.id,
+        to_generation=snapshot.generation,
+        root_task_id=ROOT_TASK_ID,
+    )
+    transition = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        plan_transition_id=plan.id,
+        worker_item_id=worker_item_id,
+        action=WorkerTransitionAction.CREATE,
+        source_execution_id=None,
+        source_session_id=None,
+    )
+    intent = SimpleNamespace(
+        worker_item_key="backend",
+        purpose="Implement the backend",
+        capability_requirements=("code",),
+        adapter_preferences=("opencode",),
+        budget_class="standard",
+        not_before_seconds=0,
+        max_attempts=1,
+        expected_artifact_refs=(),
+        required_evidence_refs=(),
+    )
+    added = []
+    uow = SimpleNamespace(
+        plan_transitions=SimpleNamespace(get=lambda *_args, **_kwargs: plan),
+        plans=SimpleNamespace(get=lambda *_args, **_kwargs: snapshot),
+        planning_requests=SimpleNamespace(
+            get=lambda *_args, **_kwargs: SimpleNamespace(
+                status=PlanningRequestStatus.MATERIALIZED,
+                profile_snapshot=SimpleNamespace(adapter_forbidden=()),
+            )
+        ),
+        planning_records=SimpleNamespace(
+            get_proposal=lambda *_args, **_kwargs: SimpleNamespace(
+                id=plan.proposal_revision_id,
+                payload=SimpleNamespace(execution_intents=(intent,)),
+            )
+        ),
+        execution_requests=SimpleNamespace(
+            get_by_proposal_worker_item=lambda *_args, **_kwargs: None,
+            add=added.append,
+        ),
+        flush=lambda: None,
+    )
+    coordinator = PlanTransitionCoordinator(
+        uow_factory=lambda: None,
+        clock=lambda: NOW,
+        owner_id="test-coordinator",
+    )
+    coordinator._add_request_dependencies = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    coordinator._append_transition_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    request = coordinator._ensure_execution_request(uow, transition, now=NOW)
+
+    assert added == [request]
+    assert request.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED

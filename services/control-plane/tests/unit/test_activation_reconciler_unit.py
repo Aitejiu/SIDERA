@@ -12,6 +12,10 @@ from sidera_control_plane.application.activation_reconciler import (
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.artifacts import Artifact, ArtifactType, EvidenceClaim
+from sidera_control_plane.domain.collaboration import (
+    CollaborationGateMode,
+    CollaborationRunStatus,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionStatus
 from sidera_control_plane.domain.execution_requests import (
@@ -21,6 +25,7 @@ from sidera_control_plane.domain.execution_requests import (
     ExecutionRequestStatus,
 )
 from sidera_control_plane.domain.planning import PlanningRequestStatus
+from sidera_control_plane.domain.task import TaskStatus
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -162,6 +167,93 @@ def test_blocked_reason_fingerprint_does_not_repeat_gate_event() -> None:
     assert second == (False, True)
     assert request.version == 2
     assert len(uow.events.events) == 1
+
+
+def test_release_required_request_waits_for_collaboration_release() -> None:
+    request = replace(
+        make_request(),
+        collaboration_gate_mode=CollaborationGateMode.RELEASE_REQUIRED,
+    )
+    uow = FakeUnitOfWork(request)
+    uow.collaboration_runs = SimpleNamespace(
+        get_current=lambda *_args, **_kwargs: None
+    )
+    uow.plans = SimpleNamespace(get_head=lambda *_args, **_kwargs: None)
+    uow.collaboration_ledger = SimpleNamespace(
+        get_release_for_request=lambda *_args, **_kwargs: None
+    )
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-activation",
+        clock=lambda: NOW,
+    )
+
+    decision = reconciler._decision(
+        cast(ControlPlaneUnitOfWork, uow),
+        request,
+        SimpleNamespace(task=SimpleNamespace(status=TaskStatus.READY)),
+        now=NOW,
+    )
+
+    assert not decision.ready
+    assert decision.reason == "collaboration_run_pending"
+
+
+def test_exact_collaboration_release_allows_activation_after_static_gate() -> None:
+    request = replace(
+        make_request(),
+        collaboration_gate_mode=CollaborationGateMode.RELEASE_REQUIRED,
+    )
+    run_id = uuid4()
+    plan_hash = "a" * 64
+    run = SimpleNamespace(
+        id=run_id,
+        workspace_id=request.workspace_id,
+        root_task_id=request.root_task_id,
+        plan_snapshot_id=request.plan_snapshot_id,
+        plan_generation=request.plan_generation,
+        plan_content_hash=plan_hash,
+        status=CollaborationRunStatus.ACTIVE,
+    )
+    head = SimpleNamespace(
+        workspace_id=request.workspace_id,
+        root_task_id=request.root_task_id,
+        active_snapshot_id=request.plan_snapshot_id,
+        active_generation=request.plan_generation,
+        active_snapshot_hash=plan_hash,
+    )
+    release = SimpleNamespace(
+        workspace_id=request.workspace_id,
+        run_id=run_id,
+        plan_snapshot_id=request.plan_snapshot_id,
+        plan_generation=request.plan_generation,
+        plan_content_hash=plan_hash,
+        execution_request_id=request.id,
+        request_version_at_release=request.version,
+    )
+    uow = FakeUnitOfWork(request)
+    uow.collaboration_runs = SimpleNamespace(
+        get_current=lambda *_args, **_kwargs: run
+    )
+    uow.plans = SimpleNamespace(get_head=lambda *_args, **_kwargs: head)
+    uow.collaboration_ledger = SimpleNamespace(
+        get_release_for_request=lambda *_args, **_kwargs: release
+    )
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-activation",
+        clock=lambda: NOW,
+    )
+
+    decision = reconciler._decision(
+        cast(ControlPlaneUnitOfWork, uow),
+        request,
+        SimpleNamespace(task=SimpleNamespace(status=TaskStatus.READY)),
+        now=NOW,
+    )
+
+    assert decision.ready
+    assert decision.reason == "ready"
 
 
 def test_successful_lineage_fact_requires_real_artifacts_and_evidence() -> None:

@@ -9,7 +9,10 @@ from types import MappingProxyType
 from uuid import UUID
 
 from sidera_control_plane.domain.artifacts import ArtifactType, EvidenceClaimStatus
-from sidera_control_plane.domain.collaboration import CollaborationGateMode
+from sidera_control_plane.domain.collaboration import (
+    CollaborationGateMode,
+    CollaborationPolicySnapshotV1,
+)
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.execution import ExecutionStatus
 
@@ -638,6 +641,17 @@ def _collaboration_gate_mode(
         raise ValidationError(
             f"unsupported collaboration gate mode: {value!r}"
         ) from exc
+
+
+def collaboration_gate_mode_for_policy(
+    policy: CollaborationPolicySnapshotV1 | None,
+    *,
+    subtask_key: str,
+) -> CollaborationGateMode:
+    """Resolve the request-level gate mode from the immutable plan policy."""
+    if policy is not None and policy.effective_policy(subtask_key).enabled:
+        return CollaborationGateMode.RELEASE_REQUIRED
+    return CollaborationGateMode.UNMANAGED
 
 
 def _execution_status(value: ExecutionStatus | str) -> ExecutionStatus:
