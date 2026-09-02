@@ -114,6 +114,11 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
                     "request_timeout_seconds",
                     settings.opencode_request_timeout_seconds,
                 ),
+                handoff_request_timeout_seconds=_module_config_float(
+                    instance,
+                    "handoff_request_timeout_seconds",
+                    settings.opencode_handoff_request_timeout_seconds,
+                ),
                 stop_grace_seconds=_module_config_float(
                     instance,
                     "stop_grace_seconds",

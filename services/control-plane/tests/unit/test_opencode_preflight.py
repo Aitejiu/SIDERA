@@ -7,7 +7,7 @@ import pytest
 from sidera_control_plane.opencode_preflight import main, run_preflight
 
 
-def _fake_opencode(tmp_path: Path) -> Path:
+def _fake_opencode(tmp_path: Path, *, handoff_modes: bool = False) -> Path:
     script = tmp_path / "fake-opencode"
     script.write_text(
         textwrap.dedent(
@@ -36,13 +36,28 @@ def _fake_opencode(tmp_path: Path) -> Path:
                         },
                     })
                 elif request.get("method") == "session/new":
+                    result = {"sessionId": "preflight-session"}
+                    if __HANDOFF_MODES__:
+                        result["configOptions"] = [{
+                            "id": "mode",
+                            "name": "Session Mode",
+                            "category": "mode",
+                            "type": "select",
+                            "currentValue": "build",
+                            "options": [
+                                {"value": "build", "name": "build"},
+                                {"value": "plan", "name": "plan"},
+                            ],
+                        }]
                     write({
                         "jsonrpc": "2.0",
                         "id": request["id"],
-                        "result": {"sessionId": "preflight-session"},
+                        "result": result,
                     })
+                elif request.get("method") == "session/set_mode":
+                    write({"jsonrpc": "2.0", "id": request["id"], "result": {}})
             """
-        ).strip()
+        ).replace("__HANDOFF_MODES__", repr(handoff_modes)).strip()
         + "\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
@@ -59,6 +74,13 @@ def test_preflight_reports_version_and_acp_capabilities(tmp_path: Path) -> None:
     assert report.status == "ok"
     assert report.version == "opencode 0.0.0-preflight"
     assert report.capability_profile is not None
+    assert report.handoff_status == "unsupported"
+    assert report.as_dict()["handoff_checkpoint_mode"] == "unsupported"
+    assert report.as_dict()["handoff_checkpoint_v1"] is False
+    assert report.as_dict()["handoff_exact_stop"] is False
+    assert report.as_dict()["handoff_session_context_v1"] is False
+    assert report.as_dict()["handoff_writer_gate"] is False
+    assert report.as_dict()["handoff_inspection"] is False
     assert report.as_dict()["capabilities"] == {
         "status": "available",
         "input": "queued",
@@ -70,12 +92,30 @@ def test_preflight_reports_version_and_acp_capabilities(tmp_path: Path) -> None:
     }
 
 
+def test_preflight_reports_supported_handoff_mode_boundary(tmp_path: Path) -> None:
+    report = run_preflight(
+        executable=str(_fake_opencode(tmp_path, handoff_modes=True)),
+        expected_version="0.0.0-preflight",
+        timeout_seconds=2,
+    )
+
+    assert report.status == "ok"
+    assert report.handoff_status == "supported"
+    assert report.as_dict()["handoff_checkpoint_mode"] == "control-event"
+    assert report.as_dict()["handoff_checkpoint_v1"] is True
+    assert report.as_dict()["handoff_exact_stop"] is True
+    assert report.as_dict()["handoff_session_context_v1"] is True
+    assert report.as_dict()["handoff_writer_gate"] is True
+    assert report.as_dict()["handoff_inspection"] is True
+
+
 def test_preflight_does_not_fallback_when_executable_is_missing() -> None:
     report = run_preflight(executable="/missing/opencode")
 
     assert report.status == "failed"
     assert report.resolved_executable is None
     assert report.capability_profile is None
+    assert report.handoff_status == "unsupported"
     assert report.as_dict()["capabilities"] == {
         "status": "unavailable",
         "reason": "OpenCode executable was not found: /missing/opencode",

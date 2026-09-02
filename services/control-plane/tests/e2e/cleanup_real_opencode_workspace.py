@@ -1,4 +1,4 @@
-"""Remove the isolated integration workspace used by the real R4 browser path."""
+"""Remove isolated integration workspaces used by real browser/runtime paths."""
 
 from __future__ import annotations
 
@@ -66,7 +66,10 @@ from sidera_control_plane.persistence.models import (
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 WORKSPACE_NAME = "Integration Test Workspace"
 R6_WORKSPACE_NAME = "SIDERA R6.1 revision vertical workspace"
-ALLOWED_WORKSPACE_NAMES = frozenset({WORKSPACE_NAME, R6_WORKSPACE_NAME})
+R6_2_WORKSPACE_NAME = "SIDERA R6.2 OpenCode handoff workspace"
+ALLOWED_WORKSPACE_NAMES = frozenset(
+    {WORKSPACE_NAME, R6_WORKSPACE_NAME, R6_2_WORKSPACE_NAME}
+)
 
 
 def main() -> int:

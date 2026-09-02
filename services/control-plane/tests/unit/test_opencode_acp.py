@@ -13,6 +13,7 @@ from sidera_control_plane.adapters.opencode_acp import (
     ACPTimeoutError,
     AdapterProbeError,
     OpenCodeACPAdapter,
+    handoff_profile_supported,
 )
 from sidera_control_plane.domain.artifacts import ArtifactType
 from sidera_control_plane.domain.gateway import DeliveryOutcome
@@ -145,6 +146,11 @@ def test_opencode_acp_probe_and_prompt_round_trip(tmp_path: Path) -> None:
     assert profile.input.value == "queued"
     assert profile.resume.value == "same-process"
     assert profile.stability.value == "experimental"
+    assert not handoff_profile_supported(profile)
+    assert profile.handoff_checkpoint_versions == ()
+    assert profile.handoff_session_context_versions == ()
+    assert profile.handoff_writer_gate_versions == ()
+    assert profile.handoff_inspection is False
 
     spec = _spec()
     (tmp_path / str(spec.execution_id)).mkdir()

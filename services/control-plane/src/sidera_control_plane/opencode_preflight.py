@@ -8,7 +8,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
+from sidera_control_plane.adapters.opencode_acp import (
+    OpenCodeACPAdapter,
+    handoff_profile_supported,
+)
 from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
 
 
@@ -21,6 +24,7 @@ class OpenCodePreflightReport:
     workspace: str | None
     capability_profile: WorkerAdapterCapabilityProfile | None
     errors: tuple[str, ...]
+    handoff_status: str = "unsupported"
 
     def as_dict(self) -> dict[str, object]:
         capabilities: dict[str, object]
@@ -40,6 +44,12 @@ class OpenCodePreflightReport:
                 "sandbox": profile.sandbox.value,
                 "stability": profile.stability.value,
             }
+        profile = self.capability_profile
+        handoff_checkpoint_mode = (
+            profile.handoff_checkpoint_mode.value
+            if profile is not None
+            else "unsupported"
+        )
         return {
             "status": self.status,
             "configured_executable": self.configured_executable,
@@ -47,6 +57,23 @@ class OpenCodePreflightReport:
             "version": self.version,
             "workspace": self.workspace,
             "capabilities": capabilities,
+            "handoff_status": self.handoff_status,
+            "handoff_checkpoint_mode": handoff_checkpoint_mode,
+            "handoff_checkpoint_v1": bool(
+                profile is not None and 1 in profile.handoff_checkpoint_versions
+            ),
+            "handoff_exact_stop": bool(
+                profile is not None and handoff_profile_supported(profile)
+            ),
+            "handoff_session_context_v1": bool(
+                profile is not None and 1 in profile.handoff_session_context_versions
+            ),
+            "handoff_writer_gate": bool(
+                profile is not None and 1 in profile.handoff_writer_gate_versions
+            ),
+            "handoff_inspection": bool(
+                profile is not None and profile.handoff_inspection
+            ),
             "errors": list(self.errors),
         }
 
@@ -67,8 +94,8 @@ def run_preflight(
             resolved_executable=None,
             version=None,
             workspace=None,
-            capability_profile=None,
-            errors=("SIDERA_OPENCODE_EXECUTABLE is empty",),
+        capability_profile=None,
+        errors=("SIDERA_OPENCODE_EXECUTABLE is empty",),
         )
     if timeout_seconds <= 0:
         raise ValueError("OpenCode preflight timeout must be positive")
@@ -81,8 +108,8 @@ def run_preflight(
             resolved_executable=None,
             version=None,
             workspace=None,
-            capability_profile=None,
-            errors=(f"OpenCode executable was not found: {configured}",),
+        capability_profile=None,
+        errors=(f"OpenCode executable was not found: {configured}",),
         )
 
     version = _read_version(resolved, timeout_seconds, errors)
@@ -113,6 +140,11 @@ def run_preflight(
         workspace=workspace,
         capability_profile=profile,
         errors=tuple(errors),
+        handoff_status=(
+            "supported"
+            if profile is not None and handoff_profile_supported(profile)
+            else "unsupported"
+        ),
     )
 
 
@@ -207,7 +239,13 @@ class _TemporaryGitWorktree:
             ["-C", str(repository), "config", "user.email", "preflight@sidera.local"],
         )
         (repository / "README.md").write_text("SIDERA OpenCode preflight\n")
-        _git(self._git_executable, ["-C", str(repository), "add", "README.md"])
+        (repository / "SIDERA_PREFLIGHT_SENTINEL.txt").write_text(
+            "SIDERA preflight sentinel\n"
+        )
+        _git(
+            self._git_executable,
+            ["-C", str(repository), "add", "README.md", "SIDERA_PREFLIGHT_SENTINEL.txt"],
+        )
         _git(
             self._git_executable,
             ["-C", str(repository), "commit", "-m", "preflight base"],

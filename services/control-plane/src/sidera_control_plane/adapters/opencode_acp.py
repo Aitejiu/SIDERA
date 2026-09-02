@@ -8,6 +8,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import Popen
@@ -45,13 +46,18 @@ from sidera_control_plane.domain.gateway import (
     AdapterSessionHandle,
     DeliveryOutcome,
     DeliveryResult,
+    GatewayOperationType,
+    gateway_operation_id,
 )
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
+    HandoffInspectionOutcome,
     HandoffOperationInspection,
+    SessionContextBinding,
 )
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
+    HandoffCheckpointMode,
     IdempotencyCapability,
     ResumeCapability,
     SandboxCapability,
@@ -63,11 +69,29 @@ from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
     ProcessDescriptor,
+    workspace_manifest_digest,
 )
 
 
 class AdapterProbeError(OpenCodeAdapterError):
     """The configured OpenCode process is unavailable or incompatible."""
+
+
+class OpenCodeHandoffUnsupported(NotImplementedError):
+    """The installed OpenCode ACP process cannot prove the handoff boundary."""
+
+
+def handoff_profile_supported(profile: WorkerAdapterCapabilityProfile) -> bool:
+    """Return whether a profile proves every R6.2 handoff capability."""
+
+    return (
+        profile.handoff_checkpoint_mode is HandoffCheckpointMode.CONTROL_EVENT
+        and 1 in profile.handoff_checkpoint_versions
+        and 1 in profile.handoff_session_context_versions
+        and 1 in profile.handoff_writer_gate_versions
+        and profile.handoff_inspection
+        and profile.stop is StopCapability.EXACT_EXECUTION
+    )
 
 
 class OpenCodeACPAdapter:
@@ -83,6 +107,21 @@ class OpenCodeACPAdapter:
         context_package_versions=(1,),
         context_patch_versions=(),
     )
+    _HANDOFF_PROFILE = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.QUEUED,
+        idempotency=IdempotencyCapability.NONE,
+        resume=ResumeCapability.SAME_PROCESS,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.EXPERIMENTAL,
+        context_package_versions=(1,),
+        context_patch_versions=(),
+        handoff_checkpoint_mode=HandoffCheckpointMode.CONTROL_EVENT,
+        handoff_checkpoint_versions=(1,),
+        handoff_session_context_versions=(1,),
+        handoff_writer_gate_versions=(1,),
+        handoff_inspection=True,
+    )
 
     def __init__(
         self,
@@ -91,6 +130,7 @@ class OpenCodeACPAdapter:
         model: str | None = None,
         workspace_root: Path | None = None,
         request_timeout_seconds: float = 30.0,
+        handoff_request_timeout_seconds: float | None = None,
         stop_grace_seconds: float = 5.0,
         git_executable: str = "git",
         stderr_limit_bytes: int = 64 * 1024,
@@ -102,6 +142,11 @@ class OpenCodeACPAdapter:
             raise ValueError("OpenCode executable is required")
         if request_timeout_seconds <= 0 or stop_grace_seconds <= 0:
             raise ValueError("OpenCode timeouts must be positive")
+        if (
+            handoff_request_timeout_seconds is not None
+            and handoff_request_timeout_seconds <= 0
+        ):
+            raise ValueError("OpenCode handoff timeout must be positive")
         if stderr_limit_bytes <= 0:
             raise ValueError("stderr limit must be positive")
         if not git_executable.strip():
@@ -114,12 +159,16 @@ class OpenCodeACPAdapter:
             else None
         )
         self._request_timeout_seconds = request_timeout_seconds
+        self._handoff_request_timeout_seconds = (
+            handoff_request_timeout_seconds or request_timeout_seconds
+        )
         self._stop_grace_seconds = stop_grace_seconds
         self._git_executable = git_executable.strip()
         self._stderr_limit_bytes = stderr_limit_bytes
         self._client_name = client_name
         self._client_version = client_version
         self._sessions: dict[str, _OpenCodeSession] = {}
+        self._profile = self._PROFILE
         self._lock = threading.RLock()
 
     def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
@@ -138,8 +187,14 @@ class OpenCodeACPAdapter:
                 {"cwd": str(cwd), "mcpServers": _config_mcp_servers(config)},
                 timeout=self._request_timeout_seconds,
             )
-            _session(session)
-            return self._PROFILE
+            _session_id = _session(session)
+            handoff_supported = self._try_negotiate_handoff_modes(
+                transport, _session_id, session, keep_plan=False
+            )
+            self._profile = (
+                self._HANDOFF_PROFILE if handoff_supported else self._PROFILE
+            )
+            return self._profile
         except ACPTimeoutError:
             raise
         except (ACPProtocolError, OpenCodeAdapterError) as exc:
@@ -178,7 +233,8 @@ class OpenCodeACPAdapter:
         *,
         operation_id: UUID,
     ) -> AdapterSessionHandle:
-        del operation_id
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
         cwd = self._workspace_path(workspace)
         transport = self._spawn(self._executable, cwd, probe=False)
         try:
@@ -194,14 +250,43 @@ class OpenCodeACPAdapter:
                 timeout=self._request_timeout_seconds,
             )
             adapter_session_id = _session(result)
+            execution_session_id = uuid4()
+            handoff_facts = _handoff_facts(spec.context_package)
+            handoff_instruction = (
+                _handoff_instruction(handoff_facts)
+                if handoff_facts is not None
+                else None
+            )
+            handoff_supported = self._try_negotiate_handoff_modes(
+                transport,
+                adapter_session_id,
+                result,
+                keep_plan=handoff_facts is not None,
+            )
+            if handoff_facts is not None and not handoff_supported:
+                raise OpenCodeHandoffUnsupported("opencode_handoff_unsupported")
             identity = _process_identity(transport.process)
+            context_binding = None
+            if spec.context_package is not None and handoff_facts is not None:
+                metadata = spec.context_package.metadata
+                context_binding = SessionContextBinding(
+                    operation_id=operation_id,
+                    execution_session_id=execution_session_id,
+                    consumer_execution_id=spec.execution_id,
+                    package_id=metadata.package_id,
+                    package_hash=metadata.package_hash,
+                    context_version=metadata.context_version or 0,
+                    acknowledged_at=datetime.now(UTC),
+                )
+            profile = self._HANDOFF_PROFILE if handoff_supported else self._PROFILE
             handle = AdapterSessionHandle(
-                execution_session_id=uuid4(),
+                execution_session_id=execution_session_id,
                 adapter_session_id=adapter_session_id,
                 process_ref=f"opencode://{identity.nonce}",
-                capability_snapshot=self._PROFILE,
+                capability_snapshot=profile,
                 last_accepted_sequence=0,
                 started_at=identity.started_at,
+                context_binding=context_binding,
             )
             with self._lock:
                 self._sessions[adapter_session_id] = _OpenCodeSession(
@@ -210,6 +295,14 @@ class OpenCodeACPAdapter:
                     identity=identity,
                     cwd=cwd,
                     acceptance_criteria=spec.acceptance_criteria,
+                    execution_id=spec.execution_id,
+                    fencing_token=spec.fencing_token,
+                    workspace_digest=workspace_manifest_digest(workspace),
+                    context_package=spec.context_package,
+                    context_binding=context_binding,
+                    handoff_instruction=handoff_instruction,
+                    handoff_held=handoff_facts is not None,
+                    handoff_supported=handoff_supported,
                 )
             return handle
         except Exception:
@@ -257,12 +350,45 @@ class OpenCodeACPAdapter:
             )
         session = self._session(handle)
         with session.lock:
+            if session.handle.execution_session_id != handle.execution_session_id:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="session_identity_mismatch",
+                    execution_session_id=session.handle.execution_session_id,
+                )
             if session.stopped or session.transport.process.poll() is not None:
                 return DeliveryResult(
                     operation_id=operation_id,
                     outcome=DeliveryOutcome.UNKNOWN,
                     accepted_sequence=None,
                     failure_code="process_identity_unknown",
+                    execution_session_id=session.handle.execution_session_id,
+                )
+            if session.handoff_state_unknown:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="handoff_state_unknown",
+                    execution_session_id=session.handle.execution_session_id,
+                )
+            if session.checkpointed:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="handoff_checkpointed",
+                    execution_session_id=session.handle.execution_session_id,
+                )
+            if session.handoff_held and not session.writer_enabled:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="handoff_writer_disabled",
+                    execution_session_id=session.handle.execution_session_id,
                 )
             if session.prompt_busy:
                 return DeliveryResult(
@@ -270,6 +396,7 @@ class OpenCodeACPAdapter:
                     outcome=DeliveryOutcome.BLOCKED,
                     accepted_sequence=None,
                     failure_code="prompt_busy",
+                    execution_session_id=session.handle.execution_session_id,
                 )
             session.prompt_busy = True
             try:
@@ -290,10 +417,20 @@ class OpenCodeACPAdapter:
                         outcome=DeliveryOutcome.FAILED,
                         accepted_sequence=None,
                         failure_code="prompt_cancelled",
+                        execution_session_id=session.handle.execution_session_id,
+                    )
+                if stop_reason != "end_turn":
+                    return DeliveryResult(
+                        operation_id=operation_id,
+                        outcome=DeliveryOutcome.UNKNOWN,
+                        accepted_sequence=None,
+                        failure_code="prompt_completion_unproven",
+                        execution_session_id=session.handle.execution_session_id,
                     )
                 self._append_notifications(session)
                 sequence = session.next_sequence
                 session.next_sequence += 1
+                session.last_accepted_sequence = sequence
                 session.events.append(
                     self._event(
                         session,
@@ -309,6 +446,7 @@ class OpenCodeACPAdapter:
                     outcome=DeliveryOutcome.DELIVERED,
                     accepted_sequence=sequence,
                     failure_code=None,
+                    execution_session_id=session.handle.execution_session_id,
                 )
             except ACPTimeoutError:
                 return DeliveryResult(
@@ -316,6 +454,7 @@ class OpenCodeACPAdapter:
                     outcome=DeliveryOutcome.UNKNOWN,
                     accepted_sequence=None,
                     failure_code="acp_response_timeout",
+                    execution_session_id=session.handle.execution_session_id,
                 )
             except ACPProtocolError as exc:
                 return DeliveryResult(
@@ -323,6 +462,7 @@ class OpenCodeACPAdapter:
                     outcome=DeliveryOutcome.FAILED,
                     accepted_sequence=None,
                     failure_code=_failure_code(exc),
+                    execution_session_id=session.handle.execution_session_id,
                 )
             finally:
                 session.prompt_busy = False
@@ -344,12 +484,42 @@ class OpenCodeACPAdapter:
     ) -> DeliveryResult:
         session = self._session(handle)
         with session.lock:
-            if session.stopped:
+            if session.handle.execution_session_id != handle.execution_session_id:
                 return DeliveryResult(
                     operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="session_identity_mismatch",
+                    execution_session_id=session.handle.execution_session_id,
+                )
+            previous = session.handoff_operations.get(operation_id)
+            if previous is not None:
+                if previous.operation_type is not GatewayOperationType.STOP_SESSION:
+                    raise OpenCodeAdapterError("handoff_operation_id_reused")
+                if not isinstance(previous.result, DeliveryResult):
+                    raise OpenCodeAdapterError("handoff_stop_result_mismatch")
+                return previous.result
+            if session.stopped:
+                result = DeliveryResult(
+                    operation_id=operation_id,
                     outcome=DeliveryOutcome.DELIVERED,
-                    accepted_sequence=handle.last_accepted_sequence,
+                    accepted_sequence=session.last_accepted_sequence,
                     failure_code=None,
+                    execution_session_id=session.handle.execution_session_id,
+                )
+                self._remember_handoff_operation(
+                    session, operation_id, GatewayOperationType.STOP_SESSION, result
+                )
+                return result
+            if session.expected_stop_operation_id is not None and operation_id != (
+                session.expected_stop_operation_id
+            ):
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="handoff_stop_identity_mismatch",
+                    execution_session_id=session.handle.execution_session_id,
                 )
             if not _identity_matches(session.identity):
                 return DeliveryResult(
@@ -357,6 +527,7 @@ class OpenCodeACPAdapter:
                     outcome=DeliveryOutcome.UNKNOWN,
                     accepted_sequence=None,
                     failure_code="process_identity_unproven",
+                    execution_session_id=session.handle.execution_session_id,
                 )
             session.transport.notify(
                 "session/cancel", {"sessionId": handle.adapter_session_id}
@@ -371,20 +542,33 @@ class OpenCodeACPAdapter:
                     outcome=DeliveryOutcome.UNKNOWN,
                     accepted_sequence=None,
                     failure_code="process_stop_unconfirmed",
+                    execution_session_id=session.handle.execution_session_id,
                 )
             session.stopped = True
-            sequence = session.next_sequence
-            session.next_sequence += 1
+            if session.checkpointed:
+                sequence = session.next_sequence
+                session.next_sequence += 1
+                accepted_sequence = session.checkpoint_sequence
+            else:
+                sequence = session.next_sequence
+                session.next_sequence += 1
+                session.last_accepted_sequence = sequence
+                accepted_sequence = sequence
             session.events.append(
                 self._event(session, "session.canceled", sequence, {})
             )
             session.transport.close()
-            return DeliveryResult(
+            result = DeliveryResult(
                 operation_id=operation_id,
                 outcome=DeliveryOutcome.DELIVERED,
-                accepted_sequence=sequence,
+                accepted_sequence=accepted_sequence,
                 failure_code=None,
+                execution_session_id=session.handle.execution_session_id,
             )
+            self._remember_handoff_operation(
+                session, operation_id, GatewayOperationType.STOP_SESSION, result
+            )
+            return result
 
     def collect_artifacts(
         self, handle: AdapterSessionHandle, *, operation_id: UUID
@@ -428,7 +612,7 @@ class OpenCodeACPAdapter:
                     media_type="text/x-diff",
                     provenance={
                         "producer": self._client_name,
-                        "environment_ref": str(session.cwd),
+                        "environment_ref": f"workspace://{handle.execution_session_id}",
                         "acceptance_criterion_refs": session.acceptance_criteria,
                         "conclusion": "OpenCode produced a Git diff in the execution workspace.",
                     },
@@ -454,9 +638,117 @@ class OpenCodeACPAdapter:
         source_input_cutoff_sequence: int,
         operation_id: UUID,
     ) -> HandoffCheckpointEvidence:
-        raise NotImplementedError(
-            "OpenCodeACPAdapter handoff checkpoint is not enabled"
-        )
+        if not isinstance(transition_id, UUID) or not isinstance(operation_id, UUID):
+            raise TypeError("handoff checkpoint identifiers must be UUIDs")
+        if not isinstance(source_input_cutoff_sequence, int) or isinstance(
+            source_input_cutoff_sequence, bool
+        ) or source_input_cutoff_sequence < 0:
+            raise ValueError("source input cutoff must be non-negative")
+        _require_handoff_profile(handle.capability_snapshot)
+        session = self._session(handle)
+        with session.lock:
+            self._assert_session_identity(session, handle)
+            previous = session.handoff_operations.get(operation_id)
+            if previous is not None:
+                if previous.operation_type is not GatewayOperationType.HANDOFF_CHECKPOINT:
+                    raise OpenCodeAdapterError("handoff_operation_id_reused")
+                if isinstance(previous.result, HandoffCheckpointEvidence):
+                    return previous.result
+                raise OpenCodeAdapterError("handoff_checkpoint_result_unknown")
+            if session.context_package is None:
+                raise OpenCodeAdapterError("handoff_context_package_missing")
+            if session.stopped:
+                raise OpenCodeAdapterError("session_stopped")
+            if session.handoff_state_unknown:
+                raise OpenCodeAdapterError("handoff_state_unknown")
+            if session.checkpointed:
+                raise OpenCodeAdapterError("handoff_checkpointed")
+            if session.prompt_busy:
+                raise OpenCodeAdapterError("prompt_busy")
+            if session.last_accepted_sequence < source_input_cutoff_sequence:
+                raise OpenCodeAdapterError("handoff_checkpoint_sequence_stale")
+            self._remember_handoff_operation(
+                session,
+                operation_id,
+                GatewayOperationType.HANDOFF_CHECKPOINT,
+                None,
+                outcome=HandoffInspectionOutcome.IN_PROGRESS,
+            )
+            try:
+                self._set_mode(
+                    session.transport,
+                    session.handle.adapter_session_id,
+                    "plan",
+                )
+                result = session.transport.request(
+                    "session/prompt",
+                    {
+                        "sessionId": session.handle.adapter_session_id,
+                        "prompt": _prompt_content(
+                            _checkpoint_control_prompt(
+                                operation_id=operation_id,
+                                transition_id=transition_id,
+                                source_input_cutoff_sequence=source_input_cutoff_sequence,
+                            ),
+                            (),
+                        ),
+                    },
+                    timeout=self._handoff_request_timeout_seconds,
+                )
+                _require_prompt_completion(result)
+                if session.transport.process.poll() is not None:
+                    raise OpenCodeAdapterError("handoff_checkpoint_process_exited")
+                self._append_notifications(session)
+                metadata = session.context_package.metadata
+                accepted_sequence = session.last_accepted_sequence
+                evidence = HandoffCheckpointEvidence(
+                    operation_id=operation_id,
+                    transition_id=transition_id,
+                    source_session_id=session.handle.execution_session_id,
+                    accepted_sequence=accepted_sequence,
+                    workspace_digest=session.workspace_digest,
+                    context_package_id=metadata.package_id,
+                    context_package_hash=metadata.package_hash,
+                    context_version=metadata.context_version or 0,
+                    progress_summary_ref=(
+                        f"opencode-progress://{session.execution_id}/{operation_id}"
+                    ),
+                    artifact_refs=_context_refs(
+                        session.context_package, category="artifact"
+                    ),
+                    evidence_refs=(
+                        f"opencode-evidence://{session.execution_id}/{operation_id}",
+                    ),
+                    quiescent=True,
+                    produced_at=datetime.now(UTC),
+                )
+                session.checkpointed = True
+                session.checkpoint_sequence = accepted_sequence
+                session.expected_stop_operation_id = gateway_operation_id(
+                    session.execution_id, GatewayOperationType.STOP_SESSION
+                )
+                self._set_handoff_operation_result(
+                    session,
+                    operation_id,
+                    evidence,
+                    outcome=HandoffInspectionOutcome.SUCCEEDED,
+                )
+                session.events.append(
+                    self._event(
+                        session,
+                        "handoff.checkpointed",
+                        session.next_sequence,
+                        {"accepted_sequence": accepted_sequence},
+                    )
+                )
+                session.next_sequence += 1
+                return evidence
+            except Exception:
+                session.handoff_state_unknown = True
+                self._set_handoff_operation_outcome(
+                    session, operation_id, HandoffInspectionOutcome.UNKNOWN
+                )
+                raise
 
     def inspect_handoff_operation(
         self,
@@ -464,9 +756,55 @@ class OpenCodeACPAdapter:
         *,
         operation_id: UUID,
     ) -> HandoffOperationInspection:
-        raise NotImplementedError(
-            "OpenCodeACPAdapter handoff inspection is not enabled"
-        )
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        _require_handoff_profile(handle.capability_snapshot)
+        try:
+            session = self._session(handle)
+        except OpenCodeAdapterError:
+            return _inspection(
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+                outcome=HandoffInspectionOutcome.UNKNOWN,
+                execution_id=None,
+                session_id=handle.execution_session_id,
+                accepted_sequence=None,
+                context_binding=None,
+            )
+        with session.lock:
+            if session.handle.execution_session_id != handle.execution_session_id:
+                return _inspection(
+                    operation_id=operation_id,
+                    operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+                    outcome=HandoffInspectionOutcome.UNKNOWN,
+                    execution_id=session.execution_id,
+                    session_id=handle.execution_session_id,
+                    accepted_sequence=None,
+                    context_binding=None,
+                )
+            record = session.handoff_operations.get(operation_id)
+            if record is None:
+                return _inspection(
+                    operation_id=operation_id,
+                    operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+                    outcome=HandoffInspectionOutcome.ABSENT,
+                    execution_id=session.execution_id,
+                    session_id=session.handle.execution_session_id,
+                    accepted_sequence=None,
+                    context_binding=session.handle.context_binding,
+                )
+            accepted_sequence = record.accepted_sequence
+            if accepted_sequence is None and record.result is not None:
+                accepted_sequence = getattr(record.result, "accepted_sequence", None)
+            return _inspection(
+                operation_id=operation_id,
+                operation_type=record.operation_type,
+                outcome=record.outcome,
+                execution_id=session.execution_id,
+                session_id=session.handle.execution_session_id,
+                accepted_sequence=accepted_sequence,
+                context_binding=session.handle.context_binding,
+            )
 
     def enable_handoff_writer(
         self,
@@ -475,9 +813,101 @@ class OpenCodeACPAdapter:
         fencing_token: int,
         operation_id: UUID,
     ) -> DeliveryResult:
-        raise NotImplementedError(
-            "OpenCodeACPAdapter handoff writer gate is not enabled"
-        )
+        if not isinstance(fencing_token, int) or isinstance(fencing_token, bool):
+            raise TypeError("fencing_token must be an integer")
+        if fencing_token < 1:
+            raise ValueError("fencing_token must be positive")
+        if not isinstance(operation_id, UUID):
+            raise TypeError("operation_id must be a UUID")
+        _require_handoff_profile(handle.capability_snapshot)
+        session = self._session(handle)
+        with session.lock:
+            self._assert_session_identity(session, handle)
+            previous = session.handoff_operations.get(operation_id)
+            if previous is not None:
+                if previous.operation_type is not GatewayOperationType.HANDOFF_ENABLE_WRITER:
+                    raise OpenCodeAdapterError("handoff_operation_id_reused")
+                if isinstance(previous.result, DeliveryResult):
+                    return previous.result
+                raise OpenCodeAdapterError("handoff_writer_result_unknown")
+            if session.context_binding is None or not session.handoff_held:
+                raise OpenCodeAdapterError("handoff_context_binding_missing")
+            if fencing_token != session.fencing_token:
+                raise OpenCodeAdapterError("handoff_fencing_mismatch")
+            if session.stopped:
+                raise OpenCodeAdapterError("session_stopped")
+            if session.handoff_state_unknown:
+                raise OpenCodeAdapterError("handoff_state_unknown")
+            if session.writer_enabled:
+                raise OpenCodeAdapterError("handoff_writer_already_enabled")
+            if session.handoff_instruction is None:
+                raise OpenCodeAdapterError("handoff_context_missing_instruction")
+            instruction = session.handoff_instruction
+            self._remember_handoff_operation(
+                session,
+                operation_id,
+                GatewayOperationType.HANDOFF_ENABLE_WRITER,
+                None,
+                outcome=HandoffInspectionOutcome.IN_PROGRESS,
+            )
+            try:
+                self._set_mode(
+                    session.transport,
+                    session.handle.adapter_session_id,
+                    "build",
+                )
+                result = session.transport.request(
+                    "session/prompt",
+                    {
+                        "sessionId": session.handle.adapter_session_id,
+                        "prompt": _prompt_content(
+                            _resume_control_prompt(
+                                operation_id=operation_id,
+                                binding=session.context_binding,
+                                instruction=instruction,
+                            ),
+                            (),
+                        ),
+                    },
+                    timeout=self._handoff_request_timeout_seconds,
+                )
+                _require_prompt_completion(result)
+                if session.transport.process.poll() is not None:
+                    raise OpenCodeAdapterError("handoff_writer_process_exited")
+                self._append_notifications(session)
+                session.writer_enabled = True
+                sequence = session.next_sequence
+                session.next_sequence += 1
+                session.last_accepted_sequence = sequence
+                session.events.append(
+                    self._event(
+                        session,
+                        "handoff.writer_enabled",
+                        sequence,
+                        {"context_version": session.context_binding.context_version},
+                    )
+                )
+                session.handle = _with_last_sequence(session.handle, sequence)
+                delivery = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.DELIVERED,
+                    accepted_sequence=sequence,
+                    failure_code=None,
+                    execution_session_id=session.handle.execution_session_id,
+                )
+                self._set_handoff_operation_result(
+                    session,
+                    operation_id,
+                    delivery,
+                    outcome=HandoffInspectionOutcome.SUCCEEDED,
+                )
+                return delivery
+            except Exception:
+                session.handoff_state_unknown = True
+                self._set_handoff_operation_outcome(
+                    session, operation_id, HandoffInspectionOutcome.UNKNOWN
+                )
+                raise
 
     def active_processes(self) -> tuple[Popen[Any], ...]:
         with self._lock:
@@ -548,12 +978,87 @@ class OpenCodeACPAdapter:
         if not isinstance(result.get("agentCapabilities", {}), Mapping):
             raise ACPProtocolError("ACP initialize response has invalid capabilities")
 
+    def _try_negotiate_handoff_modes(
+        self,
+        transport: ACPProcessTransport,
+        session_id: str,
+        session_result: Mapping[str, Any],
+        *,
+        keep_plan: bool,
+    ) -> bool:
+        modes = _session_modes(session_result)
+        if not {"plan", "build"}.issubset(modes):
+            return False
+        try:
+            self._set_mode(transport, session_id, "plan")
+            if not keep_plan:
+                self._set_mode(transport, session_id, "build")
+        except (ACPProtocolError, ACPTimeoutError, OpenCodeAdapterError):
+            return False
+        return True
+
+    def _set_mode(
+        self, transport: ACPProcessTransport, session_id: str, mode_id: str
+    ) -> None:
+        transport.request(
+            "session/set_mode",
+            {"sessionId": session_id, "modeId": mode_id},
+            timeout=self._handoff_request_timeout_seconds,
+        )
+
     def _session(self, handle: AdapterSessionHandle) -> "_OpenCodeSession":
         with self._lock:
             try:
                 return self._sessions[handle.adapter_session_id]
             except KeyError as exc:
                 raise OpenCodeAdapterError("unknown OpenCode session") from exc
+
+    @staticmethod
+    def _assert_session_identity(
+        session: "_OpenCodeSession", handle: AdapterSessionHandle
+    ) -> None:
+        if session.handle.execution_session_id != handle.execution_session_id:
+            raise OpenCodeAdapterError("session_identity_mismatch")
+
+    @staticmethod
+    def _remember_handoff_operation(
+        session: "_OpenCodeSession",
+        operation_id: UUID,
+        operation_type: GatewayOperationType,
+        result: HandoffCheckpointEvidence | DeliveryResult | None,
+        *,
+        outcome: HandoffInspectionOutcome = HandoffInspectionOutcome.SUCCEEDED,
+    ) -> None:
+        session.handoff_operations[operation_id] = _OpenCodeHandoffOperation(
+            operation_type=operation_type,
+            outcome=outcome,
+            result=result,
+            accepted_sequence=(
+                getattr(result, "accepted_sequence", None) if result is not None else None
+            ),
+        )
+
+    @staticmethod
+    def _set_handoff_operation_result(
+        session: "_OpenCodeSession",
+        operation_id: UUID,
+        result: HandoffCheckpointEvidence | DeliveryResult,
+        *,
+        outcome: HandoffInspectionOutcome,
+    ) -> None:
+        operation = session.handoff_operations[operation_id]
+        operation.result = result
+        operation.accepted_sequence = getattr(result, "accepted_sequence", None)
+        operation.outcome = outcome
+
+    @staticmethod
+    def _set_handoff_operation_outcome(
+        session: "_OpenCodeSession",
+        operation_id: UUID,
+        outcome: HandoffInspectionOutcome,
+    ) -> None:
+        operation = session.handoff_operations[operation_id]
+        operation.outcome = outcome
 
     def _append_notifications(self, session: "_OpenCodeSession") -> None:
         for message in session.transport.drain_notifications():
@@ -600,17 +1105,48 @@ class _OpenCodeSession:
         identity: ProcessDescriptor,
         cwd: Path,
         acceptance_criteria: tuple[str, ...],
+        execution_id: UUID,
+        fencing_token: int,
+        workspace_digest: str,
+        context_package: ContextMaterializationV1 | None,
+        context_binding: SessionContextBinding | None,
+        handoff_instruction: str | None,
+        handoff_held: bool,
+        handoff_supported: bool,
     ) -> None:
         self.handle = handle
         self.transport = transport
         self.identity = identity
         self.cwd = cwd
         self.acceptance_criteria = acceptance_criteria
+        self.execution_id = execution_id
+        self.fencing_token = fencing_token
+        self.workspace_digest = workspace_digest
+        self.context_package = context_package
+        self.context_binding = context_binding
+        self.handoff_instruction = handoff_instruction
+        self.handoff_held = handoff_held
+        self.handoff_supported = handoff_supported
         self.events: deque[AdapterEvent] = deque()
         self.next_sequence = 1
+        self.last_accepted_sequence = 0
         self.prompt_busy = False
         self.stopped = False
+        self.checkpointed = False
+        self.checkpoint_sequence = 0
+        self.expected_stop_operation_id: UUID | None = None
+        self.writer_enabled = False
+        self.handoff_state_unknown = False
+        self.handoff_operations: dict[UUID, _OpenCodeHandoffOperation] = {}
         self.lock = threading.RLock()
+
+
+@dataclass(slots=True)
+class _OpenCodeHandoffOperation:
+    operation_type: GatewayOperationType
+    outcome: HandoffInspectionOutcome
+    result: HandoffCheckpointEvidence | DeliveryResult | None
+    accepted_sequence: int | None
 
 
 def _validate_context(
@@ -630,6 +1166,123 @@ def _validate_context(
         raise ValueError("worker adapter requires an execution worker context")
     if materialization.total_byte_count > 256 * 1024:
         raise ValueError("context materialization exceeds adapter size limit")
+
+
+def _require_handoff_profile(profile: WorkerAdapterCapabilityProfile) -> None:
+    if not handoff_profile_supported(profile):
+        raise OpenCodeHandoffUnsupported("opencode_handoff_unsupported")
+
+
+def _handoff_facts(
+    materialization: ContextMaterializationV1 | None,
+) -> Mapping[str, object] | None:
+    if materialization is None:
+        return None
+    handoff = materialization.control_plane_facts.facts.get("handoff")
+    return handoff if isinstance(handoff, Mapping) else None
+
+
+def _handoff_instruction(facts: Mapping[str, object]) -> str:
+    instruction = facts.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise OpenCodeAdapterError("handoff_context_missing_instruction")
+    value = instruction.strip()
+    if len(value) > 4096:
+        raise OpenCodeAdapterError("handoff_instruction_too_large")
+    return value
+
+
+def _context_refs(
+    materialization: ContextMaterializationV1, *, category: str
+) -> tuple[str, ...]:
+    return tuple(
+        f"{category}://{ref.ref_id}"
+        for ref in materialization.artifact_and_evidence_refs
+        if ref.category == category
+    )
+
+
+def _session_modes(result: Mapping[str, Any]) -> frozenset[str]:
+    options = result.get("configOptions")
+    if not isinstance(options, (list, tuple)):
+        return frozenset()
+    for option in options:
+        if not isinstance(option, Mapping) or option.get("id") != "mode":
+            continue
+        values = option.get("options")
+        if not isinstance(values, (list, tuple)):
+            return frozenset()
+        modes = {
+            str(item.get("value"))
+            for item in values
+            if isinstance(item, Mapping) and isinstance(item.get("value"), str)
+        }
+        return frozenset(modes)
+    return frozenset()
+
+
+def _require_prompt_completion(result: Mapping[str, Any]) -> None:
+    if result.get("stopReason") != "end_turn":
+        raise ACPProtocolError("OpenCode prompt completion was not proven")
+
+
+def _checkpoint_control_prompt(
+    *,
+    operation_id: UUID,
+    transition_id: UUID,
+    source_input_cutoff_sequence: int,
+) -> str:
+    return (
+        "SIDERA_HANDOFF_CHECKPOINT_V1\n"
+        "This is a system-owned control event. Do not perform new work, modify files, "
+        "or accept user input. Confirm the current execution is quiescent.\n"
+        f"operation_id={operation_id}\n"
+        f"transition_id={transition_id}\n"
+        f"source_input_cutoff_sequence={source_input_cutoff_sequence}"
+    )
+
+
+def _resume_control_prompt(
+    *,
+    operation_id: UUID,
+    binding: SessionContextBinding,
+    instruction: str,
+) -> str:
+    return (
+        "SIDERA_HANDOFF_RESUME_V1\n"
+        "This is a system-owned control event. Continue only from the bound context "
+        "package after the writer gate is enabled.\n"
+        f"operation_id={operation_id}\n"
+        f"context_binding={binding.package_id}:{binding.package_hash}:"
+        f"{binding.context_version}\n"
+        f"instruction={instruction}"
+    )
+
+
+def _inspection(
+    *,
+    operation_id: UUID,
+    operation_type: GatewayOperationType,
+    outcome: HandoffInspectionOutcome,
+    execution_id: UUID | None,
+    session_id: UUID | None,
+    accepted_sequence: int | None,
+    context_binding: SessionContextBinding | None,
+) -> HandoffOperationInspection:
+    evidence_refs = (
+        f"opencode-inspection://{operation_id}/{outcome.value}",
+    )
+    return HandoffOperationInspection(
+        operation_id=operation_id,
+        operation_type=operation_type,
+        outcome=outcome,
+        execution_id=execution_id,
+        session_id=session_id,
+        accepted_sequence=accepted_sequence,
+        context_binding=context_binding,
+        observed_at=datetime.now(UTC),
+        evidence_refs=evidence_refs,
+    )
 
 
 def _config_text(config: Mapping[str, object], key: str, default: str) -> str:
@@ -684,6 +1337,7 @@ def _with_last_sequence(
         capability_snapshot=handle.capability_snapshot,
         last_accepted_sequence=sequence,
         started_at=handle.started_at,
+        context_binding=handle.context_binding,
     )
 
 

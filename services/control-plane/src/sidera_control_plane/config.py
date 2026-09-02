@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     opencode_expected_version: str | None = None
     opencode_probe_timeout_seconds: float = Field(default=30.0, gt=0)
     opencode_request_timeout_seconds: float = Field(default=60.0, gt=0)
+    opencode_handoff_request_timeout_seconds: float = Field(default=60.0, gt=0)
     opencode_stop_grace_seconds: float = Field(default=5.0, gt=0)
     local_actor_type: str = Field(default="local", min_length=1)
     local_actor_id: str = Field(default="aitejiu", min_length=1)

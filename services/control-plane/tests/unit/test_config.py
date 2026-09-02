@@ -63,6 +63,7 @@ def test_scheduler_settings_are_positive():
     assert settings.plan_transition_backoff_max_seconds == 90
     assert settings.opencode_executable == "opencode"
     assert settings.opencode_request_timeout_seconds == 60.0
+    assert settings.opencode_handoff_request_timeout_seconds == 60.0
     assert settings.opencode_stop_grace_seconds == 5.0
 
     with pytest.raises(ValueError):
