@@ -3,12 +3,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
-from tests.integration.test_context_package_repository import _seed_context
-from tests.integration.test_plan_transition_repository import (
-    _seed_records,
-    _transition,
-    _worker_transition,
-)
 
 from sidera_control_plane.domain.context_patches import (
     ContextPatchAcknowledgement,
@@ -31,6 +25,12 @@ from sidera_control_plane.persistence.plan_transition_repository import (
 )
 from sidera_control_plane.persistence.session_repository import SessionRepository
 from sidera_control_plane.persistence.worker_repository import WorkerRepository
+from tests.integration.test_context_package_repository import _seed_context
+from tests.integration.test_plan_transition_repository import (
+    _seed_records,
+    _transition,
+    _worker_transition,
+)
 
 pytestmark = pytest.mark.integration
 

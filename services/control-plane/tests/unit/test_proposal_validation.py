@@ -1,9 +1,6 @@
 from dataclasses import replace
 
 import pytest
-from tests.unit.test_planning_proposals import payload, planning_profile_snapshot
-from tests.unit.test_revision_diff import base_snapshot, revision_payload
-from tests.unit.test_revision_planning_context import _request
 
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.planning import PlanningRequestKind
@@ -19,6 +16,9 @@ from sidera_control_plane.domain.proposal_validation import (
     ProposalValidationError,
     validate_proposal,
 )
+from tests.unit.test_planning_proposals import payload, planning_profile_snapshot
+from tests.unit.test_revision_diff import base_snapshot, revision_payload
+from tests.unit.test_revision_planning_context import _request
 
 
 def expect_code(item: PlanningProposalPayload, code: str) -> None:

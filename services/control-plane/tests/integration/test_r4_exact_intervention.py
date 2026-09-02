@@ -3,15 +3,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.integration.test_r4_task_first_api import (
-    BACKEND_EXECUTION_ID,
-    GENERATION_TWO_ID,
-    ROOT_TASK_ID,
-    SESSION_ID,
-    WORKER_ID,
-    _seed,
-    _snapshot,
-)
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.worker_item_backfill import (
@@ -21,6 +12,15 @@ from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import EventModel, ExecutionInputModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_r4_task_first_api import (
+    BACKEND_EXECUTION_ID,
+    GENERATION_TWO_ID,
+    ROOT_TASK_ID,
+    SESSION_ID,
+    WORKER_ID,
+    _seed,
+    _snapshot,
+)
 
 pytestmark = pytest.mark.integration
 

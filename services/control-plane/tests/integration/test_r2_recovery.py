@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from tests.integration.test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.reconciler import Reconciler
@@ -19,6 +18,9 @@ from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import ExecutionModel, TaskModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_scheduler import (
+    register_runtime_modules_and_configure_worker,
+)
 
 pytestmark = pytest.mark.integration
 

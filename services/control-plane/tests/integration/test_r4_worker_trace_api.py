@@ -5,13 +5,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
-from tests.integration.test_r4_task_first_api import (
-    BACKEND_EXECUTION_ID,
-    ROOT_TASK_ID,
-    SESSION_ID,
-    WORKSPACE_ID,
-    _seed,
-)
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
@@ -19,6 +12,13 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ExecutionEventModel,
     ExecutionSessionModel,
+)
+from tests.integration.test_r4_task_first_api import (
+    BACKEND_EXECUTION_ID,
+    ROOT_TASK_ID,
+    SESSION_ID,
+    WORKSPACE_ID,
+    _seed,
 )
 
 pytestmark = pytest.mark.integration

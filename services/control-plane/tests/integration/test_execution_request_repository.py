@@ -3,12 +3,6 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy.orm import Session
-from tests.integration.test_r5_1_execution_request_schema import (
-    NOW,
-    WORKSPACE_A,
-    request_row,
-    seed_execution_request_facts,
-)
 
 from sidera_control_plane.domain.errors import VersionConflict
 from sidera_control_plane.domain.execution_requests import (
@@ -19,6 +13,12 @@ from sidera_control_plane.persistence.execution_request_repository import (
     ExecutionRequestRepository,
 )
 from sidera_control_plane.persistence.models import ExecutionRequestDependencyModel
+from tests.integration.test_r5_1_execution_request_schema import (
+    NOW,
+    WORKSPACE_A,
+    request_row,
+    seed_execution_request_facts,
+)
 
 pytestmark = pytest.mark.integration
 

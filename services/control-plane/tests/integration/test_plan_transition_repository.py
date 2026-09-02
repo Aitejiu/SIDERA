@@ -2,12 +2,6 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from tests.integration.test_planning_repository import (
-    add_module_instance,
-    make_profile,
-    make_proposal,
-    make_request,
-)
 
 from sidera_control_plane.domain.plan_revisions import WorkerTransitionAction
 from sidera_control_plane.domain.plan_transitions import (
@@ -32,6 +26,12 @@ from sidera_control_plane.persistence.planning_repository import (
     PlanningProfileRepository,
     PlanningRecordRepository,
     PlanningRequestRepository,
+)
+from tests.integration.test_planning_repository import (
+    add_module_instance,
+    make_profile,
+    make_proposal,
+    make_request,
 )
 
 pytestmark = pytest.mark.integration

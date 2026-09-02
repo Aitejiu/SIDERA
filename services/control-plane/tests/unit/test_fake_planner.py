@@ -4,7 +4,6 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
-from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -27,6 +26,7 @@ from sidera_control_plane.application.planner_runtime import (
     WorkspaceProviderCapabilitySnapshot,
 )
 from sidera_control_plane.domain.planning import PlanningBriefRevision
+from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 

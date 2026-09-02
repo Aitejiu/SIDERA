@@ -6,7 +6,6 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
-from tests.integration.test_planning_runner_integration import seed_request
 
 from sidera_control_plane.adapters.knowledge_http import KnowledgeAdapterError
 from sidera_control_plane.application.context_requests import (
@@ -34,6 +33,7 @@ from sidera_control_plane.persistence.models import (
     EventModel,
     OutboxMessageModel,
 )
+from tests.integration.test_planning_runner_integration import seed_request
 
 pytestmark = pytest.mark.integration
 

@@ -9,8 +9,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.e2e.r6_1_fake_runtime import activate_fake_target
-from tests.e2e.seed_r6_1_revision import seed_revision_fixture
 from sqlalchemy import select
 
 from sidera_control_plane.adapters.fake_planner import (
@@ -58,6 +56,8 @@ from sidera_control_plane.persistence.models import (
     RootTaskPlanHeadModel,
     WorkerItemModel,
 )
+from tests.e2e.r6_1_fake_runtime import activate_fake_target
+from tests.e2e.seed_r6_1_revision import seed_revision_fixture
 
 pytestmark = [
     pytest.mark.integration,

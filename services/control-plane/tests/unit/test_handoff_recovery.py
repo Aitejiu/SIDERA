@@ -9,15 +9,6 @@ from typing import Self
 from uuid import UUID, uuid4
 
 import pytest
-from tests.unit.test_handoff_commands import (
-    MemoryEventStore,
-    StaticRuntimeResolver,
-    _confirm_envelope,
-    _fixture,
-    _handler,
-    _prepare_envelope,
-    _runtime,
-)
 
 from sidera_control_plane.application.handoff_commands import (
     HandoffCommandError,
@@ -49,6 +40,15 @@ from sidera_control_plane.domain.handoffs import (
     HandoffTransition,
     HandoffTransitionStatus,
     HandoffWriterState,
+)
+from tests.unit.test_handoff_commands import (
+    MemoryEventStore,
+    StaticRuntimeResolver,
+    _confirm_envelope,
+    _fixture,
+    _handler,
+    _prepare_envelope,
+    _runtime,
 )
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)

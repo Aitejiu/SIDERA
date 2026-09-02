@@ -5,13 +5,13 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import update
-from tests.integration.test_scheduler_runtime_binding import _seed
 
 from sidera_control_plane.persistence.models import (
     ExecutionModel,
     ModuleDefinitionModel,
 )
 from sidera_control_plane.runtime_readiness import main
+from tests.integration.test_scheduler_runtime_binding import _seed
 
 pytestmark = pytest.mark.integration
 

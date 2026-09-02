@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from tests.unit.test_plan_revisions import profile_snapshot
 
 from sidera_control_plane.application.planner_runtime import (
     CapabilityCatalogSnapshot,
@@ -46,6 +45,7 @@ from sidera_control_plane.domain.plans import (
 )
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker_item import WorkerItem
+from tests.unit.test_plan_revisions import profile_snapshot
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("20000000-0000-0000-0000-000000000001")

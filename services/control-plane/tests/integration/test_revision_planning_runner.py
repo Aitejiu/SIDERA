@@ -5,7 +5,6 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.integration.test_plan_revision_commands import _command, _seed_revision_base
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -24,6 +23,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
 )
 from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 from sidera_control_plane.persistence.database import Database
+from tests.integration.test_plan_revision_commands import _command, _seed_revision_base
 
 pytestmark = pytest.mark.integration
 

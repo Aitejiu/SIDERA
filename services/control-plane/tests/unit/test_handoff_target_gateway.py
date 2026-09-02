@@ -2,8 +2,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from tests.unit.test_context_materialization import FakeCatalog, _manifest, _revision, _run
-
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.worker_gateway import WorkerGateway
@@ -20,6 +18,12 @@ from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     RepositoryCheckoutSpec,
     WorkspaceCheckout,
+)
+from tests.unit.test_context_materialization import (
+    FakeCatalog,
+    _manifest,
+    _revision,
+    _run,
 )
 
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)

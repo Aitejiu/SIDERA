@@ -7,15 +7,15 @@ import textwrap
 from pathlib import Path
 
 import pytest
+
+from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
+from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 from tests.contract.handoff_adapter_conformance import (
     HandoffAdapterFactory,
     build_handoff_fixture,
     run_source_role,
     run_target_role,
 )
-
-from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
-from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 
 
 class _FakeAdapterFactory:

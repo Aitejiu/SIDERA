@@ -4,11 +4,6 @@ import json
 from uuid import UUID
 
 import pytest
-from tests.integration.test_plan_transition_repository import (
-    _seed_records,
-    _transition,
-    _worker_transition,
-)
 
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
@@ -26,6 +21,11 @@ from sidera_control_plane.persistence.plan_transition_repository import (
 from sidera_control_plane.plan_transition_worker import (
     build_plan_transition_worker,
     summary_json,
+)
+from tests.integration.test_plan_transition_repository import (
+    _seed_records,
+    _transition,
+    _worker_transition,
 )
 
 pytestmark = pytest.mark.integration

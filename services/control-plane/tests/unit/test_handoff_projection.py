@@ -1,16 +1,6 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from tests.unit.test_task_console_projections import (
-    IMPLEMENTER_ID,
-    NOW as CONSOLE_NOW,
-    _plan,
-    _placements,
-    _tasks,
-    _worker_items,
-)
-from tests.unit.test_worker_workspace_projection import _service
-
 from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleProjectionService,
 )
@@ -18,6 +8,17 @@ from sidera_control_plane.domain.worker_item_projections import (
     ActiveHandoffProjection,
     TraceDescriptorProjection,
 )
+from tests.unit.test_task_console_projections import (
+    IMPLEMENTER_ID,
+    _placements,
+    _plan,
+    _tasks,
+    _worker_items,
+)
+from tests.unit.test_task_console_projections import (
+    NOW as CONSOLE_NOW,
+)
+from tests.unit.test_worker_workspace_projection import _service
 
 WORKSPACE_ID = UUID("22000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("32000000-0000-0000-0000-000000000001")

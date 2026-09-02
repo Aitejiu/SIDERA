@@ -2,12 +2,12 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import update
-from tests.integration.test_handoff_repository import _seed
 
 from sidera_control_plane.persistence.handoff_query_store import (
     SqlAlchemyHandoffQueryStore,
 )
 from sidera_control_plane.persistence.models import HandoffTransitionModel
+from tests.integration.test_handoff_repository import _seed
 
 pytestmark = pytest.mark.integration
 

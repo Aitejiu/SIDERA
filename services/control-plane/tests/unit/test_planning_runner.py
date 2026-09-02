@@ -7,7 +7,6 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from tests.unit.test_planning_commands import module_facts, profile
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -45,6 +44,7 @@ from sidera_control_plane.domain.planning import (
     PlanningRunStatus,
 )
 from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
+from tests.unit.test_planning_commands import module_facts, profile
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")

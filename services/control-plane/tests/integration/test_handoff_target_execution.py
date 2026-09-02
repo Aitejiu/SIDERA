@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select, update
-from tests.integration.test_context_package_repository import _seed_context
 
 from sidera_control_plane.application.handoff_candidates import (
     runtime_snapshot_for_handoff,
@@ -61,6 +60,7 @@ from sidera_control_plane.persistence.module_repository import (
     capability_profile_to_payload,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_context_package_repository import _seed_context
 
 pytestmark = pytest.mark.integration
 

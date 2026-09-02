@@ -8,7 +8,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.unit.test_planning_commands import module_facts, profile
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -48,6 +47,7 @@ from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapsho
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
 )
+from tests.unit.test_planning_commands import module_facts, profile
 
 NOW = datetime.now(UTC)
 

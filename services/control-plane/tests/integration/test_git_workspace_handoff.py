@@ -3,7 +3,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.integration.test_git_workspace_integration import _repository, _spec
 
 from sidera_control_plane.adapters.git_workspace import (
     GitWorktreeWorkspaceManager,
@@ -16,6 +15,7 @@ from sidera_control_plane.domain.handoff_evidence import (
 )
 from sidera_control_plane.domain.handoffs import HandoffPhase
 from sidera_control_plane.domain.workspace import WorkspaceLifecycle
+from tests.integration.test_git_workspace_integration import _repository, _spec
 
 pytestmark = pytest.mark.integration
 

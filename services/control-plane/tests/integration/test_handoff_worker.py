@@ -5,7 +5,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from tests.integration.test_handoff_repository import _seed
 
 from sidera_control_plane.application.handoff_coordinator import (
     HandoffCoordinator,
@@ -17,6 +16,7 @@ from sidera_control_plane.domain.handoffs import (
 )
 from sidera_control_plane.handoff_worker import summary_json
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_handoff_repository import _seed
 
 pytestmark = pytest.mark.integration
 

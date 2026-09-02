@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from tests.integration.test_planning_command_api import _planner_capabilities, _planner_profile
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
@@ -22,6 +21,10 @@ from sidera_control_plane.persistence.models import (
     PlanningRequestModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_planning_command_api import (
+    _planner_capabilities,
+    _planner_profile,
+)
 
 pytestmark = pytest.mark.integration
 

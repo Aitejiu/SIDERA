@@ -3,7 +3,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
-from tests.integration.test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.application.reconciler import Reconciler
 from sidera_control_plane.application.scheduler import Scheduler
@@ -23,6 +22,9 @@ from sidera_control_plane.persistence.models import (
     WorkerModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_scheduler import (
+    register_runtime_modules_and_configure_worker,
+)
 
 pytestmark = pytest.mark.integration
 

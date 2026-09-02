@@ -5,12 +5,6 @@ from typing import Literal
 from uuid import uuid4
 
 import pytest
-from tests.unit.test_context_materialization import (
-    FakeCatalog,
-    _manifest,
-    _revision,
-    _run,
-)
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
@@ -38,6 +32,12 @@ from sidera_control_plane.domain.workspace import (
     CheckoutMode,
     ExecutionSpec,
     RepositoryCheckoutSpec,
+)
+from tests.unit.test_context_materialization import (
+    FakeCatalog,
+    _manifest,
+    _revision,
+    _run,
 )
 
 

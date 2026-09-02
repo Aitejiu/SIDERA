@@ -7,13 +7,6 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import update
-from tests.integration.test_r4_task_first_api import (
-    ARTIFACT_ID,
-    BACKEND_EXECUTION_ID,
-    ROOT_TASK_ID,
-    WORKSPACE_ID,
-    _seed,
-)
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
@@ -22,6 +15,13 @@ from sidera_control_plane.persistence.artifact_content_store import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import ArtifactModel
+from tests.integration.test_r4_task_first_api import (
+    ARTIFACT_ID,
+    BACKEND_EXECUTION_ID,
+    ROOT_TASK_ID,
+    WORKSPACE_ID,
+    _seed,
+)
 
 pytestmark = pytest.mark.integration
 

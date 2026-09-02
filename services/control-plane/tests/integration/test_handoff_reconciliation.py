@@ -5,7 +5,6 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import update
-from tests.integration.test_handoff_repository import _seed
 
 from sidera_control_plane.application.handoff_recovery import HandoffRecoveryService
 from sidera_control_plane.domain.gateway import (
@@ -20,6 +19,7 @@ from sidera_control_plane.domain.handoffs import (
 )
 from sidera_control_plane.persistence.models import ExecutionSessionModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_handoff_repository import _seed
 
 pytestmark = pytest.mark.integration
 

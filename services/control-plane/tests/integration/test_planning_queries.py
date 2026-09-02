@@ -3,11 +3,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.integration.test_planning_command_api import _seed_waiting_request
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
+from tests.integration.test_planning_command_api import _seed_waiting_request
 
 pytestmark = pytest.mark.integration
 

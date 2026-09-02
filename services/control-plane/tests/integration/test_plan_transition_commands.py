@@ -9,13 +9,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from tests.integration.test_revision_confirmation import (
-    _base_plan,
-    _confirm_command,
-    _retire_payload,
-    _seed_revision_confirmation,
-)
-from tests.integration.test_worker_transition_lifecycle import _seed_active_runtime
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.plan_transition_coordinator import (
@@ -32,6 +25,13 @@ from sidera_control_plane.persistence.models import (
     GatewayOperationModel,
     WorkerTransitionModel,
 )
+from tests.integration.test_revision_confirmation import (
+    _base_plan,
+    _confirm_command,
+    _retire_payload,
+    _seed_revision_confirmation,
+)
+from tests.integration.test_worker_transition_lifecycle import _seed_active_runtime
 
 pytestmark = pytest.mark.integration
 

@@ -3,14 +3,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import update
-from tests.integration.test_gateway_runner import (
-    NOW,
-    FakeWorkspaceProvider,
-    RecordingFakeAdapter,
-    _capabilities,
-    _message,
-    _seed_assignment,
-)
 
 from sidera_control_plane.application.worker_gateway import (
     GatewayMessageError,
@@ -29,6 +21,14 @@ from sidera_control_plane.persistence.models import (
     WorkerModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_gateway_runner import (
+    NOW,
+    FakeWorkspaceProvider,
+    RecordingFakeAdapter,
+    _capabilities,
+    _message,
+    _seed_assignment,
+)
 
 pytestmark = pytest.mark.integration
 

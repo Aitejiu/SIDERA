@@ -44,4 +44,4 @@ target-version = "py312"
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["src", "tests"]
+include = ["src"]

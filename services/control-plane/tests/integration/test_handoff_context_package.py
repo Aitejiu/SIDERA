@@ -5,9 +5,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, update
-from tests.integration.test_context_package_worker import EmptyCatalog
-from tests.integration.test_handoff_target_execution import _seed as seed_handoff
-from tests.integration.test_planning_runner_integration import seed_request
 
 from sidera_control_plane.application.handoff_context import HandoffContextService
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
@@ -32,6 +29,9 @@ from sidera_control_plane.persistence.models import (
     HandoffTransitionModel,
     PlanningProposalRevisionModel,
 )
+from tests.integration.test_context_package_worker import EmptyCatalog
+from tests.integration.test_handoff_target_execution import _seed as seed_handoff
+from tests.integration.test_planning_runner_integration import seed_request
 
 pytestmark = pytest.mark.integration
 

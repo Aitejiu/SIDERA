@@ -2,12 +2,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from tests.integration.test_context_package_repository import (
-    _event_context,
-    _manifest,
-    _request,
-    _seed_context,
-)
 
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -18,6 +12,12 @@ from sidera_control_plane.persistence.context_package_repository import (
     ContextPackageRepository,
 )
 from sidera_control_plane.persistence.repositories import EventRepository
+from tests.integration.test_context_package_repository import (
+    _event_context,
+    _manifest,
+    _request,
+    _seed_context,
+)
 
 pytestmark = pytest.mark.integration
 

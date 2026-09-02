@@ -3,7 +3,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from tests.integration.test_context_package_repository import _seed_context
 
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.handoff_evidence import (
@@ -42,6 +41,7 @@ from sidera_control_plane.persistence.models import (
     WorkerItemModel,
     WorkerModel,
 )
+from tests.integration.test_context_package_repository import _seed_context
 
 pytestmark = pytest.mark.integration
 

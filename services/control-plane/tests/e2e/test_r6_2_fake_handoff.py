@@ -8,9 +8,6 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-from tests.e2e.r6_2_fake_runtime import FakeHandoffRuntime, FaultPoint
-from tests.e2e.seed_r6_2_handoff import G4Scenario, seed_g4_fixture
-
 from sidera_control_plane.application.handoff_candidates import HandoffCandidateService
 from sidera_control_plane.application.handoff_commands import HandoffCommandError
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
@@ -30,6 +27,8 @@ from sidera_control_plane.persistence.models import (
     WorkerModel,
     WorkerRuntimeConfigurationModel,
 )
+from tests.e2e.r6_2_fake_runtime import FakeHandoffRuntime, FaultPoint
+from tests.e2e.seed_r6_2_handoff import G4Scenario, seed_g4_fixture
 
 pytestmark = [
     pytest.mark.integration,

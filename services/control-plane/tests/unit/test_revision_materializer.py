@@ -3,7 +3,6 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from tests.unit.test_revision_diff import base_snapshot, revision_payload
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.revision_materializer import (
@@ -26,6 +25,7 @@ from sidera_control_plane.domain.revision_diff import (
     WorkerTransitionPreview,
 )
 from sidera_control_plane.domain.worker_item import WorkerItem
+from tests.unit.test_revision_diff import base_snapshot, revision_payload
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 WORKER_ID = UUID("40000000-0000-0000-0000-000000000001")

@@ -6,8 +6,6 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
-from tests.integration.test_proposal_confirmation import command, seed_proposal
-from tests.integration.test_work_context_queries import _create_context
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
@@ -23,6 +21,8 @@ from sidera_control_plane.persistence.models import (
     WorkContextRevisionModel,
 )
 from sidera_control_plane.work_context_backfill import WorkContextBackfillService
+from tests.integration.test_proposal_confirmation import command, seed_proposal
+from tests.integration.test_work_context_queries import _create_context
 
 pytestmark = pytest.mark.integration
 

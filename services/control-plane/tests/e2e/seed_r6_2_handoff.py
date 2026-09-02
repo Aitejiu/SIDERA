@@ -13,11 +13,6 @@ from typing import cast
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from tests.e2e.seed_r6_1_revision import (
-    _active_worker_context,
-    _internal_command,
-    _planning_profile,
-)
 from sqlalchemy import delete, select, text, update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
@@ -78,6 +73,11 @@ from sidera_control_plane.persistence.models import (
     WorkspaceModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.e2e.seed_r6_1_revision import (
+    _active_worker_context,
+    _internal_command,
+    _planning_profile,
+)
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 FIXTURE_NAMESPACE = UUID("f6200000-0000-0000-0000-000000000001")

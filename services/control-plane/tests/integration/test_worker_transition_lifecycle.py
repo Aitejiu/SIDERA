@@ -6,12 +6,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
-from tests.integration.test_revision_confirmation import (
-    _base_plan,
-    _confirm_command,
-    _retire_payload,
-    _seed_revision_confirmation,
-)
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.plan_transition_coordinator import (
@@ -32,6 +26,12 @@ from sidera_control_plane.persistence.models import (
     OutboxMessageModel,
     WorkerItemModel,
     WorkerTransitionModel,
+)
+from tests.integration.test_revision_confirmation import (
+    _base_plan,
+    _confirm_command,
+    _retire_payload,
+    _seed_revision_confirmation,
 )
 
 pytestmark = pytest.mark.integration

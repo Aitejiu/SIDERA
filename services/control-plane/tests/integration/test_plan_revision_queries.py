@@ -7,12 +7,12 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from tests.integration.test_revision_confirmation import _seed_revision_confirmation
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.models import PlanningRequestModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_revision_confirmation import _seed_revision_confirmation
 
 pytestmark = pytest.mark.integration
 

@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from uuid import UUID
 
 from sidera_control_plane.application.handoff_notifications import (

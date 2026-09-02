@@ -12,7 +12,6 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from tests.e2e.seed_r6_2_handoff import G4Fixture, G4Scenario, load_g4_fixture
 from sqlalchemy import delete
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
@@ -72,6 +71,7 @@ from sidera_control_plane.domain.workspace import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import ExecutionRequestDependencyModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.e2e.seed_r6_2_handoff import G4Fixture, G4Scenario, load_g4_fixture
 
 
 class FaultPoint(StrEnum):

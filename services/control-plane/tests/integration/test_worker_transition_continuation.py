@@ -6,14 +6,6 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from sqlalchemy import select
-from tests.integration.test_context_package_worker import EmptyCatalog
-from tests.integration.test_revision_confirmation import (
-    _base_plan,
-    _confirm_command,
-    _derive_payload,
-    _revision_payload,
-    _seed_revision_confirmation,
-)
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
@@ -58,6 +50,14 @@ from sidera_control_plane.persistence.models import (
     ExecutionModel,
     ExecutionRequestModel,
     WorkerTransitionModel,
+)
+from tests.integration.test_context_package_worker import EmptyCatalog
+from tests.integration.test_revision_confirmation import (
+    _base_plan,
+    _confirm_command,
+    _derive_payload,
+    _revision_payload,
+    _seed_revision_confirmation,
 )
 
 pytestmark = pytest.mark.integration

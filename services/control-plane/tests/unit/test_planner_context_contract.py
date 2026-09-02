@@ -5,8 +5,6 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from tests.unit.test_context_materialization import FakeCatalog, _manifest, _revision, _run
-from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -28,6 +26,13 @@ from sidera_control_plane.application.revision_planning_context import (
 )
 from sidera_control_plane.domain.context_packages import ContextMaterializationMode
 from sidera_control_plane.domain.planning import PlanningBriefRevision
+from tests.unit.test_context_materialization import (
+    FakeCatalog,
+    _manifest,
+    _revision,
+    _run,
+)
+from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
 REQUEST_ID = UUID("10000000-0000-0000-0000-000000000008")

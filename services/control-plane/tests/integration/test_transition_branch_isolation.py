@@ -6,12 +6,6 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from tests.integration.test_revision_confirmation import (
-    _base_plan,
-    _confirm_command,
-    _seed_revision_confirmation,
-)
-from tests.integration.test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.plan_transition_gate import (
@@ -35,6 +29,14 @@ from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.persistence.models import ExecutionModel, SchedulingBlockModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from tests.integration.test_revision_confirmation import (
+    _base_plan,
+    _confirm_command,
+    _seed_revision_confirmation,
+)
+from tests.integration.test_scheduler import (
+    register_runtime_modules_and_configure_worker,
+)
 
 pytestmark = pytest.mark.integration
 

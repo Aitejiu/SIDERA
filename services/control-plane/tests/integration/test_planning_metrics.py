@@ -3,12 +3,15 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.integration.test_planning_command_api import _seed_waiting_request
-from tests.integration.test_revision_confirmation import _confirm_command, _seed_revision_confirmation
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
+from tests.integration.test_planning_command_api import _seed_waiting_request
+from tests.integration.test_revision_confirmation import (
+    _confirm_command,
+    _seed_revision_confirmation,
+)
 
 pytestmark = pytest.mark.integration
 

@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
-from tests.integration.test_gateway_runner import NOW, _seed_assignment
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
@@ -24,6 +23,7 @@ from sidera_control_plane.persistence.models import (
     WorkerRuntimeConfigurationModel,
     WorkspaceModel,
 )
+from tests.integration.test_gateway_runner import NOW, _seed_assignment
 
 pytestmark = pytest.mark.integration
 
