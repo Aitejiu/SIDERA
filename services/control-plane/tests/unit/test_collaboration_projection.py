@@ -15,7 +15,11 @@ from sidera_control_plane.application.collaboration_projection import (
     ProjectionTooLarge,
 )
 from sidera_control_plane.application.ports import CollaborationFactStorePort
-from sidera_control_plane.domain.execution_requests import CollaborationGateMode
+from sidera_control_plane.domain.execution_requests import (
+    CollaborationGateMode,
+    DependencyEnforcement,
+    ExecutionRequestDependency,
+)
 from sidera_control_plane.domain.modules import (
     CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
@@ -34,6 +38,16 @@ LINEAGE_ID = UUID("37000000-0000-0000-0000-000000000001")
 EXECUTION_ID = UUID("38000000-0000-0000-0000-000000000001")
 ARTIFACT_ID = UUID("39000000-0000-0000-0000-000000000001")
 EVIDENCE_ID = UUID("3a000000-0000-0000-0000-000000000001")
+UPSTREAM_REQUEST_ID = UUID("3b000000-0000-0000-0000-000000000001")
+DOWNSTREAM_REQUEST_ID = UUID("3c000000-0000-0000-0000-000000000001")
+UPSTREAM_SUBTASK_ID = UUID("3d000000-0000-0000-0000-000000000001")
+DOWNSTREAM_SUBTASK_ID = UUID("3e000000-0000-0000-0000-000000000001")
+UPSTREAM_WORKER_ITEM_ID = UUID("3f000000-0000-0000-0000-000000000001")
+DOWNSTREAM_WORKER_ITEM_ID = UUID("40000000-0000-0000-0000-000000000001")
+UPSTREAM_LINEAGE_ID = UUID("41000000-0000-0000-0000-000000000001")
+UPSTREAM_EXECUTION_ID = UUID("42000000-0000-0000-0000-000000000001")
+UPSTREAM_ARTIFACT_ID = UUID("43000000-0000-0000-0000-000000000001")
+UPSTREAM_EVIDENCE_ID = UUID("44000000-0000-0000-0000-000000000001")
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 
 
@@ -155,6 +169,186 @@ def test_assembler_uses_authoritative_facts_and_excludes_private_bodies() -> Non
     assert projection.fact_cursor == 42
     assert projection.root_task_id == ROOT_TASK_ID
     assert projection.execution_requests[0]["id"] == str(REQUEST_ID)
+    assert projection.execution_requests[0]["eligible"] is False
+
+
+def test_assembler_marks_an_active_entry_request_eligible() -> None:
+    facts = _facts()
+    enabled_head = replace(
+        facts.plan_head,
+        policy_snapshot={
+            "schema_version": 1,
+            "default_policy": {"enabled": True, "strategy_id": "all_required"},
+            "subtask_overrides": [],
+        },
+    )
+    enabled = replace(facts, plan_head=enabled_head)
+
+    projection = CollaborationProjectionAssembler().assemble(enabled, fact_cursor=42)
+
+    assert projection.execution_requests[0]["eligible"] is True
+    assert projection.execution_requests[0]["eligibility_reason"] == "eligible"
+
+
+def test_assembler_applies_hard_artifact_and_evidence_join_rules() -> None:
+    facts = _facts()
+    upstream = replace(
+        facts.requests[0],
+        id=UPSTREAM_REQUEST_ID,
+        subtask_key="subtask-upstream",
+        worker_item_key="worker-upstream",
+        subtask_task_id=UPSTREAM_SUBTASK_ID,
+        worker_item_id=UPSTREAM_WORKER_ITEM_ID,
+        status="materialized",
+        execution_lineage_id=UPSTREAM_LINEAGE_ID,
+        first_execution_id=UPSTREAM_EXECUTION_ID,
+    )
+    downstream = replace(
+        facts.requests[0],
+        id=DOWNSTREAM_REQUEST_ID,
+        subtask_key="subtask-downstream",
+        worker_item_key="worker-downstream",
+        subtask_task_id=DOWNSTREAM_SUBTASK_ID,
+        worker_item_id=DOWNSTREAM_WORKER_ITEM_ID,
+        execution_lineage_id=None,
+        first_execution_id=None,
+    )
+    dependency = ExecutionRequestDependency(
+        downstream_request_id=DOWNSTREAM_REQUEST_ID,
+        upstream_request_id=UPSTREAM_REQUEST_ID,
+        enforcement=DependencyEnforcement.HARD,
+        required_artifact_refs=("artifact_type:report",),
+        required_evidence_refs=("acceptance:verify",),
+    )
+    enabled_head = replace(
+        facts.plan_head,
+        policy_snapshot={
+            "schema_version": 1,
+            "default_policy": {"enabled": True, "strategy_id": "all_required"},
+            "subtask_overrides": [],
+        },
+    )
+    joined = replace(
+        facts,
+        plan_head=enabled_head,
+        requests=(upstream, downstream),
+        dependencies=(dependency,),
+        executions=(
+            replace(
+                facts.executions[0],
+                id=UPSTREAM_EXECUTION_ID,
+                lineage_id=UPSTREAM_LINEAGE_ID,
+                task_id=UPSTREAM_SUBTASK_ID,
+                worker_item_id=UPSTREAM_WORKER_ITEM_ID,
+                status="succeeded",
+            ),
+        ),
+        artifacts=(
+            replace(
+                facts.artifacts[0],
+                id=UPSTREAM_ARTIFACT_ID,
+                execution_id=UPSTREAM_EXECUTION_ID,
+                task_id=UPSTREAM_SUBTASK_ID,
+                artifact_type="report",
+            ),
+        ),
+        evidence=(
+            replace(
+                facts.evidence[0],
+                id=UPSTREAM_EVIDENCE_ID,
+                execution_id=UPSTREAM_EXECUTION_ID,
+                task_id=UPSTREAM_SUBTASK_ID,
+                acceptance_criterion_ref="acceptance:verify",
+            ),
+        ),
+    )
+
+    projection = CollaborationProjectionAssembler().assemble(joined, fact_cursor=42)
+    request_by_id = {item["id"]: item for item in projection.execution_requests}
+
+    assert request_by_id[str(DOWNSTREAM_REQUEST_ID)]["eligible"] is True
+    assert request_by_id[str(DOWNSTREAM_REQUEST_ID)]["eligibility_reason"] == "eligible"
+
+    blocked_upstream = replace(
+        joined,
+        executions=(replace(joined.executions[0], status="running"),),
+    )
+    blocked_projection = CollaborationProjectionAssembler().assemble(
+        blocked_upstream, fact_cursor=43
+    )
+    blocked_by_id = {item["id"]: item for item in blocked_projection.execution_requests}
+    assert blocked_by_id[str(DOWNSTREAM_REQUEST_ID)]["eligible"] is False
+    assert (
+        blocked_by_id[str(DOWNSTREAM_REQUEST_ID)]["eligibility_reason"]
+        == "dependencies_blocked"
+    )
+
+    missing_artifact = replace(joined, artifacts=())
+    missing_artifact_projection = CollaborationProjectionAssembler().assemble(
+        missing_artifact, fact_cursor=44
+    )
+    assert {
+        item["id"]: item["eligible"]
+        for item in missing_artifact_projection.execution_requests
+    }[str(DOWNSTREAM_REQUEST_ID)] is False
+
+    missing_evidence = replace(joined, evidence=())
+    missing_evidence_projection = CollaborationProjectionAssembler().assemble(
+        missing_evidence, fact_cursor=45
+    )
+    assert {
+        item["id"]: item["eligible"]
+        for item in missing_evidence_projection.execution_requests
+    }[str(DOWNSTREAM_REQUEST_ID)] is False
+
+
+def test_assembler_does_not_block_on_informational_dependency() -> None:
+    facts = _facts()
+    informational = ExecutionRequestDependency(
+        downstream_request_id=REQUEST_ID,
+        upstream_request_id=UUID("45000000-0000-0000-0000-000000000001"),
+        enforcement=DependencyEnforcement.INFORMATIONAL,
+    )
+    enabled = replace(
+        facts,
+        plan_head=replace(
+            facts.plan_head,
+            policy_snapshot={
+                "schema_version": 1,
+                "default_policy": {"enabled": True, "strategy_id": "all_required"},
+                "subtask_overrides": [],
+            },
+        ),
+        dependencies=(informational,),
+    )
+
+    projection = CollaborationProjectionAssembler().assemble(enabled, fact_cursor=42)
+
+    assert projection.execution_requests[0]["eligible"] is True
+
+
+def test_assembler_keeps_release_requests_ineligible_until_run_is_active() -> None:
+    facts = _facts()
+    pending = replace(
+        facts,
+        plan_head=replace(
+            facts.plan_head,
+            run_status="pending",
+            policy_snapshot={
+                "schema_version": 1,
+                "default_policy": {"enabled": True, "strategy_id": "all_required"},
+                "subtask_overrides": [],
+            },
+        ),
+    )
+
+    projection = CollaborationProjectionAssembler().assemble(pending, fact_cursor=42)
+
+    assert projection.execution_requests[0]["eligible"] is False
+    assert (
+        projection.execution_requests[0]["eligibility_reason"]
+        == "collaboration_run_pending"
+    )
 
 
 def test_assembler_is_stable_and_semantic_changes_change_the_fingerprint() -> None:

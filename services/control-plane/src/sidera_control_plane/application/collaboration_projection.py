@@ -7,14 +7,18 @@ from hashlib import sha256
 from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
 from sidera_control_plane.domain.collaboration import RuntimeRelease
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeProjectionV1,
     canonical_json_bytes,
 )
 from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.execution import ExecutionStatus
 from sidera_control_plane.domain.execution_requests import (
+    ActivationGate,
     ExecutionRequestDependency,
+    UpstreamActivationFact,
 )
 from sidera_control_plane.domain.modules import CollaborationRuntimeCapabilityProfile
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
@@ -66,6 +70,7 @@ class CollaborationPlanHeadFact:
     run_resource_version: int
     runtime_capability_snapshot: CollaborationRuntimeCapabilityProfile
     policy_snapshot: Mapping[str, object] | None = None
+    run_status: str = "active"
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +200,18 @@ class CollaborationProjectionAssembler:
             previous_strategy_state=facts.previous_strategy_state,
         )
         dependencies = self._dependency_mappings(facts_for_dependencies)
-        requests = tuple(self._request_mapping(item) for item in request_facts)
+        eligibility = self._eligibility_by_request(
+            facts_for_dependencies,
+            policy=policy,
+        )
+        requests = tuple(
+            self._request_mapping(
+                item,
+                eligible=eligibility[item.id][0],
+                eligibility_reason=eligibility[item.id][1],
+            )
+            for item in request_facts
+        )
         executions = tuple(self._execution_mapping(item) for item in execution_facts)
         artifacts = tuple(self._artifact_mapping(item) for item in artifact_facts)
         evidence = tuple(self._evidence_mapping(item) for item in evidence_facts)
@@ -297,6 +313,121 @@ class CollaborationProjectionAssembler:
         if policy is None:
             return {"mode": "disabled"}
         return cast(Mapping[str, object], _sanitize_public_json(policy.to_mapping()))
+
+    @classmethod
+    def _eligibility_by_request(
+        cls,
+        facts: CollaborationFacts,
+        *,
+        policy: Mapping[str, object],
+    ) -> dict[UUID, tuple[bool, str]]:
+        upstream_facts = cls._upstream_activation_facts(facts)
+        released_request_ids = {item.execution_request_id for item in facts.releases}
+        result: dict[UUID, tuple[bool, str]] = {}
+        for request in facts.requests:
+            result[request.id] = cls._request_eligibility(
+                request,
+                facts=facts,
+                policy=policy,
+                released_request_ids=released_request_ids,
+                upstream_facts=upstream_facts,
+            )
+        return result
+
+    @staticmethod
+    def _request_eligibility(
+        request: CollaborationRequestFact,
+        *,
+        facts: CollaborationFacts,
+        policy: Mapping[str, object],
+        released_request_ids: set[UUID],
+        upstream_facts: Mapping[UUID, UpstreamActivationFact],
+    ) -> tuple[bool, str]:
+        if request.collaboration_gate_mode != "release_required":
+            return False, "not_release_required"
+        if request.status not in {"blocked", "ready"}:
+            return False, "request_closed"
+        if facts.plan_head.run_status != "active":
+            return False, f"collaboration_run_{facts.plan_head.run_status}"
+        if request.id in released_request_ids:
+            return False, "already_released"
+        enabled, strategy = _effective_policy(policy, request.subtask_key)
+        if not enabled:
+            return False, "collaboration_policy_disabled"
+        if strategy != "all_required":
+            return False, "strategy_unsupported"
+        decision = ActivationGate.evaluate(
+            dependencies=tuple(
+                item
+                for item in facts.dependencies
+                if item.downstream_request_id == request.id
+            ),
+            upstream_facts=upstream_facts,
+        )
+        if not decision.ready:
+            return False, decision.reason
+        return True, "eligible"
+
+    @staticmethod
+    def _upstream_activation_facts(
+        facts: CollaborationFacts,
+    ) -> Mapping[UUID, UpstreamActivationFact]:
+        executions_by_lineage: dict[UUID, list[CollaborationExecutionFact]] = {}
+        for execution in facts.executions:
+            executions_by_lineage.setdefault(execution.lineage_id, []).append(execution)
+
+        artifacts_by_execution: dict[UUID, list[CollaborationArtifactFact]] = {}
+        for artifact in facts.artifacts:
+            artifacts_by_execution.setdefault(artifact.execution_id, []).append(artifact)
+
+        evidence_by_execution: dict[UUID, list[CollaborationEvidenceFact]] = {}
+        for evidence in facts.evidence:
+            evidence_by_execution.setdefault(evidence.execution_id, []).append(evidence)
+
+        result: dict[UUID, UpstreamActivationFact] = {}
+        for request in facts.requests:
+            lineage_id = request.execution_lineage_id
+            matching = (
+                sorted(
+                    executions_by_lineage.get(lineage_id, ()),
+                    key=lambda item: (item.attempt, item.version, str(item.id)),
+                )
+                if lineage_id is not None
+                else []
+            )
+            latest = matching[-1] if matching else None
+            execution_ids = {item.id for item in matching}
+            artifact_refs = tuple(
+                sorted(
+                    {
+                        f"artifact_type:{artifact.artifact_type}"
+                        for execution_id in execution_ids
+                        for artifact in artifacts_by_execution.get(execution_id, ())
+                    }
+                )
+            )
+            evidence_refs = tuple(
+                sorted(
+                    {
+                        evidence.acceptance_criterion_ref
+                        for execution_id in execution_ids
+                        for evidence in evidence_by_execution.get(execution_id, ())
+                        if evidence.status == EvidenceClaimStatus.CANDIDATE.value
+                        and _valid_evidence_ref(evidence.acceptance_criterion_ref)
+                    }
+                )
+            )
+            result[request.id] = UpstreamActivationFact(
+                request_id=request.id,
+                execution_status=_execution_status(latest.status)
+                if latest is not None
+                else None,
+                execution_lineage_id=lineage_id,
+                artifact_refs=artifact_refs,
+                evidence_refs=evidence_refs,
+                evidence_status=EvidenceClaimStatus.CANDIDATE,
+            )
+        return result
 
     @staticmethod
     def _task_mappings(
@@ -404,7 +535,12 @@ class CollaborationProjectionAssembler:
         )
 
     @staticmethod
-    def _request_mapping(item: CollaborationRequestFact) -> Mapping[str, object]:
+    def _request_mapping(
+        item: CollaborationRequestFact,
+        *,
+        eligible: bool,
+        eligibility_reason: str,
+    ) -> Mapping[str, object]:
         return {
             "id": str(item.id),
             "subtask_key": item.subtask_key,
@@ -427,6 +563,8 @@ class CollaborationProjectionAssembler:
             ),
             "expected_artifact_refs": list(item.expected_artifact_refs),
             "expected_evidence_refs": list(item.expected_evidence_refs),
+            "eligible": eligible,
+            "eligibility_reason": eligibility_reason,
         }
 
     @staticmethod
@@ -506,6 +644,41 @@ def item_mapping(item: RuntimeRelease) -> Mapping[str, object]:
 
 def _datetime_value(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _effective_policy(
+    policy: Mapping[str, object], subtask_key: str
+) -> tuple[bool, str | None]:
+    if policy.get("mode") == "disabled":
+        return False, None
+    selected: object = policy
+    default = policy.get("default_policy")
+    if isinstance(default, Mapping):
+        selected = default
+    overrides = policy.get("subtask_overrides", ())
+    if isinstance(overrides, (list, tuple)):
+        for item in overrides:
+            if isinstance(item, Mapping) and item.get("subtask_key") == subtask_key:
+                selected = item
+                break
+    if not isinstance(selected, Mapping):
+        return False, None
+    enabled = selected.get("enabled") is True
+    strategy = selected.get("strategy_id")
+    return enabled, strategy if isinstance(strategy, str) else None
+
+
+def _execution_status(value: str) -> ExecutionStatus | None:
+    try:
+        return ExecutionStatus(value)
+    except ValueError:
+        return None
+
+
+def _valid_evidence_ref(value: str) -> bool:
+    return value.startswith("acceptance:") and len(value) > len("acceptance:") and not any(
+        character.isspace() for character in value
+    )
 
 
 def _hash_value(value: object) -> str:

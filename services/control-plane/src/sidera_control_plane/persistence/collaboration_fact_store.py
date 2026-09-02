@@ -106,6 +106,7 @@ class SqlAlchemyCollaborationFactStore:
                 run_resource_version=run.resource_version,
                 runtime_capability_snapshot=run.runtime_capability_snapshot,
                 policy_snapshot=run.policy_snapshot,
+                run_status=run.status.value,
             ),
             plan_snapshot=snapshot,
             requests=requests,
