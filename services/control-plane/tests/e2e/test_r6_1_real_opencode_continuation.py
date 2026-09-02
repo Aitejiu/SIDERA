@@ -14,11 +14,9 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
-from r6_1_fake_runtime import activate_fake_target
-from seed_r6_1_revision import seed_revision_fixture
+from tests.e2e.r6_1_fake_runtime import activate_fake_target
+from tests.e2e.seed_r6_1_revision import seed_revision_fixture
 from sqlalchemy import func, select, update
-
-pytest_plugins = ("integration.conftest",)
 
 from sidera_control_plane.adapters.acp_process import ACPProcessTransport
 from sidera_control_plane.adapters.fake_planner import (
@@ -97,7 +95,10 @@ from sidera_control_plane.persistence.module_repository import (
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("clean_database"),
+]
 
 
 @pytest.fixture

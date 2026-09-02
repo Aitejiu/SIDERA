@@ -1,9 +1,9 @@
 from dataclasses import replace
 
 import pytest
-from test_planning_proposals import payload, planning_profile_snapshot
-from test_revision_diff import base_snapshot, revision_payload
-from test_revision_planning_context import _request
+from tests.unit.test_planning_proposals import payload, planning_profile_snapshot
+from tests.unit.test_revision_diff import base_snapshot, revision_payload
+from tests.unit.test_revision_planning_context import _request
 
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.planning import PlanningRequestKind

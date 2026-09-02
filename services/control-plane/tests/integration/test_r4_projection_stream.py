@@ -8,12 +8,12 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
-from test_worker_workspace_api import (
+from tests.integration.test_worker_workspace_api import (
     EXECUTION_TWO_ID,
     ROOT_TASK_ID,
     WORKER_ITEM_ID,
 )
-from test_worker_workspace_api import (
+from tests.integration.test_worker_workspace_api import (
     _seed as seed_worker_workspace,
 )
 

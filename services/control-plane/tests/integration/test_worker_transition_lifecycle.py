@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
-from test_revision_confirmation import (
+from tests.integration.test_revision_confirmation import (
     _base_plan,
     _confirm_command,
     _retire_payload,

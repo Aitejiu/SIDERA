@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from test_planning_commands import module_facts, profile
+from tests.unit.test_planning_commands import module_facts, profile
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -152,8 +152,8 @@ def _planner_input() -> tuple[PlannerInput, PlanningProfileSnapshot]:
 
 
 def _revision_planner_input() -> tuple[PlannerInput, PlanningProfileSnapshot]:
-    from test_plan_revisions import profile_snapshot
-    from test_revision_planning_context import _build_context
+    from tests.unit.test_plan_revisions import profile_snapshot
+    from tests.unit.test_revision_planning_context import _build_context
 
     context = _build_context()
     request_id = uuid4()

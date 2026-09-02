@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
-from test_revision_confirmation import _seed_revision_confirmation
+from tests.integration.test_revision_confirmation import _seed_revision_confirmation
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings

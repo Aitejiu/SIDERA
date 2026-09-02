@@ -5,7 +5,7 @@ from typing import Literal
 from uuid import uuid4
 
 import pytest
-from test_context_materialization import (
+from tests.unit.test_context_materialization import (
     FakeCatalog,
     _manifest,
     _revision,

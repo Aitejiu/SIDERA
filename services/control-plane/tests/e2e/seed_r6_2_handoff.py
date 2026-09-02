@@ -13,7 +13,7 @@ from typing import cast
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from seed_r6_1_revision import (
+from tests.e2e.seed_r6_1_revision import (
     _active_worker_context,
     _internal_command,
     _planning_profile,

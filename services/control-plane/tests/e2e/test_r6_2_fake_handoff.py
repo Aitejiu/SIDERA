@@ -8,10 +8,8 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-pytest_plugins = ("integration.conftest",)
-
-from r6_2_fake_runtime import FakeHandoffRuntime, FaultPoint
-from seed_r6_2_handoff import G4Scenario, seed_g4_fixture
+from tests.e2e.r6_2_fake_runtime import FakeHandoffRuntime, FaultPoint
+from tests.e2e.seed_r6_2_handoff import G4Scenario, seed_g4_fixture
 
 from sidera_control_plane.application.handoff_candidates import HandoffCandidateService
 from sidera_control_plane.application.handoff_commands import HandoffCommandError
@@ -33,7 +31,10 @@ from sidera_control_plane.persistence.models import (
     WorkerRuntimeConfigurationModel,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("clean_database"),
+]
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 

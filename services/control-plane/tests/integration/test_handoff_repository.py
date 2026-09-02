@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from test_context_package_repository import _seed_context
+from tests.integration.test_context_package_repository import _seed_context
 
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.handoff_evidence import (

@@ -6,12 +6,12 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from test_revision_confirmation import (
+from tests.integration.test_revision_confirmation import (
     _base_plan,
     _confirm_command,
     _seed_revision_confirmation,
 )
-from test_scheduler import register_runtime_modules_and_configure_worker
+from tests.integration.test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.plan_transition_gate import (

@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
-from test_scheduler import register_runtime_modules_and_configure_worker
+from tests.integration.test_scheduler import register_runtime_modules_and_configure_worker
 
 from sidera_control_plane.application.reconciler import Reconciler
 from sidera_control_plane.application.scheduler import Scheduler

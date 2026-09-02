@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from test_planning_proposals import planning_profile_snapshot
+from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 from sidera_control_plane.application.planner_runtime import (
     CapabilityCatalogEntry,

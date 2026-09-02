@@ -3,8 +3,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
-from test_context_package_repository import _seed_context
-from test_plan_transition_repository import (
+from tests.integration.test_context_package_repository import _seed_context
+from tests.integration.test_plan_transition_repository import (
     _seed_records,
     _transition,
     _worker_transition,

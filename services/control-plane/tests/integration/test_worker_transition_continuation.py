@@ -6,8 +6,8 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from sqlalchemy import select
-from test_context_package_worker import EmptyCatalog
-from test_revision_confirmation import (
+from tests.integration.test_context_package_worker import EmptyCatalog
+from tests.integration.test_revision_confirmation import (
     _base_plan,
     _confirm_command,
     _derive_payload,

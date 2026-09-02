@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select, update
-from test_context_package_repository import _seed_context
+from tests.integration.test_context_package_repository import _seed_context
 
 from sidera_control_plane.application.handoff_candidates import (
     runtime_snapshot_for_handoff,

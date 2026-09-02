@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import update
-from test_scheduler_runtime_binding import _seed
+from tests.integration.test_scheduler_runtime_binding import _seed
 
 from sidera_control_plane.persistence.models import (
     ExecutionModel,

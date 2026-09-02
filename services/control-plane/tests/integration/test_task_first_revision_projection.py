@@ -6,7 +6,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from test_plan_transition_commands import _retire_unknown
+from tests.integration.test_plan_transition_commands import _retire_unknown
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings

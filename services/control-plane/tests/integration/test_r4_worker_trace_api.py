@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
-from test_r4_task_first_api import (
+from tests.integration.test_r4_task_first_api import (
     BACKEND_EXECUTION_ID,
     ROOT_TASK_ID,
     SESSION_ID,

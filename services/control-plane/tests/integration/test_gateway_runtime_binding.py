@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import update
-from test_gateway_runner import (
+from tests.integration.test_gateway_runner import (
     NOW,
     FakeWorkspaceProvider,
     RecordingFakeAdapter,

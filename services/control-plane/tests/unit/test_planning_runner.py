@@ -7,7 +7,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from test_planning_commands import module_facts, profile
+from tests.unit.test_planning_commands import module_facts, profile
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -367,8 +367,8 @@ def test_runner_claims_calls_fake_and_persists_proposal_atomically() -> None:
 
 
 def test_fake_planner_emits_v3_for_a_revision_context() -> None:
-    from test_plan_revisions import profile_snapshot
-    from test_revision_planning_context import _build_context
+    from tests.unit.test_plan_revisions import profile_snapshot
+    from tests.unit.test_revision_planning_context import _build_context
 
     context = _build_context()
     request_id = uuid4()

@@ -9,7 +9,7 @@ from typing import Self
 from uuid import UUID, uuid4
 
 import pytest
-from test_handoff_commands import (
+from tests.unit.test_handoff_commands import (
     MemoryEventStore,
     StaticRuntimeResolver,
     _confirm_envelope,

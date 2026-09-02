@@ -9,26 +9,26 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
-from test_context_package_worker import EmptyCatalog, _seed_assembly, _worker
-from test_execution_context_gate import (
+from tests.integration.test_context_package_worker import EmptyCatalog, _seed_assembly, _worker
+from tests.integration.test_execution_context_gate import (
     EmptyKnowledgeCatalog,
     _install_execution_context,
 )
-from test_gateway_runner import (
+from tests.integration.test_gateway_runner import (
     NOW as GATEWAY_NOW,
 )
-from test_gateway_runner import (
+from tests.integration.test_gateway_runner import (
     FakeWorkspaceProvider,
     RecordingFakeAdapter,
     _message,
     _seed_assignment,
 )
-from test_knowledge_candidate_submission import (
+from tests.integration.test_knowledge_candidate_submission import (
     FakeKnowledgeCatalog,
     _proposal,
     _queue,
 )
-from test_planning_context_gate import RecordingPlanner, runner, seed_request
+from tests.integration.test_planning_context_gate import RecordingPlanner, runner, seed_request
 
 from sidera_control_plane.adapters.knowledge_http import (
     KnowledgeAdapterError,

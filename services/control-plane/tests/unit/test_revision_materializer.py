@@ -3,7 +3,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from test_revision_diff import base_snapshot, revision_payload
+from tests.unit.test_revision_diff import base_snapshot, revision_payload
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.revision_materializer import (

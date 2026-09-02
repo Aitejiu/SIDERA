@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import update
-from test_r4_task_first_api import (
+from tests.integration.test_r4_task_first_api import (
     ARTIFACT_ID,
     BACKEND_EXECUTION_ID,
     ROOT_TASK_ID,

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from test_plan_revisions import profile_snapshot
+from tests.unit.test_plan_revisions import profile_snapshot
 
 from sidera_control_plane.application.planner_runtime import (
     CapabilityCatalogSnapshot,

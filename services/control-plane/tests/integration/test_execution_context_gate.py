@@ -5,14 +5,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
-from test_gateway_runner import (
+from tests.integration.test_gateway_runner import (
     FakeWorkspaceProvider,
     RecordingFakeAdapter,
     _message,
     _seed_assignment,
 )
-from test_planning_context_gate import EmptyKnowledgeCatalog, seed_request
-from test_scheduler import WorkerSpec, seed_scheduler_case
+from tests.integration.test_planning_context_gate import EmptyKnowledgeCatalog, seed_request
+from tests.integration.test_scheduler import WorkerSpec, seed_scheduler_case
 
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_materialization import ContextMaterializer

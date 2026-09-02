@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from test_context_package_repository import (
+from tests.integration.test_context_package_repository import (
     _event_context,
     _manifest,
     _request,

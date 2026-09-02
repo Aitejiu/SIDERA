@@ -3,7 +3,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy.orm import Session
-from test_r5_1_execution_request_schema import (
+from tests.integration.test_r5_1_execution_request_schema import (
     NOW,
     WORKSPACE_A,
     request_row,

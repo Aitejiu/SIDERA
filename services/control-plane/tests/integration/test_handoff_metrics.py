@@ -1,7 +1,7 @@
 from uuid import UUID
 
 import pytest
-from test_handoff_repository import _seed
+from tests.integration.test_handoff_repository import _seed
 
 from sidera_control_plane.persistence.handoff_metrics_store import (
     SqlAlchemyHandoffMetricsStore,

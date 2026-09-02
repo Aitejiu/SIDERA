@@ -6,8 +6,8 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
-from test_proposal_confirmation import command, seed_proposal
-from test_work_context_queries import _create_context
+from tests.integration.test_proposal_confirmation import command, seed_proposal
+from tests.integration.test_work_context_queries import _create_context
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings

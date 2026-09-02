@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select, update
-from test_handoff_target_execution import _seed as seed_handoff
+from tests.integration.test_handoff_target_execution import _seed as seed_handoff
 
 from sidera_control_plane.application.handoff_input_transfer import (
     HandoffInputTransferService,

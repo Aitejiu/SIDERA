@@ -16,28 +16,28 @@ _INTEGRATION_TESTS = str(Path(__file__).resolve().parents[1] / "integration")
 if _INTEGRATION_TESTS not in sys.path:
     sys.path.insert(0, _INTEGRATION_TESTS)
 
-from test_gateway_runner import (
+from tests.integration.test_gateway_runner import (
     FakeWorkspaceProvider,
     RecordingFakeAdapter,
     _message,
     _patch_materialization,
     _seed_assignment,
 )
-from test_plan_transition_commands import _retire_unknown
-from test_plan_transition_failures import _gateway
-from test_plan_transition_failures import (
+from tests.integration.test_plan_transition_commands import _retire_unknown
+from tests.integration.test_plan_transition_failures import _gateway
+from tests.integration.test_plan_transition_failures import (
     test_lost_stop_response_is_unknown_and_not_replayed as _lost_stop_response,
 )
-from test_plan_transition_failures import (
+from tests.integration.test_plan_transition_failures import (
     test_new_session_survives_coordinator_crash_and_reconciles_on_restart as _new_session_survives,
 )
-from test_plan_transition_failures import (
+from tests.integration.test_plan_transition_failures import (
     test_patch_delivered_before_db_failure_is_unknown_and_not_replayed as _patch_delivered,
 )
-from test_plan_transition_failures import (
+from tests.integration.test_plan_transition_failures import (
     test_session_start_persistence_failure_is_unknown_and_not_replayed as _session_start_persistence,
 )
-from test_revision_confirmation import (
+from tests.integration.test_revision_confirmation import (
     _base_plan,
     _confirm_command,
     _preserve_payload,
@@ -45,8 +45,10 @@ from test_revision_confirmation import (
     _seed_revision_confirmation,
 )
 
-pytest_plugins = ("integration.conftest",)
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("clean_database"),
+]
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 

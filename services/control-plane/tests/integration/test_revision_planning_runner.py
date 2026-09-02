@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from test_plan_revision_commands import _command, _seed_revision_base
+from tests.integration.test_plan_revision_commands import _command, _seed_revision_base
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,

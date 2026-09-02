@@ -8,8 +8,8 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from test_activation_reconciler import _materialize_plan
-from test_proposal_confirmation import command, seed_proposal
+from tests.integration.test_activation_reconciler import _materialize_plan
+from tests.integration.test_proposal_confirmation import command, seed_proposal
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import (

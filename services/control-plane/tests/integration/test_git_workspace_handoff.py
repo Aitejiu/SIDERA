@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from test_git_workspace_integration import _repository, _spec
+from tests.integration.test_git_workspace_integration import _repository, _spec
 
 from sidera_control_plane.adapters.git_workspace import (
     GitWorktreeWorkspaceManager,

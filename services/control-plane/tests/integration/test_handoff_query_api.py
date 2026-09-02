@@ -59,7 +59,7 @@ def test_handoff_query_routes_return_bounded_real_views(
     database_url: str,
     workspace_id: UUID,
 ) -> None:
-    from test_handoff_target_execution import _seed
+    from tests.integration.test_handoff_target_execution import _seed
 
     fixture, _runtime = _seed(database, workspace_id)
     with database.session() as session:

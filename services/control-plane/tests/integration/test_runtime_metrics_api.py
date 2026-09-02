@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from test_scheduler_runtime_binding import _scheduler, _seed
+from tests.integration.test_scheduler_runtime_binding import _scheduler, _seed
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings

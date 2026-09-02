@@ -5,15 +5,15 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
-from test_context_package_worker import EmptyCatalog
-from test_handoff_context_package import (
+from tests.integration.test_context_package_worker import EmptyCatalog
+from tests.integration.test_handoff_context_package import (
     _add_target_request,
     _reset_transition_for_bundle,
     _seed_proposal,
 )
-from test_handoff_target_execution import _scheduler
-from test_handoff_target_execution import _seed as seed_handoff
-from test_planning_runner_integration import seed_request
+from tests.integration.test_handoff_target_execution import _scheduler
+from tests.integration.test_handoff_target_execution import _seed as seed_handoff
+from tests.integration.test_planning_runner_integration import seed_request
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from test_task_console_projections import (
+from tests.unit.test_task_console_projections import (
     IMPLEMENTER_ID,
     NOW as CONSOLE_NOW,
     _plan,
@@ -9,7 +9,7 @@ from test_task_console_projections import (
     _tasks,
     _worker_items,
 )
-from test_worker_workspace_projection import _service
+from tests.unit.test_worker_workspace_projection import _service
 
 from sidera_control_plane.domain.task_console_projections import (
     TaskConsoleProjectionService,

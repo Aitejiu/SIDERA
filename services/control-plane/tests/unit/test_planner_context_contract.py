@@ -5,8 +5,8 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from test_context_materialization import FakeCatalog, _manifest, _revision, _run
-from test_planning_proposals import planning_profile_snapshot
+from tests.unit.test_context_materialization import FakeCatalog, _manifest, _revision, _run
+from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,

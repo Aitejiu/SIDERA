@@ -2,7 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from test_context_materialization import FakeCatalog, _manifest, _revision, _run
+from tests.unit.test_context_materialization import FakeCatalog, _manifest, _revision, _run
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer

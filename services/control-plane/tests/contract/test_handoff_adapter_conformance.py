@@ -7,7 +7,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from contract.handoff_adapter_conformance import (
+from tests.contract.handoff_adapter_conformance import (
     HandoffAdapterFactory,
     build_handoff_fixture,
     run_source_role,

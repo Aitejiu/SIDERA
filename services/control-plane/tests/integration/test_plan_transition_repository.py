@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from test_planning_repository import (
+from tests.integration.test_planning_repository import (
     add_module_instance,
     make_profile,
     make_proposal,

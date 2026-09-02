@@ -4,7 +4,7 @@ import json
 from uuid import UUID
 
 import pytest
-from test_plan_transition_repository import (
+from tests.integration.test_plan_transition_repository import (
     _seed_records,
     _transition,
     _worker_transition,

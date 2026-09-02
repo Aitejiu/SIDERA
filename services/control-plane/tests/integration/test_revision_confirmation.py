@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from test_plan_revision_commands import _capabilities, _profile
+from tests.integration.test_plan_revision_commands import _capabilities, _profile
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.revision_materializer import RevisionMaterializer

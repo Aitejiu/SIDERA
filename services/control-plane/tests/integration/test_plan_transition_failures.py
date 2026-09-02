@@ -6,8 +6,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
-from test_gateway_runner import NOW as GATEWAY_NOW
-from test_gateway_runner import (
+from tests.integration.test_gateway_runner import NOW as GATEWAY_NOW
+from tests.integration.test_gateway_runner import (
     FakeWorkspaceProvider,
     RecordingFakeAdapter,
     UnknownInputAdapter,
@@ -17,14 +17,14 @@ from test_gateway_runner import (
     _request_stop,
     _seed_assignment,
 )
-from test_revision_confirmation import (
+from tests.integration.test_revision_confirmation import (
     _base_plan,
     _confirm_command,
     _revision_payload,
     _seed_revision_confirmation,
 )
-from test_worker_transition_continuation import NOW as CONTINUATION_NOW
-from test_worker_transition_continuation import (
+from tests.integration.test_worker_transition_continuation import NOW as CONTINUATION_NOW
+from tests.integration.test_worker_transition_continuation import (
     _activate_target,
     _seed_terminal_source,
     _seed_work_context,
@@ -397,7 +397,7 @@ def _prepare_active_continuation(
         owner_id="failure-transition-test",
     )
     assert coordinator.run_once(limit=10).failed == 0
-    from test_context_package_worker import EmptyCatalog
+    from tests.integration.test_context_package_worker import EmptyCatalog
 
     from sidera_control_plane.application.activation_reconciler import (
         ActivationReconciler,

@@ -9,11 +9,9 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from r6_1_fake_runtime import activate_fake_target
-from seed_r6_1_revision import seed_revision_fixture
+from tests.e2e.r6_1_fake_runtime import activate_fake_target
+from tests.e2e.seed_r6_1_revision import seed_revision_fixture
 from sqlalchemy import select
-
-pytest_plugins = ("integration.conftest",)
 
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
@@ -61,7 +59,10 @@ from sidera_control_plane.persistence.models import (
     WorkerItemModel,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("clean_database"),
+]
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 
