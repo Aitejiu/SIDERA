@@ -5,7 +5,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from sidera_control_plane.api.schemas import CommandRequest
+from sidera_control_plane.api.schemas import (
+    ActorRequest,
+    CommandRequest,
+    RegisterPlanningProfilePayload,
+)
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
@@ -21,7 +25,9 @@ from sidera_control_plane.domain.errors import (
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
+    COLLABORATION_RUNTIME_MODULE_TYPE,
     CancellationCapability,
+    CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     ModuleDefinition,
     ModuleInstance,
@@ -151,16 +157,27 @@ def profile(
 
 
 class ModuleRepository:
-    def __init__(self, definition: ModuleDefinition, instance: ModuleInstance) -> None:
+    def __init__(
+        self,
+        definition: ModuleDefinition,
+        instance: ModuleInstance,
+        *,
+        extra_definitions: tuple[ModuleDefinition, ...] = (),
+        extra_instances: tuple[ModuleInstance, ...] = (),
+    ) -> None:
         self.definition = definition
         self.instance = instance
+        self.definitions = {definition.id: definition}
+        self.definitions.update({item.id: item for item in extra_definitions})
+        self.instances = {instance.id: instance}
+        self.instances.update({item.id: item for item in extra_instances})
         self.added: list[object] = []
 
     def get_definition(self, module_id: UUID, workspace_id: UUID):
-        return self.definition if module_id == self.definition.id else None
+        return self.definitions.get(module_id)
 
     def get_instance(self, module_id: UUID, workspace_id: UUID):
-        return self.instance if module_id == self.instance.id else None
+        return self.instances.get(module_id)
 
     def add_definition(self, definition: ModuleDefinition) -> None:
         self.added.append(definition)
@@ -448,11 +465,18 @@ def unit(
     stored_profile: PlanningProfile | None = None,
     stored_request: PlanningRequest | None = None,
     current_proposal: object | None = None,
+    extra_definitions: tuple[ModuleDefinition, ...] = (),
+    extra_instances: tuple[ModuleInstance, ...] = (),
 ) -> Any:
     return SimpleNamespace(
         tasks=SimpleNamespace(),
         plans=SimpleNamespace(),
-        modules=ModuleRepository(definition, instance),
+        modules=ModuleRepository(
+            definition,
+            instance,
+            extra_definitions=extra_definitions,
+            extra_instances=extra_instances,
+        ),
         planning_profiles=ProfileRepository(stored_profile),
         planning_requests=RequestRepository(stored_request),
         planning_runs=RunRepository(stored_request),
@@ -700,6 +724,98 @@ def test_register_planning_profile_validates_module_and_persists_version() -> No
     assert result.data["planning_profile_id"] == str(unit_of_work.planning_profiles.stored.id)
     assert result.data["profile_version"] == 1
     assert unit_of_work.planning_profiles.stored.planner_module_instance_id == instance.id
+
+
+def test_register_planning_profile_pins_an_active_runtime_by_trusted_references() -> None:
+    planner_definition, planner_instance = module_facts(
+        proposal_schema_versions=(4,)
+    )
+    runtime_definition_id = uuid4()
+    runtime_instance_id = uuid4()
+    runtime_capabilities = CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime-v1",
+        projection_schema_versions=(1,),
+        decision_schema_versions=(1,),
+        strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
+    )
+    runtime_definition = ModuleDefinition(
+        id=runtime_definition_id,
+        workspace_id=WORKSPACE_ID,
+        module_type=COLLABORATION_RUNTIME_MODULE_TYPE,
+        provider="runtime-test",
+        interface_version="collaboration-runtime-v1",
+        config_schema_version=1,
+        capabilities=runtime_capabilities,
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+    runtime_instance = ModuleInstance(
+        id=runtime_instance_id,
+        workspace_id=WORKSPACE_ID,
+        definition_id=runtime_definition_id,
+        instance_name="test-runtime",
+        config_version=3,
+        config_namespace="runtime",
+        config={"runtime.mode": "test"},
+        secret_refs=("secret://runtime/key",),
+        lifecycle=ModuleLifecycle.ACTIVE,
+    )
+    unit_of_work = unit(
+        planner_definition,
+        planner_instance,
+        extra_definitions=(runtime_definition,),
+        extra_instances=(runtime_instance,),
+    )
+    payload = register_profile_payload(planner_instance.id)
+    payload.update(
+        {
+            "proposal_schema_version": 4,
+            "collaboration_runtime_definition_id": str(runtime_definition_id),
+            "collaboration_runtime_instance_id": str(runtime_instance_id),
+            "collaboration_runtime_config_version": 3,
+        }
+    )
+
+    result = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    ).handle(
+        unit_of_work,
+        envelope("RegisterPlanningProfile", payload),
+    )
+
+    binding = unit_of_work.planning_profiles.stored.collaboration_runtime_binding
+    assert result.data["profile_version"] == 1
+    assert binding is not None
+    assert binding.runtime_definition_id == runtime_definition_id
+    assert binding.runtime_instance_id == runtime_instance_id
+    assert binding.runtime_config_version == 3
+    assert "runtime-test" not in repr(binding)
+    assert "secret://runtime/key" not in repr(binding)
+
+
+def test_profile_payload_accepts_only_trusted_collaboration_runtime_references() -> None:
+    payload = register_profile_payload(uuid4())
+    payload["proposal_schema_version"] = 4
+    payload.update(
+        {
+            "collaboration_runtime_definition_id": str(uuid4()),
+            "collaboration_runtime_instance_id": str(uuid4()),
+            "collaboration_runtime_config_version": 3,
+        }
+    )
+
+    parsed = RegisterPlanningProfilePayload.model_validate(payload)
+
+    assert parsed.collaboration_runtime_config_version == 3
+
+    payload["collaboration_runtime_binding"] = {"api_key": "secret-value"}
+    with pytest.raises(ValueError, match="extra"):
+        RegisterPlanningProfilePayload.model_validate(payload)
 
 
 def test_submit_planning_request_returns_request_and_run_ids() -> None:
@@ -980,7 +1096,7 @@ def test_submit_plan_revision_payload_uses_strict_command_schema() -> None:
             workspace_id=WORKSPACE_ID,
             command_type="SubmitPlanRevision",
             target_type="task",
-            actor={"type": "user", "id": "operator"},
+            actor=ActorRequest(type="user", id="operator"),
             target_id=root_task_id,
             expected_version=1,
             idempotency_key=uuid4().hex,

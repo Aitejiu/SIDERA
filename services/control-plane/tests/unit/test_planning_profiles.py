@@ -24,6 +24,10 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
 )
+from sidera_control_plane.persistence.planning_repository import (
+    _snapshot_from_mapping,
+    _snapshot_to_mapping,
+)
 
 
 def planner_capabilities(
@@ -246,3 +250,38 @@ def test_profile_snapshot_preserves_and_validates_collaboration_binding() -> Non
                 ),
             )
         )
+
+
+def test_profile_snapshot_persistence_round_trips_collaboration_binding() -> None:
+    runtime_capability = CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime-v1",
+        projection_schema_versions=(1,),
+        decision_schema_versions=(1,),
+        strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
+    )
+    binding = CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=uuid4(),
+        runtime_instance_id=uuid4(),
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=3,
+        runtime_capability_snapshot=runtime_capability,
+    )
+    snapshot = planning_profile(
+        proposal_schema_version=4,
+        collaboration_runtime_binding=binding,
+    ).snapshot(
+        replace(planner_capabilities(), proposal_schema_versions=(4,)),
+        module_instance_config_version=7,
+    )
+
+    mapping = _snapshot_to_mapping(snapshot)
+    restored = _snapshot_from_mapping(mapping)
+
+    assert restored == snapshot
+    assert "api_key" not in repr(mapping)

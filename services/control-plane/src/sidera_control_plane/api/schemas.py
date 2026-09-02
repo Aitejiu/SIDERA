@@ -203,6 +203,9 @@ class RegisterPlanningProfilePayload(BaseModel):
     execution_budget_level: NonEmptyString
     user_selectable: bool = True
     planner_secret_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    collaboration_runtime_definition_id: UUID | None = None
+    collaboration_runtime_instance_id: UUID | None = None
+    collaboration_runtime_config_version: int | None = Field(default=None, ge=1)
 
 
 class SubmitPlanningRequestPayload(BaseModel):

@@ -21,6 +21,7 @@ from sidera_control_plane.application.planner_runtime import (
 from sidera_control_plane.application.revision_planning_context import (
     RevisionPlanningContextV1,
 )
+from sidera_control_plane.domain.collaboration import CollaborationPolicyRequestV1
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextMaterializationV1,
@@ -51,6 +52,7 @@ from sidera_control_plane.domain.planning_proposals import (
     ImpactPolicy,
     PlanningProfileDescriptor,
     PlanningProposalPayload,
+    PlanningProposalPayloadV4,
     ProposalRevision,
     ProposedRootTask,
     ProposedSubtask,
@@ -58,6 +60,7 @@ from sidera_control_plane.domain.planning_proposals import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
@@ -80,12 +83,14 @@ FakeScenario = Literal[
     "timeout",
     "unknown_outcome",
 ]
+FakeCollaborationMode = Literal["disabled", "enabled"]
 
 
 @dataclass(frozen=True, slots=True)
 class FakePlannerConfig:
     scenario: FakeScenario
     provider_ref: str = "fake-planner"
+    collaboration_mode: FakeCollaborationMode = "disabled"
 
     def __post_init__(self) -> None:
         if self.scenario not in {
@@ -101,6 +106,10 @@ class FakePlannerConfig:
             raise ValueError(f"unsupported fake planner scenario: {self.scenario}")
         if not self.provider_ref.strip():
             raise ValueError("fake planner provider_ref is required")
+        if self.collaboration_mode not in {"disabled", "enabled"}:
+            raise ValueError(
+                f"unsupported fake collaboration mode: {self.collaboration_mode}"
+            )
 
 
 class FakePlannerAdapter:
@@ -113,7 +122,7 @@ class FakePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2, 3),
+        proposal_schema_versions=(2, 3, 4),
         context_package_versions=(1,),
     )
 
@@ -237,7 +246,16 @@ class FakePlannerAdapter:
                     else _revision_proposal_payload
                 )
                 payload = payload_builder(planner_input.planning_context, base_plan)
-                derived_diff = RevisionDiffNormalizer().normalize(base_plan, payload)
+                if planner_input.proposal_schema_version == 4:
+                    payload = _revision_proposal_payload_v4(
+                        payload, self.config.collaboration_mode
+                    )
+                derived_diff = RevisionDiffNormalizer().normalize(
+                    base_plan,
+                    payload._as_v3()
+                    if isinstance(payload, PlanningRevisionProposalPayloadV4)
+                    else payload,
+                )
             except (DomainError, TypeError, ValueError):
                 return self._failure(
                     PlannerInvalidResult,
@@ -270,7 +288,16 @@ class FakePlannerAdapter:
                 )
             )
 
-        payload = _scale_proposal_payload() if self.config.scenario == "scale" else _proposal_payload()
+        legacy_payload = (
+            _scale_proposal_payload()
+            if self.config.scenario == "scale"
+            else _proposal_payload()
+        )
+        payload = (
+            _proposal_payload_v4(legacy_payload, self.config.collaboration_mode)
+            if planner_input.proposal_schema_version == 4
+            else legacy_payload
+        )
         proposal = ProposalRevision.create(
             planning_request_id=planner_input.planning_request_id,
             revision=1,
@@ -386,6 +413,63 @@ def _proposal_payload() -> PlanningProposalPayload:
             failure_policy="retry_then_block",
         ),
         base_descriptor=None,
+    )
+
+
+def _collaboration_policy_request(
+    mode: FakeCollaborationMode,
+) -> CollaborationPolicyRequestV1:
+    return CollaborationPolicyRequestV1.from_mapping(
+        {
+            "mode": mode,
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+        }
+    )
+
+
+def _proposal_payload_v4(
+    legacy: PlanningProposalPayload,
+    mode: FakeCollaborationMode,
+) -> PlanningProposalPayloadV4:
+    return PlanningProposalPayloadV4(
+        schema_version=4,
+        kind=legacy.kind,
+        root_task=legacy.root_task,
+        subtasks=legacy.subtasks,
+        worker_items=legacy.worker_items,
+        subtask_milestones=legacy.subtask_milestones,
+        subtask_dependencies=legacy.subtask_dependencies,
+        worker_item_dependencies=legacy.worker_item_dependencies,
+        execution_intents=legacy.execution_intents,
+        decision_summary=legacy.decision_summary,
+        impact_policy=legacy.impact_policy,
+        collaboration_policy_request=_collaboration_policy_request(mode),
+    )
+
+
+def _revision_proposal_payload_v4(
+    legacy: PlanningRevisionProposalPayloadV3,
+    mode: FakeCollaborationMode,
+) -> PlanningRevisionProposalPayloadV4:
+    return PlanningRevisionProposalPayloadV4(
+        schema_version=4,
+        kind=legacy.kind,
+        base_descriptor=legacy.base_descriptor,
+        root_task=legacy.root_task,
+        subtasks=legacy.subtasks,
+        worker_items=legacy.worker_items,
+        subtask_milestones=legacy.subtask_milestones,
+        subtask_dependencies=legacy.subtask_dependencies,
+        worker_item_dependencies=legacy.worker_item_dependencies,
+        execution_intents=legacy.execution_intents,
+        subtask_identity_decisions=legacy.subtask_identity_decisions,
+        worker_item_identity_decisions=legacy.worker_item_identity_decisions,
+        retired_subtask_ids=legacy.retired_subtask_ids,
+        retired_worker_item_ids=legacy.retired_worker_item_ids,
+        decision_summary=legacy.decision_summary,
+        impact_policy=legacy.impact_policy,
+        collaboration_policy_request=_collaboration_policy_request(mode),
     )
 
 

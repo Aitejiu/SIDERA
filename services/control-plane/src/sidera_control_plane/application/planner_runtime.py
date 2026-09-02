@@ -82,11 +82,14 @@ class PlannerPolicyConstraints:
     max_concurrency: int
     budget_level: str
     execution_max_attempts: int
+    collaboration_policy_modes: tuple[str, ...] = ("disabled",)
+    collaboration_strategy_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_profile_snapshot(
         cls, profile_snapshot: PlanningProfileSnapshot
     ) -> PlannerPolicyConstraints:
+        binding = profile_snapshot.collaboration_runtime_binding
         return cls(
             allowed_capabilities=profile_snapshot.allowed_capabilities,
             adapter_preferences=profile_snapshot.adapter_preferences,
@@ -99,6 +102,14 @@ class PlannerPolicyConstraints:
             max_concurrency=profile_snapshot.budget.max_concurrency,
             budget_level=profile_snapshot.execution_budget_level,
             execution_max_attempts=profile_snapshot.execution_max_attempts,
+            collaboration_policy_modes=(
+                ("disabled", "enabled") if binding is not None else ("disabled",)
+            ),
+            collaboration_strategy_ids=(
+                ()
+                if binding is None
+                else binding.runtime_capability_snapshot.strategy_ids
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -120,6 +131,26 @@ class PlannerPolicyConstraints:
         object.__setattr__(self, "allowed_capabilities", tuple(self.allowed_capabilities))
         object.__setattr__(self, "adapter_preferences", tuple(self.adapter_preferences))
         object.__setattr__(self, "adapter_forbidden", tuple(self.adapter_forbidden))
+        if not self.collaboration_policy_modes or any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.collaboration_policy_modes
+        ):
+            raise ValueError("collaboration policy modes must be non-empty strings")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.collaboration_strategy_ids
+        ):
+            raise ValueError("collaboration strategy ids must be non-empty strings")
+        object.__setattr__(
+            self,
+            "collaboration_policy_modes",
+            tuple(dict.fromkeys(self.collaboration_policy_modes)),
+        )
+        object.__setattr__(
+            self,
+            "collaboration_strategy_ids",
+            tuple(dict.fromkeys(self.collaboration_strategy_ids)),
+        )
 
 
 @dataclass(frozen=True, slots=True)

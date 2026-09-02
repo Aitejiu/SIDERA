@@ -17,6 +17,7 @@ from sidera_control_plane.adapters.fake_planner import (
 from sidera_control_plane.adapters.opencode_planner import (
     OpenCodePlannerAdapter,
     OpenCodePlannerError,
+    _parse_result,
     _planner_opencode_config,
     _planner_prompt,
     _repair_prompt,
@@ -32,10 +33,15 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerProposalResult,
     PlannerRunControl,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
+    CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     PlannerAdapterCapabilityProfile,
+    StabilityLevel,
     StructuredOutputCapability,
     UsageReportingCapability,
 )
@@ -44,8 +50,10 @@ from sidera_control_plane.domain.planning import (
     PlanningRequestKind,
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
+from sidera_control_plane.domain.planning_proposals import PlanningProposalPayloadV4
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from tests.unit.test_planning_commands import module_facts, profile
 
@@ -213,6 +221,83 @@ def _response(result_type: str, body: object, *, usage: dict[str, int] | None = 
     )
 
 
+def _disabled_collaboration_policy() -> dict[str, object]:
+    return {
+        "mode": "disabled",
+        "default_policy": {"strategy_id": "all_required"},
+        "subtask_overrides": [],
+    }
+
+
+def _v4_snapshot(snapshot: PlanningProfileSnapshot) -> PlanningProfileSnapshot:
+    assert isinstance(snapshot.planner_capabilities, PlannerAdapterCapabilityProfile)
+    return replace(
+        snapshot,
+        proposal_schema_version=4,
+        planner_capabilities=replace(
+            snapshot.planner_capabilities,
+            proposal_schema_versions=(2, 3, 4),
+        ),
+    )
+
+
+def test_opencode_parser_dispatches_initial_and_revision_v4() -> None:
+    initial_input, initial_snapshot = _planner_input()
+    initial_snapshot = _v4_snapshot(initial_snapshot)
+    initial_input = replace(
+        initial_input,
+        proposal_schema_version=4,
+        profile_snapshot=initial_snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(
+            initial_snapshot
+        ),
+    )
+    initial_payload = _proposal_payload().to_mapping()
+    initial_payload.pop("base_descriptor")
+    initial_payload["schema_version"] = 4
+    initial_payload["collaboration_policy_request"] = _disabled_collaboration_policy()
+
+    initial_result = _parse_result(
+        _response("proposal", initial_payload),
+        initial_input,
+        "test-opencode",
+    )
+
+    revision_input, revision_snapshot = _revision_planner_input()
+    revision_snapshot = _v4_snapshot(revision_snapshot)
+    revision_input = replace(
+        revision_input,
+        proposal_schema_version=4,
+        profile_snapshot=revision_snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(
+            revision_snapshot
+        ),
+    )
+    fake_result = FakePlannerAdapter(FakePlannerConfig(scenario="revision")).plan(
+        revision_input,
+        PlannerRunControl(
+            operation_id=revision_input.operation_id,
+            started_at=NOW,
+            deadline_at=NOW + timedelta(seconds=30),
+        ),
+    )
+    assert isinstance(fake_result, PlannerProposalResult)
+    revision_payload = fake_result.proposal.payload.to_mapping()
+    revision_payload["schema_version"] = 4
+    revision_payload["collaboration_policy_request"] = _disabled_collaboration_policy()
+
+    revision_result = _parse_result(
+        _response("proposal", revision_payload),
+        revision_input,
+        "test-opencode",
+    )
+
+    assert isinstance(initial_result, PlannerProposalResult)
+    assert isinstance(initial_result.proposal.payload, PlanningProposalPayloadV4)
+    assert isinstance(revision_result, PlannerProposalResult)
+    assert isinstance(revision_result.proposal.payload, PlanningRevisionProposalPayloadV4)
+
+
 def _adapter(tmp_path: Path, *, hang_prompt: bool = False) -> OpenCodePlannerAdapter:
     return OpenCodePlannerAdapter(
         executable=str(_fake_opencode(tmp_path, hang_prompt=hang_prompt)),
@@ -229,7 +314,7 @@ def test_planner_probe_declares_json_text_not_json_schema(tmp_path: Path) -> Non
     assert profile.idempotency is IdempotencyCapability.NONE
     assert profile.cancellation is CancellationCapability.PROCESS
     assert profile.usage_reporting is UsageReportingCapability.TOKENS
-    assert profile.proposal_schema_versions == (2, 3)
+    assert profile.proposal_schema_versions == (2, 3, 4)
 
 
 def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
@@ -247,6 +332,50 @@ def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
         "acceptance:<criterion-ref> format"
     ) in prompt
     assert "Never use acceptance_criterion: values" in prompt
+
+
+def test_v4_planner_prompt_exposes_policy_vocabulary_without_runtime_bindings() -> None:
+    planner_input, snapshot = _planner_input()
+    runtime_definition_id = uuid4()
+    runtime_instance_id = uuid4()
+    binding = CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=runtime_definition_id,
+        runtime_instance_id=runtime_instance_id,
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=3,
+        runtime_capability_snapshot=CollaborationRuntimeCapabilityProfile(
+            interface_version="collaboration-runtime-v1",
+            projection_schema_versions=(1,),
+            decision_schema_versions=(1,),
+            strategy_ids=("all_required",),
+            idempotency=IdempotencyCapability.OPERATION_ID,
+            max_projection_bytes=262_144,
+            max_decision_bytes=65_536,
+            max_intents_per_decision=128,
+            max_strategy_state_bytes=16_384,
+            stability=StabilityLevel.EXPERIMENTAL,
+        ),
+    )
+    snapshot = replace(
+        _v4_snapshot(snapshot),
+        collaboration_runtime_binding=binding,
+    )
+    planner_input = replace(
+        planner_input,
+        proposal_schema_version=4,
+        profile_snapshot=snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(snapshot),
+    )
+
+    prompt = _planner_prompt(planner_input)
+
+    assert "collaboration_policy_request" in prompt
+    assert '"modes":["disabled","enabled"]' in prompt
+    assert '"strategy_ids":["all_required"]' in prompt
+    assert str(runtime_definition_id) not in prompt
+    assert str(runtime_instance_id) not in prompt
+    assert "collaboration-runtime-v1" not in prompt
+    assert "runtime_config_version" not in prompt
 
 
 def test_revision_planner_prompt_binds_complete_target_plan_and_exact_identity() -> None:

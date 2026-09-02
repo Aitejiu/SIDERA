@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from sidera_control_plane.adapters.fake_planner import (
+    FakeCollaborationMode,
     FakePlannerAdapter,
     FakePlannerConfig,
     FakeScenario,
@@ -16,6 +17,7 @@ from sidera_control_plane.application.planner_runtime import (
     ContextReference,
     PlannerClarificationResult,
     PlannerFailure,
+    PlannerInput,
     PlannerInputAssembler,
     PlannerInvalidResult,
     PlannerPolicyConstraints,
@@ -25,7 +27,16 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerUnknownOutcome,
     WorkspaceProviderCapabilitySnapshot,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
+from sidera_control_plane.domain.modules import (
+    CollaborationRuntimeCapabilityProfile,
+    IdempotencyCapability,
+    StabilityLevel,
+)
 from sidera_control_plane.domain.planning import PlanningBriefRevision
+from sidera_control_plane.domain.planning_proposals import PlanningProposalPayloadV4
 from tests.unit.test_planning_proposals import planning_profile_snapshot
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -83,6 +94,47 @@ def _control(planner_input) -> PlannerRunControl:
     )
 
 
+def _v4_input(mode: FakeCollaborationMode) -> PlannerInput:
+    planner_input = _input()
+    planner_capabilities = replace(
+        planner_input.profile_snapshot.planner_capabilities,
+        proposal_schema_versions=(2, 3, 4),
+    )
+    snapshot = replace(
+        planner_input.profile_snapshot,
+        proposal_schema_version=4,
+        planner_capabilities=planner_capabilities,
+    )
+    if mode == "enabled":
+        snapshot = replace(
+            snapshot,
+            collaboration_runtime_binding=CollaborationRuntimeBindingSnapshot(
+                runtime_definition_id=uuid4(),
+                runtime_instance_id=uuid4(),
+                runtime_interface_version="collaboration-runtime-v1",
+                runtime_config_version=3,
+                runtime_capability_snapshot=CollaborationRuntimeCapabilityProfile(
+                    interface_version="collaboration-runtime-v1",
+                    projection_schema_versions=(1,),
+                    decision_schema_versions=(1,),
+                    strategy_ids=("all_required",),
+                    idempotency=IdempotencyCapability.OPERATION_ID,
+                    max_projection_bytes=262_144,
+                    max_decision_bytes=65_536,
+                    max_intents_per_decision=128,
+                    max_strategy_state_bytes=16_384,
+                    stability=StabilityLevel.EXPERIMENTAL,
+                ),
+            ),
+        )
+    return replace(
+        planner_input,
+        proposal_schema_version=4,
+        profile_snapshot=snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(snapshot),
+    )
+
+
 def test_fake_planner_requires_explicit_scenario_and_is_deterministic() -> None:
     planner_input = _input()
     adapter = FakePlannerAdapter(FakePlannerConfig(scenario="proposal"))
@@ -96,6 +148,21 @@ def test_fake_planner_requires_explicit_scenario_and_is_deterministic() -> None:
     assert first.proposal.canonical_payload == second.proposal.canonical_payload
     assert first.proposal.payload.to_mapping() == second.proposal.payload.to_mapping()
     assert first.proposal.payload.schema_version == 2
+
+
+@pytest.mark.parametrize("mode", ["disabled", "enabled"])
+def test_fake_planner_v4_emits_fixture_collaboration_mode(
+    mode: FakeCollaborationMode,
+) -> None:
+    planner_input = _v4_input(mode)
+    result = FakePlannerAdapter(
+        FakePlannerConfig(scenario="proposal", collaboration_mode=mode)
+    ).plan(planner_input, _control(planner_input))
+
+    assert isinstance(result, PlannerProposalResult)
+    assert isinstance(result.proposal.payload, PlanningProposalPayloadV4)
+    assert result.proposal.payload.schema_version == 4
+    assert result.proposal.payload.collaboration_policy_request.mode.value == mode
 
 
 def test_fake_planner_clarification_then_feedback_returns_valid_proposal() -> None:

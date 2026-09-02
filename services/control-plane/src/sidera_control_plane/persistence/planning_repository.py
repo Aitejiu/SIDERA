@@ -10,6 +10,9 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.modules import PlannerAdapterCapabilityProfile
 from sidera_control_plane.domain.planning import (
@@ -37,12 +40,14 @@ from sidera_control_plane.domain.planning_profiles import (
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayload,
+    PlanningProposalPayloadV4,
     ProposalDiff,
     ProposalRevision,
     derive_proposal_diff,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 from sidera_control_plane.persistence.models import (
@@ -765,6 +770,11 @@ def _profile_policy(profile: PlanningProfile) -> dict[str, object]:
         "execution_max_attempts": profile.execution_max_attempts,
         "execution_budget_level": profile.execution_budget_level,
         "planner_secret_refs": list(profile.planner_secret_refs),
+        "collaboration_runtime_binding": (
+            None
+            if profile.collaboration_runtime_binding is None
+            else profile.collaboration_runtime_binding.to_mapping()
+        ),
     }
 
 
@@ -812,6 +822,9 @@ def _to_profile(row: PlanningProfileModel) -> PlanningProfile:
         user_selectable=row.user_selectable,
         status=PlanningProfileStatus(row.status),
         planner_secret_refs=_strings(policy, "planner_secret_refs"),
+        collaboration_runtime_binding=_binding_from_mapping(
+            policy.get("collaboration_runtime_binding")
+        ),
     )
 
 
@@ -839,6 +852,11 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
         "execution_budget_level": snapshot.execution_budget_level,
         "planner_secret_refs": list(snapshot.planner_secret_refs),
         "planner_capabilities": _capability_to_mapping(capabilities),
+        "collaboration_runtime_binding": (
+            None
+            if snapshot.collaboration_runtime_binding is None
+            else snapshot.collaboration_runtime_binding.to_mapping()
+        ),
     }
 
 
@@ -885,6 +903,9 @@ def _snapshot_from_mapping(value: Mapping[str, object]) -> PlanningProfileSnapsh
         planner_secret_refs=_strings(value, "planner_secret_refs"),
         planner_capabilities=_capability_from_mapping(
             _mapping(value.get("planner_capabilities"), "planner_capabilities")
+        ),
+        collaboration_runtime_binding=_binding_from_mapping(
+            value.get("collaboration_runtime_binding")
         ),
     )
 
@@ -946,6 +967,14 @@ def _retry_to_mapping(retry: PlanningRetryPolicy) -> dict[str, object]:
         "unknown_outcome_policy": retry.unknown_outcome_policy.value,
         "invalid_output_policy": retry.invalid_output_policy.value,
     }
+
+
+def _binding_from_mapping(value: object) -> CollaborationRuntimeBindingSnapshot | None:
+    if value is None:
+        return None
+    return CollaborationRuntimeBindingSnapshot.from_mapping(
+        _mapping(value, "collaboration_runtime_binding")
+    )
 
 
 def _brief_model(brief: PlanningBriefRevision, workspace_id: UUID) -> PlanningBriefRevisionModel:
@@ -1191,7 +1220,19 @@ def _to_proposal(row: PlanningProposalRevisionModel) -> ProposalRevision:
         "execution_intents": row.execution_intents,
         "impact_policy": row.impact_policy,
     }
-    if row.proposal_schema_version == 3 or row.kind == PlanningRequestKind.REVISION.value:
+    if row.proposal_schema_version == 4:
+        payload = (
+            PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
+            if row.kind == PlanningRequestKind.REVISION.value
+            else PlanningProposalPayloadV4.from_mapping(payload_mapping)
+        )
+        if isinstance(payload, PlanningProposalPayloadV4):
+            derived_diff = derive_proposal_diff(payload.to_legacy())
+        else:
+            derived_diff = NormalizedRevisionDiff.from_mapping(
+                _mapping(row.derived_diff, "proposal derived_diff")
+            )
+    elif row.proposal_schema_version == 3:
         payload = PlanningRevisionProposalPayloadV3.from_mapping(payload_mapping)
         derived_diff = NormalizedRevisionDiff.from_mapping(
             _mapping(row.derived_diff, "proposal derived_diff")

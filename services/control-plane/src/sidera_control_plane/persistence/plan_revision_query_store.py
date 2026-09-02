@@ -24,6 +24,7 @@ from sidera_control_plane.application.plan_revision_queries import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.revision_diff import (
@@ -102,7 +103,11 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
             payload_mapping = _mapping(
                 canonical_payload.get("proposal"), "proposal canonical payload"
             )
-            payload = PlanningRevisionProposalPayloadV3.from_mapping(payload_mapping)
+            payload = (
+                PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
+                if proposal.proposal_schema_version == 4
+                else PlanningRevisionProposalPayloadV3.from_mapping(payload_mapping)
+            )
             diff = NormalizedRevisionDiff.from_mapping(
                 dict(proposal.derived_diff)
             )
@@ -230,7 +235,7 @@ def _revision_diff_view(
     request: PlanningRequestModel,
     proposal: PlanningProposalRevisionModel,
     base_snapshot: TaskPlanSnapshot,
-    payload: PlanningRevisionProposalPayloadV3,
+    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
     diff: NormalizedRevisionDiff,
     freshness: RevisionFreshnessView,
 ) -> RevisionDiffView:
@@ -299,7 +304,7 @@ def _revision_diff_view(
 
 def _path_maps(
     base_snapshot: TaskPlanSnapshot,
-    payload: PlanningRevisionProposalPayloadV3,
+    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
 ) -> tuple[dict[str, str], dict[str, str]]:
     subtask_titles = {item.key: item.title for item in base_snapshot.subtasks}
     subtask_titles.update({item.key: item.title for item in payload.subtasks})

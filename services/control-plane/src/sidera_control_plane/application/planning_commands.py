@@ -23,6 +23,9 @@ from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
     work_context_event,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     OperatorRequired,
@@ -33,7 +36,9 @@ from sidera_control_plane.domain.errors import (
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
+    COLLABORATION_RUNTIME_MODULE_TYPE,
     PLANNER_ADAPTER_MODULE_TYPE,
+    CollaborationRuntimeCapabilityProfile,
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
@@ -227,6 +232,11 @@ class PlanningCommandHandler:
             raise ValidationError("planner module instance is not a planner adapter")
         if not isinstance(definition.capabilities, PlannerAdapterCapabilityProfile):
             raise ValidationError("planner module capabilities are invalid")
+        collaboration_binding = _resolve_collaboration_runtime_binding(
+            uow,
+            workspace_id=envelope.workspace_id,
+            payload=payload,
+        )
         profile = PlanningProfile(
             id=uuid4(),
             workspace_id=envelope.workspace_id,
@@ -262,6 +272,7 @@ class PlanningCommandHandler:
             planner_secret_refs=_string_tuple(
                 payload.get("planner_secret_refs", ()), "planner_secret_refs"
             ),
+            collaboration_runtime_binding=collaboration_binding,
         )
         if profile.planner_interface_version != definition.interface_version:
             raise ValidationError(
@@ -1466,6 +1477,73 @@ def _planner_capabilities(
     )
 
 
+def _resolve_collaboration_runtime_binding(
+    uow: ControlPlaneUnitOfWork,
+    *,
+    workspace_id: UUID,
+    payload: Mapping[str, object],
+) -> CollaborationRuntimeBindingSnapshot | None:
+    definition_value = payload.get("collaboration_runtime_definition_id")
+    instance_value = payload.get("collaboration_runtime_instance_id")
+    config_value = payload.get("collaboration_runtime_config_version")
+    supplied = tuple(
+        value is not None for value in (definition_value, instance_value, config_value)
+    )
+    if not any(supplied):
+        return None
+    if not all(supplied):
+        raise ValidationError(
+            "collaboration runtime references must be supplied together"
+        )
+    if _positive_int(payload, "proposal_schema_version") != 4:
+        raise ValidationError(
+            "collaboration runtime binding requires proposal schema version 4"
+        )
+
+    definition_id = _uuid_value(
+        definition_value, "collaboration_runtime_definition_id"
+    )
+    instance_id = _uuid_value(instance_value, "collaboration_runtime_instance_id")
+    config_version = _positive_value(
+        config_value, "collaboration_runtime_config_version"
+    )
+    instance = uow.modules.get_instance(instance_id, workspace_id)
+    if instance is None:
+        raise NotFound("collaboration runtime instance not found")
+    if instance.definition_id != definition_id:
+        raise ValidationError(
+            "collaboration runtime instance does not belong to the definition"
+        )
+    definition = uow.modules.get_definition(definition_id, workspace_id)
+    if definition is None:
+        raise NotFound("collaboration runtime definition not found")
+    if definition.module_type != COLLABORATION_RUNTIME_MODULE_TYPE:
+        raise ValidationError("module is not a collaboration runtime")
+    if (
+        definition.lifecycle is not ModuleLifecycle.ACTIVE
+        or instance.lifecycle is not ModuleLifecycle.ACTIVE
+    ):
+        raise ValidationError("collaboration runtime binding requires an active module")
+    if instance.config_version != config_version:
+        raise ValidationError(
+            "collaboration runtime config version does not match instance"
+        )
+    capabilities = definition.capabilities
+    if not isinstance(capabilities, CollaborationRuntimeCapabilityProfile):
+        raise ValidationError("collaboration runtime capabilities are invalid")
+    if definition.interface_version != capabilities.interface_version:
+        raise ValidationError(
+            "collaboration runtime interface version does not match capabilities"
+        )
+    return CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=definition.id,
+        runtime_instance_id=instance.id,
+        runtime_interface_version=definition.interface_version,
+        runtime_config_version=instance.config_version,
+        runtime_capability_snapshot=capabilities,
+    )
+
+
 def _current_brief(request: PlanningRequest) -> PlanningBriefRevision:
     if not request.briefs:
         raise ValidationError("planning request has no current brief")
@@ -1615,6 +1693,12 @@ def _positive_int(value: Mapping[str, object], name: str) -> int:
     return item
 
 
+def _positive_value(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValidationError(f"{name} must be positive")
+    return value
+
+
 def _planning_conflict(request: PlanningRequest) -> PlanningConflict:
     return PlanningConflict(
         current_request_version=request.version,
@@ -1661,6 +1745,13 @@ def _uuid(value: Mapping[str, object], name: str) -> UUID:
     item = value.get(name)
     try:
         return item if isinstance(item, UUID) else UUID(str(item))
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{name} must be a UUID") from exc
+
+
+def _uuid_value(value: object, name: str) -> UUID:
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{name} must be a UUID") from exc
 

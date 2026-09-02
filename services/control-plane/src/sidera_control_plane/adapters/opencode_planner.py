@@ -53,10 +53,12 @@ from sidera_control_plane.domain.planning import (
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayload,
+    PlanningProposalPayloadV4,
     ProposalRevision,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.proposal_validation import validate_proposal
@@ -82,7 +84,7 @@ class OpenCodePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.EXPERIMENTAL,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2, 3),
+        proposal_schema_versions=(2, 3, 4),
         context_package_versions=(1,),
     )
     provider_ref = "opencode-acp-planner"
@@ -433,6 +435,15 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
             "max_nodes": planner_input.policy_constraints.max_nodes,
             "max_concurrency": planner_input.policy_constraints.max_concurrency,
             "budget_level": planner_input.policy_constraints.budget_level,
+            "collaboration_policy": {
+                "modes": list(
+                    planner_input.policy_constraints.collaboration_policy_modes
+                ),
+                "strategy_ids": list(
+                    planner_input.policy_constraints.collaboration_strategy_ids
+                ),
+                "override_scope": "subtask",
+            },
         },
         "context_refs": [item.ref for item in planner_input.context_refs],
     }
@@ -482,25 +493,44 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
         "values, and omit no required field. Empty dependency and milestone arrays "
         "are valid. Do not add fields.\n"
         + json.dumps(
-            _revision_proposal_shape_hint() if is_revision else _proposal_shape_hint(),
+            (
+                _revision_proposal_shape_hint(planner_input.proposal_schema_version)
+                if is_revision
+                else _proposal_shape_hint(planner_input.proposal_schema_version)
+            ),
             sort_keys=True,
             separators=(",", ":"),
         )
         + "\n"
         + json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
+    if planner_input.proposal_schema_version == 4:
+        prompt += (
+            "\nSchema v4 requires a complete collaboration_policy_request with mode, "
+            "default_policy, and subtask_overrides. Use only the policy modes and "
+            "strategy_ids provided in policy.collaboration_policy; do not emit Runtime "
+            "module, provider, config, or secret identifiers."
+        )
     if not is_revision:
         return prompt
-    return prompt + (
-        "\nThis is a plan revision. Return a complete target plan using proposal schema "
-        "version 3. Copy the exact base_descriptor from revision_context. Preserve "
-        "every existing subtask and WorkerItem identity decision exactly once unless "
-        "the revised requirement justifies a create or derive strategy. Include every "
-        "target strategy, retired identity, complete subtask and WorkerItem DAG, all "
-        "execution intents, and the impact_policy. Do not emit concrete runtime worker "
-        "bindings; SIDERA resolves those after user confirmation. The target plan is "
-        "the full replacement plan, not a patch fragment."
+    revision_prompt = (
+        f"\nThis is a plan revision. Return a complete target plan using proposal schema "
+        f"version {planner_input.proposal_schema_version}. Copy the exact "
+        "base_descriptor from revision_context. Preserve every existing subtask and "
+        "WorkerItem identity decision exactly once unless the revised requirement "
+        "justifies a create or derive strategy. Include every target strategy, retired "
+        "identity, complete subtask and WorkerItem DAG, all execution intents, and the "
+        "impact_policy. Do not emit concrete runtime worker bindings; SIDERA resolves "
+        "those after user confirmation. The target plan is the full replacement plan, "
+        "not a patch fragment."
     )
+    if planner_input.proposal_schema_version == 4:
+        revision_prompt += (
+            " Include the complete collaboration_policy_request. Its mode must be "
+            "one of the policy modes provided above, and every strategy_id must be "
+            "one of the provided strategy_ids."
+        )
+    return prompt + revision_prompt
 
 
 def _planner_opencode_config(model: str | None) -> dict[str, object]:
@@ -519,8 +549,8 @@ def _planner_opencode_config(model: str | None) -> dict[str, object]:
     return config
 
 
-def _proposal_shape_hint() -> dict[str, object]:
-    return {
+def _proposal_shape_hint(schema_version: int = 2) -> dict[str, object]:
+    shape: dict[str, object] = {
         "result_type": "proposal",
         "proposal": {
             "schema_version": 2,
@@ -632,10 +662,20 @@ def _proposal_shape_hint() -> dict[str, object]:
             }
         ],
     }
+    if schema_version == 4:
+        proposal = cast(dict[str, object], shape["proposal"])
+        proposal.pop("base_descriptor", None)
+        proposal["schema_version"] = 4
+        proposal["collaboration_policy_request"] = {
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+        }
+    return shape
 
 
-def _revision_proposal_shape_hint() -> dict[str, object]:
-    return {
+def _revision_proposal_shape_hint(schema_version: int = 3) -> dict[str, object]:
+    shape: dict[str, object] = {
         "result_type": "proposal",
         "proposal": {
             "schema_version": 3,
@@ -693,6 +733,15 @@ def _revision_proposal_shape_hint() -> dict[str, object]:
             "context_bytes": 0,
         },
     }
+    if schema_version == 4:
+        proposal = cast(dict[str, object], shape["proposal"])
+        proposal["schema_version"] = 4
+        proposal["collaboration_policy_request"] = {
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+        }
+    return shape
 
 
 def _repair_diagnostic(error: OpenCodePlannerError) -> str | None:
@@ -745,12 +794,22 @@ def _parse_result(
             if not isinstance(raw_payload, Mapping):
                 raise ValueError("proposal must be an object")
             derived_diff = None
+            payload: (
+                PlanningProposalPayload
+                | PlanningProposalPayloadV4
+                | PlanningRevisionProposalPayloadV3
+                | PlanningRevisionProposalPayloadV4
+            )
             if planner_input.kind is PlanningRequestKind.REVISION:
                 if not isinstance(
                     planner_input.planning_context, RevisionPlanningContextV1
                 ):
                     raise ValueError("revision planner context is missing")
-                payload = PlanningRevisionProposalPayloadV3.from_mapping(raw_payload)
+                payload = (
+                    PlanningRevisionProposalPayloadV4.from_mapping(raw_payload)
+                    if planner_input.proposal_schema_version == 4
+                    else PlanningRevisionProposalPayloadV3.from_mapping(raw_payload)
+                )
                 base_plan = TaskPlanSnapshot.from_payload(
                     dict(planner_input.planning_context.plan_snapshot_payload)
                 )
@@ -762,9 +821,18 @@ def _parse_result(
                     kind=PlanningRequestKind.REVISION,
                     base_snapshot=base_plan,
                 )
-                derived_diff = RevisionDiffNormalizer().normalize(base_plan, payload)
+                derived_diff = RevisionDiffNormalizer().normalize(
+                    base_plan,
+                    payload._as_v3()
+                    if isinstance(payload, PlanningRevisionProposalPayloadV4)
+                    else payload,
+                )
             else:
-                payload = PlanningProposalPayload.from_mapping(raw_payload)
+                payload = (
+                    PlanningProposalPayloadV4.from_mapping(raw_payload)
+                    if planner_input.proposal_schema_version == 4
+                    else PlanningProposalPayload.from_mapping(raw_payload)
+                )
             proposal = ProposalRevision.create(
                 planning_request_id=planner_input.planning_request_id,
                 revision=1,

@@ -4131,6 +4131,21 @@ export interface components {
             /** Allowed Capabilities */
             allowed_capabilities: string[];
             budget: components["schemas"]["PlanningBudgetPayload"];
+            /**
+             * Collaboration Runtime Config Version
+             * @default null
+             */
+            collaboration_runtime_config_version: number | null;
+            /**
+             * Collaboration Runtime Definition Id
+             * @default null
+             */
+            collaboration_runtime_definition_id: string | null;
+            /**
+             * Collaboration Runtime Instance Id
+             * @default null
+             */
+            collaboration_runtime_instance_id: string | null;
             /** Default Priority */
             default_priority: number;
             /** Display Name */
