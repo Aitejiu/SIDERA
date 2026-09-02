@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 from sidera_control_plane.application.ports import (
     ArtifactRepositoryPort,
     AttentionAcknowledgementRepositoryPort,
+    CollaborationEvaluationRepositoryPort,
+    CollaborationLedgerRepositoryPort,
+    CollaborationRunRepositoryPort,
     CommandRepositoryPort,
     ContextAssemblyRepositoryPort,
     ContextPackageRepositoryPort,
@@ -53,6 +56,11 @@ from sidera_control_plane.application.projection_changes import (
 )
 from sidera_control_plane.persistence.attention_repository import (
     AttentionAcknowledgementRepository,
+)
+from sidera_control_plane.persistence.collaboration_repository import (
+    CollaborationEvaluationRepository,
+    CollaborationLedgerRepository,
+    CollaborationRunRepository,
 )
 from sidera_control_plane.persistence.context_package_repository import (
     ContextAssemblyRepository,
@@ -141,6 +149,9 @@ class SqlAlchemyUnitOfWork:
     scheduling_blocks: SchedulingBlockRepositoryPort
     executions: ExecutionRepositoryPort
     execution_requests: ExecutionRequestRepositoryPort
+    collaboration_runs: CollaborationRunRepositoryPort
+    collaboration_evaluations: CollaborationEvaluationRepositoryPort
+    collaboration_ledger: CollaborationLedgerRepositoryPort
     handoff_proposals: HandoffProposalRepositoryPort
     handoff_transitions: HandoffTransitionRepositoryPort
     handoff_context_bundles: HandoffContextBundleRepositoryPort
@@ -199,6 +210,11 @@ class SqlAlchemyUnitOfWork:
         self.scheduling_blocks = SqlAlchemySchedulingBlockRepository(self.session)
         self.executions = ExecutionRepository(self.session)
         self.execution_requests = ExecutionRequestRepository(self.session)
+        self.collaboration_runs = CollaborationRunRepository(self.session)
+        self.collaboration_evaluations = CollaborationEvaluationRepository(
+            self.session
+        )
+        self.collaboration_ledger = CollaborationLedgerRepository(self.session)
         self.handoff_proposals = HandoffProposalRepository(self.session)
         self.handoff_transitions = HandoffTransitionRepository(self.session)
         self.handoff_context_bundles = HandoffContextBundleRepository(self.session)

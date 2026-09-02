@@ -91,6 +91,18 @@ class ProjectionChangeRepository:
         ) or 0
         return max(int(cursor_table_value), int(projection_value))
 
+    def latest_target_cursor(
+        self, workspace_id: UUID, projection_type: str, resource_id: UUID
+    ) -> int:
+        cursor = self._session.scalar(
+            select(func.max(ProjectionChangeModel.cursor)).where(
+                ProjectionChangeModel.workspace_id == workspace_id,
+                ProjectionChangeModel.projection_type == projection_type,
+                ProjectionChangeModel.resource_id == resource_id,
+            )
+        )
+        return int(cursor or 0)
+
     def cursor_expired(self, workspace_id: UUID, cursor: int) -> bool:
         latest = self.latest_cursor(workspace_id)
         if latest == 0 or cursor >= latest:

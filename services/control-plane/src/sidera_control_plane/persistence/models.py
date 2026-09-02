@@ -3630,7 +3630,7 @@ class RuntimeIntentModel(TimestampMixin, Base):
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
-class RuntimeReleaseModel(TimestampMixin, Base):
+class RuntimeReleaseModel(Base):
     __tablename__ = "runtime_releases"
     __table_args__ = (
         CheckConstraint(

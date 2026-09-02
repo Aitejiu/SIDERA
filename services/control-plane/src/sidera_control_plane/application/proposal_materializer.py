@@ -33,11 +33,13 @@ from sidera_control_plane.domain.planning import (
 from sidera_control_plane.domain.planning_profiles import PlanningProfile
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
+    PlanningProposalPayloadV4,
     ProposalRevision,
     proposal_content_hash,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import (
     DependencyKind,
@@ -723,7 +725,12 @@ class _DependencyAccumulator:
 
 
 def _plan_worker_dependencies(
-    payload: PlanningProposalPayload | PlanningRevisionProposalPayloadV3,
+    payload: (
+        PlanningProposalPayload
+        | PlanningProposalPayloadV4
+        | PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+    ),
 ) -> tuple[WorkerItemDependency, ...]:
     edges: dict[tuple[str, str], WorkerItemDependency] = {}
     for dependency in payload.worker_item_dependencies:

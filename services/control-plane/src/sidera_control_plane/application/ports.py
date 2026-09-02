@@ -24,6 +24,15 @@ from sidera_control_plane.domain.attention import (
     AttentionAcknowledgement,
     AttentionSource,
 )
+from sidera_control_plane.domain.collaboration import (
+    CollaborationEvaluation,
+    CollaborationRun,
+    RuntimeDecision,
+    RuntimeIntent,
+    RuntimeIntentApplication,
+    RuntimeProjectionSnapshot,
+    RuntimeRelease,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -945,6 +954,93 @@ class ExecutionRequestRepositoryPort(Protocol):
     def list_downstream_for_upstream(
         self, upstream_request_id: UUID, workspace_id: UUID
     ) -> tuple[ExecutionRequest, ...]:
+        raise NotImplementedError
+
+
+class CollaborationRunRepositoryPort(Protocol):
+    def get_current(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationRun | None:
+        raise NotImplementedError
+
+    def get(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationRun | None:
+        raise NotImplementedError
+
+    def add(self, run: CollaborationRun) -> None:
+        raise NotImplementedError
+
+    def save(self, run: CollaborationRun, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def list_recovery_candidates(
+        self, *, now: datetime, limit: int
+    ) -> tuple[CollaborationRun, ...]:
+        raise NotImplementedError
+
+
+class CollaborationEvaluationRepositoryPort(Protocol):
+    def get_or_add(
+        self, evaluation: CollaborationEvaluation
+    ) -> CollaborationEvaluation:
+        raise NotImplementedError
+
+    def claim_next(
+        self,
+        *,
+        workspace_id: UUID | None,
+        owner_id: str,
+        now: datetime,
+        lease_ttl: timedelta,
+        limit: int,
+    ) -> tuple[CollaborationEvaluation, ...]:
+        raise NotImplementedError
+
+    def save(
+        self, evaluation: CollaborationEvaluation, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+    def recover_expired(
+        self, *, now: datetime, limit: int
+    ) -> tuple[CollaborationEvaluation, ...]:
+        raise NotImplementedError
+
+
+class CollaborationLedgerRepositoryPort(Protocol):
+    def get_or_add_projection(
+        self, snapshot: RuntimeProjectionSnapshot
+    ) -> RuntimeProjectionSnapshot:
+        raise NotImplementedError
+
+    def next_decision_sequence(self, run_id: UUID, workspace_id: UUID) -> int:
+        raise NotImplementedError
+
+    def add_decision_bundle(
+        self, decision: RuntimeDecision, intents: tuple[RuntimeIntent, ...]
+    ) -> None:
+        raise NotImplementedError
+
+    def add_applications(
+        self, applications: tuple[RuntimeIntentApplication, ...]
+    ) -> None:
+        raise NotImplementedError
+
+    def add_releases(self, releases: tuple[RuntimeRelease, ...]) -> None:
+        raise NotImplementedError
+
+    def get_release_for_request(
+        self, workspace_id: UUID, request_id: UUID
+    ) -> RuntimeRelease | None:
         raise NotImplementedError
 
 

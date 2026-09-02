@@ -53,3 +53,21 @@ def test_r5_1_materialization_and_activation_tables_are_registered() -> None:
     assert expected <= set(Base.metadata.tables)
     assert "proposal_revision_id" in Base.metadata.tables["execution_requests"].c
     assert "execution_lineage_id" in Base.metadata.tables["execution_requests"].c
+
+
+def test_r6_3_1_collaboration_tables_match_the_ledger_contract() -> None:
+    expected = {
+        "collaboration_runs",
+        "runtime_projection_snapshots",
+        "collaboration_evaluations",
+        "runtime_decisions",
+        "runtime_intents",
+        "runtime_releases",
+        "runtime_intent_applications",
+    }
+
+    assert expected <= set(Base.metadata.tables)
+    assert "created_at" not in Base.metadata.tables["runtime_releases"].c
+
+    for table_name in expected - {"runtime_releases"}:
+        assert "workspace_id" in Base.metadata.tables[table_name].c
