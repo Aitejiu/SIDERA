@@ -6,6 +6,7 @@ from types import TracebackType
 from typing import Literal, Protocol, Self
 from uuid import UUID
 
+from sidera_control_plane.application.collaboration_projection import CollaborationFacts
 from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateProposalV1,
     KnowledgeCandidateSubmission,
@@ -985,6 +986,17 @@ class CollaborationRunRepositoryPort(Protocol):
     def list_recovery_candidates(
         self, *, now: datetime, limit: int
     ) -> tuple[CollaborationRun, ...]:
+        raise NotImplementedError
+
+
+class CollaborationFactStorePort(Protocol):
+    def load(
+        self,
+        workspace_id: UUID,
+        run: CollaborationRun,
+        *,
+        fact_cursor: int,
+    ) -> CollaborationFacts:
         raise NotImplementedError
 
 

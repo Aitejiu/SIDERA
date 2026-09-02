@@ -98,6 +98,9 @@ def test_scoped_planning_event_invalidates_root_task_surfaces() -> None:
         type(targets[0])(
             "subtask_workspace", ROOT_TASK_ID, "planning_proposal_ready"
         ),
+        type(targets[0])(
+            "collaboration_runtime", ROOT_TASK_ID, "planning_proposal_ready"
+        ),
     )
 
 

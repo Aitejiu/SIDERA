@@ -25,6 +25,7 @@ PROJECTION_TYPES = frozenset(
         "work_context",
         "context_package",
         "knowledge_candidate_submission",
+        "collaboration_runtime",
     }
 )
 
@@ -55,17 +56,47 @@ _EXECUTION_LIFECYCLE_TYPES = {
     "ExecutionContinued",
     "ExecutionRetryQueued",
     "ExecutionCanceled",
+    "ExecutionCanceledByHandoff",
+    "ExecutionCanceledByPlanTransition",
+    "ExecutionCanceledByStop",
     "ExecutionLost",
     "ExecutionStopRequested",
     "ExecutionSessionStarted",
     "ExecutionSessionClosed",
+    "ExecutionSessionClosedByHandoff",
     "ExecutionSessionLost",
     "ExecutionRequestCreated",
+    "ExecutionRequestCreatedByPlanTransition",
     "ExecutionRequestGateBlocked",
     "ExecutionRequestGateReady",
     "ExecutionRequestMaterialized",
     "ExecutionRequestObsoleted",
     "TaskWaitingForDecision",
+}
+_COLLABORATION_EVENT_TYPES = {
+    "CollaborationRunCreated",
+    "CollaborationRunActivated",
+    "CollaborationRunBlocked",
+    "CollaborationRunCompleted",
+    "CollaborationRunSuperseded",
+    "CollaborationRunUpdated",
+    "CollaborationRunTransitioned",
+    "CollaborationEvaluationCreated",
+    "CollaborationEvaluationClaimed",
+    "CollaborationEvaluationCompleted",
+    "CollaborationEvaluationFailed",
+    "RuntimeProjectionMaterialized",
+    "RuntimeDecisionRecorded",
+    "RuntimeDecisionCreated",
+    "RuntimeDecisionApplied",
+    "CollaborationDecisionCreated",
+    "CollaborationDecisionRecorded",
+    "RuntimeIntentCreated",
+    "RuntimeIntentApplied",
+    "RuntimeReleaseCreated",
+    "RuntimeReleaseRecorded",
+    "RuntimeReleaseIssued",
+    "ExecutionRequestReleased",
 }
 
 
@@ -215,6 +246,20 @@ def projection_targets_for_event(
                 root_task_id=root_task_id,
                 change_type=planning_change_type or "planning_run_updated",
             )
+    if event.aggregate_type in {
+        "collaboration_run",
+        "collaboration_evaluation",
+        "runtime_projection_snapshot",
+        "runtime_decision",
+        "runtime_intent",
+        "runtime_intent_application",
+        "runtime_release",
+    } or event.event_type in _COLLABORATION_EVENT_TYPES:
+        return _targets(
+            ("collaboration_runtime",),
+            worker_item_id,
+            root_task_id or _payload_uuid(payload, "root_task_id"),
+        )
     worker_item_id = worker_item_id or _payload_uuid(payload, "worker_item_id")
     root_task_id = root_task_id or _payload_uuid(payload, "root_task_id")
     context = payload.get("execution_context")
@@ -310,22 +355,37 @@ def projection_targets_for_event(
     if event.event_type in _INPUT_TYPES:
         return _targets(("worker_item_workspace", "worker_item_activity"), worker_item_id, root_task_id)
     if event.event_type in _EXECUTION_LIFECYCLE_TYPES:
-        return _targets(_WORKER_ITEM_ACTIVITY_TYPES, worker_item_id, root_task_id)
+        return _targets(
+            _WORKER_ITEM_ACTIVITY_TYPES + ("collaboration_runtime",),
+            worker_item_id,
+            root_task_id,
+        )
     if event.event_type == "ArtifactRecorded":
         return _targets(
-            ("subtask_workspace", "worker_item_workspace", "worker_item_activity"),
+            (
+                "subtask_workspace",
+                "worker_item_workspace",
+                "worker_item_activity",
+                "collaboration_runtime",
+            ),
             worker_item_id,
             root_task_id,
         )
     if event.event_type == "EvidenceRecorded":
         return _targets(
-            _WORKER_ITEM_OVERVIEW_TYPES + ("worker_item_activity",),
+            _WORKER_ITEM_OVERVIEW_TYPES
+            + ("worker_item_activity", "collaboration_runtime"),
             worker_item_id,
             root_task_id,
         )
     if event.aggregate_type == "task_plan":
         return _targets(
-            ("task_overview", "task_graph", "subtask_workspace"),
+            (
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "collaboration_runtime",
+            ),
             worker_item_id,
             root_task_id or event.aggregate_id,
         )
@@ -335,7 +395,12 @@ def projection_targets_for_event(
         return _targets(("task_overview",), worker_item_id, root_task_id)
     if event.aggregate_type == "plan_transition":
         return _targets(
-            ("task_overview", "task_graph", "subtask_workspace"),
+            (
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "collaboration_runtime",
+            ),
             worker_item_id,
             root_task_id,
         )
@@ -372,7 +437,12 @@ def projection_targets_for_execution_event(
     execution_id: UUID,
 ) -> tuple[ProjectionInvalidationTarget, ...]:
     return _targets(
-        ("worker_item_workspace", "worker_item_activity", "worker_trace"),
+        (
+            "worker_item_workspace",
+            "worker_item_activity",
+            "worker_trace",
+            "collaboration_runtime",
+        ),
         worker_item_id,
         root_task_id,
         trace_resource_id=execution_id,
@@ -383,7 +453,12 @@ def projection_targets_for_artifact(
     *, worker_item_id: UUID | None, root_task_id: UUID | None
 ) -> tuple[ProjectionInvalidationTarget, ...]:
     return _targets(
-        ("subtask_workspace", "worker_item_workspace", "worker_item_activity"),
+        (
+            "subtask_workspace",
+            "worker_item_workspace",
+            "worker_item_activity",
+            "collaboration_runtime",
+        ),
         worker_item_id,
         root_task_id,
     )
@@ -393,7 +468,7 @@ def projection_targets_for_evidence(
     *, worker_item_id: UUID | None, root_task_id: UUID | None
 ) -> tuple[ProjectionInvalidationTarget, ...]:
     return _targets(
-        _WORKER_ITEM_OVERVIEW_TYPES + ("worker_item_activity",),
+        _WORKER_ITEM_OVERVIEW_TYPES + ("worker_item_activity", "collaboration_runtime"),
         worker_item_id,
         root_task_id,
     )
@@ -441,6 +516,8 @@ def _targets(
     for projection_type in projection_types:
         if projection_type not in PROJECTION_TYPES:
             raise ValueError(f"unsupported projection type: {projection_type}")
+        if projection_type == "collaboration_runtime" and root_task_id is None:
+            continue
         if projection_type in {"workers", "worker_runtime"}:
             resource_id = worker_id
         elif projection_type == "executions":
@@ -488,6 +565,11 @@ def _planning_targets(
         targets.extend(
             ProjectionInvalidationTarget(projection_type, root_task_id, change_type)
             for projection_type in ("task_overview", "task_graph", "subtask_workspace")
+        )
+        targets.append(
+            ProjectionInvalidationTarget(
+                "collaboration_runtime", root_task_id, change_type
+            )
         )
     return tuple(targets)
 

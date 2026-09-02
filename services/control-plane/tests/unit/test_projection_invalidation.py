@@ -65,6 +65,7 @@ def _event(
                 "subtask_workspace",
                 "worker_item_workspace",
                 "worker_item_activity",
+                "collaboration_runtime",
             },
         ),
         (
@@ -73,7 +74,12 @@ def _event(
         ),
         (
             "ArtifactRecorded",
-            {"subtask_workspace", "worker_item_workspace", "worker_item_activity"},
+            {
+                "subtask_workspace",
+                "worker_item_workspace",
+                "worker_item_activity",
+                "collaboration_runtime",
+            },
         ),
         (
             "EvidenceRecorded",
@@ -83,6 +89,7 @@ def _event(
                 "subtask_workspace",
                 "worker_item_workspace",
                 "worker_item_activity",
+                "collaboration_runtime",
             },
         ),
         (
@@ -148,6 +155,55 @@ def test_projection_targets_use_workspace_scope_when_identity_is_unavailable() -
 
     assert targets
     assert all(target.resource_id is None for target in targets)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "ExecutionStarted",
+        "ExecutionRetryQueued",
+        "ExecutionRequestGateReady",
+        "ArtifactRecorded",
+        "EvidenceRecorded",
+        "PlanningMaterialized",
+    ],
+)
+def test_collaboration_runtime_target_is_root_scoped_for_runtime_facts(
+    event_type: str,
+) -> None:
+    aggregate_type = "planning_request" if event_type == "PlanningMaterialized" else "execution"
+    targets = projection_targets_for_event(
+        _event(event_type, aggregate_type=aggregate_type)
+    )
+
+    assert any(
+        target.projection_type == "collaboration_runtime"
+        and target.resource_id == ROOT_TASK_ID
+        for target in targets
+    )
+
+
+def test_collaboration_runtime_target_is_omitted_when_root_is_unresolved() -> None:
+    event = _event(
+        "ExecutionStarted",
+        payload={},
+    )
+
+    targets = projection_targets_for_event(event)
+
+    assert all(target.projection_type != "collaboration_runtime" for target in targets)
+
+
+def test_collaboration_run_events_invalidate_the_root_runtime_projection() -> None:
+    event = _event(
+        "CollaborationRunActivated",
+        aggregate_type="collaboration_run",
+        aggregate_id=UUID("91000000-0000-0000-0000-000000000001"),
+    )
+
+    targets = projection_targets_for_event(event)
+
+    assert targets == (type(targets[0])("collaboration_runtime", ROOT_TASK_ID),)
 
 
 def test_candidate_submission_invalidates_its_related_resources() -> None:
