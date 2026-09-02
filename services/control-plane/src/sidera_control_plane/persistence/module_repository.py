@@ -14,10 +14,12 @@ from sidera_control_plane.application.projection_invalidation import (
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.handoffs import HandoffTransferMode
 from sidera_control_plane.domain.modules import (
+    COLLABORATION_RUNTIME_MODULE_TYPE,
     WORKER_ADAPTER_MODULE_TYPE,
     WORKSPACE_PROVIDER_MODULE_TYPE,
     CancellationCapability,
     CapabilityInput,
+    CollaborationRuntimeCapabilityProfile,
     ExecutionBinding,
     HandoffCheckpointMode,
     IdempotencyCapability,
@@ -352,6 +354,19 @@ def capability_profile_to_payload(
         if profile.handoff_inspection:
             payload["handoff_inspection"] = True
         return payload
+    if isinstance(profile, CollaborationRuntimeCapabilityProfile):
+        return {
+            "interface_version": profile.interface_version,
+            "projection_schema_versions": list(profile.projection_schema_versions),
+            "decision_schema_versions": list(profile.decision_schema_versions),
+            "strategy_ids": list(profile.strategy_ids),
+            "idempotency": profile.idempotency.value,
+            "max_projection_bytes": profile.max_projection_bytes,
+            "max_decision_bytes": profile.max_decision_bytes,
+            "max_intents_per_decision": profile.max_intents_per_decision,
+            "max_strategy_state_bytes": profile.max_strategy_state_bytes,
+            "stability": profile.stability.value,
+        }
     return {
         "structured_output": profile.structured_output.value,
         "clarification": profile.clarification,
@@ -439,6 +454,35 @@ def capability_profile_from_payload(
             handoff_inspection=_bool_capability_or_default(
                 payload, "handoff_inspection", False
             ),
+        )
+
+    if canonical_type == COLLABORATION_RUNTIME_MODULE_TYPE:
+        _reject_unknown_fields(payload, _COLLABORATION_FIELDS)
+        return CollaborationRuntimeCapabilityProfile(
+            interface_version=_required_string(payload, "interface_version"),
+            projection_schema_versions=_version_tuple_capability_named(
+                payload, "projection_schema_versions"
+            ),
+            decision_schema_versions=_version_tuple_capability_named(
+                payload, "decision_schema_versions"
+            ),
+            strategy_ids=_string_tuple_capability(payload, "strategy_ids"),
+            idempotency=_enum_capability(
+                payload, "idempotency", IdempotencyCapability
+            ),
+            max_projection_bytes=_positive_int_capability(
+                payload, "max_projection_bytes"
+            ),
+            max_decision_bytes=_positive_int_capability(
+                payload, "max_decision_bytes"
+            ),
+            max_intents_per_decision=_positive_int_capability(
+                payload, "max_intents_per_decision"
+            ),
+            max_strategy_state_bytes=_positive_int_capability(
+                payload, "max_strategy_state_bytes"
+            ),
+            stability=_enum_capability(payload, "stability", StabilityLevel),
         )
 
     _reject_unknown_fields(payload, _PLANNER_FIELDS)
@@ -565,6 +609,20 @@ _PLANNER_FIELDS = frozenset(
         "context_package_versions",
     }
 )
+_COLLABORATION_FIELDS = frozenset(
+    {
+        "interface_version",
+        "projection_schema_versions",
+        "decision_schema_versions",
+        "strategy_ids",
+        "idempotency",
+        "max_projection_bytes",
+        "max_decision_bytes",
+        "max_intents_per_decision",
+        "max_strategy_state_bytes",
+        "stability",
+    }
+)
 
 
 def _reject_unknown_fields(
@@ -676,3 +734,16 @@ def _version_tuple_capability_named(
             f"capability field {field_name!r} must contain positive integers"
         )
     return tuple(sorted(set(value)))
+
+
+def _string_tuple_capability(
+    payload: Mapping[str, object], field_name: str
+) -> tuple[str, ...]:
+    value = payload.get(field_name)
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"capability field {field_name!r} must be an array")
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValidationError(
+            f"capability field {field_name!r} must contain non-empty strings"
+        )
+    return tuple(value)

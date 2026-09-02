@@ -52,11 +52,13 @@ class ModuleLifecycle(StrEnum):
 WORKER_ADAPTER_MODULE_TYPE = "worker_adapter"
 WORKSPACE_PROVIDER_MODULE_TYPE = "workspace_provider"
 PLANNER_ADAPTER_MODULE_TYPE = "planner_adapter"
+COLLABORATION_RUNTIME_MODULE_TYPE = "collaboration_runtime"
 
 _MODULE_TYPE_ALIASES = {
     "worker-adapter": WORKER_ADAPTER_MODULE_TYPE,
     "workspace-provider": WORKSPACE_PROVIDER_MODULE_TYPE,
     "planner-adapter": PLANNER_ADAPTER_MODULE_TYPE,
+    "collaboration-runtime": COLLABORATION_RUNTIME_MODULE_TYPE,
 }
 
 
@@ -310,10 +312,66 @@ class PlannerAdapterCapabilityProfile:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CollaborationRuntimeCapabilityProfile:
+    interface_version: str
+    projection_schema_versions: tuple[int, ...]
+    decision_schema_versions: tuple[int, ...]
+    strategy_ids: tuple[str, ...]
+    idempotency: IdempotencyCapability
+    max_projection_bytes: int
+    max_decision_bytes: int
+    max_intents_per_decision: int
+    max_strategy_state_bytes: int
+    stability: StabilityLevel
+
+    def __post_init__(self) -> None:
+        _require_text(self.interface_version, "interface_version")
+        object.__setattr__(
+            self,
+            "projection_schema_versions",
+            _required_version_tuple(
+                self.projection_schema_versions, "projection_schema_versions"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "decision_schema_versions",
+            _required_version_tuple(
+                self.decision_schema_versions, "decision_schema_versions"
+            ),
+        )
+        object.__setattr__(
+            self, "strategy_ids", _strategy_id_tuple(self.strategy_ids)
+        )
+        object.__setattr__(
+            self,
+            "idempotency",
+            _enum_value(
+                self.idempotency,
+                IdempotencyCapability,
+                "idempotency capability",
+            ),
+        )
+        for name in (
+            "max_projection_bytes",
+            "max_decision_bytes",
+            "max_intents_per_decision",
+            "max_strategy_state_bytes",
+        ):
+            _positive_int(getattr(self, name), name)
+        object.__setattr__(
+            self,
+            "stability",
+            _enum_value(self.stability, StabilityLevel, "stability level"),
+        )
+
+
 type ModuleCapabilityProfile = (
     WorkerAdapterCapabilityProfile
     | WorkspaceProviderCapabilityProfile
     | PlannerAdapterCapabilityProfile
+    | CollaborationRuntimeCapabilityProfile
 )
 
 # Temporary source compatibility for existing WorkerAdapter implementations.
@@ -445,6 +503,7 @@ def canonical_module_type(value: str) -> str:
         WORKER_ADAPTER_MODULE_TYPE,
         WORKSPACE_PROVIDER_MODULE_TYPE,
         PLANNER_ADAPTER_MODULE_TYPE,
+        COLLABORATION_RUNTIME_MODULE_TYPE,
     }:
         raise ValidationError(f"unsupported module_type: {value!r}")
     return canonical
@@ -455,7 +514,9 @@ def _profile_type_for_module(module_type: str) -> type[object]:
         return WorkerAdapterCapabilityProfile
     if module_type == WORKSPACE_PROVIDER_MODULE_TYPE:
         return WorkspaceProviderCapabilityProfile
-    return PlannerAdapterCapabilityProfile
+    if module_type == PLANNER_ADAPTER_MODULE_TYPE:
+        return PlannerAdapterCapabilityProfile
+    return CollaborationRuntimeCapabilityProfile
 
 
 def _module_lifecycle(value: ModuleLifecycle | str) -> ModuleLifecycle:
@@ -512,6 +573,33 @@ def _positive_version_tuple(value: tuple[int, ...], name: str) -> tuple[int, ...
     ):
         raise ValidationError(f"{name} must contain positive integers")
     return tuple(sorted(set(value)))
+
+
+def _required_version_tuple(value: tuple[int, ...], name: str) -> tuple[int, ...]:
+    versions = _positive_version_tuple(value, name)
+    if not versions:
+        raise ValidationError(f"{name} cannot be empty")
+    return versions
+
+
+def _strategy_id_tuple(value: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValidationError("strategy_ids must be a tuple")
+    strategy_ids: list[str] = []
+    for strategy_id in value:
+        _require_text(strategy_id, "strategy_id")
+        normalized = strategy_id.strip()
+        if normalized in strategy_ids:
+            raise ValidationError("strategy_ids must be unique")
+        strategy_ids.append(normalized)
+    if not strategy_ids:
+        raise ValidationError("strategy_ids cannot be empty")
+    return tuple(strategy_ids)
+
+
+def _positive_int(value: int, name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValidationError(f"{name} must be positive")
 
 
 def _handoff_transfer_mode_tuple(

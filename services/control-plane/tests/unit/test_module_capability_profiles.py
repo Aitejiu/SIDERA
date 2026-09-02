@@ -8,6 +8,7 @@ from sidera_control_plane.domain.handoffs import HandoffTransferMode
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
     CapabilityInput,
+    CollaborationRuntimeCapabilityProfile,
     HandoffCheckpointMode,
     IdempotencyCapability,
     ModuleDefinition,
@@ -60,6 +61,21 @@ def workspace_capabilities() -> WorkspaceProviderCapabilityProfile:
         writable=True,
         git_worktree=True,
         stability=StabilityLevel.STABLE,
+    )
+
+
+def collaboration_runtime_capabilities() -> CollaborationRuntimeCapabilityProfile:
+    return CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime-v1",
+        projection_schema_versions=(1,),
+        decision_schema_versions=(1,),
+        strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
     )
 
 
@@ -126,6 +142,16 @@ def test_workspace_provider_profile_round_trips() -> None:
         "git_worktree": True,
         "stability": "stable",
     }
+
+
+def test_collaboration_runtime_profile_round_trips() -> None:
+    profile = collaboration_runtime_capabilities()
+
+    payload = capability_profile_to_payload(profile)
+    restored = capability_profile_from_payload("collaboration-runtime", payload)
+
+    assert restored == profile
+    assert payload["strategy_ids"] == ["all_required"]
 
 
 def test_unknown_capability_fields_are_rejected() -> None:
