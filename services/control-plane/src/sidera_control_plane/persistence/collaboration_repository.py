@@ -181,6 +181,22 @@ class CollaborationEvaluationRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def get(
+        self,
+        workspace_id: UUID,
+        evaluation_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationEvaluation | None:
+        statement = select(CollaborationEvaluationModel).where(
+            CollaborationEvaluationModel.workspace_id == workspace_id,
+            CollaborationEvaluationModel.id == evaluation_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_evaluation(row) if row is not None else None
+
     def get_for_projection(
         self, workspace_id: UUID, projection_snapshot_id: UUID
     ) -> CollaborationEvaluation | None:
@@ -246,6 +262,7 @@ class CollaborationEvaluationRepository:
         self,
         *,
         workspace_id: UUID | None = None,
+        run_id: UUID | None = None,
         owner_id: str,
         now: datetime,
         lease_ttl: timedelta,
@@ -283,6 +300,8 @@ class CollaborationEvaluationRepository:
                 conditions.append(
                     CollaborationEvaluationModel.workspace_id == workspace_id
                 )
+            if run_id is not None:
+                conditions.append(CollaborationEvaluationModel.run_id == run_id)
             statement = (
                 select(CollaborationEvaluationModel)
                 .join(

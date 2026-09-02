@@ -772,6 +772,7 @@ class CollaborationEvaluation:
         diagnostic_summary: str | None,
         next_attempt_at: datetime,
         now: datetime,
+        response_hash: str | None = None,
     ) -> None:
         if self.status is not CollaborationEvaluationStatus.EVALUATING:
             raise InvalidTransition("only an evaluating evaluation can retry")
@@ -785,6 +786,9 @@ class CollaborationEvaluation:
         self.lease_expires_at = None
         self.next_attempt_at = next_attempt_at
         self.last_error_code = _required_text(error_code, "last_error_code")
+        if response_hash is not None:
+            _hash(response_hash, "response_hash")
+            self.response_hash = response_hash
         self.diagnostic_summary = _optional_text(
             diagnostic_summary, "diagnostic_summary"
         )
@@ -803,12 +807,24 @@ class CollaborationEvaluation:
         self.completed_at = now
         self._bump(now)
 
+    def record_response_hash(self, *, now: datetime, response_hash: str) -> None:
+        """Persist a successful response without closing the phase-C lease."""
+        if self.status is not CollaborationEvaluationStatus.EVALUATING:
+            raise InvalidTransition(
+                "only an evaluating evaluation can record a response"
+            )
+        _aware(now, "evaluation response time")
+        _hash(response_hash, "response_hash")
+        self.response_hash = response_hash
+        self._bump(now)
+
     def block(
         self,
         *,
         error_code: str,
         diagnostic_summary: str | None,
         now: datetime,
+        response_hash: str | None = None,
     ) -> None:
         if self.status in {
             CollaborationEvaluationStatus.COMPLETED,
@@ -821,6 +837,9 @@ class CollaborationEvaluation:
         self.lease_expires_at = None
         self.next_attempt_at = None
         self.last_error_code = _required_text(error_code, "last_error_code")
+        if response_hash is not None:
+            _hash(response_hash, "response_hash")
+            self.response_hash = response_hash
         self.diagnostic_summary = _optional_text(
             diagnostic_summary, "diagnostic_summary"
         )

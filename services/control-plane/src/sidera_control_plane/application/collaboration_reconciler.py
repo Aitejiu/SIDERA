@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.collaboration_projection import (
@@ -42,6 +42,12 @@ from sidera_control_plane.domain.plan_revisions import (
     plan_snapshot_content_hash,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+
+if TYPE_CHECKING:
+    from sidera_control_plane.application.collaboration_runtime_invoker import (
+        RuntimeInvocationFailure,
+        RuntimeInvocationResult,
+    )
 
 
 class CollaborationRuntimeResolverPort(Protocol):
@@ -141,6 +147,138 @@ class CollaborationReconciler:
                 if prepared is not None:
                     return prepared
         return None
+
+    def complete_success(
+        self,
+        prepared: PreparedCollaborationEvaluation,
+        result: RuntimeInvocationResult,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Record a response while leaving phase-C Decision application open."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        with self._uow_factory() as uow:
+            evaluation = uow.collaboration_evaluations.get(
+                prepared.run.workspace_id,
+                prepared.evaluation.id,
+                for_update=True,
+            )
+            run = uow.collaboration_runs.get(
+                prepared.run.workspace_id,
+                prepared.run.id,
+                for_update=True,
+            )
+            if not _prepared_lease_is_current(prepared, evaluation, run, now=now):
+                return False
+            assert evaluation is not None
+            assert run is not None
+            previous_version = evaluation.resource_version
+            evaluation.record_response_hash(
+                response_hash=result.response_hash,
+                now=now,
+            )
+            uow.collaboration_evaluations.save(evaluation, previous_version)
+            return True
+
+    def complete_failure(
+        self,
+        prepared: PreparedCollaborationEvaluation,
+        failure: RuntimeInvocationFailure,
+        *,
+        now: datetime,
+        max_attempts: int = 5,
+        backoff_seconds: int = 2,
+        backoff_max_seconds: int = 60,
+    ) -> CollaborationEvaluation | None:
+        """Persist a Runtime failure in a new short transaction."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        if backoff_seconds < 1 or backoff_max_seconds < 1:
+            raise ValueError("backoff values must be positive")
+        with self._uow_factory() as uow:
+            evaluation = uow.collaboration_evaluations.get(
+                prepared.run.workspace_id,
+                prepared.evaluation.id,
+                for_update=True,
+            )
+            run = uow.collaboration_runs.get(
+                prepared.run.workspace_id,
+                prepared.run.id,
+                for_update=True,
+            )
+            if not _prepared_lease_is_current(prepared, evaluation, run, now=now):
+                return None
+            assert evaluation is not None
+            assert run is not None
+            if failure.retryable and evaluation.attempt < max_attempts:
+                delay = min(
+                    backoff_max_seconds,
+                    backoff_seconds * (2 ** min(max(evaluation.attempt - 1, 0), 30)),
+                )
+                previous_version = evaluation.resource_version
+                evaluation.schedule_retry(
+                    error_code=failure.code,
+                    diagnostic_summary=failure.diagnostic_summary,
+                    response_hash=failure.response_hash,
+                    next_attempt_at=now + timedelta(seconds=delay),
+                    now=now,
+                )
+                uow.collaboration_evaluations.save(evaluation, previous_version)
+                self._emit_evaluation_event(
+                    uow,
+                    evaluation,
+                    run,
+                    event_type="CollaborationEvaluationRetryScheduled",
+                    owner_id=prepared.lease_owner,
+                    payload={
+                        "error_code": failure.code,
+                        "diagnostic_summary": failure.diagnostic_summary,
+                        "next_attempt_at": (
+                            evaluation.next_attempt_at.isoformat()
+                            if evaluation.next_attempt_at is not None
+                            else None
+                        ),
+                    },
+                )
+                return evaluation
+
+            previous_evaluation_version = evaluation.resource_version
+            evaluation.block(
+                error_code=failure.code,
+                diagnostic_summary=failure.diagnostic_summary,
+                response_hash=failure.response_hash,
+                now=now,
+            )
+            uow.collaboration_evaluations.save(evaluation, previous_evaluation_version)
+            self._emit_evaluation_event(
+                uow,
+                evaluation,
+                run,
+                event_type="CollaborationEvaluationFailed",
+                owner_id=prepared.lease_owner,
+                payload={
+                    "error_code": failure.code,
+                    "diagnostic_summary": failure.diagnostic_summary,
+                },
+            )
+            if run.status in {
+                CollaborationRunStatus.PENDING,
+                CollaborationRunStatus.ACTIVE,
+            }:
+                previous_run_version = run.resource_version
+                run.block(reason=failure.code, now=now)
+                uow.collaboration_runs.save(run, previous_run_version)
+                self._emit_run_event(
+                    uow,
+                    run,
+                    event_type="CollaborationRunBlocked",
+                    owner_id=prepared.lease_owner,
+                    payload=_attention_payload(prepared, failure, now=now),
+                )
+            return evaluation
 
     @staticmethod
     def _candidate_roots(
@@ -261,16 +399,21 @@ class CollaborationReconciler:
                         payload={},
                     )
 
+        # A due evaluation must keep its projection and operation ID even when
+        # a newer wakeup has already produced another projection for the Run.
+        recovered = self._reuse_existing_evaluation(
+            uow,
+            run=run,
+            owner_id=owner_id,
+            now=now,
+        )
+        if recovered is not None:
+            return recovered
         if (
             run.last_projection_snapshot_id is not None
             and fact_cursor <= run.last_evaluated_change_cursor
         ):
-            return self._reuse_existing_evaluation(
-                uow,
-                run=run,
-                owner_id=owner_id,
-                now=now,
-            )
+            return None
 
         facts = self._fact_store_factory(uow).load(
             workspace_id,
@@ -312,25 +455,26 @@ class CollaborationReconciler:
         owner_id: str,
         now: datetime,
     ) -> PreparedCollaborationEvaluation | None:
-        projection_id = run.last_projection_snapshot_id
-        if projection_id is None:
-            return None
-        evaluation = uow.collaboration_evaluations.get_for_projection(
-            run.workspace_id, projection_id
+        claimed = uow.collaboration_evaluations.claim_next(
+            workspace_id=run.workspace_id,
+            run_id=run.id,
+            owner_id=owner_id,
+            now=now,
+            lease_ttl=self._evaluation_lease_ttl,
+            limit=1,
         )
-        if evaluation is None or evaluation.status in {
-            CollaborationEvaluationStatus.COMPLETED,
-            CollaborationEvaluationStatus.BLOCKED,
-            CollaborationEvaluationStatus.EVALUATING,
-        }:
+        if not claimed:
             return None
-        if evaluation.next_attempt_at is None or evaluation.next_attempt_at > now:
-            return None
+        evaluation = claimed[0]
+        projection_id = evaluation.projection_snapshot_id
         stored_projection = uow.collaboration_ledger.get_projection(
             run.workspace_id, projection_id
         )
         if stored_projection is None:
-            return None
+            raise RuntimeResolutionError(
+                "projection_snapshot_missing",
+                "claimable collaboration evaluation has no projection snapshot",
+            )
         try:
             projection = RuntimeProjectionV1.from_mapping(
                 stored_projection.payload,
@@ -352,26 +496,13 @@ class CollaborationReconciler:
                 "projection_snapshot_mismatch",
                 "stored collaboration projection identity does not match its ledger row",
             )
-        claimed = uow.collaboration_evaluations.claim_next(
-            workspace_id=run.workspace_id,
-            owner_id=owner_id,
-            now=now,
-            lease_ttl=self._evaluation_lease_ttl,
-            limit=1,
-        )
-        claimed_evaluation = next(
-            (item for item in claimed if item.id == evaluation.id),
-            None,
-        )
-        if claimed_evaluation is None:
-            return None
         return PreparedCollaborationEvaluation(
             run=run,
-            evaluation=claimed_evaluation,
+            evaluation=evaluation,
             projection=projection,
-            operation_id=claimed_evaluation.operation_id,
+            operation_id=evaluation.operation_id,
             lease_owner=owner_id,
-            lease_expires_at=claimed_evaluation.lease_expires_at
+            lease_expires_at=evaluation.lease_expires_at
             or (now + self._evaluation_lease_ttl),
         )
 
@@ -432,6 +563,7 @@ class CollaborationReconciler:
             return None
         claimed = uow.collaboration_evaluations.claim_next(
             workspace_id=run.workspace_id,
+            run_id=run.id,
             owner_id=owner_id,
             now=now,
             lease_ttl=self._evaluation_lease_ttl,
@@ -479,6 +611,65 @@ class CollaborationReconciler:
             owner_id=owner_id,
             payload={},
         )
+
+    @staticmethod
+    def _emit_evaluation_event(
+        uow: ControlPlaneUnitOfWork,
+        evaluation: CollaborationEvaluation,
+        run: CollaborationRun,
+        *,
+        event_type: str,
+        owner_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        event_payload = {
+            "evaluation_id": str(evaluation.id),
+            "run_id": str(run.id),
+            "root_task_id": str(run.root_task_id),
+            "operation_id": str(evaluation.operation_id),
+            "status": evaluation.status.value,
+            **payload,
+        }
+        command = CommandEnvelope(
+            id=uuid4(),
+            workspace_id=run.workspace_id,
+            command_type="collaboration.evaluation.reconcile",
+            target_type="collaboration_evaluation",
+            actor_type="system",
+            actor_id=owner_id,
+            target_id=evaluation.id,
+            payload=event_payload,
+            expected_version=evaluation.resource_version,
+            idempotency_key=(
+                f"collaboration-evaluation-event:{evaluation.id}:"
+                f"{evaluation.resource_version}:{event_type}"
+            ),
+            correlation_id=run.id,
+        )
+        event = EventData(
+            id=uuid4(),
+            workspace_id=run.workspace_id,
+            aggregate_type="collaboration_evaluation",
+            aggregate_id=evaluation.id,
+            aggregate_version=evaluation.resource_version,
+            event_type=event_type,
+            payload=event_payload,
+            actor_type="system",
+            actor_id=owner_id,
+            causation_id=command.id,
+            correlation_id=run.id,
+        )
+        uow.commands.record_applied(
+            command,
+            hash_request(command),
+            CommandResult(
+                command_id=command.id,
+                aggregate_id=evaluation.id,
+                aggregate_version=evaluation.resource_version,
+                event_ids=(event.id,),
+            ),
+        )
+        uow.events.append_with_outbox(event)
 
     @staticmethod
     def _emit_run_event(
@@ -540,6 +731,103 @@ class CollaborationReconciler:
             ),
         )
         uow.events.append_with_outbox(event)
+
+
+def _prepared_lease_is_current(
+    prepared: PreparedCollaborationEvaluation,
+    evaluation: CollaborationEvaluation | None,
+    run: CollaborationRun | None,
+    *,
+    now: datetime,
+) -> bool:
+    if evaluation is None or run is None:
+        return False
+    return (
+        run.id == prepared.run.id
+        and run.workspace_id == prepared.run.workspace_id
+        and run.resource_version == prepared.run.resource_version
+        and evaluation.id == prepared.evaluation.id
+        and evaluation.workspace_id == prepared.run.workspace_id
+        and evaluation.run_id == prepared.run.id
+        and evaluation.projection_snapshot_id == prepared.projection.projection_id
+        and evaluation.operation_id == prepared.operation_id
+        and evaluation.status is CollaborationEvaluationStatus.EVALUATING
+        and evaluation.lease_owner == prepared.lease_owner
+        and evaluation.lease_expires_at is not None
+        and evaluation.lease_expires_at > now
+    )
+
+
+def _attention_payload(
+    prepared: PreparedCollaborationEvaluation,
+    failure: RuntimeInvocationFailure,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    projection = prepared.projection
+    root_title = (
+        _mapping_text(
+            next(
+                (item for item in projection.tasks if item.get("kind") == "root"),
+                projection.tasks[0] if projection.tasks else {},
+            ),
+            "title",
+        )
+        or "Root task"
+    )
+    request = next(
+        (
+            item
+            for item in projection.execution_requests
+            if item.get("status") not in {"materialized", "cancelled", "obsolete"}
+        ),
+        None,
+    )
+    subtask_key = _mapping_text(request, "subtask_key") if request else None
+    subtask = next(
+        (item for item in projection.subtasks if item.get("key") == subtask_key),
+        projection.subtasks[0] if projection.subtasks else {},
+    )
+    subtask_key = subtask_key or _mapping_text(subtask, "key") or "root"
+    subtask_title = _mapping_text(subtask, "title") or subtask_key
+    detail_href = (
+        f"/workspaces/{projection.workspace_id}/tasks/{projection.root_task_id}"
+        "/collaboration"
+    )
+    reason = _failure_reason(failure.code)
+    attention = {
+        "attention_required": True,
+        "attention_key": f"collaboration:{prepared.run.id}:blocked",
+        "root_task_title": root_title,
+        "subtask_key": subtask_key,
+        "subtask_title": subtask_title,
+        "subtask_path": [subtask_title],
+        "reason_code": failure.code,
+        "reason": reason,
+        "failed_at": now.isoformat(),
+        "detail_href": detail_href,
+        "deep_link": detail_href,
+    }
+    attention["diagnostic_summary"] = failure.diagnostic_summary
+    return attention
+
+
+def _mapping_text(mapping: Mapping[str, object] | None, key: str) -> str | None:
+    if mapping is None:
+        return None
+    value = mapping.get(key)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _failure_reason(code: str) -> str:
+    return {
+        "runtime_timeout": "Collaboration Runtime timed out after bounded retries",
+        "runtime_unavailable": "Collaboration Runtime is unavailable",
+        "runtime_config_mismatch": "The pinned Collaboration Runtime configuration changed",
+        "unsupported_runtime_capability": "The pinned Collaboration Runtime lacks a required capability",
+        "projection_too_large": "The collaboration projection exceeds the Runtime limit",
+        "runtime_output_invalid": "The Collaboration Runtime returned an invalid response",
+    }.get(code, "Collaboration Runtime requires attention")
 
 
 def _new_run(snapshot: TaskPlanSnapshot, *, now: datetime) -> CollaborationRun:

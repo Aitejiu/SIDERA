@@ -1011,6 +1011,15 @@ class CollaborationFactStorePort(Protocol):
 
 
 class CollaborationEvaluationRepositoryPort(Protocol):
+    def get(
+        self,
+        workspace_id: UUID,
+        evaluation_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationEvaluation | None:
+        raise NotImplementedError
+
     def get_for_projection(
         self, workspace_id: UUID, projection_snapshot_id: UUID
     ) -> CollaborationEvaluation | None:
@@ -1030,6 +1039,7 @@ class CollaborationEvaluationRepositoryPort(Protocol):
         self,
         *,
         workspace_id: UUID | None,
+        run_id: UUID | None = None,
         owner_id: str,
         now: datetime,
         lease_ttl: timedelta,

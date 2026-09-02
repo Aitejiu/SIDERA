@@ -16,6 +16,9 @@ from sidera_control_plane.application.collaboration_projection import (
 from sidera_control_plane.application.collaboration_reconciler import (
     CollaborationReconciler,
 )
+from sidera_control_plane.application.collaboration_runtime_invoker import (
+    RuntimeInvocationFailure,
+)
 from sidera_control_plane.application.collaboration_runtime_resolver import (
     ResolvedCollaborationRuntime,
     RuntimeResolutionError,
@@ -254,6 +257,18 @@ class FakeRunRepository:
     def add(self, run: CollaborationRun) -> None:
         self.runs[run.id] = run
 
+    def get(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationRun | None:
+        run = self.runs.get(run_id)
+        if run is None or run.workspace_id != workspace_id:
+            return None
+        return run
+
     def save(self, run: CollaborationRun, previous_version: int) -> None:
         assert run.resource_version == previous_version + 1
         self.saved.append((run.id, previous_version))
@@ -279,6 +294,18 @@ class FakeEvaluationRepository:
         if existing is not None:
             return existing
         self.evaluations[evaluation.id] = evaluation
+        return evaluation
+
+    def get(
+        self,
+        workspace_id: UUID,
+        evaluation_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationEvaluation | None:
+        evaluation = self.evaluations.get(evaluation_id)
+        if evaluation is None or evaluation.workspace_id != workspace_id:
+            return None
         return evaluation
 
     def get_for_projection(
@@ -344,6 +371,7 @@ class FakeEvaluationRepository:
         self,
         *,
         workspace_id: UUID | None,
+        run_id: UUID | None = None,
         owner_id: str,
         now: datetime,
         lease_ttl: timedelta,
@@ -356,6 +384,8 @@ class FakeEvaluationRepository:
             if len(claimed) >= limit:
                 break
             if workspace_id is not None and evaluation.workspace_id != workspace_id:
+                continue
+            if run_id is not None and evaluation.run_id != run_id:
                 continue
             if any(
                 item.workspace_id == evaluation.workspace_id
@@ -382,6 +412,10 @@ class FakeEvaluationRepository:
             assert evaluation.resource_version == previous + 1
             claimed.append(evaluation)
         return tuple(claimed)
+
+    def save(self, evaluation: CollaborationEvaluation, previous_version: int) -> None:
+        assert evaluation.resource_version == previous_version + 1
+        self.evaluations[evaluation.id] = evaluation
 
 
 class FakeLedgerRepository:
@@ -808,6 +842,59 @@ def test_due_retry_reuses_projection_and_operation_id() -> None:
     assert second.evaluation.attempt == 2
 
 
+def test_due_retry_from_older_projection_is_not_lost_after_newer_wakeup() -> None:
+    harness = _harness()
+    first = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert first is not None
+    failure = RuntimeInvocationFailure(
+        code="runtime_timeout",
+        response_hash=None,
+        diagnostic_summary="temporary timeout",
+        retryable=True,
+        duration_ms=12,
+    )
+    first_retry = harness.reconciler.complete_failure(
+        first,
+        failure,
+        now=NOW,
+        max_attempts=3,
+        backoff_seconds=2,
+        backoff_max_seconds=3,
+    )
+    assert first_retry is not None
+
+    harness.uow.projection_changes.target_cursor = 18
+    newer = harness.reconciler.prepare_next(
+        owner_id="worker-b",
+        now=NOW + timedelta(seconds=1),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert newer is not None
+    newer.evaluation.schedule_retry(
+        error_code="runtime_timeout",
+        diagnostic_summary="newer projection waits",
+        next_attempt_at=NOW + timedelta(seconds=10),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    recovered = harness.reconciler.prepare_next(
+        owner_id="worker-c",
+        now=NOW + timedelta(seconds=2),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert recovered is not None
+    assert recovered.projection.projection_id == first.projection.projection_id
+    assert recovered.operation_id == first.operation_id
+
+
 def test_terminal_request_and_lineage_complete_the_run() -> None:
     snapshot = _snapshot(policy=_policy())
     run = _run(snapshot)
@@ -851,4 +938,180 @@ def test_terminal_request_and_lineage_complete_the_run() -> None:
     assert any(
         getattr(event, "event_type", None) == "CollaborationRunCompleted"
         for event in harness.uow.events.events
+    )
+
+
+def test_retry_failure_reuses_operation_id_and_emits_bounded_retry_event() -> None:
+    harness = _harness()
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert prepared is not None
+
+    retried = harness.reconciler.complete_failure(
+        prepared,
+        RuntimeInvocationFailure(
+            code="runtime_timeout",
+            response_hash=None,
+            diagnostic_summary="bounded timeout",
+            retryable=True,
+            duration_ms=12,
+        ),
+        now=NOW,
+        max_attempts=3,
+        backoff_seconds=2,
+        backoff_max_seconds=3,
+    )
+
+    assert retried is not None
+    assert retried.status is CollaborationEvaluationStatus.RETRY_WAIT
+    assert retried.attempt == 2
+    assert retried.next_attempt_at == NOW + timedelta(seconds=2)
+    assert prepared.operation_id == retried.operation_id
+    assert prepared.run.status is CollaborationRunStatus.ACTIVE
+    assert any(
+        getattr(event, "event_type", None) == "CollaborationEvaluationRetryScheduled"
+        for event in harness.uow.events.events
+    )
+
+    recovered = harness.reconciler.prepare_next(
+        owner_id="worker-b",
+        now=NOW + timedelta(seconds=2),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert recovered is not None
+    assert recovered.operation_id == prepared.operation_id
+    assert recovered.evaluation.attempt == 2
+
+
+def test_non_retryable_failure_blocks_run_with_one_root_attention_payload() -> None:
+    harness = _harness()
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert prepared is not None
+
+    blocked = harness.reconciler.complete_failure(
+        prepared,
+        RuntimeInvocationFailure(
+            code="runtime_output_invalid",
+            response_hash="b" * 64,
+            diagnostic_summary="invalid response; [provider key redacted]",
+            retryable=False,
+            duration_ms=12,
+        ),
+        now=NOW,
+    )
+
+    assert blocked is not None
+    assert blocked.status is CollaborationEvaluationStatus.BLOCKED
+    assert blocked.response_hash == "b" * 64
+    assert prepared.run.status is CollaborationRunStatus.BLOCKED
+    run_events = [
+        event
+        for event in harness.uow.events.events
+        if getattr(event, "event_type", None) == "CollaborationRunBlocked"
+    ]
+    assert len(run_events) == 1
+    payload = run_events[0].payload
+    assert payload["attention_required"] is True
+    assert payload["subtask_path"] == ["subtask-a"]
+    assert payload["detail_href"].endswith(f"/tasks/{ROOT_TASK_ID}/collaboration")
+
+
+def test_success_completion_records_hash_without_closing_evaluation() -> None:
+    harness = _harness()
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert prepared is not None
+
+    completed = harness.reconciler.complete_success(
+        prepared,
+        SimpleNamespace(response_hash="c" * 64),
+        now=NOW,
+    )
+
+    assert completed is True
+    assert prepared.evaluation.status is CollaborationEvaluationStatus.EVALUATING
+    assert prepared.evaluation.response_hash == "c" * 64
+
+
+def test_retry_backoff_is_capped_and_exhaustion_blocks_the_run() -> None:
+    harness = _harness()
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert prepared is not None
+    failure = RuntimeInvocationFailure(
+        code="runtime_unavailable",
+        response_hash=None,
+        diagnostic_summary="provider unavailable",
+        retryable=True,
+        duration_ms=12,
+    )
+
+    first_retry = harness.reconciler.complete_failure(
+        prepared,
+        failure,
+        now=NOW,
+        max_attempts=3,
+        backoff_seconds=2,
+        backoff_max_seconds=3,
+    )
+    assert first_retry is not None
+    second = harness.reconciler.prepare_next(
+        owner_id="worker-b",
+        now=NOW + timedelta(seconds=2),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert second is not None
+
+    second_retry = harness.reconciler.complete_failure(
+        second,
+        failure,
+        now=NOW + timedelta(seconds=2),
+        max_attempts=3,
+        backoff_seconds=2,
+        backoff_max_seconds=3,
+    )
+    assert second_retry is not None
+    assert second_retry.attempt == 3
+    assert second_retry.next_attempt_at == NOW + timedelta(seconds=5)
+
+    third = harness.reconciler.prepare_next(
+        owner_id="worker-c",
+        now=NOW + timedelta(seconds=5),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    assert third is not None
+    exhausted = harness.reconciler.complete_failure(
+        third,
+        failure,
+        now=NOW + timedelta(seconds=5),
+        max_attempts=3,
+        backoff_seconds=2,
+        backoff_max_seconds=3,
+    )
+
+    assert exhausted is not None
+    assert exhausted.status is CollaborationEvaluationStatus.BLOCKED
+    assert (
+        harness.uow.collaboration_runs.runs[prepared.run.id].status
+        is CollaborationRunStatus.BLOCKED
     )
