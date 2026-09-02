@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration import CollaborationPolicyRequestV1
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plan_revisions import (
     ContextDisposition,
@@ -383,17 +384,190 @@ class PlanningRevisionProposalPayloadV3:
                 raise ValidationError("derived WorkerItem source is outside the base")
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningRevisionProposalPayloadV4:
+    schema_version: int
+    kind: PlanningRequestKind
+    base_descriptor: RevisionBaseDescriptorV1
+    root_task: ProposedRootTask
+    subtasks: tuple[ProposedSubtask, ...]
+    worker_items: tuple[ProposedWorkerItem, ...]
+    subtask_milestones: tuple[SubtaskMilestone, ...]
+    subtask_dependencies: tuple[SubtaskDependency, ...]
+    worker_item_dependencies: tuple[WorkerItemDependency, ...]
+    execution_intents: tuple[ExecutionIntent, ...]
+    subtask_identity_decisions: tuple[SubtaskIdentityDecision, ...]
+    worker_item_identity_decisions: tuple[WorkerItemIdentityDecision, ...]
+    retired_subtask_ids: tuple[UUID, ...]
+    retired_worker_item_ids: tuple[UUID, ...]
+    decision_summary: DecisionSummary
+    impact_policy: ImpactPolicy
+    collaboration_policy_request: CollaborationPolicyRequestV1
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 4:
+            raise ValidationError("revision proposal schema_version must be 4")
+        if self.kind is not PlanningRequestKind.REVISION:
+            raise ValidationError("revision proposal kind must be revision")
+        if not isinstance(self.base_descriptor, RevisionBaseDescriptorV1):
+            raise ValidationError("revision proposal requires an exact base descriptor")
+        for name in (
+            "subtasks",
+            "worker_items",
+            "subtask_milestones",
+            "subtask_dependencies",
+            "worker_item_dependencies",
+            "execution_intents",
+            "subtask_identity_decisions",
+            "worker_item_identity_decisions",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        object.__setattr__(
+            self,
+            "retired_subtask_ids",
+            _unique_uuids(self.retired_subtask_ids, "retired_subtask_ids"),
+        )
+        object.__setattr__(
+            self,
+            "retired_worker_item_ids",
+            _unique_uuids(self.retired_worker_item_ids, "retired_worker_item_ids"),
+        )
+        if not isinstance(
+            self.collaboration_policy_request, CollaborationPolicyRequestV1
+        ):
+            raise ValidationError(
+                "revision proposal v4 requires a collaboration policy request"
+            )
+        self.validate()
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> PlanningRevisionProposalPayloadV4:
+        if not isinstance(value, Mapping):
+            raise ValidationError("revision proposal v4 payload must be a mapping")
+        allowed = {
+            "schema_version",
+            "kind",
+            "base_descriptor",
+            "root_task",
+            "subtasks",
+            "worker_items",
+            "milestones",
+            "subtask_dependencies",
+            "worker_item_dependencies",
+            "execution_intents",
+            "subtask_identity_decisions",
+            "worker_item_identity_decisions",
+            "retired_subtask_ids",
+            "retired_worker_item_ids",
+            "decision_summary",
+            "impact_policy",
+            "collaboration_policy_request",
+        }
+        unknown = sorted(str(key) for key in value if key not in allowed)
+        if unknown:
+            raise ValidationError(
+                f"unknown revision proposal v4 fields: {', '.join(unknown)}"
+            )
+        if _int(value, "schema_version") != 4:
+            raise ValidationError("revision proposal schema_version must be 4")
+        policy_value = value.get("collaboration_policy_request")
+        if not isinstance(policy_value, Mapping):
+            raise ValidationError(
+                "collaboration_policy_request must be a mapping"
+            )
+        legacy_mapping = dict(value)
+        legacy_mapping.pop("collaboration_policy_request", None)
+        legacy_mapping["schema_version"] = 3
+        legacy = PlanningRevisionProposalPayloadV3.from_mapping(legacy_mapping)
+        return cls(
+            schema_version=4,
+            kind=legacy.kind,
+            base_descriptor=legacy.base_descriptor,
+            root_task=legacy.root_task,
+            subtasks=legacy.subtasks,
+            worker_items=legacy.worker_items,
+            subtask_milestones=legacy.subtask_milestones,
+            subtask_dependencies=legacy.subtask_dependencies,
+            worker_item_dependencies=legacy.worker_item_dependencies,
+            execution_intents=legacy.execution_intents,
+            subtask_identity_decisions=legacy.subtask_identity_decisions,
+            worker_item_identity_decisions=legacy.worker_item_identity_decisions,
+            retired_subtask_ids=legacy.retired_subtask_ids,
+            retired_worker_item_ids=legacy.retired_worker_item_ids,
+            decision_summary=legacy.decision_summary,
+            impact_policy=legacy.impact_policy,
+            collaboration_policy_request=CollaborationPolicyRequestV1.from_mapping(
+                policy_value
+            ),
+        )
+
+    def _as_v3(self) -> PlanningRevisionProposalPayloadV3:
+        return PlanningRevisionProposalPayloadV3(
+            schema_version=3,
+            kind=self.kind,
+            base_descriptor=self.base_descriptor,
+            root_task=self.root_task,
+            subtasks=self.subtasks,
+            worker_items=self.worker_items,
+            subtask_milestones=self.subtask_milestones,
+            subtask_dependencies=self.subtask_dependencies,
+            worker_item_dependencies=self.worker_item_dependencies,
+            execution_intents=self.execution_intents,
+            subtask_identity_decisions=self.subtask_identity_decisions,
+            worker_item_identity_decisions=self.worker_item_identity_decisions,
+            retired_subtask_ids=self.retired_subtask_ids,
+            retired_worker_item_ids=self.retired_worker_item_ids,
+            decision_summary=self.decision_summary,
+            impact_policy=self.impact_policy,
+        )
+
+    def validate(self) -> None:
+        self._as_v3().validate()
+
+    def validate_against_base(self, base_snapshot: TaskPlanSnapshot) -> None:
+        self._as_v3().validate_against_base(base_snapshot)
+
+    def to_mapping(self) -> dict[str, object]:
+        mapping = self._as_v3().canonical_payload()
+        mapping["schema_version"] = 4
+        mapping["collaboration_policy_request"] = (
+            self.collaboration_policy_request.to_mapping()
+        )
+        return mapping
+
+    def canonical_payload(self) -> dict[str, object]:
+        return self.to_mapping()
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_mapping(),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
 def validate_revision_proposal(
-    payload: PlanningRevisionProposalPayloadV3,
+    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
     *,
     profile_snapshot: object,
     brief_revision: int,
-) -> PlanningRevisionProposalPayloadV3:
-    if not isinstance(payload, PlanningRevisionProposalPayloadV3):
-        raise ValidationError("revision proposal must use schema v3")
-    if getattr(profile_snapshot, "proposal_schema_version", None) != 3:
+) -> PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4:
+    if not isinstance(
+        payload,
+        (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+    ):
+        raise ValidationError("revision proposal must use schema v3 or v4")
+    if getattr(profile_snapshot, "proposal_schema_version", None) != payload.schema_version:
         raise ValidationError(
-            "revision proposal schema v3 is not selected by the profile"
+            f"revision proposal schema v{payload.schema_version} is not selected by the profile"
         )
     if brief_revision < 1:
         raise ValidationError("brief revision must be positive")

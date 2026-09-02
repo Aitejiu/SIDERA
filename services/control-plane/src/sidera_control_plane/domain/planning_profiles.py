@@ -5,6 +5,9 @@ from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
     PLANNER_ADAPTER_MODULE_TYPE,
@@ -26,6 +29,12 @@ class UnknownOutcomePolicy(StrEnum):
 class InvalidOutputPolicy(StrEnum):
     BLOCK = "block"
     RETRY = "retry"
+
+
+COLLABORATION_MAX_PROJECTION_BYTES = 1_048_576
+COLLABORATION_MAX_DECISION_BYTES = 262_144
+COLLABORATION_MAX_INTENTS_PER_DECISION = 1_000
+COLLABORATION_MAX_STRATEGY_STATE_BYTES = 65_536
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +120,7 @@ class PlanningProfileSnapshot:
     execution_budget_level: str
     planner_secret_refs: tuple[str, ...]
     planner_capabilities: PlannerAdapterCapabilityProfile
+    collaboration_runtime_binding: CollaborationRuntimeBindingSnapshot | None = None
 
     def __post_init__(self) -> None:
         if self.profile_version < 1 or self.planner_module_config_version < 1:
@@ -150,6 +160,7 @@ class PlanningProfileSnapshot:
             "planner_secret_refs",
             _text_tuple(self.planner_secret_refs, "planner_secret_refs"),
         )
+        _validate_collaboration_binding(self.collaboration_runtime_binding)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +187,7 @@ class PlanningProfile:
     user_selectable: bool
     status: PlanningProfileStatus
     planner_secret_refs: tuple[str, ...]
+    collaboration_runtime_binding: CollaborationRuntimeBindingSnapshot | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.profile_key, "profile_key")
@@ -223,6 +235,7 @@ class PlanningProfile:
             "planner_secret_refs",
             _text_tuple(self.planner_secret_refs, "planner_secret_refs"),
         )
+        _validate_collaboration_binding(self.collaboration_runtime_binding)
 
     def assert_user_selectable(self) -> None:
         if self.status is not PlanningProfileStatus.ACTIVE:
@@ -276,7 +289,27 @@ class PlanningProfile:
             execution_budget_level=self.execution_budget_level,
             planner_secret_refs=self.planner_secret_refs,
             planner_capabilities=planner_capabilities,
+            collaboration_runtime_binding=self.collaboration_runtime_binding,
         )
+
+
+def _validate_collaboration_binding(
+    binding: CollaborationRuntimeBindingSnapshot | None,
+) -> None:
+    if binding is None:
+        return
+    capability = binding.runtime_capability_snapshot
+    limits = (
+        ("projection", capability.max_projection_bytes, COLLABORATION_MAX_PROJECTION_BYTES),
+        ("decision", capability.max_decision_bytes, COLLABORATION_MAX_DECISION_BYTES),
+        ("intents", capability.max_intents_per_decision, COLLABORATION_MAX_INTENTS_PER_DECISION),
+        ("strategy state", capability.max_strategy_state_bytes, COLLABORATION_MAX_STRATEGY_STATE_BYTES),
+    )
+    for label, declared, maximum in limits:
+        if declared > maximum:
+            raise ValidationError(
+                f"global collaboration {label} limit is exceeded"
+            )
 
 
 def _enum_value(value: Any, enum_type: type[StrEnum], label: str) -> StrEnum:

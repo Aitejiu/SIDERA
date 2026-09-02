@@ -3,9 +3,13 @@ from uuid import uuid4
 
 import pytest
 
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
     CancellationCapability,
+    CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     PlannerAdapterCapabilityProfile,
     StabilityLevel,
@@ -198,4 +202,47 @@ def test_snapshot_rejects_incompatible_module_and_capabilities() -> None:
         profile.snapshot(
             planner_capabilities(max_context_bytes=32_000),
             module_instance_config_version=7,
+        )
+
+
+def test_profile_snapshot_preserves_and_validates_collaboration_binding() -> None:
+    runtime_capability = CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime-v1",
+        projection_schema_versions=(1,),
+        decision_schema_versions=(1,),
+        strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
+    )
+    binding = CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=uuid4(),
+        runtime_instance_id=uuid4(),
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=3,
+        runtime_capability_snapshot=runtime_capability,
+    )
+    profile = planning_profile(
+        proposal_schema_version=4,
+        collaboration_runtime_binding=binding,
+    )
+    snapshot = profile.snapshot(
+        replace(planner_capabilities(), proposal_schema_versions=(4,)),
+        module_instance_config_version=7,
+    )
+
+    assert snapshot.collaboration_runtime_binding == binding
+
+    with pytest.raises(ValidationError, match="global collaboration"):
+        planning_profile(
+            collaboration_runtime_binding=replace(
+                binding,
+                runtime_capability_snapshot=replace(
+                    runtime_capability,
+                    max_projection_bytes=1_048_577,
+                ),
+            )
         )

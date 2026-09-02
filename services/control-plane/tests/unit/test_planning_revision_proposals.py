@@ -23,6 +23,7 @@ from sidera_control_plane.domain.planning_proposals import (
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
@@ -224,3 +225,22 @@ def test_revision_payload_rejects_non_revision_dependency_kind() -> None:
                 ),
             ),
         )
+
+
+def test_revision_payload_v4_requires_complete_collaboration_request() -> None:
+    raw = proposal().canonical_payload()
+    raw["schema_version"] = 4
+    raw["collaboration_policy_request"] = {
+        "mode": "enabled",
+        "default_policy": {"strategy_id": "all_required"},
+        "subtask_overrides": [],
+    }
+
+    value = PlanningRevisionProposalPayloadV4.from_mapping(raw)
+    assert value.schema_version == 4
+    assert PlanningRevisionProposalPayloadV4.from_mapping(value.to_mapping()) == value
+
+    missing = dict(raw)
+    del missing["collaboration_policy_request"]
+    with pytest.raises(ValidationError, match="collaboration_policy_request"):
+        PlanningRevisionProposalPayloadV4.from_mapping(missing)

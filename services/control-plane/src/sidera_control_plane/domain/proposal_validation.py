@@ -4,19 +4,30 @@ from collections.abc import Mapping
 from typing import NoReturn
 
 from sidera_control_plane.domain.artifacts import ArtifactType
+from sidera_control_plane.domain.collaboration import (
+    CollaborationMode,
+    CollaborationPolicyRequestV1,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import PlannerAdapterCapabilityProfile
 from sidera_control_plane.domain.planning import PlanningRequest, PlanningRequestKind
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
+    PlanningProposalPayloadV4,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
+    PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import DependencyKind, TaskPlanSnapshot
 
-ProposalPayload = PlanningProposalPayload | PlanningRevisionProposalPayloadV3
+ProposalPayload = (
+    PlanningProposalPayload
+    | PlanningProposalPayloadV4
+    | PlanningRevisionProposalPayloadV3
+    | PlanningRevisionProposalPayloadV4
+)
 
 
 class ProposalValidationError(ValidationError):
@@ -48,7 +59,10 @@ def validate_proposal(
     if expected_kind is None:
         expected_kind = typed_payload.kind
     if expected_kind is PlanningRequestKind.REVISION:
-        if not isinstance(typed_payload, PlanningRevisionProposalPayloadV3):
+        if not isinstance(
+            typed_payload,
+            (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+        ):
             if not explicit_revision:
                 expected_kind = PlanningRequestKind.CREATE
             else:
@@ -66,46 +80,69 @@ def validate_proposal(
                 base_snapshot=base_snapshot,
             )
             return typed_payload
-    if not isinstance(typed_payload, PlanningProposalPayload):
+    if not isinstance(typed_payload, (PlanningProposalPayload, PlanningProposalPayloadV4)):
         _fail(
             "proposal_schema_invalid",
             "create proposal schema v2 is required",
         )
-    if typed_payload.schema_version != 2:
-        _fail("proposal_schema_invalid", "R5.1 requires proposal schema version 2")
+    is_v4 = isinstance(typed_payload, PlanningProposalPayloadV4)
+    expected_schema_version = 4 if is_v4 else 2
+    if typed_payload.schema_version != expected_schema_version:
+        _fail(
+            "proposal_schema_invalid",
+            f"proposal schema version {expected_schema_version} is required",
+        )
     if profile_snapshot.proposal_schema_version != typed_payload.schema_version:
         _fail("proposal_schema_invalid", "proposal schema is not selected by the profile")
     if brief_revision < 1:
         _fail("proposal_schema_invalid", "brief revision must be positive")
     if typed_payload.kind is not PlanningRequestKind.CREATE:
         _fail("proposal_revision_operation_forbidden", "R5.1 accepts create proposals only")
-    if typed_payload.base_descriptor is not None:
+    if not is_v4 and typed_payload.base_descriptor is not None:
         _fail("proposal_revision_operation_forbidden", "base descriptor is reserved for revision proposals")
     if typed_payload.impact_policy.revision_operation is not None:
         _fail("proposal_revision_operation_forbidden", "revision operation is not supported")
     if typed_payload.impact_policy.manual_gate:
         _fail("proposal_manual_gate_unsupported", "manual approval gates are not supported in R5.1")
 
-    _validate_unique_keys(typed_payload)
-    _validate_references(typed_payload)
-    _validate_cycles(typed_payload)
-    _validate_capabilities(typed_payload, profile_snapshot)
-    _validate_budget(typed_payload, profile_snapshot)
-    _validate_intents(typed_payload)
+    validation_payload = typed_payload.to_legacy() if is_v4 else typed_payload
+    _validate_unique_keys(validation_payload)
+    _validate_references(validation_payload)
+    _validate_cycles(validation_payload)
+    _validate_capabilities(validation_payload, profile_snapshot)
+    _validate_budget(validation_payload, profile_snapshot)
+    _validate_intents(validation_payload)
+    if is_v4:
+        _validate_collaboration_request(typed_payload, profile_snapshot)
     return typed_payload
 
 
 def _typed_payload(
     payload: ProposalPayload | Mapping[str, object],
 ) -> ProposalPayload:
-    if isinstance(payload, (PlanningProposalPayload, PlanningRevisionProposalPayloadV3)):
+    if isinstance(
+        payload,
+        (
+            PlanningProposalPayload,
+            PlanningProposalPayloadV4,
+            PlanningRevisionProposalPayloadV3,
+            PlanningRevisionProposalPayloadV4,
+        ),
+    ):
         return payload
     if not isinstance(payload, Mapping):
         _fail("proposal_schema_invalid", "proposal payload must be a typed mapping")
     schema_version = payload.get("schema_version")
     kind = payload.get("kind")
-    if schema_version == 3 or kind == PlanningRequestKind.REVISION.value:
+    if schema_version == 4 and kind == PlanningRequestKind.CREATE.value:
         try:
+            return PlanningProposalPayloadV4.from_mapping(payload)
+        except ValidationError as exc:
+            _fail("proposal_schema_invalid", str(exc))
+    if schema_version == 4 or schema_version == 3 or kind == PlanningRequestKind.REVISION.value:
+        try:
+            if schema_version == 4:
+                return PlanningRevisionProposalPayloadV4.from_mapping(payload)
             return PlanningRevisionProposalPayloadV3.from_mapping(payload)
         except ValidationError as exc:
             _fail("proposal_schema_invalid", str(exc))
@@ -121,7 +158,7 @@ def _typed_payload(
 
 
 def _validate_revision_proposal(
-    payload: PlanningRevisionProposalPayloadV3,
+    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
     *,
     profile_snapshot: PlanningProfileSnapshot,
     capability_snapshot: PlannerAdapterCapabilityProfile | None,
@@ -129,18 +166,18 @@ def _validate_revision_proposal(
     request: PlanningRequest | None,
     base_snapshot: TaskPlanSnapshot | None,
 ) -> None:
-    if profile_snapshot.proposal_schema_version != 3:
+    if profile_snapshot.proposal_schema_version != payload.schema_version:
         _fail(
             "proposal_schema_invalid",
-            "revision proposal schema v3 is not selected by the profile",
+            f"revision proposal schema v{payload.schema_version} is not selected by the profile",
         )
     capabilities = capability_snapshot or profile_snapshot.planner_capabilities
     if not isinstance(capabilities, PlannerAdapterCapabilityProfile):
         _fail("proposal_schema_invalid", "planner capability snapshot is invalid")
-    if 3 not in capabilities.proposal_schema_versions:
+    if payload.schema_version not in capabilities.proposal_schema_versions:
         _fail(
             "proposal_schema_invalid",
-            "revision proposal schema v3 is not supported by the adapter",
+            f"revision proposal schema v{payload.schema_version} is not supported by the adapter",
         )
     if brief_revision < 1:
         _fail("proposal_schema_invalid", "brief revision must be positive")
@@ -171,6 +208,38 @@ def _validate_revision_proposal(
         _fail(code, detail)
     _validate_capabilities(payload, profile_snapshot)
     _validate_budget(payload, profile_snapshot)
+    if isinstance(payload, PlanningRevisionProposalPayloadV4):
+        _validate_collaboration_request(payload, profile_snapshot)
+
+
+def _validate_collaboration_request(
+    payload: PlanningProposalPayloadV4 | PlanningRevisionProposalPayloadV4,
+    profile_snapshot: PlanningProfileSnapshot,
+) -> None:
+    request = payload.collaboration_policy_request
+    if not isinstance(request, CollaborationPolicyRequestV1):
+        _fail(
+            "proposal_schema_invalid",
+            "collaboration policy request is invalid",
+        )
+    request.validate_for_subtasks(frozenset(item.key for item in payload.subtasks))
+    if request.mode is CollaborationMode.DISABLED:
+        return
+    binding = profile_snapshot.collaboration_runtime_binding
+    if binding is None:
+        _fail(
+            "proposal_collaboration_binding_missing",
+            "enabled collaboration policy requires a pinned runtime binding",
+        )
+    supported = set(binding.runtime_capability_snapshot.strategy_ids)
+    requested = {request.default_policy.strategy_id.value}
+    requested.update(item.strategy_id.value for item in request.subtask_overrides)
+    unsupported = sorted(requested - supported)
+    if unsupported:
+        _fail(
+            "proposal_collaboration_strategy_unsupported",
+            f"runtime does not support collaboration strategy: {', '.join(unsupported)}",
+        )
 
 
 def _validate_unique_keys(payload: PlanningProposalPayload) -> None:

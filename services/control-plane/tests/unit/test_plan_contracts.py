@@ -3,6 +3,8 @@ from uuid import UUID
 
 import pytest
 
+from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.plans import (
     Dependency,
     DependencyEnforcement,
@@ -444,3 +446,68 @@ def test_schema_v2_rejects_invalid_fixed_three_layer_shapes(
         TaskPlanSnapshot.from_payload(mutate(plan_v2_payload()))
 
     assert error.value.reason == reason
+
+
+def collaboration_policy_payload(
+    *, overrides: list[dict[str, object]] | None = None
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "runtime_definition_id": "61000000-0000-0000-0000-000000000001",
+        "runtime_instance_id": "62000000-0000-0000-0000-000000000001",
+        "runtime_interface_version": "collaboration-runtime-v1",
+        "runtime_config_version": 3,
+        "runtime_capability_snapshot": {
+            "interface_version": "collaboration-runtime-v1",
+            "projection_schema_versions": [1],
+            "decision_schema_versions": [1],
+            "strategy_ids": ["all_required"],
+            "idempotency": "operation-id",
+            "max_projection_bytes": 262_144,
+            "max_decision_bytes": 65_536,
+            "max_intents_per_decision": 128,
+            "max_strategy_state_bytes": 16_384,
+            "stability": "experimental",
+        },
+        "default_policy": {"enabled": True, "strategy_id": "all_required"},
+        "subtask_overrides": overrides or [],
+    }
+
+
+def test_schema_v3_round_trips_policy_and_hashes_policy_changes() -> None:
+    raw = plan_v2_payload()
+    raw["schema_version"] = 3
+    raw["collaboration_policy"] = collaboration_policy_payload()
+
+    snapshot = TaskPlanSnapshot.from_payload(raw)
+    assert snapshot.schema_version == 3
+    assert snapshot.collaboration_policy is not None
+    assert snapshot.to_payload() == raw
+
+    changed = dict(raw)
+    changed["collaboration_policy"] = collaboration_policy_payload(
+        overrides=[
+            {
+                "subtask_key": "integration",
+                "enabled": False,
+                "strategy_id": "all_required",
+            }
+        ]
+    )
+    changed_snapshot = TaskPlanSnapshot.from_payload(changed)
+    assert plan_snapshot_content_hash(changed_snapshot) != plan_snapshot_content_hash(snapshot)
+
+
+def test_schema_v3_requires_explicit_policy_and_keeps_it_strict() -> None:
+    missing = plan_v2_payload()
+    missing["schema_version"] = 3
+    with pytest.raises(PlanValidationError, match="missing field: collaboration_policy"):
+        TaskPlanSnapshot.from_payload(missing)
+
+    unknown = plan_v2_payload()
+    unknown["schema_version"] = 3
+    policy = collaboration_policy_payload()
+    policy["runtime_instance_id"] = "forbidden-planner-field"
+    unknown["collaboration_policy"] = policy
+    with pytest.raises(ValidationError, match="runtime_instance_id"):
+        TaskPlanSnapshot.from_payload(unknown)

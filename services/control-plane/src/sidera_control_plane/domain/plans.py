@@ -7,9 +7,10 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration import CollaborationPolicySnapshotV1
 from sidera_control_plane.domain.errors import ValidationError
 
-SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, 2})
+SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 
 
 class WorkItemKind(StrEnum):
@@ -155,6 +156,7 @@ class TaskPlanSnapshot:
     subtask_milestones: tuple[SubtaskMilestone, ...] = ()
     subtask_dependencies: tuple[SubtaskDependency, ...] = ()
     worker_item_dependencies: tuple[WorkerItemDependency, ...] = ()
+    collaboration_policy: CollaborationPolicySnapshotV1 | None = None
 
     @classmethod
     def create(
@@ -182,6 +184,7 @@ class TaskPlanSnapshot:
         subtask_milestones: tuple[SubtaskMilestone, ...] = (),
         subtask_dependencies: tuple[SubtaskDependency, ...] = (),
         worker_item_dependencies: tuple[WorkerItemDependency, ...] = (),
+        collaboration_policy: CollaborationPolicySnapshotV1 | None = None,
     ) -> TaskPlanSnapshot:
         snapshot = cls(
             id=snapshot_id,
@@ -206,6 +209,7 @@ class TaskPlanSnapshot:
             subtask_milestones=tuple(subtask_milestones),
             subtask_dependencies=tuple(subtask_dependencies),
             worker_item_dependencies=tuple(worker_item_dependencies),
+            collaboration_policy=collaboration_policy,
         )
         snapshot._validate()
         return snapshot
@@ -335,6 +339,67 @@ class TaskPlanSnapshot:
                         for item in required("worker_item_dependencies")
                     ),
                 )
+            if schema_version == 3:
+                _reject_unknown_fields(
+                    payload,
+                    {
+                        "id",
+                        "schema_version",
+                        "workspace_id",
+                        "root_task_id",
+                        "generation",
+                        "parent_snapshot_id",
+                        "source_type",
+                        "source_ref",
+                        "title",
+                        "goal_summary",
+                        "acceptance_refs",
+                        "subtasks",
+                        "worker_items",
+                        "milestones",
+                        "subtask_dependencies",
+                        "worker_item_dependencies",
+                        "collaboration_policy",
+                        "published_by",
+                        "published_at",
+                    },
+                    "plan",
+                )
+                raw_policy = required("collaboration_policy")
+                policy = (
+                    None
+                    if raw_policy is None
+                    else CollaborationPolicySnapshotV1.from_mapping(
+                        _payload_mapping(raw_policy, "collaboration_policy")
+                    )
+                )
+                return cls.create(
+                    **common,
+                    work_items=(),
+                    worker_slots=(),
+                    milestones=(),
+                    dependencies=(),
+                    subtasks=tuple(
+                        _subtask_from_payload(item) for item in required("subtasks")
+                    ),
+                    worker_item_plans=tuple(
+                        _worker_item_plan_from_payload(item)
+                        for item in required("worker_items")
+                    ),
+                    subtask_milestones=tuple(
+                        _subtask_milestone_from_payload(item)
+                        for item in required("milestones")
+                    ),
+                    subtask_dependencies=tuple(
+                        _subtask_dependency_from_payload(item)
+                        for item in required("subtask_dependencies")
+                    ),
+                    worker_item_dependencies=tuple(
+                        _worker_item_dependency_from_payload(item)
+                        for item in required("worker_item_dependencies")
+                    ),
+                    collaboration_policy=policy,
+                )
             return cls.create(**common, work_items=(), worker_slots=(), milestones=(), dependencies=())
         except PlanValidationError:
             raise
@@ -377,7 +442,7 @@ class TaskPlanSnapshot:
                     ],
                 }
             )
-        elif self.schema_version == 2:
+        elif self.schema_version in {2, 3}:
             payload.update(
                 {
                     "subtasks": [
@@ -401,6 +466,12 @@ class TaskPlanSnapshot:
                     ],
                 }
             )
+            if self.schema_version == 3:
+                payload["collaboration_policy"] = (
+                    self.collaboration_policy.to_mapping()
+                    if self.collaboration_policy is not None
+                    else None
+                )
         return payload
 
     def _validate(self) -> None:
@@ -409,8 +480,19 @@ class TaskPlanSnapshot:
                 "unsupported_schema_version",
                 f"unsupported plan schema version: {self.schema_version}",
             )
-        if self.schema_version == 2:
+        if self.schema_version in {2, 3}:
             self._validate_v2()
+            if (
+                self.schema_version == 3
+                and self.collaboration_policy is not None
+                and not isinstance(
+                    self.collaboration_policy, CollaborationPolicySnapshotV1
+                )
+            ):
+                self._fail(
+                    "invalid_collaboration_policy",
+                    "schema v3 collaboration_policy must be a policy snapshot",
+                )
             return
         if self.generation < 1:
             self._fail("invalid_generation", "generation must be positive")
@@ -520,6 +602,11 @@ class TaskPlanSnapshot:
                 self._fail("missing_field", f"{name} is required")
         if self.work_items or self.worker_slots or self.milestones or self.dependencies:
             self._fail("mixed_schema_fields", "schema v2 cannot contain schema v1 fields")
+        if self.schema_version == 2 and self.collaboration_policy is not None:
+            self._fail(
+                "mixed_schema_fields",
+                "schema v2 cannot contain collaboration policy",
+            )
 
         subtask_keys = _unique_keys(
             (item.key for item in self.subtasks), "subtask"
