@@ -171,6 +171,12 @@ def _clear_database(database: Database) -> None:
         )
         session.execute(update(ExecutionRequestModel).values(handoff_transition_id=None))
         session.execute(
+            update(CollaborationRunModel).values(
+                last_projection_snapshot_id=None,
+                last_decision_id=None,
+            )
+        )
+        session.execute(
             update(ExecutionInputModel).values(
                 source_input_id=None,
                 handoff_transition_id=None,

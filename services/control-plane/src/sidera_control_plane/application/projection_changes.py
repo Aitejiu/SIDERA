@@ -52,3 +52,13 @@ class ProjectionChangePublisher:
         )
         self._published[key] = change
         return change
+
+    def latest_cursor(self, workspace_id: UUID) -> int:
+        return self._repository.latest_cursor(workspace_id)
+
+    def latest_target_cursor(
+        self, workspace_id: UUID, projection_type: str, resource_id: UUID
+    ) -> int:
+        return self._repository.latest_target_cursor(
+            workspace_id, projection_type, resource_id
+        )

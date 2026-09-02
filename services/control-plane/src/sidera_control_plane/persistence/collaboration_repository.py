@@ -82,6 +82,24 @@ class CollaborationRunRepository:
         row = self._session.scalar(statement)
         return _to_run(row) if row is not None else None
 
+    def get_for_plan(
+        self,
+        workspace_id: UUID,
+        plan_snapshot_id: UUID,
+        plan_generation: int,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationRun | None:
+        statement = select(CollaborationRunModel).where(
+            CollaborationRunModel.workspace_id == workspace_id,
+            CollaborationRunModel.plan_snapshot_id == plan_snapshot_id,
+            CollaborationRunModel.plan_generation == plan_generation,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_run(row) if row is not None else None
+
     def add(self, run: CollaborationRun) -> None:
         self._session.add(_run_model(run))
 
@@ -163,6 +181,34 @@ class CollaborationEvaluationRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def get_for_projection(
+        self, workspace_id: UUID, projection_snapshot_id: UUID
+    ) -> CollaborationEvaluation | None:
+        row = self._session.scalar(
+            select(CollaborationEvaluationModel).where(
+                CollaborationEvaluationModel.workspace_id == workspace_id,
+                CollaborationEvaluationModel.projection_snapshot_id
+                == projection_snapshot_id,
+            )
+        )
+        return _to_evaluation(row) if row is not None else None
+
+    def get_live_for_run(
+        self, workspace_id: UUID, run_id: UUID, *, now: datetime
+    ) -> CollaborationEvaluation | None:
+        row = self._session.scalar(
+            select(CollaborationEvaluationModel)
+            .where(
+                CollaborationEvaluationModel.workspace_id == workspace_id,
+                CollaborationEvaluationModel.run_id == run_id,
+                CollaborationEvaluationModel.status
+                == CollaborationEvaluationStatus.EVALUATING.value,
+                CollaborationEvaluationModel.lease_expires_at > now,
+            )
+            .order_by(CollaborationEvaluationModel.id.asc())
+        )
+        return _to_evaluation(row) if row is not None else None
+
     def get_or_add(
         self, evaluation: CollaborationEvaluation
     ) -> CollaborationEvaluation:
@@ -180,7 +226,9 @@ class CollaborationEvaluationRepository:
         self._session.execute(
             insert(CollaborationEvaluationModel)
             .values(**_evaluation_values(evaluation))
-            .on_conflict_do_nothing(constraint="uq_collaboration_evaluations_run_projection")
+            .on_conflict_do_nothing(
+                constraint="uq_collaboration_evaluations_run_projection"
+            )
         )
         stored = self._session.scalar(
             select(CollaborationEvaluationModel).where(
@@ -215,8 +263,7 @@ class CollaborationEvaluationRepository:
                 .where(
                     live_row.workspace_id == CollaborationEvaluationModel.workspace_id,
                     live_row.run_id == CollaborationEvaluationModel.run_id,
-                    live_row.status
-                    == CollaborationEvaluationStatus.EVALUATING.value,
+                    live_row.status == CollaborationEvaluationStatus.EVALUATING.value,
                     live_row.lease_expires_at > now,
                 )
                 .correlate(CollaborationEvaluationModel)
@@ -241,8 +288,7 @@ class CollaborationEvaluationRepository:
                 .join(
                     CollaborationRunModel,
                     and_(
-                        CollaborationRunModel.id
-                        == CollaborationEvaluationModel.run_id,
+                        CollaborationRunModel.id == CollaborationEvaluationModel.run_id,
                         CollaborationRunModel.workspace_id
                         == CollaborationEvaluationModel.workspace_id,
                     ),
@@ -270,9 +316,7 @@ class CollaborationEvaluationRepository:
             claimed.append(item)
         return tuple(claimed)
 
-    def save(
-        self, evaluation: CollaborationEvaluation, previous_version: int
-    ) -> None:
+    def save(self, evaluation: CollaborationEvaluation, previous_version: int) -> None:
         result = self._session.execute(
             update(CollaborationEvaluationModel)
             .where(
@@ -301,16 +345,23 @@ class CollaborationEvaluationRepository:
             )
 
     def recover_expired(
-        self, *, now: datetime, limit: int
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        workspace_id: UUID | None = None,
     ) -> tuple[CollaborationEvaluation, ...]:
         _positive_limit(limit)
+        conditions = [
+            CollaborationEvaluationModel.status
+            == CollaborationEvaluationStatus.EVALUATING.value,
+            CollaborationEvaluationModel.lease_expires_at <= now,
+        ]
+        if workspace_id is not None:
+            conditions.append(CollaborationEvaluationModel.workspace_id == workspace_id)
         rows = self._session.scalars(
             select(CollaborationEvaluationModel)
-            .where(
-                CollaborationEvaluationModel.status
-                == CollaborationEvaluationStatus.EVALUATING.value,
-                CollaborationEvaluationModel.lease_expires_at <= now,
-            )
+            .where(*conditions)
             .order_by(
                 CollaborationEvaluationModel.lease_expires_at.asc(),
                 CollaborationEvaluationModel.created_at.asc(),
@@ -347,6 +398,17 @@ class CollaborationLedgerRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def get_projection(
+        self, workspace_id: UUID, projection_snapshot_id: UUID
+    ) -> RuntimeProjectionSnapshot | None:
+        row = self._session.scalar(
+            select(RuntimeProjectionSnapshotModel).where(
+                RuntimeProjectionSnapshotModel.workspace_id == workspace_id,
+                RuntimeProjectionSnapshotModel.id == projection_snapshot_id,
+            )
+        )
+        return _to_projection(row) if row is not None else None
+
     def get_or_add_projection(
         self, snapshot: RuntimeProjectionSnapshot
     ) -> RuntimeProjectionSnapshot:
@@ -354,7 +416,8 @@ class CollaborationLedgerRepository:
             select(RuntimeProjectionSnapshotModel).where(
                 RuntimeProjectionSnapshotModel.workspace_id == snapshot.workspace_id,
                 RuntimeProjectionSnapshotModel.run_id == snapshot.run_id,
-                RuntimeProjectionSnapshotModel.schema_version == snapshot.schema_version,
+                RuntimeProjectionSnapshotModel.schema_version
+                == snapshot.schema_version,
                 RuntimeProjectionSnapshotModel.content_hash == snapshot.content_hash,
             )
         )
@@ -686,7 +749,9 @@ def _capability_mapping(
     }
 
 
-def _capability_from_mapping(value: Mapping[str, Any]) -> CollaborationRuntimeCapabilityProfile:
+def _capability_from_mapping(
+    value: Mapping[str, Any],
+) -> CollaborationRuntimeCapabilityProfile:
     return CollaborationRuntimeCapabilityProfile(
         interface_version=value["interface_version"],
         projection_schema_versions=tuple(value["projection_schema_versions"]),

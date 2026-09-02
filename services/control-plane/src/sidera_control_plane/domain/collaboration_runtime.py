@@ -89,7 +89,9 @@ class RuntimeProjectionV1:
         _hash(self.plan_content_hash, "projection plan_content_hash")
         _positive_int(self.run_resource_version, "projection run_resource_version")
         _non_negative_int(self.fact_cursor, "projection fact_cursor")
-        object.__setattr__(self, "policy", _freeze_projection_mapping(self.policy, "policy"))
+        object.__setattr__(
+            self, "policy", _freeze_projection_mapping(self.policy, "policy")
+        )
         for name in (
             "tasks",
             "subtasks",
@@ -146,6 +148,98 @@ class RuntimeProjectionV1:
             "fingerprints": _json_value(self.fingerprints),
         }
 
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object], *, created_at: datetime
+    ) -> RuntimeProjectionV1:
+        """Rehydrate a stored canonical projection without changing its identity."""
+        mapping = _strict_object(
+            value,
+            "projection",
+            {
+                "schema_version",
+                "projection_id",
+                "workspace_id",
+                "root_task_id",
+                "run_id",
+                "plan_snapshot_id",
+                "plan_generation",
+                "plan_content_hash",
+                "run_resource_version",
+                "fact_cursor",
+                "policy",
+                "tasks",
+                "subtasks",
+                "worker_items",
+                "dependencies",
+                "execution_requests",
+                "executions",
+                "artifacts",
+                "evidence",
+                "releases",
+                "previous_strategy_state",
+                "fingerprints",
+            },
+        )
+        return cls(
+            schema_version=_version(
+                mapping.get("schema_version"), "projection schema_version"
+            ),
+            projection_id=_wire_uuid(mapping.get("projection_id"), "projection_id"),
+            workspace_id=_wire_uuid(mapping.get("workspace_id"), "workspace_id"),
+            root_task_id=_wire_uuid(mapping.get("root_task_id"), "root_task_id"),
+            run_id=_wire_uuid(mapping.get("run_id"), "run_id"),
+            plan_snapshot_id=_wire_uuid(
+                mapping.get("plan_snapshot_id"), "plan_snapshot_id"
+            ),
+            plan_generation=_version(
+                mapping.get("plan_generation"), "projection plan_generation"
+            ),
+            plan_content_hash=_wire_hash(
+                mapping.get("plan_content_hash"), "plan_content_hash"
+            ),
+            run_resource_version=_version(
+                mapping.get("run_resource_version"), "projection run_resource_version"
+            ),
+            fact_cursor=_non_negative_int(
+                mapping.get("fact_cursor"), "projection fact_cursor"
+            ),
+            policy=_wire_mapping(mapping.get("policy"), "projection policy"),
+            tasks=_wire_mapping_sequence(mapping.get("tasks"), "projection tasks"),
+            subtasks=_wire_mapping_sequence(
+                mapping.get("subtasks"), "projection subtasks"
+            ),
+            worker_items=_wire_mapping_sequence(
+                mapping.get("worker_items"), "projection worker_items"
+            ),
+            dependencies=_wire_mapping_sequence(
+                mapping.get("dependencies"), "projection dependencies"
+            ),
+            execution_requests=_wire_mapping_sequence(
+                mapping.get("execution_requests"), "projection execution_requests"
+            ),
+            executions=_wire_mapping_sequence(
+                mapping.get("executions"), "projection executions"
+            ),
+            artifacts=_wire_mapping_sequence(
+                mapping.get("artifacts"), "projection artifacts"
+            ),
+            evidence=_wire_mapping_sequence(
+                mapping.get("evidence"), "projection evidence"
+            ),
+            releases=_wire_mapping_sequence(
+                mapping.get("releases"), "projection releases"
+            ),
+            previous_strategy_state=_wire_mapping(
+                mapping.get("previous_strategy_state"),
+                "projection previous_strategy_state",
+            ),
+            fingerprints=_wire_mapping(
+                mapping.get("fingerprints"), "projection fingerprints"
+            ),
+            created_at=created_at,
+        )
+
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_mapping())
 
@@ -153,7 +247,9 @@ class RuntimeProjectionV1:
     def content_hash(self) -> str:
         return sha256(self.canonical_bytes()).hexdigest()
 
-    def with_fingerprint(self, fingerprints: Mapping[str, object]) -> RuntimeProjectionV1:
+    def with_fingerprint(
+        self, fingerprints: Mapping[str, object]
+    ) -> RuntimeProjectionV1:
         return replace(self, fingerprints=fingerprints)
 
 
@@ -224,7 +320,9 @@ class RuntimeDecisionV1:
             _freeze_json_mapping(self.strategy_state, "strategy_state"),
         )
         intents = tuple(self.intents)
-        if any(not isinstance(item, ReleaseExecutionRequestIntentV1) for item in intents):
+        if any(
+            not isinstance(item, ReleaseExecutionRequestIntentV1) for item in intents
+        ):
             raise RuntimeEnvelopeError("decision contains an invalid intent")
         ordinals = [item.ordinal for item in intents]
         if ordinals != list(range(len(ordinals))):
@@ -342,9 +440,7 @@ def parse_runtime_decision_v1(
         raise RuntimeEnvelopeError("decision intents must be an array")
     if len(raw_intents) > max_intents:
         raise RuntimeEnvelopeError("decision exceeds maximum intent count")
-    outcome = _enum(
-        mapping.get("outcome"), RuntimeDecisionOutcome, "decision outcome"
-    )
+    outcome = _enum(mapping.get("outcome"), RuntimeDecisionOutcome, "decision outcome")
     if outcome is RuntimeDecisionOutcome.NO_CHANGE and raw_intents:
         raise RuntimeEnvelopeError("no_change decision cannot contain intents")
     if outcome is RuntimeDecisionOutcome.INTENTS and not raw_intents:
@@ -419,9 +515,7 @@ def _reject_non_finite(value: str) -> object:
     raise RuntimeEnvelopeError(f"JSON contains non-finite number: {value}")
 
 
-def _strict_object(
-    value: object, name: str, allowed: set[str]
-) -> Mapping[str, object]:
+def _strict_object(value: object, name: str, allowed: set[str]) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise RuntimeEnvelopeError(f"{name} must be a JSON object")
     unknown = sorted(str(key) for key in value if key not in allowed)
@@ -471,9 +565,7 @@ def _reject_private_projection_fields(value: Mapping[str, object], name: str) ->
                     _reject_private_projection_fields(nested, f"{name}.{key}[{index}]")
 
 
-def _freeze_json_mapping(
-    value: object, name: str
-) -> Mapping[str, object]:
+def _freeze_json_mapping(value: object, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise RuntimeEnvelopeError(f"{name} must be a JSON object")
     frozen = _freeze_json(value, name, depth=0)
@@ -577,6 +669,25 @@ def _wire_uuid(value: object, name: str) -> UUID:
         raise RuntimeEnvelopeError(f"{name} must be a UUID string") from exc
 
 
+def _wire_mapping(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise RuntimeEnvelopeError(f"{name} must be an object")
+    return cast(Mapping[str, object], value)
+
+
+def _wire_mapping_sequence(
+    value: object, name: str
+) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise RuntimeEnvelopeError(f"{name} must be an array")
+    items: list[Mapping[str, object]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise RuntimeEnvelopeError(f"{name}[{index}] must be an object")
+        items.append(cast(Mapping[str, object], item))
+    return tuple(items)
+
+
 def _positive_int(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise RuntimeEnvelopeError(f"{name} must be positive")
@@ -628,7 +739,11 @@ def _wire_text(value: object, name: str, maximum: int) -> str:
 
 
 def _aware(value: object, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise RuntimeEnvelopeError(f"{name} must be timezone-aware")
     return value
 

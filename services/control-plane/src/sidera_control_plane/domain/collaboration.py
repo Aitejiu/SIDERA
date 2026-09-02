@@ -630,6 +630,27 @@ class CollaborationRun:
         self.next_evaluation_at = None
         self._bump(now)
 
+    def record_projection(
+        self,
+        *,
+        projection_snapshot_id: UUID,
+        fact_cursor: int,
+        now: datetime,
+    ) -> None:
+        if self.status is not CollaborationRunStatus.ACTIVE:
+            raise InvalidTransition(
+                "only an active collaboration run can prepare an evaluation"
+            )
+        _uuid(projection_snapshot_id, "projection_snapshot_id")
+        _non_negative_int(fact_cursor, "fact_cursor")
+        if fact_cursor < self.last_evaluated_change_cursor:
+            raise ValidationError("projection cursor cannot move backwards")
+        _aware(now, "collaboration projection preparation time")
+        self.last_projection_snapshot_id = projection_snapshot_id
+        self.last_evaluated_change_cursor = fact_cursor
+        self.next_evaluation_at = None
+        self._bump(now)
+
     def _bump(self, now: datetime) -> None:
         self.resource_version += 1
         self.updated_at = now

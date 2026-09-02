@@ -38,8 +38,18 @@ from sidera_control_plane.persistence.models import (
 class SqlAlchemyCollaborationFactStore:
     """Load the bounded, root-scoped facts exposed to a collaboration runtime."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database | None = None,
+        *,
+        session: Session | None = None,
+    ) -> None:
+        if database is None and session is None:
+            raise ValueError("database or session is required")
+        if database is not None and session is not None:
+            raise ValueError("database and session are mutually exclusive")
         self._database = database
+        self._session = session
 
     def load(
         self,
@@ -49,51 +59,81 @@ class SqlAlchemyCollaborationFactStore:
         fact_cursor: int,
     ) -> CollaborationFacts:
         self._validate_run_scope(workspace_id, run, fact_cursor)
+        if self._session is not None:
+            return self._load_from_session(
+                self._session, workspace_id, run, fact_cursor=fact_cursor
+            )
+        if self._database is None:
+            raise RuntimeError("fact store has no database or session")
         with self._database.session() as session:
-            head = session.scalar(
-                select(RootTaskPlanHeadModel).where(
-                    RootTaskPlanHeadModel.workspace_id == workspace_id,
-                    RootTaskPlanHeadModel.root_task_id == run.root_task_id,
-                )
+            return self._load_from_session(
+                session, workspace_id, run, fact_cursor=fact_cursor
             )
-            if head is None:
-                raise ValidationError("collaboration plan head does not exist")
-            if (
-                head.active_snapshot_id != run.plan_snapshot_id
-                or head.active_generation != run.plan_generation
-                or head.active_snapshot_hash != run.plan_content_hash
-            ):
-                raise ValidationError(
-                    "collaboration run is pinned to a stale plan head"
-                )
 
-            snapshot_row = session.scalar(
-                select(PlanSnapshotModel).where(
-                    PlanSnapshotModel.workspace_id == workspace_id,
-                    PlanSnapshotModel.root_task_id == run.root_task_id,
-                    PlanSnapshotModel.id == run.plan_snapshot_id,
-                    PlanSnapshotModel.generation == run.plan_generation,
-                )
-            )
-            if snapshot_row is None:
-                raise ValidationError("collaboration plan snapshot does not exist")
-            snapshot = TaskPlanSnapshot.from_payload(dict(snapshot_row.payload))
-            self._validate_snapshot_identity(snapshot, run)
+    def load_in_session(
+        self,
+        session: Session,
+        workspace_id: UUID,
+        run: CollaborationRun,
+        *,
+        fact_cursor: int,
+    ) -> CollaborationFacts:
+        """Load facts without opening a second transaction."""
+        self._validate_run_scope(workspace_id, run, fact_cursor)
+        return self._load_from_session(
+            session, workspace_id, run, fact_cursor=fact_cursor
+        )
 
-            requests = self._load_requests(session, run, snapshot)
-            request_ids = tuple(item.id for item in requests)
-            dependencies = self._load_dependencies(session, run, request_ids)
-            lineage_ids = tuple(
-                item.execution_lineage_id
-                for item in requests
-                if item.execution_lineage_id is not None
+    def _load_from_session(
+        self,
+        session: Session,
+        workspace_id: UUID,
+        run: CollaborationRun,
+        *,
+        fact_cursor: int,
+    ) -> CollaborationFacts:
+        head = session.scalar(
+            select(RootTaskPlanHeadModel).where(
+                RootTaskPlanHeadModel.workspace_id == workspace_id,
+                RootTaskPlanHeadModel.root_task_id == run.root_task_id,
             )
-            executions = self._load_executions(session, workspace_id, lineage_ids)
-            execution_ids = tuple(item.id for item in executions)
-            artifacts = self._load_artifacts(session, workspace_id, execution_ids)
-            evidence = self._load_evidence(session, workspace_id, execution_ids)
-            releases = self._load_releases(session, run, request_ids)
-            previous_strategy_state = self._load_previous_strategy_state(session, run)
+        )
+        if head is None:
+            raise ValidationError("collaboration plan head does not exist")
+        if (
+            head.active_snapshot_id != run.plan_snapshot_id
+            or head.active_generation != run.plan_generation
+            or head.active_snapshot_hash != run.plan_content_hash
+        ):
+            raise ValidationError("collaboration run is pinned to a stale plan head")
+
+        snapshot_row = session.scalar(
+            select(PlanSnapshotModel).where(
+                PlanSnapshotModel.workspace_id == workspace_id,
+                PlanSnapshotModel.root_task_id == run.root_task_id,
+                PlanSnapshotModel.id == run.plan_snapshot_id,
+                PlanSnapshotModel.generation == run.plan_generation,
+            )
+        )
+        if snapshot_row is None:
+            raise ValidationError("collaboration plan snapshot does not exist")
+        snapshot = TaskPlanSnapshot.from_payload(dict(snapshot_row.payload))
+        self._validate_snapshot_identity(snapshot, run)
+
+        requests = self._load_requests(session, run, snapshot)
+        request_ids = tuple(item.id for item in requests)
+        dependencies = self._load_dependencies(session, run, request_ids)
+        lineage_ids = tuple(
+            item.execution_lineage_id
+            for item in requests
+            if item.execution_lineage_id is not None
+        )
+        executions = self._load_executions(session, workspace_id, lineage_ids)
+        execution_ids = tuple(item.id for item in executions)
+        artifacts = self._load_artifacts(session, workspace_id, execution_ids)
+        evidence = self._load_evidence(session, workspace_id, execution_ids)
+        releases = self._load_releases(session, run, request_ids)
+        previous_strategy_state = self._load_previous_strategy_state(session, run)
 
         return CollaborationFacts(
             plan_head=CollaborationPlanHeadFact(

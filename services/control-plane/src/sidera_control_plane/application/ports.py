@@ -977,6 +977,16 @@ class CollaborationRunRepositoryPort(Protocol):
     ) -> CollaborationRun | None:
         raise NotImplementedError
 
+    def get_for_plan(
+        self,
+        workspace_id: UUID,
+        plan_snapshot_id: UUID,
+        plan_generation: int,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationRun | None:
+        raise NotImplementedError
+
     def add(self, run: CollaborationRun) -> None:
         raise NotImplementedError
 
@@ -1001,6 +1011,16 @@ class CollaborationFactStorePort(Protocol):
 
 
 class CollaborationEvaluationRepositoryPort(Protocol):
+    def get_for_projection(
+        self, workspace_id: UUID, projection_snapshot_id: UUID
+    ) -> CollaborationEvaluation | None:
+        raise NotImplementedError
+
+    def get_live_for_run(
+        self, workspace_id: UUID, run_id: UUID, *, now: datetime
+    ) -> CollaborationEvaluation | None:
+        raise NotImplementedError
+
     def get_or_add(
         self, evaluation: CollaborationEvaluation
     ) -> CollaborationEvaluation:
@@ -1017,18 +1037,25 @@ class CollaborationEvaluationRepositoryPort(Protocol):
     ) -> tuple[CollaborationEvaluation, ...]:
         raise NotImplementedError
 
-    def save(
-        self, evaluation: CollaborationEvaluation, previous_version: int
-    ) -> None:
+    def save(self, evaluation: CollaborationEvaluation, previous_version: int) -> None:
         raise NotImplementedError
 
     def recover_expired(
-        self, *, now: datetime, limit: int
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        workspace_id: UUID | None = None,
     ) -> tuple[CollaborationEvaluation, ...]:
         raise NotImplementedError
 
 
 class CollaborationLedgerRepositoryPort(Protocol):
+    def get_projection(
+        self, workspace_id: UUID, projection_snapshot_id: UUID
+    ) -> RuntimeProjectionSnapshot | None:
+        raise NotImplementedError
+
     def get_or_add_projection(
         self, snapshot: RuntimeProjectionSnapshot
     ) -> RuntimeProjectionSnapshot:
@@ -1258,6 +1285,14 @@ class ProjectionChangePublisherPort(Protocol):
         resource_version: int | None,
         correlation_id: UUID,
     ) -> ProjectionChange:
+        raise NotImplementedError
+
+    def latest_cursor(self, workspace_id: UUID) -> int:
+        raise NotImplementedError
+
+    def latest_target_cursor(
+        self, workspace_id: UUID, projection_type: str, resource_id: UUID
+    ) -> int:
         raise NotImplementedError
 
 
@@ -1932,6 +1967,9 @@ class ControlPlaneUnitOfWork(Protocol):
     worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort
     execution_requests: ExecutionRequestRepositoryPort
+    collaboration_runs: CollaborationRunRepositoryPort
+    collaboration_evaluations: CollaborationEvaluationRepositoryPort
+    collaboration_ledger: CollaborationLedgerRepositoryPort
     handoff_proposals: HandoffProposalRepositoryPort
     handoff_transitions: HandoffTransitionRepositoryPort
     handoff_context_bundles: HandoffContextBundleRepositoryPort
