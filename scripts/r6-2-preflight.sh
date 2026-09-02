@@ -559,7 +559,7 @@ validate_uuid SIDERA_WORKSPACE_ID "$SIDERA_WORKSPACE_ID"
 validate_flag SIDERA_R6_2_REAL_OPENCODE "$SIDERA_R6_2_REAL_OPENCODE"
 validate_flag SIDERA_R6_2_SECOND_ADAPTER "$SIDERA_R6_2_SECOND_ADAPTER"
 case "$SIDERA_R6_2_SECOND_ADAPTER_TYPE" in
-  ''|*[!A-Za-z0-9._:-]*) fail "SIDERA_R6_2_SECOND_ADAPTER_TYPE contains unsupported characters" ;;
+  *[!A-Za-z0-9._:-]*) fail "SIDERA_R6_2_SECOND_ADAPTER_TYPE contains unsupported characters" ;;
 esac
 if [ "$SIDERA_R6_2_SECOND_ADAPTER" = 1 ]; then
   require_value SIDERA_R6_2_SECOND_ADAPTER_TYPE "$SIDERA_R6_2_SECOND_ADAPTER_TYPE"

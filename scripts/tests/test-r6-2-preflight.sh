@@ -141,6 +141,8 @@ write_env() {
   local model=${1:-opencode-go/MiMo-V2.5}
   local real_opencode=${2:-0}
   local second_adapter=${3:-0}
+  local second_adapter_type=''
+  [ "$second_adapter" != 1 ] || second_adapter_type=registered-second-adapter
   printf '%s\n' \
     '# fixture comment' \
     '' \
@@ -155,7 +157,7 @@ write_env() {
     "SIDERA_OPENCODE_MODEL=$model" \
     "SIDERA_R6_2_REAL_OPENCODE=$real_opencode" \
     "SIDERA_R6_2_SECOND_ADAPTER=$second_adapter" \
-    'SIDERA_R6_2_SECOND_ADAPTER_TYPE=not-registered' > "$ENV_FILE"
+    "SIDERA_R6_2_SECOND_ADAPTER_TYPE=$second_adapter_type" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 }
 
@@ -289,6 +291,11 @@ assert_failure "duplicate database identity" run_preflight "$TMP/same-db.env"
 write_env "invalid-model"
 assert_failure "malformed model" run_preflight
 write_env
+
+sed 's/^SIDERA_R6_2_SECOND_ADAPTER=0$/SIDERA_R6_2_SECOND_ADAPTER=1/' \
+  "$ENV_FILE" > "$TMP/missing-second-adapter-type.env"
+chmod 600 "$TMP/missing-second-adapter-type.env"
+assert_failure "missing second Adapter type" run_preflight "$TMP/missing-second-adapter-type.env"
 
 export SIDERA_FAKE_PORT_CONFLICT=1
 assert_failure "occupied port" run_preflight
