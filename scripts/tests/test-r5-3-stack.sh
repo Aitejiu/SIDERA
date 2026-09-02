@@ -81,7 +81,7 @@ write_env() {
     "SIDERA_AKASHIC_CONFIG=$AKASHIC_DIR/config.toml" \
     "SIDERA_OPENCODE_EXECUTABLE=$TMP/opencode" \
     'SIDERA_OPENCODE_EXPECTED_VERSION=1.18.19' \
-    'SIDERA_OPENCODE_MODEL=opencode-go/MiMo-V2.5' \
+    'SIDERA_OPENCODE_MODEL=opencode-go/mimo-v2.5' \
     'SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=300' \
     'SIDERA_PLANNING_PROFILE_ID=00000000-0000-0000-0000-000000000002' \
     'SIDERA_PLANNING_PROFILE_VERSION=1' > "$ENV_FILE"
@@ -341,7 +341,7 @@ assert_contains 'SIDERA_KNOWLEDGE_LOCAL_OWNER_TOKEN=<unset>' "$CP_CAPTURE" 'cont
 assert_contains 'SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN=<unset>' "$CP_CAPTURE" 'control plane main agent capability isolation'
 assert_contains 'SIDERA_DATABASE_URL=postgresql://127.0.0.1:55432/sidera' "$CP_CAPTURE" 'control plane database'
 assert_contains 'SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN=fake-knowledge-control-plane-token' "$CP_CAPTURE" 'control plane capability'
-assert_contains 'SIDERA_PLANNING_OPENCODE_MODEL=opencode-go/MiMo-V2.5' "$PLANNING_CAPTURE" 'planning model configuration'
+assert_contains 'SIDERA_PLANNING_OPENCODE_MODEL=opencode-go/mimo-v2.5' "$PLANNING_CAPTURE" 'planning model configuration'
 assert_contains 'SIDERA_PLANNING_OPENCODE_REQUEST_TIMEOUT_SECONDS=300' "$PLANNING_CAPTURE" 'planning request timeout'
 assert_contains 'SIDERA_MAIN_AGENT_AKASHIC_ENDPOINT=127.0.0.1:9000' "$GATEWAY_CAPTURE" 'gateway endpoint'
 assert_contains 'SIDERA_MAIN_AGENT_AKASHIC_WORKSPACE_TOKEN=fake-akashic-workspace-token' "$GATEWAY_CAPTURE" 'gateway workspace token'

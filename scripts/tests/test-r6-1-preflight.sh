@@ -78,7 +78,7 @@ make_fake_commands() {
 write_env() {
   local control_url=${1:-http://127.0.0.1:8000}
   local workspace_id=${2:-20000000-0000-0000-0000-000000000001}
-  local model=${3:-opencode-go/MiMo-V2.5}
+  local model=${3:-opencode-go/mimo-v2.5}
   printf '%s\n' \
     '# fixture comment' \
     '' \
@@ -193,7 +193,7 @@ sed 's/^SIDERA_OPENCODE_MODEL=.*/SIDERA_OPENCODE_MODEL=/' "$ENV_FILE" > "$TMP/mi
 chmod 600 "$TMP/missing-model.env"
 assert_failure "missing model" run_preflight "$TMP/missing-model.env"
 
-write_env http://127.0.0.1:8000 20000000-0000-0000-0000-000000000001 opencode-go/MiMo-V2.5
+write_env http://127.0.0.1:8000 20000000-0000-0000-0000-000000000001 opencode-go/mimo-v2.5
 export R6_1_FAKE_PATCH_CAPABILITY=1
 assert_failure "OpenCode patch capability" run_preflight
 unset R6_1_FAKE_PATCH_CAPABILITY

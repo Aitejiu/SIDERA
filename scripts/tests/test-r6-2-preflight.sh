@@ -138,7 +138,7 @@ write_identity() {
 }
 
 write_env() {
-  local model=${1:-opencode-go/MiMo-V2.5}
+  local model=${1:-opencode-go/mimo-v2.5}
   local real_opencode=${2:-0}
   local second_adapter=${3:-0}
   local second_adapter_type=''
@@ -344,7 +344,7 @@ else
 fi
 unset SIDERA_FAKE_OPENCODE_UNSUPPORTED
 
-write_env opencode-go/MiMo-V2.5 1 1
+write_env opencode-go/mimo-v2.5 1 1
 export SIDERA_FAKE_OPENCODE_REAL_PASS=1
 export SIDERA_FAKE_SECOND_ADAPTER_PASS=1
 if output=$(run_preflight 2>&1); then
