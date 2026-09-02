@@ -285,6 +285,18 @@ const blockedTransition: HandoffTransition = {
   recovery_inspected_at: "2026-08-23T08:07:00Z",
 } as unknown as HandoffTransition;
 
+const recoveredTransition: HandoffTransition = {
+  ...blockedTransition,
+  version: 3,
+  status: "blocked",
+  phase: "create_target_execution",
+  writer_state: "writer_none",
+  logical_attempt: 2,
+  failure_code: null,
+  available_recovery_strategies: [],
+  recovery_evidence_refs: ["event:handoff-2"],
+};
+
 function renderDialog(
   onRefreshCandidates = vi.fn(async () => undefined),
   onRefresh = vi.fn(async () => undefined),
@@ -484,5 +496,41 @@ describe("HandoffProgress", () => {
     expect(await within(progress).findByText("恢复请求已记录，正在读取新的切换状态。")).toBeVisible();
     expect(requestBody?.target_type).toBe("handoff_transition");
     expect(requestBody?.target_id).toBe(TRANSITION_ID);
+  });
+
+  it("keeps the recovery acknowledgement visible while the transition refreshes", async () => {
+    const user = userEvent.setup();
+    let transitionReads = 0;
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/handoff-transitions/${TRANSITION_ID}`,
+        () => HttpResponse.json(transitionReads++ === 0 ? blockedTransition : recoveredTransition),
+      ),
+      http.post("/api/v1/commands", () => HttpResponse.json({
+        command_id: "command-5",
+        aggregate_id: TRANSITION_ID,
+        aggregate_version: 3,
+        event_ids: [],
+      })),
+    );
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter>
+          <HandoffProgress
+            workspaceId={WORKSPACE_ID}
+            transitionId={TRANSITION_ID}
+            onRefresh={vi.fn(async () => undefined)}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const progress = await screen.findByRole("region", { name: "Agent 切换进度" });
+    await user.type(within(progress).getByRole("textbox", { name: "恢复原因" }), "确认目标尚未启动");
+    await user.type(within(progress).getByRole("textbox", { name: "证据引用" }), "event:handoff-2");
+    await user.click(within(progress).getByRole("button", { name: "提交恢复策略" }));
+    await waitFor(() => expect(transitionReads).toBe(2));
+
+    await expect(within(progress).getByText("恢复请求已记录，正在读取新的切换状态。")).toBeVisible();
   });
 });

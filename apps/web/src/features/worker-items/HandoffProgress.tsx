@@ -126,6 +126,7 @@ function HandoffProgressView({
   const isUnknownTargetStart = transition.status === "blocked_unknown"
     || transition.failure_code === "target_start_unknown";
   const evidence = evidenceRefs.split(",").map((value) => value.trim()).filter(Boolean);
+  const recoveryAcknowledged = recoveryStatus === "submitted";
   const canSubmitRecovery = recoveryOpen
     && selectedStrategy !== ""
     && reason.trim().length > 0
@@ -214,16 +215,18 @@ function HandoffProgressView({
         <TraceLink workspaceId={workspaceId} label="查看目标 Agent Trace" descriptor={transition.target_trace_descriptor ?? transition.target.execution?.trace_descriptor} />
       </div>
 
-      {blocked && allowedStrategies.length > 0 ? (
+      {blocked && (allowedStrategies.length > 0 || recoveryAcknowledged) ? (
         <section className="handoff-progress__recovery" aria-labelledby="handoff-recovery-title">
           <div className="handoff-progress__recovery-heading">
             <div>
               <span className="eyebrow">BOUNDED RECOVERY</span>
               <h3 id="handoff-recovery-title">恢复这次切换</h3>
             </div>
-            <span>{allowedStrategies.length} 个后端允许策略</span>
+            <span>{recoveryAcknowledged ? "请求已记录" : `${allowedStrategies.length} 个后端允许策略`}</span>
           </div>
-          {!recoveryOpen ? (
+          {recoveryAcknowledged ? (
+            <div className="handoff-progress__success" role="status">恢复请求已记录，正在读取新的切换状态。</div>
+          ) : !recoveryOpen ? (
             <button className="quiet-button" type="button" onClick={() => {
               setRecoveryOpen(true);
               setStrategy(allowedStrategies[0] ?? "");
@@ -277,7 +280,6 @@ function HandoffProgressView({
                 </div>
               ) : null}
               {recoveryError ? <div className="handoff-progress__error" role="alert"><CircleAlert size={14} aria-hidden="true" />{recoveryError}</div> : null}
-              {recoveryStatus === "submitted" ? <div className="handoff-progress__success" role="status">恢复请求已记录，正在读取新的切换状态。</div> : null}
               <div className="handoff-progress__recovery-actions">
                 <button className="quiet-button" type="button" onClick={() => setRecoveryOpen(false)} disabled={recoveryStatus === "submitting"}>收起</button>
                 <button className="primary-button" type="button" onClick={() => void submitRecovery()} disabled={!canSubmitRecovery}>

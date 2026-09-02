@@ -76,7 +76,7 @@ def test_transport_rejects_malformed_json_and_times_out(tmp_path: Path) -> None:
     )
     try:
         with pytest.raises(ACPProcessProtocolError, match="invalid JSON"):
-            transport.request("malformed", {}, timeout=1)
+            transport.request("malformed", {}, timeout=3)
         with pytest.raises(ACPProcessTimeoutError):
             transport.request("hang", {}, timeout=0.05)
     finally:

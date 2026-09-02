@@ -1,0 +1,261 @@
+#!/bin/bash
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/sidera-r6-2-preflight.XXXXXX")
+RUNTIME_DIR="$ROOT/.r6-2-preflight-runtime-$PPID"
+trap 'rm -rf "$TMP"; rm -rf "$RUNTIME_DIR"; rm -f "$ROOT/.r6-2-preflight-symlink-$PPID"' EXIT HUP INT TERM
+
+FAKE_BIN="$TMP/bin"
+ENV_FILE="$TMP/r6-2.local.env"
+AKASHIC_NOT_ALLOWED="$TMP/should-not-be-read"
+OPENCODE="$FAKE_BIN/opencode"
+UV_LOG="$TMP/uv.log"
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+make_fake_commands() {
+  mkdir -p "$FAKE_BIN" "$RUNTIME_DIR"
+  chmod 700 "$RUNTIME_DIR"
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1:-}" = "--prefix" ]; then printf "/opt/homebrew/opt/postgresql@16\\n"; exit 0; fi' \
+    'exit 0' > "$FAKE_BIN/brew"
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s|db=%s\\n" "$*" "${SIDERA_DATABASE_URL##*/}" >> "$SIDERA_R6_2_FAKE_UV_LOG"' \
+    'case "$*" in' \
+    '  *"python --version") printf "Python 3.12.14\\n" ;;' \
+    '  *"opencode_preflight"*)' \
+    '    if [ "$SIDERA_FAKE_OPENCODE_UNSUPPORTED" = "1" ]; then printf '\''%s\\n'\'' '\''{"status":"ok","handoff_status":"unsupported"}'\''; else printf '\''%s\\n'\'' '\''{"status":"ok","handoff_status":"supported"}'\''; fi' \
+    '    ;;' \
+    '  *"alembic"*"heads"*)' \
+    '    if [ "${SIDERA_FAKE_MIGRATION_MULTI_HEAD:-0}" = "1" ]; then printf "0021_r6_2_retired_handoff_targets (head)\\n0021_other (head)\\n"; elif [ "${SIDERA_FAKE_MIGRATION_MISMATCH:-0}" = "1" ]; then printf "0019_r6_2_agent_handoff (head)\\n"; else printf "0021_r6_2_retired_handoff_targets (head)\\n"; fi' \
+    '    ;;' \
+    '  *"alembic"*"current"*)' \
+    '    if [ "${SIDERA_FAKE_MIGRATION_MISMATCH:-0}" = "1" ]; then printf "0019_r6_2_agent_handoff (head)\\n"; else printf "0021_r6_2_retired_handoff_targets (head)\\n"; fi' \
+    '    ;;' \
+    '  *"alembic"*"history"*) printf "0021_r6_2_retired_handoff_targets -> 0020_r6_2_workspace_transfer_outcome -> 0019_r6_2_agent_handoff\\n" ;;' \
+    '  *"alembic"*"upgrade head"*) printf "upgrade complete\\n" ;;' \
+    '  *"test_database_schema.py"*) printf "3 passed\\n" ;;' \
+    '  *"test_r6_2_real_opencode_handoff.py"*)' \
+    '    [ "${SIDERA_FAKE_OPENCODE_REAL_PASS:-0}" = "1" ] && printf "1 passed\\n" || printf "1 skipped\\n"' \
+    '    ;;' \
+    '  *"test_r6_2_second_adapter_handoff.py"*)' \
+    '    [ "${SIDERA_FAKE_SECOND_ADAPTER_PASS:-0}" = "1" ] && printf "1 passed\\n" || printf "1 skipped\\n"' \
+    '    ;;' \
+    'esac' > "$FAKE_BIN/uv"
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "v24.19.0\\n"' > "$FAKE_BIN/node"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1:-}" = "--version" ]; then printf "11.17.0\\n"; else printf "npm ok\\n"; fi' > "$FAKE_BIN/npm"
+  printf '%s\n' '#!/bin/sh' 'printf "{}\\n"' > "$FAKE_BIN/curl"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/git"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/pg_isready"
+  printf '%s\n' '#!/bin/sh' 'printf "Python 3.12.14\\n"' > "$FAKE_BIN/python3"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case "$*" in' \
+    '  *"-iTCP:8000"*) [ "${SIDERA_FAKE_PORT_CONFLICT:-0}" = "1" ] && printf "42424\\n" ;;' \
+    'esac' > "$FAKE_BIN/lsof"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/ps"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$FAKE_BIN/shasum"
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1:-}" = "--version" ]; then printf "opencode 1.18.19\\n"; fi' > "$OPENCODE"
+  chmod +x "$FAKE_BIN"/*
+}
+
+write_env() {
+  local model=${1:-opencode-go/MiMo-V2.5}
+  local real_opencode=${2:-0}
+  local second_adapter=${3:-0}
+  printf '%s\n' \
+    '# fixture comment' \
+    '' \
+    'SIDERA_DATABASE_URL=postgresql+psycopg://sidera:fake-db-password@127.0.0.1:55432/sidera_r62_runtime' \
+    'SIDERA_R6_2_TEST_DATABASE_URL=postgresql+psycopg://sidera:fake-db-password@127.0.0.1:55432/sidera_r62_test' \
+    'SIDERA_WORKSPACE_ID=20000000-0000-0000-0000-000000000001' \
+    'SIDERA_CONTROL_PLANE_URL=http://127.0.0.1:8000' \
+    'SIDERA_MAIN_AGENT_GATEWAY_URL=http://127.0.0.1:8010' \
+    'SIDERA_WEB_URL=http://127.0.0.1:4173' \
+    "SIDERA_OPENCODE_EXECUTABLE=$OPENCODE" \
+    'SIDERA_OPENCODE_EXPECTED_VERSION=1.18.19' \
+    "SIDERA_OPENCODE_MODEL=$model" \
+    "SIDERA_R6_2_REAL_OPENCODE=$real_opencode" \
+    "SIDERA_R6_2_SECOND_ADAPTER=$second_adapter" \
+    'SIDERA_R6_2_SECOND_ADAPTER_TYPE=not-registered' > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+run_preflight() {
+  local env_file=${1:-$ENV_FILE}
+  shift || true
+  PATH="$FAKE_BIN:/usr/bin:/bin" \
+    SIDERA_R6_2_ENV_FILE="$env_file" \
+    SIDERA_R6_2_RUNTIME_DIR="$RUNTIME_DIR" \
+    SIDERA_R6_2_FAKE_UV_LOG="$UV_LOG" \
+    /bin/bash "$ROOT/scripts/r6-2-preflight.sh" "$@"
+}
+
+assert_failure() {
+  local label=$1
+  shift
+  local output
+  if output=$("$@" 2>&1); then
+    printf '%s\n' "$output" >&2
+    fail "$label should fail"
+  fi
+  case "$output" in
+    *fake-db-password*|*AKASHIC_NOT_ALLOWED*)
+      fail "$label leaked a secret or disallowed provider value"
+      ;;
+  esac
+}
+
+make_fake_commands
+write_env
+
+if output=$(run_preflight 2>&1); then
+  case "$output" in
+    *fake-db-password*|*SIDERA_DATABASE_URL=*) fail "valid preflight leaked private configuration" ;;
+  esac
+  case "$output" in
+    *"deterministic=pass"*) ;; *) fail "valid preflight omitted deterministic result" ;; esac
+  case "$output" in
+    *"opencode_preflight=supported"*) ;; *) fail "valid preflight omitted OpenCode support" ;; esac
+  case "$output" in
+    *"opencode_real=absent"*) ;; *) fail "valid preflight misclassified absent OpenCode gate" ;; esac
+  case "$output" in
+    *"second_adapter_real=absent"*) ;; *) fail "valid preflight misclassified absent second Adapter gate" ;; esac
+  case "$output" in
+    *"release_classification=partial_gate"*) ;; *) fail "valid preflight omitted partial classification" ;; esac
+else
+  printf '%s\n' "$output" >&2
+  fail "valid preflight should pass"
+fi
+
+case "$(cat "$UV_LOG")" in
+  *"db=sidera_r62_test"*) ;; *) fail "migration checks did not use the disposable test database" ;;
+esac
+case "$(cat "$UV_LOG")" in
+  *"db=sidera_r62_runtime"*) fail "migration test touched the development database" ;;
+esac
+
+help_output=$(PATH="$FAKE_BIN:/usr/bin:/bin" /bin/bash "$ROOT/scripts/r6-2-preflight.sh" --help)
+case "$help_output" in *"usage:"*) ;; *) fail "--help omitted usage" ;; esac
+assert_failure "unknown argument" env PATH="$FAKE_BIN:/usr/bin:/bin" /bin/bash "$ROOT/scripts/r6-2-preflight.sh" --unknown
+
+awk '{printf "%s\r\n", $0}' "$ENV_FILE" > "$TMP/crlf.env"
+chmod 600 "$TMP/crlf.env"
+run_preflight "$TMP/crlf.env" >/dev/null
+
+printf '%s\n' 'SIDERA_WEB_URL=http://127.0.0.1:4174' >> "$ENV_FILE"
+assert_failure "duplicate key" run_preflight
+write_env
+
+printf '%s\n' 'SIDERA_UNKNOWN=value' >> "$ENV_FILE"
+assert_failure "unknown key" run_preflight
+write_env
+
+printf '%s\n' 'export SIDERA_WEB_URL=http://127.0.0.1:4174' >> "$ENV_FILE"
+assert_failure "export syntax" run_preflight
+write_env
+
+touch_target="$TMP/command-substitution-ran"
+printf 'SIDERA_WEB_URL=$(touch %s)\n' "$touch_target" >> "$ENV_FILE"
+assert_failure "command substitution" run_preflight
+[ ! -e "$touch_target" ] || fail "command substitution was evaluated"
+write_env
+
+printf '%s\n' 'SIDERA_WEB_URL=http://not-a-url' >> "$ENV_FILE"
+assert_failure "malformed loopback value" run_preflight
+write_env
+
+chmod 644 "$ENV_FILE"
+assert_failure "world-readable env" run_preflight
+chmod 600 "$ENV_FILE"
+
+ln -s "$ENV_FILE" "$TMP/env-symlink"
+assert_failure "symlink env" run_preflight "$TMP/env-symlink"
+
+write_env
+printf '%s\n' 'SIDERA_DATABASE_URL=postgresql://sidera:fake-db-password@192.0.2.10:55432/sidera_r62_runtime' >> "$TMP/non-loopback.env"
+chmod 600 "$TMP/non-loopback.env"
+assert_failure "non-loopback database" run_preflight "$TMP/non-loopback.env"
+
+sed 's/sidera_r62_test/sidera_r62_runtime/' "$ENV_FILE" > "$TMP/same-db.env"
+chmod 600 "$TMP/same-db.env"
+assert_failure "duplicate database identity" run_preflight "$TMP/same-db.env"
+
+write_env "invalid-model"
+assert_failure "malformed model" run_preflight
+write_env
+
+export SIDERA_FAKE_PORT_CONFLICT=1
+assert_failure "occupied port" run_preflight
+unset SIDERA_FAKE_PORT_CONFLICT
+
+export SIDERA_FAKE_MIGRATION_MISMATCH=1
+assert_failure "migration mismatch" run_preflight
+unset SIDERA_FAKE_MIGRATION_MISMATCH
+
+export SIDERA_FAKE_MIGRATION_MULTI_HEAD=1
+assert_failure "multiple migration heads" run_preflight
+unset SIDERA_FAKE_MIGRATION_MULTI_HEAD
+
+outside_runtime="$TMP/outside-runtime"
+mkdir -p "$outside_runtime"
+chmod 700 "$outside_runtime"
+assert_failure "runtime outside repository" env PATH="$FAKE_BIN:/usr/bin:/bin" \
+  SIDERA_R6_2_ENV_FILE="$ENV_FILE" SIDERA_R6_2_FAKE_UV_LOG="$UV_LOG" \
+  /bin/bash "$ROOT/scripts/r6-2-preflight.sh" --runtime-dir "$outside_runtime"
+
+symlink_runtime_target="$TMP/symlink-runtime-target"
+mkdir -p "$symlink_runtime_target"
+chmod 700 "$symlink_runtime_target"
+symlink_runtime="$ROOT/.r6-2-preflight-symlink-$PPID"
+ln -s "$symlink_runtime_target" "$symlink_runtime"
+assert_failure "symlink runtime" env PATH="$FAKE_BIN:/usr/bin:/bin" \
+  SIDERA_R6_2_ENV_FILE="$ENV_FILE" SIDERA_R6_2_FAKE_UV_LOG="$UV_LOG" \
+  /bin/bash "$ROOT/scripts/r6-2-preflight.sh" --runtime-dir "$symlink_runtime"
+rm -f "$symlink_runtime"
+
+chmod 755 "$RUNTIME_DIR"
+assert_failure "runtime permissions" run_preflight
+chmod 700 "$RUNTIME_DIR"
+
+export SIDERA_FAKE_OPENCODE_UNSUPPORTED=1
+if output=$(run_preflight 2>&1); then
+  case "$output" in
+    *"opencode_preflight=unsupported"*) ;; *) fail "unsupported OpenCode status was not reported" ;; esac
+  case "$output" in
+    *"release_classification=partial_gate"*) ;; *) fail "unsupported OpenCode status changed classification incorrectly" ;; esac
+else
+  printf '%s\n' "$output" >&2
+  fail "unsupported OpenCode preflight should remain a non-blocking partial gate"
+fi
+unset SIDERA_FAKE_OPENCODE_UNSUPPORTED
+
+write_env opencode-go/MiMo-V2.5 1 1
+export SIDERA_FAKE_OPENCODE_REAL_PASS=1
+export SIDERA_FAKE_SECOND_ADAPTER_PASS=1
+if output=$(run_preflight 2>&1); then
+  case "$output" in *"opencode_real=pass"*) ;; *) fail "real OpenCode pass was not classified" ;; esac
+  case "$output" in *"second_adapter_real=pass"*) ;; *) fail "second Adapter pass was not classified" ;; esac
+  case "$output" in *"release_classification=complete"*) ;; *) fail "complete classification was not emitted" ;; esac
+else
+  printf '%s\n' "$output" >&2
+  fail "fake successful real-gate discovery should pass preflight"
+fi
+
+printf '%s\n' 'r6-2 preflight tests passed'
