@@ -258,3 +258,41 @@ def test_run_rejects_disabled_module_lifecycle_and_invalid_hash() -> None:
     with pytest.raises(ValidationError, match="plan_content_hash"):
         make_run(plan_content_hash="not-a-hash")
     assert ModuleLifecycle.DISABLED.value == "disabled"
+
+
+def test_deferred_application_can_only_reach_a_terminal_disposition() -> None:
+    application = RuntimeIntentApplication(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        intent_id=INTENT_ID,
+        status=RuntimeIntentApplicationStatus.DEFERRED,
+        expected_run_version=1,
+        observed_run_version=1,
+        expected_request_version=1,
+        observed_request_version=1,
+        release_id=None,
+        result_code="governance_deferred",
+        result_summary="held for approval",
+        resource_version=1,
+        created_at=NOW,
+        applied_at=None,
+    )
+
+    applied = application.resolve(
+        status=RuntimeIntentApplicationStatus.APPLIED,
+        result_code="governance_approved",
+        result_summary="Release approved after current-fact validation",
+        release_id=uuid4(),
+        now=NOW,
+    )
+
+    assert applied.resource_version == application.resource_version + 1
+    assert applied.applied_at == NOW
+    with pytest.raises(InvalidTransition):
+        applied.resolve(
+            status=RuntimeIntentApplicationStatus.REJECTED,
+            result_code="governance_rejected",
+            result_summary="rejected",
+            release_id=None,
+            now=NOW,
+        )

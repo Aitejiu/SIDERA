@@ -4,7 +4,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -61,6 +61,7 @@ class RuntimeIntentApplicationStatus(StrEnum):
     REJECTED = "rejected"
     STALE = "stale"
     DUPLICATE = "duplicate"
+    DEFERRED = "deferred"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1035,6 +1036,40 @@ class RuntimeIntentApplication:
         )
         _aware(self.created_at, "intent application created_at")
         _optional_aware(self.applied_at, "intent application applied_at")
+
+    def resolve(
+        self,
+        *,
+        status: RuntimeIntentApplicationStatus,
+        result_code: str,
+        result_summary: str,
+        release_id: UUID | None,
+        now: datetime,
+    ) -> RuntimeIntentApplication:
+        if self.status is not RuntimeIntentApplicationStatus.DEFERRED:
+            raise InvalidTransition("only a deferred intent application can be resolved")
+        status = _enum(status, RuntimeIntentApplicationStatus, "intent application status")
+        if status not in (
+            RuntimeIntentApplicationStatus.APPLIED,
+            RuntimeIntentApplicationStatus.REJECTED,
+            RuntimeIntentApplicationStatus.STALE,
+        ):
+            raise InvalidTransition("deferred intent application must resolve to a terminal status")
+        if status is RuntimeIntentApplicationStatus.APPLIED:
+            if release_id is None:
+                raise ValidationError("applied intent application requires release_id")
+        elif release_id is not None:
+            raise ValidationError("non-applied intent application cannot have release_id")
+        _aware(now, "intent application applied_at")
+        return replace(
+            self,
+            status=status,
+            release_id=release_id,
+            result_code=_text(result_code, "result_code"),
+            result_summary=_text(result_summary, "result_summary"),
+            resource_version=self.resource_version + 1,
+            applied_at=now,
+        )
 
 
 @dataclass(frozen=True, slots=True)
