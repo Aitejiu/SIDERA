@@ -18,6 +18,7 @@ import { Link } from "react-router-dom";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
 import { workerCollaborationLabel } from "../collaboration/types";
+import { WorkerGovernancePanel } from "../collaboration/WorkerGovernancePanel";
 import { WorkerContextSummary } from "../context/WorkerContextSummary";
 import { ExecutionRoutingPanel } from "./ExecutionRoutingPanel";
 import type { WorkerItemCollaborationSummary, WorkerPlacement, WorkerWorkspace } from "./types";
@@ -51,6 +52,17 @@ export function WorkerSidebar({
       </div>
 
       {workspace.collaboration ? <WorkerCollaborationSection collaboration={workspace.collaboration} /> : null}
+
+      <WorkerGovernancePanel
+        workspaceId={workspace.workspace_id}
+        workerItemId={workerItem.id}
+        workerItemVersion={workerItem.version}
+        targetPlanGeneration={workspace.current_placement.plan_generation}
+        taskPath={`${taskTitle} / ${subtaskTitle} / ${workerItem.title}`}
+        canIntervene={workspace.can_intervene}
+        collaboration={workspace.collaboration}
+        onRefresh={onRefresh}
+      />
 
       <ExecutionRoutingPanel
         workspaceId={workspace.workspace_id}

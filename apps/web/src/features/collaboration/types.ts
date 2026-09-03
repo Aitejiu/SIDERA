@@ -12,6 +12,10 @@ export type CollaborationStatus = RootCollaborationSummary["status"];
 export type WorkerCollaborationSummary =
   components["schemas"]["WorkerItemCollaborationSummaryResponse"];
 export type WorkerCollaborationState = WorkerCollaborationSummary["state"];
+export type GovernanceAction = WorkerCollaborationSummary["available_actions"][number];
+export type GovernanceMode = WorkerCollaborationSummary["governance_mode"];
+export type CollaborationReleaseState = WorkerCollaborationSummary["release_state"];
+export type ActiveCollaborationProposal = NonNullable<WorkerCollaborationSummary["active_proposal"]>;
 
 export const workerCollaborationCopy: Record<WorkerCollaborationState, string> = {
   unmanaged: "按现有流程调度",

@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CircleAlert, GitBranch, RefreshCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
@@ -7,7 +7,17 @@ import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
-import { getTaskGraph, taskGraphQueryKey } from "../tasks/api";
+import {
+  getTaskGraph,
+  taskActivityQueryKey,
+  taskGraphQueryKey,
+  taskOverviewDetailQueryKey,
+  taskOverviewQueryKey,
+  taskQueryKey,
+} from "../tasks/api";
+import { subtaskWorkspaceQueryKey } from "../subtasks/api";
+import { collaborationDecisionsQueryKey, collaborationDetailQueryKey } from "../collaboration/api";
+import { planningRequestsQueryKey } from "../planning/api";
 import { executionQueryKey, getExecution } from "../trace/api";
 import {
   getHandoffCandidates,
@@ -35,6 +45,7 @@ export function WorkerItemPage() {
   }>();
   const location = useLocation();
   const stream = useWorkspaceStreamOptional();
+  const queryClient = useQueryClient();
   const workspaceQuery = useQuery({
     queryKey: workerWorkspaceQueryKey(workspaceId, workerItemId),
     queryFn: ({ signal }) => getWorkerItemWorkspace(workspaceId, workerItemId, signal),
@@ -92,12 +103,30 @@ export function WorkerItemPage() {
   const activity = useMemo(() => flattenActivities(activityQuery.data?.pages), [activityQuery.data?.pages]);
 
   const refreshWorkerItem = async () => {
-    await Promise.all([
-      workspaceQuery.refetch(),
-      activityQuery.refetch(),
-      executionId ? executionQuery.refetch() : Promise.resolve(),
-      handoffCandidatesEnabled ? handoffCandidatesQuery.refetch() : Promise.resolve(),
-    ]);
+    const queryKeys: Array<readonly unknown[]> = [
+      workerWorkspaceQueryKey(workspaceId, workerItemId),
+      workerActivityQueryKey(workspaceId, workerItemId),
+      taskOverviewQueryKey(workspaceId),
+      planningRequestsQueryKey(workspaceId, true),
+    ];
+    if (rootTaskId) {
+      queryKeys.push(
+        taskGraphQueryKey(workspaceId, rootTaskId),
+        taskOverviewDetailQueryKey(workspaceId, rootTaskId),
+        taskQueryKey(workspaceId, rootTaskId),
+        taskActivityQueryKey(workspaceId, rootTaskId),
+        collaborationDetailQueryKey(workspaceId, rootTaskId),
+        collaborationDecisionsQueryKey(workspaceId, rootTaskId),
+        subtaskWorkspaceQueryKey(
+          workspaceId,
+          rootTaskId,
+          workspaceQuery.data?.current_placement.subtask_key ?? "",
+        ),
+      );
+    }
+    if (executionId) queryKeys.push(executionQueryKey(workspaceId, executionId));
+    if (handoffCandidatesEnabled) queryKeys.push(handoffCandidatesQueryKey(workspaceId, workerItemId));
+    await Promise.all(queryKeys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   };
 
   return (

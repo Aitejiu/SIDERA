@@ -12314,3 +12314,316 @@ a.knowledge-table__row:focus-visible {
     grid-column: 1 / -1;
   }
 }
+
+.worker-governance {
+  gap: 11px;
+  border-top: 2px solid var(--dispatch);
+}
+
+.worker-governance__heading,
+.worker-governance__proposal-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.worker-governance__heading h3 {
+  min-width: 0;
+}
+
+.worker-governance__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--structure);
+  background: var(--structure);
+}
+
+.worker-governance__facts > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  background: var(--surface);
+}
+
+.worker-governance__facts span,
+.worker-governance__proposal > span,
+.worker-governance__proposal-heading .mono-label,
+.worker-governance__hold strong {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.worker-governance__facts strong {
+  font-size: 11px;
+}
+
+.worker-governance__attention,
+.worker-governance__hold,
+.worker-governance__proposal {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-left: 3px solid var(--attention);
+  background: #fffaf1;
+}
+
+.worker-governance__attention {
+  display: flex;
+  align-items: start;
+  gap: 7px;
+  color: var(--attention);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.worker-governance__attention svg {
+  flex: 0 0 auto;
+}
+
+.worker-governance__hold {
+  border-left-color: var(--dispatch);
+  background: #f4f8ff;
+}
+
+.worker-governance__hold strong {
+  color: var(--ink);
+}
+
+.worker-governance__proposal {
+  border-left-color: var(--dispatch);
+  background: #f4f8ff;
+}
+
+.worker-governance__proposal-heading {
+  align-items: baseline;
+}
+
+.worker-governance__proposal-heading .mono-label {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.worker-governance__proposal strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.worker-governance__proposal > span:last-child {
+  overflow-wrap: anywhere;
+}
+
+.worker-governance__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.worker-governance__actions button {
+  min-width: 0;
+  gap: 6px;
+  white-space: normal;
+  text-align: left;
+}
+
+.governance-dialog-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(23 31 42 / 42%);
+}
+
+.governance-dialog {
+  display: grid;
+  gap: 16px;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  padding: 21px;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: var(--canvas);
+  box-shadow: 0 16px 40px rgb(18 26 36 / 22%);
+  outline: none;
+}
+
+.governance-dialog__heading,
+.governance-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.governance-dialog__heading {
+  align-items: start;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--ink);
+}
+
+.governance-dialog__heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  font-size: 19px;
+}
+
+.governance-dialog__heading h2 svg {
+  color: var(--dispatch);
+}
+
+.governance-dialog--danger .governance-dialog__heading h2 svg {
+  color: var(--blocked);
+}
+
+.governance-dialog__scope,
+.governance-dialog__proposal,
+.governance-dialog__warning {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 11px 12px;
+  border-left: 3px solid var(--dispatch);
+  background: #f4f8ff;
+}
+
+.governance-dialog__scope strong,
+.governance-dialog__proposal strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.governance-dialog__scope > span:last-child,
+.governance-dialog__proposal > span:last-child {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.governance-dialog__proposal {
+  border-left-color: var(--attention);
+  background: #fffaf1;
+}
+
+.governance-dialog__warning {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  border-left-color: var(--attention);
+  color: var(--attention);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.governance-dialog__warning svg {
+  flex: 0 0 auto;
+}
+
+.governance-dialog__field {
+  display: grid;
+  gap: 6px;
+}
+
+.governance-dialog__field > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.governance-dialog__field textarea {
+  min-width: 0;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--structure);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.governance-dialog__field textarea:focus {
+  outline: 2px solid #b8cdec;
+  outline-offset: 1px;
+}
+
+.governance-dialog__error,
+.governance-dialog__pending {
+  display: flex;
+  align-items: start;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.governance-dialog__error {
+  border-left: 3px solid var(--blocked);
+  color: var(--blocked);
+  background: #fff5f4;
+}
+
+.governance-dialog__pending {
+  border-left: 3px solid var(--dispatch);
+  color: var(--dispatch);
+  background: #f4f8ff;
+}
+
+.governance-dialog__error svg,
+.governance-dialog__pending svg {
+  flex: 0 0 auto;
+}
+
+.governance-dialog__actions {
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.governance-dialog__actions .primary-button,
+.governance-dialog__actions .quiet-button {
+  gap: 6px;
+}
+
+@media (max-width: 639px) {
+  .worker-governance__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .worker-governance__actions button {
+    justify-content: flex-start;
+    min-height: 36px;
+  }
+
+  .governance-dialog-backdrop {
+    padding: 10px;
+  }
+
+  .governance-dialog {
+    width: min(100%, calc(100vw - 20px));
+    max-height: calc(100vh - 20px);
+    padding: 16px;
+  }
+
+  .governance-dialog__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .governance-dialog__actions .primary-button,
+  .governance-dialog__actions .quiet-button {
+    width: 100%;
+  }
+}

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -188,7 +188,18 @@ const workspace = {
   last_change_cursor: 42,
   as_of: "2026-08-23T08:05:00Z",
   collaboration: {
+    active_hold_id: null,
+    active_proposal: null,
+    attention_state: "none",
+    available_actions: [],
     enabled: true,
+    governance_history: [],
+    governance_mode: "automatic",
+    hold_created_at: null,
+    hold_reason: null,
+    hold_resource_version: null,
+    proposal_summary: null,
+    release_state: "unreleased",
     state: "materialized",
     upstream_links: [],
     waiting_summary: null,
@@ -608,6 +619,47 @@ describe("WorkerItemPage", () => {
       `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/payment-implementation`,
     );
     expect(screen.queryByRole("button", { name: /强制放行/ })).not.toBeInTheDocument();
+  });
+
+  it("shows server-driven release governance controls inside the WorkerItem sidebar", async () => {
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+        () => HttpResponse.json({
+          ...workspace,
+          collaboration: {
+            ...workspace.collaboration,
+            active_hold_id: "50000000-0000-0000-0000-000000000002",
+            active_proposal: {
+              created_at: "2026-09-04T08:00:00Z",
+              proposal_id: "50000000-0000-0000-0000-000000000001",
+              reason_code: "upstream_evidence_ready",
+              resolved_at: null,
+              resource_version: 8,
+              status: "pending",
+              summary: "上游证据已齐，请确认是否放行回调实现",
+              target_request_version: 3,
+            },
+            attention_state: "decision_required",
+            available_actions: ["approve", "reject", "resume_automatic"],
+            governance_mode: "paused",
+            hold_created_at: "2026-09-04T07:55:00Z",
+            hold_reason: "等待人工审查",
+            hold_resource_version: 4,
+            proposal_summary: "上游证据已齐，请确认是否放行回调实现",
+            release_state: "proposed",
+          },
+        }),
+      ),
+    );
+    renderPage();
+
+    const sidebar = await screen.findByRole("complementary", { name: "WorkerItem 事实" });
+    const governance = within(sidebar).getByRole("region", { name: "协同放行控制" });
+    expect(within(governance).getByText("已暂停")).toBeVisible();
+    expect(within(governance).getByText("上游证据已齐，请确认是否放行回调实现")).toBeVisible();
+    expect(within(governance).getByRole("button", { name: "批准 Proposal" })).toBeVisible();
+    await waitFor(() => expect(within(governance).getByRole("button", { name: "恢复自动放行" })).toBeVisible());
   });
 
   it("shows plan sync state and keeps transition facts separate from Agent Trace", async () => {
