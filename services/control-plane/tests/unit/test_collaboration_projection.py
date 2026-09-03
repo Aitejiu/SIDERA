@@ -302,6 +302,86 @@ def test_assembler_applies_hard_artifact_and_evidence_join_rules() -> None:
     }[str(DOWNSTREAM_REQUEST_ID)] is False
 
 
+def test_assembler_normalizes_bare_acceptance_evidence_refs() -> None:
+    facts = _facts()
+    upstream = replace(
+        facts.requests[0],
+        id=UPSTREAM_REQUEST_ID,
+        subtask_key="subtask-upstream",
+        worker_item_key="worker-upstream",
+        subtask_task_id=UPSTREAM_SUBTASK_ID,
+        worker_item_id=UPSTREAM_WORKER_ITEM_ID,
+        status="materialized",
+        execution_lineage_id=UPSTREAM_LINEAGE_ID,
+        first_execution_id=UPSTREAM_EXECUTION_ID,
+    )
+    downstream = replace(
+        facts.requests[0],
+        id=DOWNSTREAM_REQUEST_ID,
+        subtask_key="subtask-downstream",
+        worker_item_key="worker-downstream",
+        subtask_task_id=DOWNSTREAM_SUBTASK_ID,
+        worker_item_id=DOWNSTREAM_WORKER_ITEM_ID,
+        execution_lineage_id=None,
+        first_execution_id=None,
+    )
+    joined = replace(
+        facts,
+        plan_head=replace(
+            facts.plan_head,
+            policy_snapshot={
+                "schema_version": 1,
+                "default_policy": {"enabled": True, "strategy_id": "all_required"},
+                "subtask_overrides": [],
+            },
+        ),
+        requests=(upstream, downstream),
+        dependencies=(
+            ExecutionRequestDependency(
+                downstream_request_id=DOWNSTREAM_REQUEST_ID,
+                upstream_request_id=UPSTREAM_REQUEST_ID,
+                enforcement=DependencyEnforcement.HARD,
+                required_artifact_refs=("artifact_type:report",),
+                required_evidence_refs=("acceptance:verify",),
+            ),
+        ),
+        executions=(
+            replace(
+                facts.executions[0],
+                id=UPSTREAM_EXECUTION_ID,
+                lineage_id=UPSTREAM_LINEAGE_ID,
+                task_id=UPSTREAM_SUBTASK_ID,
+                worker_item_id=UPSTREAM_WORKER_ITEM_ID,
+                status="succeeded",
+            ),
+        ),
+        artifacts=(
+            replace(
+                facts.artifacts[0],
+                id=UPSTREAM_ARTIFACT_ID,
+                execution_id=UPSTREAM_EXECUTION_ID,
+                task_id=UPSTREAM_SUBTASK_ID,
+                artifact_type="report",
+            ),
+        ),
+        evidence=(
+            replace(
+                facts.evidence[0],
+                id=UPSTREAM_EVIDENCE_ID,
+                execution_id=UPSTREAM_EXECUTION_ID,
+                task_id=UPSTREAM_SUBTASK_ID,
+                acceptance_criterion_ref="verify",
+            ),
+        ),
+    )
+
+    projection = CollaborationProjectionAssembler().assemble(joined, fact_cursor=46)
+
+    assert {
+        item["id"]: item["eligible"] for item in projection.execution_requests
+    }[str(DOWNSTREAM_REQUEST_ID)] is True
+
+
 def test_assembler_does_not_block_on_informational_dependency() -> None:
     facts = _facts()
     informational = ExecutionRequestDependency(

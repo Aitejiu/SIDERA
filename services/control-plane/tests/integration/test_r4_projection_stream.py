@@ -360,6 +360,7 @@ def test_execution_event_targets_stable_worker_item_resources(
         "subtask_workspace",
         "worker_item_workspace",
         "worker_item_activity",
+        "collaboration_runtime",
     }
     assert {
         change.resource_id

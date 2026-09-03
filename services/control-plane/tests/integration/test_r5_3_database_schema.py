@@ -327,4 +327,4 @@ def test_r5_3_schema_uses_one_head(database: Database) -> None:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0021_r6_2_retired_handoff_targets"
+    assert version == "0023_r6_3_1_schema_alignment"

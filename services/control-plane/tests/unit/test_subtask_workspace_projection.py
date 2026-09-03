@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration_projections import (
+    SubtaskCollaborationSummaryProjection,
+)
 from sidera_control_plane.domain.plan_normalization import (
     CanonicalTaskPlan,
     CanonicalWorkerItemPlan,
@@ -230,6 +233,17 @@ def _placements() -> tuple[SubtaskPlacementFact, ...]:
 
 
 def test_subtask_workspace_contains_only_local_worker_items() -> None:
+    collaboration = SubtaskCollaborationSummaryProjection(
+        enabled=True,
+        effective_strategy="all_required",
+        required_input_count=2,
+        satisfied_input_count=1,
+        waiting_upstream_subtasks=(),
+        missing_artifact_refs=("artifact:report",),
+        missing_evidence_refs=(),
+        released_worker_item_count=1,
+        waiting_worker_item_count=1,
+    )
     workspace = SubtaskWorkspaceProjectionService().compose(
         _plan(),
         subtask_key="callback-idempotency",
@@ -313,6 +327,7 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
         ),
         last_change_cursor=19,
         as_of=NOW,
+        collaboration=collaboration,
     )
 
     assert workspace.subtask.key == "callback-idempotency"
@@ -342,5 +357,6 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
         2026, 8, 22, 11, 50, tzinfo=UTC
     )
     assert workspace.recent_activity[0].summary == "运行回调测试"
+    assert workspace.collaboration == collaboration
     assert not hasattr(workspace, "trace_events")
     assert not hasattr(workspace, "intervention_composer_uri")

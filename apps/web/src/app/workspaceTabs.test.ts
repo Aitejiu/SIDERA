@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activateTab,
   closeTab,
   hydrateTabs,
   initialTabs,
@@ -237,6 +238,17 @@ describe("workspace tabs", () => {
     expect(state.activeTabId).toBe("collaboration:task-1");
 
     const closed = reduceTabs(state, closeTab("collaboration:task-1"));
+    expect(closed.activeTabId).toBe("root-task:task-1");
+    expect(closed.navigationHref).toBe("/workspaces/ws-1/tasks/task-1");
+  });
+
+  it("returns a newly opened tab to the tab that opened it", () => {
+    let state = stateWithTaskSubtaskAndWorker();
+    state = reduceTabs(state, activateTab("root-task:task-1"));
+    state = reduceTabs(state, openTab(collaborationTab("task-1")));
+
+    const closed = reduceTabs(state, closeTab("collaboration:task-1"));
+
     expect(closed.activeTabId).toBe("root-task:task-1");
     expect(closed.navigationHref).toBe("/workspaces/ws-1/tasks/task-1");
   });

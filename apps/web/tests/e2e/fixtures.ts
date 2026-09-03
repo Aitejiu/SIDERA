@@ -7,6 +7,7 @@ export const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 export const R5_WORKSPACE_ID = "20000000-0000-0000-0000-000000000002";
 export const R6_1_WORKSPACE_ID = "20000000-0000-0000-0000-000000000003";
 export const R6_2_WORKSPACE_ID = "20000000-0000-0000-0000-000000000004";
+export const R6_3_1_WORKSPACE_ID = "20000000-0000-0000-0000-000000000005";
 export const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
 export const SUBTASK_TASK_ID = "30000000-0000-0000-0000-000000000002";
 export const SECOND_ROOT_TASK_ID = "30000000-0000-0000-0000-000000000005";
@@ -42,6 +43,19 @@ export type R6HandoffSeed = {
   target_worker_ids: string[];
   scenario: HandoffSeedScenario;
 };
+export type R6CollaborationSeed = {
+  workspace_id: string;
+  root_task_id: string;
+  plan_snapshot_id: string;
+  planning_request_id: string;
+  proposal_id: string;
+  runtime_definition_id: string;
+  runtime_instance_id: string;
+  subtask_ids: Record<string, string>;
+  worker_item_ids: Record<string, string>;
+  request_ids: Record<string, string>;
+  worker_ids: Record<string, string>;
+};
 
 const webRoot = resolve(import.meta.dirname, "../..");
 const repositoryRoot = resolve(webRoot, "../..");
@@ -51,6 +65,8 @@ const planningSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r5_planning
 const revisionSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_1_revision.py");
 const handoffSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_2_handoff.py");
 const handoffRuntimeScript = resolve(controlPlaneRoot, "tests/e2e/r6_2_fake_runtime.py");
+const collaborationSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_3_1_collaboration.py");
+const collaborationRuntimeScript = resolve(controlPlaneRoot, "tests/e2e/r6_3_1_fake_runtime.py");
 const defaultPython = resolve(controlPlaneRoot, ".venv/bin/python");
 const knowledgeServiceRoot = resolve(repositoryRoot, "services/knowledge-service");
 const knowledgeSeedScript = resolve(knowledgeServiceRoot, "tests/e2e/seed_r5_3_knowledge.py");
@@ -125,6 +141,45 @@ export function seedR6Handoff(scenario: HandoffSeedScenario = "normal"): R6Hando
     throw new Error("R6.2 handoff seed returned a non-object summary");
   }
   return parsed as R6HandoffSeed;
+}
+
+export function seedR6Collaboration(): R6CollaborationSeed {
+  const output = execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    [
+      collaborationSeedScript,
+      "--workspace-id",
+      R6_3_1_WORKSPACE_ID,
+      "--reset",
+    ],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: e2eEnvironment(),
+      encoding: "utf8",
+    },
+  );
+  const lastLine = output.trim().split(/\r?\n/).at(-1);
+  if (lastLine === undefined || lastLine.length === 0) {
+    throw new Error("R6.3.1 collaboration seed did not return a JSON summary");
+  }
+  const parsed: unknown = JSON.parse(lastLine);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("R6.3.1 collaboration seed returned a non-object summary");
+  }
+  return parsed as R6CollaborationSeed;
+}
+
+export function runR6CollaborationOnce(
+  workspaceId: string = R6_3_1_WORKSPACE_ID,
+): Record<string, unknown> {
+  return runFakeCollaborationRuntime(workspaceId);
+}
+
+export function prepareR6CollaborationBrowser(
+  workspaceId: string = R6_3_1_WORKSPACE_ID,
+): Record<string, unknown> {
+  return runFakeCollaborationRuntime(workspaceId, true);
 }
 
 export function seedKnowledge(workspaceId: string = WORKSPACE_ID): void {
@@ -212,6 +267,36 @@ function runFakeHandoffRuntime(
   return parsed as Record<string, unknown>;
 }
 
+function runFakeCollaborationRuntime(
+  workspaceId: string,
+  browserState = false,
+): Record<string, unknown> {
+  const output = execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    [
+      collaborationRuntimeScript,
+      "--workspace-id",
+      workspaceId,
+      ...(browserState ? ["--browser-state"] : []),
+    ],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: e2eEnvironment(),
+      encoding: "utf8",
+    },
+  );
+  const lastLine = output.trim().split(/\r?\n/).at(-1);
+  if (lastLine === undefined || lastLine.length === 0) {
+    throw new Error("R6.3.1 fake runtime did not return a JSON summary");
+  }
+  const parsed: unknown = JSON.parse(lastLine);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("R6.3.1 fake runtime returned a non-object summary");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function runControlPlaneOnce(moduleName: string): Record<string, unknown> {
   const output = execFileSync(
     process.env.SIDERA_E2E_PYTHON ?? defaultPython,
@@ -255,6 +340,9 @@ type Fixtures = {
   seedR5: (scenario?: PlanningSeedScenario) => void;
   seedR6Revision: () => void;
   seedR6Handoff: (scenario?: HandoffSeedScenario) => R6HandoffSeed;
+  seedR6Collaboration: () => R6CollaborationSeed;
+  runR6CollaborationOnce: (workspaceId?: string) => Record<string, unknown>;
+  prepareR6CollaborationBrowser: (workspaceId?: string) => Record<string, unknown>;
   seedKnowledge: (workspaceId?: string) => void;
 };
 
@@ -282,6 +370,24 @@ export const test = base.extend<Fixtures>({
     // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(seedR6Handoff);
+  },
+  seedR6Collaboration: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(seedR6Collaboration);
+  },
+  runR6CollaborationOnce: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(runR6CollaborationOnce);
+  },
+  prepareR6CollaborationBrowser: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(prepareR6CollaborationBrowser);
   },
   seedKnowledge: async ({ browserName }, use) => {
     void browserName;

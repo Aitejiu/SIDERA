@@ -409,11 +409,17 @@ class CollaborationProjectionAssembler:
             evidence_refs = tuple(
                 sorted(
                     {
-                        evidence.acceptance_criterion_ref
+                        _normalized_evidence_ref(
+                            evidence.acceptance_criterion_ref
+                        )
                         for execution_id in execution_ids
                         for evidence in evidence_by_execution.get(execution_id, ())
                         if evidence.status == EvidenceClaimStatus.CANDIDATE.value
-                        and _valid_evidence_ref(evidence.acceptance_criterion_ref)
+                        and _valid_evidence_ref(
+                            _normalized_evidence_ref(
+                                evidence.acceptance_criterion_ref
+                            )
+                        )
                     }
                 )
             )
@@ -679,6 +685,10 @@ def _valid_evidence_ref(value: str) -> bool:
     return value.startswith("acceptance:") and len(value) > len("acceptance:") and not any(
         character.isspace() for character in value
     )
+
+
+def _normalized_evidence_ref(value: str) -> str:
+    return value if value.startswith("acceptance:") else f"acceptance:{value}"
 
 
 def _hash_value(value: object) -> str:

@@ -3382,6 +3382,12 @@ class RuntimeProjectionSnapshotModel(TimestampMixin, Base):
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
 
 class CollaborationEvaluationModel(TimestampMixin, Base):
@@ -5228,6 +5234,11 @@ class ExecutionWorkspaceTransferModel(TimestampMixin, Base):
             "status = 'succeeded' AND target_manifest_id IS NOT NULL OR "
             "status <> 'succeeded'",
             name="ck_execution_workspace_transfers_success_target",
+        ),
+        CheckConstraint(
+            "location_ref_hash ~ '^[0-9a-f]{64}$' AND "
+            "repository_state_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_execution_workspace_transfers_hashes",
         ),
         ForeignKeyConstraint(
             ["workspace_id"],

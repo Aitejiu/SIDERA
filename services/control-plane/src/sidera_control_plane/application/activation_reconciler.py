@@ -717,7 +717,7 @@ class ActivationReconciler:
         for claim in claims:
             if not claim.artifact_ids or not set(claim.artifact_ids).issubset(artifact_ids):
                 continue
-            ref = f"acceptance:{claim.acceptance_criterion_ref}"
+            ref = _normalized_evidence_ref(claim.acceptance_criterion_ref)
             if ref not in evidence_refs:
                 evidence_refs.append(ref)
         return UpstreamActivationFact(
@@ -902,6 +902,10 @@ class ActivationReconciler:
                 "elapsed_seconds": elapsed,
             },
         )
+
+
+def _normalized_evidence_ref(value: str) -> str:
+    return value if value.startswith("acceptance:") else f"acceptance:{value}"
 
 
 def _execution_payload(execution: Execution) -> dict[str, object]:

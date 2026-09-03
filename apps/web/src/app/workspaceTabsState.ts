@@ -13,7 +13,9 @@ export type WorkspaceTabId =
   | `knowledge-candidate:${string}`
   | `context-package:${string}`;
 
-export type WorkspaceTab =
+export type WorkspaceTab = {
+  returnTabId?: WorkspaceTabId;
+} & (
   | {
       id: "task-index";
       kind: "task-index";
@@ -90,7 +92,8 @@ export type WorkspaceTab =
       title: string;
       href: string;
       closeable: true;
-    };
+    }
+);
 
 export type WorkspaceTabsState = {
   workspaceId: string;
@@ -157,13 +160,26 @@ export function reduceTabs(
     case "open":
     case "register-direct-route": {
       const existingIndex = state.tabs.findIndex((tab) => tab.id === action.tab.id);
+      const existingTab = existingIndex < 0 ? undefined : state.tabs[existingIndex];
+      const returnTabId = action.tab.returnTabId
+        ?? existingTab?.returnTabId
+        ?? (
+          existingIndex < 0
+          && state.activeTabId !== action.tab.id
+          && state.activeTabId !== "task-index"
+            ? state.activeTabId
+            : undefined
+        );
+      const tab = returnTabId === undefined
+        ? action.tab
+        : { ...action.tab, returnTabId };
       const tabs = existingIndex < 0
-        ? [...state.tabs, action.tab]
-        : state.tabs.map((tab, index) => index === existingIndex ? action.tab : tab);
+        ? [...state.tabs, tab]
+        : state.tabs.map((item, index) => index === existingIndex ? tab : item);
       return {
         ...state,
         tabs,
-        activeTabId: action.tab.id,
+        activeTabId: tab.id,
         navigationHref: null,
       };
     }
@@ -185,7 +201,12 @@ export function reduceTabs(
       if (state.activeTabId !== action.id) {
         return { ...state, tabs, navigationHref: null };
       }
-      const target = tabs[Math.max(0, index - 1)] ?? tabs[0];
+      const returnTarget = state.tabs[index]?.returnTabId;
+      const target = (
+        returnTarget === undefined
+          ? undefined
+          : tabs.find((tab) => tab.id === returnTarget)
+      ) ?? tabs[Math.max(0, index - 1)] ?? tabs[0];
       if (target === undefined) {
         return initialTabs(state.workspaceId);
       }

@@ -578,6 +578,7 @@ class SubtaskWorkspaceProjectionService:
             last_change_cursor=last_change_cursor,
             as_of=as_of,
             convergence=convergence,
+            collaboration=collaboration,
         )
 
 
