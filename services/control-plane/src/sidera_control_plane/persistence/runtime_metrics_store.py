@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -263,38 +264,45 @@ class SqlAlchemyRuntimeMetricsStore:
                 ),
                 else_="rejected",
             ).label("result")
-            command_rows = session.execute(
-                select(CommandModel.command_type, command_result, func.count())
-                .select_from(CommandModel)
-                .outerjoin(
-                    CollaborationGovernanceResolutionModel,
-                    and_(
+            command_rows = [
+                (row[0], row[1], row[2])
+                for row in session.execute(
+                    select(CommandModel.command_type, command_result, func.count())
+                    .select_from(CommandModel)
+                    .outerjoin(
+                        CollaborationGovernanceResolutionModel,
+                        and_(
+                            CollaborationGovernanceResolutionModel.workspace_id
+                            == CommandModel.workspace_id,
+                            CollaborationGovernanceResolutionModel.command_id
+                            == CommandModel.id,
+                        ),
+                    )
+                    .where(
+                        CommandModel.workspace_id == workspace_id,
+                        CommandModel.command_type.in_(_GOVERNANCE_COMMAND_TYPES),
+                    )
+                    .group_by(CommandModel.command_type, command_result)
+                ).all()
+            ]
+            resolution_rows = [
+                (row[0], row[1], row[2])
+                for row in session.execute(
+                    select(
+                        CollaborationGovernanceResolutionModel.action,
+                        CollaborationGovernanceResolutionModel.result,
+                        func.count(),
+                    )
+                    .where(
                         CollaborationGovernanceResolutionModel.workspace_id
-                        == CommandModel.workspace_id,
-                        CollaborationGovernanceResolutionModel.command_id
-                        == CommandModel.id,
-                    ),
-                )
-                .where(
-                    CommandModel.workspace_id == workspace_id,
-                    CommandModel.command_type.in_(_GOVERNANCE_COMMAND_TYPES),
-                )
-                .group_by(CommandModel.command_type, command_result)
-            ).all()
-            resolution_rows = session.execute(
-                select(
-                    CollaborationGovernanceResolutionModel.action,
-                    CollaborationGovernanceResolutionModel.result,
-                    func.count(),
-                )
-                .where(
-                    CollaborationGovernanceResolutionModel.workspace_id == workspace_id
-                )
-                .group_by(
-                    CollaborationGovernanceResolutionModel.action,
-                    CollaborationGovernanceResolutionModel.result,
-                )
-            ).all()
+                        == workspace_id
+                    )
+                    .group_by(
+                        CollaborationGovernanceResolutionModel.action,
+                        CollaborationGovernanceResolutionModel.result,
+                    )
+                ).all()
+            ]
             stale_event_reason = func.coalesce(
                 EventModel.payload["reason_code"].as_string(),
                 EventModel.payload["code"].as_string(),
@@ -307,24 +315,30 @@ class SqlAlchemyRuntimeMetricsStore:
                 ),
                 else_="unknown",
             ).label("reason_code")
-            stale_rows = session.execute(
-                select(stale_reason, func.count())
-                .select_from(CollaborationReleaseProposalModel)
-                .outerjoin(
-                    EventModel,
-                    and_(
-                        EventModel.workspace_id == workspace_id,
-                        EventModel.aggregate_type == "collaboration_release_proposal",
-                        EventModel.aggregate_id == CollaborationReleaseProposalModel.id,
-                        EventModel.event_type == "CollaborationReleaseProposalStale",
-                    ),
-                )
-                .where(
-                    CollaborationReleaseProposalModel.workspace_id == workspace_id,
-                    CollaborationReleaseProposalModel.status == "stale",
-                )
-                .group_by(stale_reason)
-            ).all()
+            stale_rows = [
+                (row[0], row[1])
+                for row in session.execute(
+                    select(stale_reason, func.count())
+                    .select_from(CollaborationReleaseProposalModel)
+                    .outerjoin(
+                        EventModel,
+                        and_(
+                            EventModel.workspace_id == workspace_id,
+                            EventModel.aggregate_type
+                            == "collaboration_release_proposal",
+                            EventModel.aggregate_id
+                            == CollaborationReleaseProposalModel.id,
+                            EventModel.event_type
+                            == "CollaborationReleaseProposalStale",
+                        ),
+                    )
+                    .where(
+                        CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                        CollaborationReleaseProposalModel.status == "stale",
+                    )
+                    .group_by(stale_reason)
+                ).all()
+            ]
 
         counts: Counter[tuple[str, tuple[tuple[str, str], ...]]] = Counter()
         values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(
@@ -589,9 +603,9 @@ def _add_governance_metrics(
     pending_proposals: int,
     oldest_pending_proposal: object,
     now: datetime,
-    command_rows: list[tuple[object, object, object]],
-    resolution_rows: list[tuple[object, object, object]],
-    stale_rows: list[tuple[object, object]],
+    command_rows: Sequence[tuple[object, object, object]],
+    resolution_rows: Sequence[tuple[object, object, object]],
+    stale_rows: Sequence[tuple[object, object]],
 ) -> None:
     _add_metric_count(
         counts,

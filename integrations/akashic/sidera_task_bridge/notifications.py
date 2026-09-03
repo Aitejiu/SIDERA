@@ -17,7 +17,7 @@ from .client import (
     TransportUnavailable,
 )
 from .config import TaskBridgeConfig
-from .contracts import ProjectionChange
+from .contracts import JsonValue, ProjectionChange
 from .state import (
     BridgeStateStore,
     NotificationSnapshot,
@@ -308,7 +308,12 @@ class NotificationRunner:
 
             list_transitions = getattr(self._client, "list_plan_transitions", None)
             if callable(list_transitions):
-                transitions = await list_transitions(binding.resource_id)
+                transitions = await cast(
+                    Callable[
+                        [UUID], Awaitable[tuple[dict[str, JsonValue], ...]]
+                    ],
+                    list_transitions,
+                )(binding.resource_id)
                 for transition in transitions:
                     transition_id = _uuid_value(transition.get("plan_transition_id"))
                     if transition_id is None:
@@ -703,7 +708,9 @@ class NotificationEvaluator:
         if not callable(reader):
             return {}
         try:
-            return await reader(request_id)
+            return await cast(
+                Callable[[UUID], Awaitable[dict[str, JsonValue]]], reader
+            )(request_id)
         except TransportUnavailable:
             raise NotificationQueryUnavailable from None
         except ControlPlaneRejected as exc:

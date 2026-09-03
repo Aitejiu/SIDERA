@@ -57,7 +57,6 @@ export function WorkerGovernancePanel({
   workerItemVersion,
   targetPlanGeneration,
   taskPath,
-  canIntervene,
   collaboration,
   onRefresh,
 }: WorkerGovernancePanelProps) {
@@ -161,7 +160,9 @@ export function WorkerGovernancePanel({
             {availableActions.map((action) => {
               const copy = actionButtonCopy[action];
               const Icon = copy.icon;
-              const enabled = canIntervene && actionRequirementsMet(action, proposal, collaboration);
+              // Governance targets the WorkerItem release gate, independently of
+              // whether the current Agent Session accepts user input.
+              const enabled = actionRequirementsMet(action, proposal, collaboration);
               return (
                 <button
                   className={copy.tone === "danger" ? "quiet-button quiet-button--danger" : "quiet-button"}
@@ -169,7 +170,6 @@ export function WorkerGovernancePanel({
                   key={action}
                   onClick={() => openAction(action)}
                   disabled={!enabled || isSubmitting}
-                  title={!canIntervene ? "当前 WorkerItem 只读" : undefined}
                 >
                   <Icon size={14} aria-hidden="true" />{copy.label}
                 </button>
@@ -179,7 +179,6 @@ export function WorkerGovernancePanel({
         ) : (
           <span className="muted-copy">服务端当前没有可执行的治理动作</span>
         )}
-        {!canIntervene && availableActions.length > 0 ? <span className="muted-copy">当前工作区只读，治理动作已禁用。</span> : null}
       </section>
       {activeAction ? (
         <GovernanceActionDialog

@@ -7,6 +7,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import type { ActiveCollaborationProposal, GovernanceAction } from "./types";
@@ -108,7 +109,7 @@ export function GovernanceActionDialog({
     if (canSubmit) onSubmit(reason.trim());
   };
 
-  return (
+  return createPortal(
     <div className="governance-dialog-backdrop">
       <section
         className={`governance-dialog governance-dialog--${copy.tone}`}
@@ -196,6 +197,7 @@ export function GovernanceActionDialog({
           </div>
         </form>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }

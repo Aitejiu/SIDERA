@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/collaboration-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collaboration Readiness */
+        get: operations["get_collaboration_readiness_api_v1_collaboration_readiness_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/commands": {
         parameters: {
             query?: never;
@@ -1744,7 +1761,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "active" | "resumed" | "superseded" | "created" | "deferred" | "pending" | "applied" | "rejected" | "stale" | "duplicate" | "issued";
+            status: "active" | "resumed" | "superseded" | "created" | "deferred" | "pending" | "applied" | "approved" | "rejected" | "stale" | "duplicate" | "issued";
             /** Summary */
             summary: string;
         };
@@ -1884,6 +1901,34 @@ export interface components {
              * Format: uuid
              */
             workspace_id: string;
+        };
+        /** CollaborationReadinessCheckResponse */
+        CollaborationReadinessCheckResponse: {
+            /** Code */
+            code: string;
+            /** Name */
+            name: string;
+            /** Ready */
+            ready: boolean;
+            /** Summary */
+            summary: string;
+        };
+        /** CollaborationReadinessResponse */
+        CollaborationReadinessResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Checks */
+            checks: components["schemas"]["CollaborationReadinessCheckResponse"][];
+            /** Component */
+            component: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "not_ready";
         };
         /** CollaborationReleaseProposalSummaryResponse */
         CollaborationReleaseProposalSummaryResponse: {
@@ -7173,6 +7218,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_collaboration_readiness_api_v1_collaboration_readiness_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollaborationReadinessResponse"];
+                };
+            };
+        };
+    };
     execute_command_api_v1_commands_post: {
         parameters: {
             query?: never;

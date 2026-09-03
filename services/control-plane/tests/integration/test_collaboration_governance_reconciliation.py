@@ -62,6 +62,16 @@ def test_generation_supersede_stales_only_open_governance_and_keeps_history(
     next_snapshot = _advance_generation(database, uow_factory, snapshot)
     governance = CollaborationGovernanceReconciler()
 
+    with database.session() as session:
+        governance_history_before = session.scalars(
+            select(ProjectionChangeModel.change_type)
+            .where(
+                ProjectionChangeModel.workspace_id == workspace_id,
+                ProjectionChangeModel.projection_type == "collaboration_governance",
+            )
+            .order_by(ProjectionChangeModel.cursor.asc())
+        ).all()
+
     with uow_factory() as uow:
         run = uow.collaboration_runs.get(
             workspace_id,
@@ -145,8 +155,13 @@ def test_generation_supersede_stales_only_open_governance_and_keeps_history(
         "CollaborationGovernanceHoldSuperseded",
     ]
     assert runtime_changes == []
-    assert governance_changes == [
+    assert governance_changes[: len(governance_history_before)] == (
+        governance_history_before
+    )
+    assert governance_changes[len(governance_history_before) :] == [
+        "CollaborationReleaseProposalStale",
         "collaboration_release_proposal_stale",
+        "CollaborationGovernanceHoldSuperseded",
         "collaboration_governance_hold_superseded",
     ]
     assert len(heads) == 1

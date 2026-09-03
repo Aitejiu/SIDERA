@@ -108,6 +108,33 @@ describe("WorkerGovernancePanel", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("keeps governance actions available when the current Session is read-only", () => {
+    render(
+      <WorkerGovernancePanel
+        {...makeProps(
+          makeCollaboration({ available_actions: ["pause"] }),
+          { canIntervene: false },
+        )}
+      />,
+    );
+
+    const panel = screen.getByRole("region", { name: "协同放行控制" });
+    expect(within(panel).getByRole("button", { name: "暂停自动放行" })).toBeEnabled();
+  });
+
+  it("mounts the operation dialog outside the WorkerItem sidebar stacking context", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkerGovernancePanel
+        {...makeProps(makeCollaboration({ available_actions: ["pause"] }))}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "暂停自动放行" }));
+    const backdrop = document.querySelector(".governance-dialog-backdrop");
+    expect(backdrop?.parentElement).toBe(document.body);
+  });
+
   it("only exposes the actions returned by the server and keeps the Proposal scope visible", async () => {
     const user = userEvent.setup();
     const proposal = {

@@ -73,7 +73,15 @@ export function PlanConvergenceStrip({
         {convergence.blocked_count > 0 ? <span>阻塞 {convergence.blocked_count}</span> : null}
         {convergence.unknown_count > 0 ? <span>未知 {convergence.unknown_count}</span> : null}
       </div>
-      <div className="plan-convergence-strip__progress" aria-label={`收敛进度 ${progress}%`}>
+      <div
+        className="plan-convergence-strip__progress"
+        role="progressbar"
+        aria-label="收敛进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+        aria-valuetext={`${progress}%`}
+      >
         <span style={{ width: `${progress}%` }} />
       </div>
       {blockedItems.length > 0 ? (

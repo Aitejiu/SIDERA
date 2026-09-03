@@ -122,3 +122,6 @@ class GovernanceProposalView(BaseModel):
     governance_mode: GovernanceMode
     available_actions: tuple[GovernanceAction, ...]
     deep_link: str
+    # Older Control Plane fixtures omitted these optional audit timestamps.
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None

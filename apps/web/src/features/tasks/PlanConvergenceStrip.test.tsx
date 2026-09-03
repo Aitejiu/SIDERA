@@ -40,6 +40,12 @@ describe("PlanConvergenceStrip", () => {
     expect(within(region).getByText("当前卡点")).toBeVisible();
     expect(within(region).getByText("回调幂等")).toBeVisible();
     expect(within(region).getByText("等待确认重试规则")).toBeVisible();
+
+    const progress = within(region).getByRole("progressbar", { name: "收敛进度" });
+    expect(progress).toHaveAttribute("aria-valuemin", "0");
+    expect(progress).toHaveAttribute("aria-valuemax", "100");
+    expect(progress).toHaveAttribute("aria-valuenow", "50");
+    expect(progress).toHaveAttribute("aria-valuetext", "50%");
   });
 
   it("explains a subtask branch without exposing adapter or session details", () => {

@@ -792,6 +792,7 @@ class CollaborationGovernanceHistoryResponse(BaseModel):
         "deferred",
         "pending",
         "applied",
+        "approved",
         "rejected",
         "stale",
         "duplicate",
