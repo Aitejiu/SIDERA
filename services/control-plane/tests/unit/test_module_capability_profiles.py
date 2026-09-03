@@ -6,6 +6,7 @@ import pytest
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.handoffs import HandoffTransferMode
 from sidera_control_plane.domain.modules import (
+    NOTIFICATION_CHANNEL_MODULE_TYPE,
     CancellationCapability,
     CapabilityInput,
     CollaborationRuntimeCapabilityProfile,
@@ -14,6 +15,8 @@ from sidera_control_plane.domain.modules import (
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
+    NotificationChannelCapabilityProfile,
+    NotificationReceiptCapability,
     PlannerAdapterCapabilityProfile,
     ResumeCapability,
     SandboxCapability,
@@ -75,6 +78,18 @@ def collaboration_runtime_capabilities() -> CollaborationRuntimeCapabilityProfil
         max_decision_bytes=65_536,
         max_intents_per_decision=128,
         max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
+    )
+
+
+def notification_channel_capabilities() -> NotificationChannelCapabilityProfile:
+    return NotificationChannelCapabilityProfile(
+        channel_types=("akashic_private",),
+        delivery_contract_versions=(1,),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        receipt=NotificationReceiptCapability.PROVIDER_REF,
+        max_message_bytes=16_384,
+        supports_deep_link=True,
         stability=StabilityLevel.EXPERIMENTAL,
     )
 
@@ -152,6 +167,86 @@ def test_collaboration_runtime_profile_round_trips() -> None:
 
     assert restored == profile
     assert payload["strategy_ids"] == ["all_required"]
+
+
+def test_notification_channel_profile_round_trips_without_provider_details() -> None:
+    profile = notification_channel_capabilities()
+
+    payload = capability_profile_to_payload(profile)
+    restored = capability_profile_from_payload(
+        NOTIFICATION_CHANNEL_MODULE_TYPE, payload
+    )
+
+    assert restored == profile
+    assert payload == {
+        "channel_types": ["akashic_private"],
+        "delivery_contract_versions": [1],
+        "idempotency": "operation-id",
+        "receipt": "provider_ref",
+        "max_message_bytes": 16_384,
+        "supports_deep_link": True,
+        "stability": "experimental",
+    }
+    assert "route" not in payload
+    assert "secret" not in payload
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("channel_types", (), "channel_types"),
+        ("channel_types", ("akashic_private", "akashic_private"), "unique"),
+        ("delivery_contract_versions", (0,), "delivery_contract_versions"),
+        ("max_message_bytes", 0, "max_message_bytes"),
+    ),
+)
+def test_notification_channel_profile_rejects_invalid_values(
+    field: str, value: object, match: str
+) -> None:
+    kwargs: dict[str, object] = {
+        "channel_types": ("akashic_private",),
+        "delivery_contract_versions": (1,),
+        "idempotency": IdempotencyCapability.OPERATION_ID,
+        "receipt": NotificationReceiptCapability.PROVIDER_REF,
+        "max_message_bytes": 16_384,
+        "supports_deep_link": True,
+        "stability": StabilityLevel.EXPERIMENTAL,
+    }
+    kwargs[field] = value
+    with pytest.raises(ValidationError, match=match):
+        NotificationChannelCapabilityProfile(**kwargs)  # type: ignore[arg-type]
+
+
+def test_notification_channel_profile_rejects_unknown_payload_fields() -> None:
+    payload = {
+        **capability_profile_to_payload(notification_channel_capabilities()),
+        "provider_route": "private",
+    }
+
+    with pytest.raises(ValidationError, match="provider_route"):
+        capability_profile_from_payload(NOTIFICATION_CHANNEL_MODULE_TYPE, payload)
+
+
+def test_notification_channel_profile_must_match_module_type() -> None:
+    with pytest.raises(ValidationError, match="notification_channel"):
+        definition(
+            module_type=NOTIFICATION_CHANNEL_MODULE_TYPE,
+            capabilities=worker_capabilities(),
+        )
+    with pytest.raises(ValidationError, match="worker_adapter"):
+        definition(
+            module_type="worker_adapter",
+            capabilities=notification_channel_capabilities(),
+        )
+
+
+def test_notification_channel_alias_is_stored_as_canonical_value() -> None:
+    item = definition(
+        module_type="notification-channel",
+        capabilities=notification_channel_capabilities(),
+    )
+
+    assert item.module_type == NOTIFICATION_CHANNEL_MODULE_TYPE
 
 
 def test_unknown_capability_fields_are_rejected() -> None:

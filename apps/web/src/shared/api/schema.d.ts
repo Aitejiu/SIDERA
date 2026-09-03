@@ -7619,7 +7619,7 @@ export interface operations {
         parameters: {
             query: {
                 workspace_id: string;
-                module_type?: ("worker_adapter" | "workspace_provider") | null;
+                module_type?: ("worker_adapter" | "workspace_provider" | "planner_adapter" | "collaboration_runtime" | "notification_channel") | null;
             };
             header?: never;
             path?: never;

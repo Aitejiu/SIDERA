@@ -9,7 +9,13 @@ from sidera_control_plane.application.module_queries import ModuleQueryService
 
 router = APIRouter(prefix="/api/v1/modules")
 
-ModuleType = Literal["worker_adapter", "workspace_provider"]
+ModuleType = Literal[
+    "worker_adapter",
+    "workspace_provider",
+    "planner_adapter",
+    "collaboration_runtime",
+    "notification_channel",
+]
 
 
 @router.get("", response_model=tuple[ModuleSummaryResponse, ...])

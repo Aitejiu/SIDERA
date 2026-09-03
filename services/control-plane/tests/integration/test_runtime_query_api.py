@@ -228,6 +228,21 @@ def test_module_query_filters_workspace_orders_stably_and_exposes_lifecycle(
     assert len(filtered.json()) == 1
     assert filtered.json()[0]["id"] == str(seed["adapter_instance_id"])
 
+    for module_type in (
+        "planner_adapter",
+        "collaboration_runtime",
+        "notification_channel",
+    ):
+        supported_filter = client.get(
+            "/api/v1/modules",
+            params={
+                "workspace_id": str(workspace_id),
+                "module_type": module_type,
+            },
+        )
+        assert supported_filter.status_code == 200, supported_filter.text
+        assert supported_filter.json() == []
+
     other_workspace = uuid4()
     with database.session() as session:
         session.add(

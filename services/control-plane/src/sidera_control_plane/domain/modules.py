@@ -20,6 +20,11 @@ class IdempotencyCapability(StrEnum):
     OPERATION_ID = "operation-id"
 
 
+class NotificationReceiptCapability(StrEnum):
+    NONE = "none"
+    PROVIDER_REF = "provider_ref"
+
+
 class ResumeCapability(StrEnum):
     NONE = "none"
     SAME_PROCESS = "same-process"
@@ -53,12 +58,14 @@ WORKER_ADAPTER_MODULE_TYPE = "worker_adapter"
 WORKSPACE_PROVIDER_MODULE_TYPE = "workspace_provider"
 PLANNER_ADAPTER_MODULE_TYPE = "planner_adapter"
 COLLABORATION_RUNTIME_MODULE_TYPE = "collaboration_runtime"
+NOTIFICATION_CHANNEL_MODULE_TYPE = "notification_channel"
 
 _MODULE_TYPE_ALIASES = {
     "worker-adapter": WORKER_ADAPTER_MODULE_TYPE,
     "workspace-provider": WORKSPACE_PROVIDER_MODULE_TYPE,
     "planner-adapter": PLANNER_ADAPTER_MODULE_TYPE,
     "collaboration-runtime": COLLABORATION_RUNTIME_MODULE_TYPE,
+    "notification-channel": NOTIFICATION_CHANNEL_MODULE_TYPE,
 }
 
 
@@ -367,11 +374,63 @@ class CollaborationRuntimeCapabilityProfile:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class NotificationChannelCapabilityProfile:
+    channel_types: tuple[str, ...]
+    delivery_contract_versions: tuple[int, ...]
+    idempotency: IdempotencyCapability
+    receipt: NotificationReceiptCapability
+    max_message_bytes: int
+    supports_deep_link: bool
+    stability: StabilityLevel
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "channel_types",
+            _unique_string_tuple(self.channel_types, "channel_types"),
+        )
+        object.__setattr__(
+            self,
+            "delivery_contract_versions",
+            _required_version_tuple(
+                self.delivery_contract_versions, "delivery_contract_versions"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "idempotency",
+            _enum_value(
+                self.idempotency,
+                IdempotencyCapability,
+                "idempotency capability",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "receipt",
+            _enum_value(
+                self.receipt,
+                NotificationReceiptCapability,
+                "notification receipt capability",
+            ),
+        )
+        _positive_int(self.max_message_bytes, "max_message_bytes")
+        if not isinstance(self.supports_deep_link, bool):
+            raise ValidationError("supports_deep_link capability must be a boolean")
+        object.__setattr__(
+            self,
+            "stability",
+            _enum_value(self.stability, StabilityLevel, "stability level"),
+        )
+
+
 type ModuleCapabilityProfile = (
     WorkerAdapterCapabilityProfile
     | WorkspaceProviderCapabilityProfile
     | PlannerAdapterCapabilityProfile
     | CollaborationRuntimeCapabilityProfile
+    | NotificationChannelCapabilityProfile
 )
 
 # Temporary source compatibility for existing WorkerAdapter implementations.
@@ -504,6 +563,7 @@ def canonical_module_type(value: str) -> str:
         WORKSPACE_PROVIDER_MODULE_TYPE,
         PLANNER_ADAPTER_MODULE_TYPE,
         COLLABORATION_RUNTIME_MODULE_TYPE,
+        NOTIFICATION_CHANNEL_MODULE_TYPE,
     }:
         raise ValidationError(f"unsupported module_type: {value!r}")
     return canonical
@@ -516,7 +576,11 @@ def _profile_type_for_module(module_type: str) -> type[object]:
         return WorkspaceProviderCapabilityProfile
     if module_type == PLANNER_ADAPTER_MODULE_TYPE:
         return PlannerAdapterCapabilityProfile
-    return CollaborationRuntimeCapabilityProfile
+    if module_type == COLLABORATION_RUNTIME_MODULE_TYPE:
+        return CollaborationRuntimeCapabilityProfile
+    if module_type == NOTIFICATION_CHANNEL_MODULE_TYPE:
+        return NotificationChannelCapabilityProfile
+    raise ValidationError(f"unsupported module_type: {module_type!r}")
 
 
 def _module_lifecycle(value: ModuleLifecycle | str) -> ModuleLifecycle:
@@ -595,6 +659,21 @@ def _strategy_id_tuple(value: tuple[str, ...]) -> tuple[str, ...]:
     if not strategy_ids:
         raise ValidationError("strategy_ids cannot be empty")
     return tuple(strategy_ids)
+
+
+def _unique_string_tuple(value: tuple[str, ...], name: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValidationError(f"{name} must be a tuple")
+    normalized_values: list[str] = []
+    for item in value:
+        _require_text(item, name)
+        normalized = item.strip()
+        if normalized in normalized_values:
+            raise ValidationError(f"{name} must be unique")
+        normalized_values.append(normalized)
+    if not normalized_values:
+        raise ValidationError(f"{name} cannot be empty")
+    return tuple(normalized_values)
 
 
 def _positive_int(value: int, name: str) -> None:

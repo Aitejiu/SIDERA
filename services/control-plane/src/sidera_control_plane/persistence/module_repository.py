@@ -15,6 +15,7 @@ from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.handoffs import HandoffTransferMode
 from sidera_control_plane.domain.modules import (
     COLLABORATION_RUNTIME_MODULE_TYPE,
+    NOTIFICATION_CHANNEL_MODULE_TYPE,
     WORKER_ADAPTER_MODULE_TYPE,
     WORKSPACE_PROVIDER_MODULE_TYPE,
     CancellationCapability,
@@ -27,6 +28,8 @@ from sidera_control_plane.domain.modules import (
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
+    NotificationChannelCapabilityProfile,
+    NotificationReceiptCapability,
     PlannerAdapterCapabilityProfile,
     ResumeCapability,
     SandboxCapability,
@@ -354,6 +357,16 @@ def capability_profile_to_payload(
         if profile.handoff_inspection:
             payload["handoff_inspection"] = True
         return payload
+    if isinstance(profile, NotificationChannelCapabilityProfile):
+        return {
+            "channel_types": list(profile.channel_types),
+            "delivery_contract_versions": list(profile.delivery_contract_versions),
+            "idempotency": profile.idempotency.value,
+            "receipt": profile.receipt.value,
+            "max_message_bytes": profile.max_message_bytes,
+            "supports_deep_link": profile.supports_deep_link,
+            "stability": profile.stability.value,
+        }
     if isinstance(profile, CollaborationRuntimeCapabilityProfile):
         return {
             "interface_version": profile.interface_version,
@@ -454,6 +467,26 @@ def capability_profile_from_payload(
             handoff_inspection=_bool_capability_or_default(
                 payload, "handoff_inspection", False
             ),
+        )
+
+    if canonical_type == NOTIFICATION_CHANNEL_MODULE_TYPE:
+        _reject_unknown_fields(payload, _NOTIFICATION_FIELDS)
+        return NotificationChannelCapabilityProfile(
+            channel_types=_string_tuple_capability(payload, "channel_types"),
+            delivery_contract_versions=_version_tuple_capability_named(
+                payload, "delivery_contract_versions"
+            ),
+            idempotency=_enum_capability(
+                payload, "idempotency", IdempotencyCapability
+            ),
+            receipt=_enum_capability(
+                payload, "receipt", NotificationReceiptCapability
+            ),
+            max_message_bytes=_positive_int_capability(
+                payload, "max_message_bytes"
+            ),
+            supports_deep_link=_bool_capability(payload, "supports_deep_link"),
+            stability=_enum_capability(payload, "stability", StabilityLevel),
         )
 
     if canonical_type == COLLABORATION_RUNTIME_MODULE_TYPE:
@@ -620,6 +653,17 @@ _COLLABORATION_FIELDS = frozenset(
         "max_decision_bytes",
         "max_intents_per_decision",
         "max_strategy_state_bytes",
+        "stability",
+    }
+)
+_NOTIFICATION_FIELDS = frozenset(
+    {
+        "channel_types",
+        "delivery_contract_versions",
+        "idempotency",
+        "receipt",
+        "max_message_bytes",
+        "supports_deep_link",
         "stability",
     }
 )
