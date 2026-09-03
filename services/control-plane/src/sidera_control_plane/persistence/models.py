@@ -5429,9 +5429,8 @@ class NotificationPolicyStateModel(Base):
             name="ck_notification_policy_states_versions",
         ),
         CheckConstraint(
-            "(not_before IS NULL AND first_observed_at IS NULL) OR "
-            "(not_before IS NOT NULL AND first_observed_at IS NOT NULL AND "
-            "not_before >= first_observed_at)",
+            "not_before IS NULL OR "
+            "(first_observed_at IS NOT NULL AND not_before >= first_observed_at)",
             name="ck_notification_policy_states_pending_window",
         ),
         CheckConstraint(
@@ -5729,7 +5728,8 @@ class NotificationRouteModel(Base):
             name="ck_notification_routes_version",
         ),
         CheckConstraint(
-            "source_ref ~ '^[A-Za-z0-9][A-Za-z0-9._~:/+\\-]{31,511}$'",
+            "length(source_ref) >= 32 AND "
+            "source_ref ~ '^[A-Za-z0-9][A-Za-z0-9._~:/+\\-]*$'",
             name="ck_notification_routes_source_ref",
         ),
         ForeignKeyConstraint(
