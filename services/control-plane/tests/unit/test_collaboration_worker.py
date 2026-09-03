@@ -10,8 +10,10 @@ from sidera_control_plane.application.collaboration_runtime_invoker import (
     RuntimeInvocationFailure,
 )
 from sidera_control_plane.collaboration_worker import (
+    CollaborationRecoverySweepResult,
     CollaborationWorker,
     CollaborationWorkerRunSummary,
+    summary_json,
 )
 
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
@@ -27,11 +29,15 @@ class FakeReconciler:
     def prepare_next(self, **_: Any) -> object | None:
         return self.prepared.pop(0) if self.prepared else None
 
-    def complete_success(self, prepared: object, result: object, *, now: datetime) -> bool:
+    def complete_success(
+        self, prepared: object, result: object, *, now: datetime
+    ) -> bool:
         self.successes += 1
         return True
 
-    def complete_decision(self, prepared: object, result: object, *, now: datetime) -> object:
+    def complete_decision(
+        self, prepared: object, result: object, *, now: datetime
+    ) -> object:
         application = self.applications.pop(0)
         return application
 
@@ -146,6 +152,45 @@ def test_continuous_mode_runs_recovery_on_its_own_interval() -> None:
 
     assert recovery_calls == [NOW]
     assert sleeps == [1.5]
+
+
+def test_recovery_summary_exposes_counts_and_stable_codes_only() -> None:
+    reconciler = FakeReconciler(prepared=[], applications=[], failures=[])
+    summaries: list[CollaborationWorkerRunSummary] = []
+    worker = CollaborationWorker(
+        reconciler=reconciler,
+        invoker=FakeInvoker([]),
+        owner_id="test-collaboration-worker",
+        clock=lambda: NOW,
+        monotonic_clock=lambda: 0.0,
+        recovery_sweep=lambda _now: CollaborationRecoverySweepResult(
+            recovered=2,
+            failed=1,
+            failure_codes=("collaboration_governance_lineage_invalid",),
+        ),
+    )
+
+    def stop_after_sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        worker.run_forever(
+            batch_size=20,
+            poll_seconds=1.5,
+            recovery_sweep_seconds=30,
+            sleep=stop_after_sleep,
+            on_summary=summaries.append,
+        )
+    except KeyboardInterrupt:
+        pass
+
+    assert len(summaries) == 1
+    assert summaries[0].recovered == 2
+    assert summaries[0].recovery_failed == 1
+    assert summaries[0].recovery_failure_codes == (
+        "collaboration_governance_lineage_invalid",
+    )
+    assert '"recovery_failed":1' in summary_json(summaries[0])
 
 
 def test_process_entry_returns_nonzero_for_build_failure(monkeypatch: Any) -> None:

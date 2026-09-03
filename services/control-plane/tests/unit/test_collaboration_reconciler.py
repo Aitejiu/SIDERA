@@ -550,6 +550,15 @@ class FakeRuntimeResolver:
         )
 
 
+class FakeGovernanceReconciler:
+    def __init__(self) -> None:
+        self.calls: list[tuple[UUID, str, UUID]] = []
+
+    def supersede_run(self, uow, run, *, now, actor_id, correlation_id):
+        del uow, now
+        self.calls.append((run.id, actor_id, correlation_id))
+
+
 @dataclass
 class Harness:
     snapshot: TaskPlanSnapshot
@@ -557,6 +566,7 @@ class Harness:
     facts: FakeFactStore
     resolver: FakeRuntimeResolver
     reconciler: CollaborationReconciler
+    governance_reconciler: FakeGovernanceReconciler | None = None
 
 
 def _harness(
@@ -564,6 +574,7 @@ def _harness(
     snapshot: TaskPlanSnapshot | None = None,
     run: CollaborationRun | None = None,
     resolver: FakeRuntimeResolver | None = None,
+    governance_reconciler: FakeGovernanceReconciler | None = None,
 ) -> Harness:
     selected_snapshot = snapshot or _snapshot(policy=_policy())
     plan = FakePlanRepository(selected_snapshot)
@@ -577,8 +588,16 @@ def _harness(
         runtime_resolver_factory=lambda _: runtime_resolver,
         projection_assembler=CollaborationProjectionAssembler(),
         evaluation_lease_ttl=timedelta(minutes=5),
+        governance_reconciler=governance_reconciler,
     )
-    return Harness(selected_snapshot, uow, facts, runtime_resolver, reconciler)
+    return Harness(
+        selected_snapshot,
+        uow,
+        facts,
+        runtime_resolver,
+        reconciler,
+        governance_reconciler,
+    )
 
 
 def test_plan_invalidation_creates_exact_pinned_run_and_first_evaluation() -> None:
@@ -744,7 +763,8 @@ def test_reconciler_can_scan_workspace_roots_without_explicit_root() -> None:
 
 
 def test_new_plan_generation_supersedes_old_run_and_starts_new_generation() -> None:
-    harness = _harness()
+    governance_reconciler = FakeGovernanceReconciler()
+    harness = _harness(governance_reconciler=governance_reconciler)
     first = harness.reconciler.prepare_next(
         owner_id="worker-a",
         now=NOW,
@@ -779,6 +799,7 @@ def test_new_plan_generation_supersedes_old_run_and_starts_new_generation() -> N
         getattr(event, "event_type", None) == "CollaborationRunSuperseded"
         for event in harness.uow.events.events
     )
+    assert governance_reconciler.calls == [(first.run.id, "worker-b", first.run.id)]
 
 
 def test_cursor_is_captured_before_authoritative_facts_are_loaded() -> None:

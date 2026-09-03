@@ -48,6 +48,9 @@ if TYPE_CHECKING:
         CollaborationDecisionApplicationResult,
         CollaborationDecisionService,
     )
+    from sidera_control_plane.application.collaboration_governance_reconciler import (
+        CollaborationGovernanceReconciler,
+    )
     from sidera_control_plane.application.collaboration_runtime_invoker import (
         RuntimeInvocationFailure,
         RuntimeInvocationResult,
@@ -90,6 +93,7 @@ class CollaborationReconciler:
         recovery_limit: int = 100,
         default_workspace_id: UUID | None = None,
         default_root_task_id: UUID | None = None,
+        governance_reconciler: CollaborationGovernanceReconciler | None = None,
     ) -> None:
         if evaluation_lease_ttl <= timedelta(0):
             raise ValueError("evaluation_lease_ttl must be positive")
@@ -108,6 +112,7 @@ class CollaborationReconciler:
         self._recovery_limit = recovery_limit
         self._default_workspace_id = default_workspace_id
         self._default_root_task_id = default_root_task_id
+        self._governance_reconciler = governance_reconciler
 
     def prepare_next(
         self,
@@ -631,6 +636,14 @@ class CollaborationReconciler:
             owner_id=owner_id,
             payload={},
         )
+        if self._governance_reconciler is not None:
+            self._governance_reconciler.supersede_run(
+                uow,
+                run,
+                now=now,
+                actor_id=owner_id,
+                correlation_id=run.id,
+            )
 
     @staticmethod
     def _emit_evaluation_event(

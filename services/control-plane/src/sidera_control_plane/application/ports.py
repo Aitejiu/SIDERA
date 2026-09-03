@@ -1156,7 +1156,9 @@ class CollaborationGovernanceRepositoryPort(Protocol):
     def add_hold(self, hold: CollaborationGovernanceHold) -> None:
         raise NotImplementedError
 
-    def save_hold(self, hold: CollaborationGovernanceHold, previous_version: int) -> None:
+    def save_hold(
+        self, hold: CollaborationGovernanceHold, previous_version: int
+    ) -> None:
         raise NotImplementedError
 
     def get_proposal(
@@ -1190,6 +1192,15 @@ class CollaborationGovernanceRepositoryPort(Protocol):
     def list_pending_proposals_for_run(
         self, workspace_id: UUID, run_id: UUID, *, for_update: bool = False
     ) -> tuple[CollaborationReleaseProposal, ...]:
+        raise NotImplementedError
+
+    def list_supersede_candidates(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        workspace_id: UUID | None = None,
+    ) -> tuple[CollaborationGovernanceHold, ...]:
         raise NotImplementedError
 
     def add_proposal(self, proposal: CollaborationReleaseProposal) -> None:

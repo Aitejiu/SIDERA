@@ -8,12 +8,16 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from uuid import uuid4
 
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
     ReferenceCollaborationRuntime,
 )
 from sidera_control_plane.application.collaboration_decisions import (
     CollaborationDecisionService,
+)
+from sidera_control_plane.application.collaboration_governance_reconciler import (
+    CollaborationGovernanceReconciler,
 )
 from sidera_control_plane.application.collaboration_reconciler import (
     CollaborationReconciler,
@@ -101,19 +105,27 @@ class CollaborationWorkerRunSummary:
     failed: int = 0
     lease_lost: int = 0
     recovered: int = 0
+    recovery_failed: int = 0
+    recovery_failure_codes: tuple[str, ...] = ()
 
-    def with_counts(self, **changes: int) -> CollaborationWorkerRunSummary:
-        values = {
-            field: getattr(self, field)
-            for field in self.__dataclass_fields__
-        }
+    def with_counts(self, **changes: Any) -> CollaborationWorkerRunSummary:
+        values = {field: getattr(self, field) for field in self.__dataclass_fields__}
         values.update(changes)
         return CollaborationWorkerRunSummary(**values)
 
 
 Clock = Callable[[], datetime]
 MonotonicClock = Callable[[], float]
-RecoverySweep = Callable[[datetime], int]
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationRecoverySweepResult:
+    recovered: int = 0
+    failed: int = 0
+    failure_codes: tuple[str, ...] = ()
+
+
+RecoverySweep = Callable[[datetime], int | CollaborationRecoverySweepResult | None]
 Sleep = Callable[[float], None]
 
 
@@ -175,13 +187,27 @@ class CollaborationWorker:
         while True:
             now = self._clock()
             current = self._monotonic_clock()
-            recovered = 0
+            recovery_result = CollaborationRecoverySweepResult()
             if self._recovery_sweep is not None and current >= next_recovery:
-                recovered = self._recovery_sweep(now)
+                raw_result = self._recovery_sweep(now)
+                if isinstance(raw_result, CollaborationRecoverySweepResult):
+                    recovery_result = raw_result
+                elif raw_result is not None:
+                    recovery_result = CollaborationRecoverySweepResult(
+                        recovered=int(raw_result)
+                    )
                 next_recovery = current + recovery_sweep_seconds
             summary = self.run_once(batch_size)
-            if recovered:
-                summary = summary.with_counts(recovered=recovered)
+            if (
+                recovery_result.recovered
+                or recovery_result.failed
+                or recovery_result.failure_codes
+            ):
+                summary = summary.with_counts(
+                    recovered=recovery_result.recovered,
+                    recovery_failed=recovery_result.failed,
+                    recovery_failure_codes=recovery_result.failure_codes,
+                )
             if on_summary is not None:
                 on_summary(summary)
             sleep(poll_seconds)
@@ -205,7 +231,7 @@ class CollaborationWorker:
                 now=self._clock(),
             )
             status = str(getattr(application, "status", "applied"))
-            changes = {"released": len(getattr(application, "releases", ())) }
+            changes = {"released": len(getattr(application, "releases", ()))}
             if status == "no_change":
                 changes["no_change"] = 1
             elif status == "stale":
@@ -254,7 +280,9 @@ class CollaborationWorker:
         return summary.with_counts(
             failed=summary.failed + 1,
             retried=summary.retried
-            + int(status_value in {"retry_wait", CollaborationEvaluationStatus.RETRY_WAIT}),
+            + int(
+                status_value in {"retry_wait", CollaborationEvaluationStatus.RETRY_WAIT}
+            ),
             blocked=summary.blocked
             + int(status_value in {"blocked", CollaborationEvaluationStatus.BLOCKED}),
         )
@@ -279,6 +307,7 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
         modules, runtime_factory
     )
     owner_id = f"collaboration-worker:{settings.local_actor_id}"
+    governance_reconciler = CollaborationGovernanceReconciler(uow_factory=uow_factory)
     try:
         decision_service = CollaborationDecisionService(
             uow_factory=uow_factory,
@@ -290,6 +319,7 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
             fact_store_factory=_fact_store,
             runtime_resolver_factory=resolver_factory,
             decision_service=decision_service,
+            governance_reconciler=governance_reconciler,
             evaluation_lease_ttl=timedelta(
                 seconds=settings.collaboration_lease_ttl_seconds
             ),
@@ -308,14 +338,28 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
             max_diagnostic_bytes=settings.collaboration_max_diagnostic_bytes,
         )
 
-        def recovery_sweep(now: datetime) -> int:
+        def recovery_sweep(
+            now: datetime,
+        ) -> CollaborationRecoverySweepResult:
             with uow_factory() as uow:
-                return len(
+                evaluation_recovered = len(
                     uow.collaboration_evaluations.recover_expired(
                         now=now,
                         limit=settings.collaboration_batch_size,
                     )
                 )
+            governance = governance_reconciler.recover(
+                None,
+                now=now,
+                actor_id=owner_id,
+                correlation_id=uuid4(),
+                limit=settings.collaboration_batch_size,
+            )
+            return CollaborationRecoverySweepResult(
+                recovered=evaluation_recovered + governance.repaired,
+                failed=governance.failed,
+                failure_codes=governance.failure_codes,
+            )
 
         return CollaborationWorkerRuntime(
             worker=CollaborationWorker(
@@ -350,6 +394,8 @@ def summary_json(summary: CollaborationWorkerRunSummary) -> str:
             "failed": summary.failed,
             "lease_lost": summary.lease_lost,
             "recovered": summary.recovered,
+            "recovery_failed": summary.recovery_failed,
+            "recovery_failure_codes": list(summary.recovery_failure_codes),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -366,9 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime = build_collaboration_worker(settings)
         if args.once:
             print(
-                summary_json(
-                    runtime.worker.run_once(settings.collaboration_batch_size)
-                )
+                summary_json(runtime.worker.run_once(settings.collaboration_batch_size))
             )
             return 0
         runtime.worker.run_forever(

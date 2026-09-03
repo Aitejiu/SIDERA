@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.collaboration_governance import (
@@ -21,6 +21,8 @@ from sidera_control_plane.persistence.models import (
     CollaborationGovernanceHoldModel,
     CollaborationGovernanceResolutionModel,
     CollaborationReleaseProposalModel,
+    CollaborationRunModel,
+    RootTaskPlanHeadModel,
 )
 
 
@@ -50,7 +52,8 @@ class CollaborationGovernanceRepository:
             CollaborationGovernanceHoldModel.workspace_id == workspace_id,
             CollaborationGovernanceHoldModel.run_id == run_id,
             CollaborationGovernanceHoldModel.worker_item_id == worker_item_id,
-            CollaborationGovernanceHoldModel.status == GovernanceHoldStatus.ACTIVE.value,
+            CollaborationGovernanceHoldModel.status
+            == GovernanceHoldStatus.ACTIVE.value,
         )
         row = self._one(statement, for_update)
         return _to_hold(row) if row is not None else None
@@ -65,30 +68,45 @@ class CollaborationGovernanceRepository:
     ) -> tuple[CollaborationGovernanceHold, ...]:
         if not worker_item_ids:
             return ()
-        statement = select(CollaborationGovernanceHoldModel).where(
-            CollaborationGovernanceHoldModel.workspace_id == workspace_id,
-            CollaborationGovernanceHoldModel.run_id == run_id,
-            CollaborationGovernanceHoldModel.worker_item_id.in_(worker_item_ids),
-            CollaborationGovernanceHoldModel.status == GovernanceHoldStatus.ACTIVE.value,
-        ).order_by(CollaborationGovernanceHoldModel.worker_item_id.asc())
+        statement = (
+            select(CollaborationGovernanceHoldModel)
+            .where(
+                CollaborationGovernanceHoldModel.workspace_id == workspace_id,
+                CollaborationGovernanceHoldModel.run_id == run_id,
+                CollaborationGovernanceHoldModel.worker_item_id.in_(worker_item_ids),
+                CollaborationGovernanceHoldModel.status
+                == GovernanceHoldStatus.ACTIVE.value,
+            )
+            .order_by(CollaborationGovernanceHoldModel.worker_item_id.asc())
+        )
         rows = self._many(statement, for_update)
         return tuple(_to_hold(row) for row in rows)
 
     def list_active_holds_for_run(
         self, workspace_id: UUID, run_id: UUID, *, for_update: bool = False
     ) -> tuple[CollaborationGovernanceHold, ...]:
-        statement = select(CollaborationGovernanceHoldModel).where(
-            CollaborationGovernanceHoldModel.workspace_id == workspace_id,
-            CollaborationGovernanceHoldModel.run_id == run_id,
-            CollaborationGovernanceHoldModel.status == GovernanceHoldStatus.ACTIVE.value,
-        ).order_by(CollaborationGovernanceHoldModel.created_at.asc(), CollaborationGovernanceHoldModel.id.asc())
+        statement = (
+            select(CollaborationGovernanceHoldModel)
+            .where(
+                CollaborationGovernanceHoldModel.workspace_id == workspace_id,
+                CollaborationGovernanceHoldModel.run_id == run_id,
+                CollaborationGovernanceHoldModel.status
+                == GovernanceHoldStatus.ACTIVE.value,
+            )
+            .order_by(
+                CollaborationGovernanceHoldModel.created_at.asc(),
+                CollaborationGovernanceHoldModel.id.asc(),
+            )
+        )
         rows = self._many(statement, for_update)
         return tuple(_to_hold(row) for row in rows)
 
     def add_hold(self, hold: CollaborationGovernanceHold) -> None:
         self._session.add(_hold_model(hold))
 
-    def save_hold(self, hold: CollaborationGovernanceHold, previous_version: int) -> None:
+    def save_hold(
+        self, hold: CollaborationGovernanceHold, previous_version: int
+    ) -> None:
         result = self._session.execute(
             update(CollaborationGovernanceHoldModel)
             .where(
@@ -103,7 +121,14 @@ class CollaborationGovernanceRepository:
                 resolved_at=hold.resolved_at,
             )
         )
-        _check_cas(result, previous_version, hold.id, hold.workspace_id, self._session, CollaborationGovernanceHoldModel)
+        _check_cas(
+            result,
+            previous_version,
+            hold.id,
+            hold.workspace_id,
+            self._session,
+            CollaborationGovernanceHoldModel,
+        )
 
     def get_proposal(
         self, workspace_id: UUID, proposal_id: UUID, *, for_update: bool = False
@@ -140,9 +165,12 @@ class CollaborationGovernanceRepository:
         statement = select(CollaborationReleaseProposalModel).where(
             CollaborationReleaseProposalModel.workspace_id == workspace_id,
             CollaborationReleaseProposalModel.hold_id == hold_id,
-            CollaborationReleaseProposalModel.execution_request_id == execution_request_id,
-            CollaborationReleaseProposalModel.target_request_version == target_request_version,
-            CollaborationReleaseProposalModel.input_fingerprint_version == fingerprint_version,
+            CollaborationReleaseProposalModel.execution_request_id
+            == execution_request_id,
+            CollaborationReleaseProposalModel.target_request_version
+            == target_request_version,
+            CollaborationReleaseProposalModel.input_fingerprint_version
+            == fingerprint_version,
             CollaborationReleaseProposalModel.input_fingerprint == fingerprint,
         )
         row = self._one(statement, for_update)
@@ -151,24 +179,93 @@ class CollaborationGovernanceRepository:
     def list_pending_proposals_for_hold(
         self, workspace_id: UUID, hold_id: UUID, *, for_update: bool = False
     ) -> tuple[CollaborationReleaseProposal, ...]:
-        statement = select(CollaborationReleaseProposalModel).where(
-            CollaborationReleaseProposalModel.workspace_id == workspace_id,
-            CollaborationReleaseProposalModel.hold_id == hold_id,
-            CollaborationReleaseProposalModel.status == ReleaseProposalStatus.PENDING.value,
-        ).order_by(CollaborationReleaseProposalModel.created_at.asc(), CollaborationReleaseProposalModel.id.asc())
+        statement = (
+            select(CollaborationReleaseProposalModel)
+            .where(
+                CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                CollaborationReleaseProposalModel.hold_id == hold_id,
+                CollaborationReleaseProposalModel.status
+                == ReleaseProposalStatus.PENDING.value,
+            )
+            .order_by(
+                CollaborationReleaseProposalModel.created_at.asc(),
+                CollaborationReleaseProposalModel.id.asc(),
+            )
+        )
         rows = self._many(statement, for_update)
         return tuple(_to_proposal(row) for row in rows)
 
     def list_pending_proposals_for_run(
         self, workspace_id: UUID, run_id: UUID, *, for_update: bool = False
     ) -> tuple[CollaborationReleaseProposal, ...]:
-        statement = select(CollaborationReleaseProposalModel).where(
-            CollaborationReleaseProposalModel.workspace_id == workspace_id,
-            CollaborationReleaseProposalModel.run_id == run_id,
-            CollaborationReleaseProposalModel.status == ReleaseProposalStatus.PENDING.value,
-        ).order_by(CollaborationReleaseProposalModel.created_at.asc(), CollaborationReleaseProposalModel.id.asc())
+        statement = (
+            select(CollaborationReleaseProposalModel)
+            .where(
+                CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                CollaborationReleaseProposalModel.run_id == run_id,
+                CollaborationReleaseProposalModel.status
+                == ReleaseProposalStatus.PENDING.value,
+            )
+            .order_by(
+                CollaborationReleaseProposalModel.created_at.asc(),
+                CollaborationReleaseProposalModel.id.asc(),
+            )
+        )
         rows = self._many(statement, for_update)
         return tuple(_to_proposal(row) for row in rows)
+
+    def list_supersede_candidates(
+        self,
+        *,
+        now,
+        limit: int,
+        workspace_id: UUID | None = None,
+    ) -> tuple[CollaborationGovernanceHold, ...]:
+        _positive_limit(limit)
+        _aware(now)
+        run = CollaborationRunModel
+        head = RootTaskPlanHeadModel
+        statement = (
+            select(CollaborationGovernanceHoldModel)
+            .join(
+                run,
+                and_(
+                    run.id == CollaborationGovernanceHoldModel.run_id,
+                    run.workspace_id == CollaborationGovernanceHoldModel.workspace_id,
+                ),
+            )
+            .outerjoin(
+                head,
+                and_(
+                    head.root_task_id == CollaborationGovernanceHoldModel.root_task_id,
+                    head.workspace_id == CollaborationGovernanceHoldModel.workspace_id,
+                ),
+            )
+            .where(
+                CollaborationGovernanceHoldModel.status
+                == GovernanceHoldStatus.ACTIVE.value,
+                CollaborationGovernanceHoldModel.created_at <= now,
+                or_(
+                    run.status == "superseded",
+                    head.root_task_id.is_(None),
+                    head.active_snapshot_id != run.plan_snapshot_id,
+                    head.active_generation != run.plan_generation,
+                    head.active_snapshot_hash != run.plan_content_hash,
+                ),
+            )
+            .order_by(
+                CollaborationGovernanceHoldModel.created_at.asc(),
+                CollaborationGovernanceHoldModel.id.asc(),
+            )
+            .limit(limit)
+            .with_for_update(of=CollaborationGovernanceHoldModel, skip_locked=True)
+        )
+        if workspace_id is not None:
+            statement = statement.where(
+                CollaborationGovernanceHoldModel.workspace_id == workspace_id
+            )
+        rows = self._session.scalars(statement).all()
+        return tuple(_to_hold(row) for row in rows)
 
     def add_proposal(self, proposal: CollaborationReleaseProposal) -> None:
         self._session.add(_proposal_model(proposal))
@@ -189,7 +286,14 @@ class CollaborationGovernanceRepository:
                 resolved_at=proposal.resolved_at,
             )
         )
-        _check_cas(result, previous_version, proposal.id, proposal.workspace_id, self._session, CollaborationReleaseProposalModel)
+        _check_cas(
+            result,
+            previous_version,
+            proposal.id,
+            proposal.workspace_id,
+            self._session,
+            CollaborationReleaseProposalModel,
+        )
 
     def get_resolution_for_proposal(
         self, workspace_id: UUID, proposal_id: UUID
@@ -236,7 +340,9 @@ def _hold_model(hold: CollaborationGovernanceHold) -> CollaborationGovernanceHol
     )
 
 
-def _proposal_model(proposal: CollaborationReleaseProposal) -> CollaborationReleaseProposalModel:
+def _proposal_model(
+    proposal: CollaborationReleaseProposal,
+) -> CollaborationReleaseProposalModel:
     return CollaborationReleaseProposalModel(
         id=proposal.id,
         workspace_id=proposal.workspace_id,
@@ -259,7 +365,9 @@ def _proposal_model(proposal: CollaborationReleaseProposal) -> CollaborationRele
     )
 
 
-def _resolution_model(resolution: CollaborationGovernanceResolution) -> CollaborationGovernanceResolutionModel:
+def _resolution_model(
+    resolution: CollaborationGovernanceResolution,
+) -> CollaborationGovernanceResolutionModel:
     return CollaborationGovernanceResolutionModel(
         id=resolution.id,
         workspace_id=resolution.workspace_id,
@@ -294,7 +402,9 @@ def _to_hold(row: CollaborationGovernanceHoldModel) -> CollaborationGovernanceHo
     )
 
 
-def _to_proposal(row: CollaborationReleaseProposalModel) -> CollaborationReleaseProposal:
+def _to_proposal(
+    row: CollaborationReleaseProposalModel,
+) -> CollaborationReleaseProposal:
     return CollaborationReleaseProposal(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -317,7 +427,9 @@ def _to_proposal(row: CollaborationReleaseProposalModel) -> CollaborationRelease
     )
 
 
-def _to_resolution(row: CollaborationGovernanceResolutionModel) -> CollaborationGovernanceResolution:
+def _to_resolution(
+    row: CollaborationGovernanceResolutionModel,
+) -> CollaborationGovernanceResolution:
     return CollaborationGovernanceResolution(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -349,3 +461,13 @@ def _check_cas(
         )
     )
     raise VersionConflict(previous_version, int(current or 0))
+
+
+def _positive_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("limit must be positive")
+
+
+def _aware(value: Any) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
