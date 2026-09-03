@@ -40,6 +40,14 @@ from sidera_control_plane.persistence.models import (
     HandoffTransitionModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
+    NotificationDeliveryAttemptModel,
+    NotificationDeliveryIntentModel,
+    NotificationFactModel,
+    NotificationPolicyStateModel,
+    NotificationReconciliationCursorModel,
+    NotificationRouteModel,
+    NotificationSourceBindingModel,
+    NotificationThreadModel,
     OutboxMessageModel,
     PlanEntityLineageModel,
     PlanningBriefRevisionModel,
@@ -133,6 +141,17 @@ def clean_database(database: Database) -> Iterator[None]:
 
 def _clear_database(database: Database) -> None:
     with database.session() as session:
+        for model in (
+            NotificationDeliveryAttemptModel,
+            NotificationDeliveryIntentModel,
+            NotificationSourceBindingModel,
+            NotificationPolicyStateModel,
+            NotificationThreadModel,
+            NotificationFactModel,
+            NotificationRouteModel,
+            NotificationReconciliationCursorModel,
+        ):
+            session.execute(delete(model))
         session.execute(
             text(
                 "TRUNCATE TABLE "

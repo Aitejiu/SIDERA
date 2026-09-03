@@ -32,6 +32,7 @@ from sidera_control_plane.application.ports import (
     KnowledgeCandidateSubmissionRepositoryPort,
     LeaseStorePort,
     ModuleRepositoryPort,
+    NotificationLedger,
     PlanEntityLineageRepositoryPort,
     PlanningLeaseRepositoryPort,
     PlanningProfileRepositoryPort,
@@ -99,6 +100,9 @@ from sidera_control_plane.persistence.lease_store import LeaseStore
 from sidera_control_plane.persistence.module_repository import (
     ExecutionBindingRepository,
     ModuleRepository,
+)
+from sidera_control_plane.persistence.notification_repository import (
+    SqlAlchemyNotificationRepository,
 )
 from sidera_control_plane.persistence.plan_repository import PlanRepository
 from sidera_control_plane.persistence.plan_transition_repository import (
@@ -185,6 +189,7 @@ class SqlAlchemyUnitOfWork:
     context_assemblies: ContextAssemblyRepositoryPort
     context_packages: ContextPackageRepositoryPort
     knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
+    notifications: NotificationLedger
 
     def __init__(
         self, database: Database, *, projection_change_retention_seconds: int = 604_800
@@ -260,6 +265,9 @@ class SqlAlchemyUnitOfWork:
         self.context_packages = ContextPackageRepository(self.session, self.events)
         self.knowledge_candidate_submissions = KnowledgeCandidateSubmissionRepository(
             self.session
+        )
+        self.notifications = SqlAlchemyNotificationRepository(
+            self.session, self.projection_changes
         )
         return self
 

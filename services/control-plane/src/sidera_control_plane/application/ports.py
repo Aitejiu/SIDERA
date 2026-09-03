@@ -95,6 +95,17 @@ from sidera_control_plane.domain.modules import (
     PlannerAdapterCapabilityProfile,
     WorkerAdapterCapabilityProfile,
 )
+from sidera_control_plane.domain.notifications import (
+    InboxThread,
+    NotificationDeliveryAttempt,
+    NotificationDeliveryIntent,
+    NotificationDeliveryStatus,
+    NotificationFact,
+    NotificationPolicyState,
+    NotificationReconciliationCursor,
+    NotificationRoute,
+    NotificationSourceBinding,
+)
 from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
 from sidera_control_plane.domain.plan_transitions import (
     PlanEntityLineage,
@@ -2091,6 +2102,219 @@ class EventStorePort(Protocol):
         raise NotImplementedError
 
 
+class NotificationLedger(Protocol):
+    def get_policy_state(
+        self,
+        workspace_id: UUID,
+        recipient_type: str,
+        recipient_id: str,
+        subject_type: str,
+        subject_id: str,
+        topic: str,
+        *,
+        for_update: bool = False,
+    ) -> NotificationPolicyState | None:
+        raise NotImplementedError
+
+    def list_due_policy_states(
+        self,
+        workspace_id: UUID,
+        now: datetime,
+        limit: int,
+        *,
+        for_update_skip_locked: bool = False,
+    ) -> tuple[NotificationPolicyState, ...]:
+        raise NotImplementedError
+
+    def add_policy_state(self, state: NotificationPolicyState) -> None:
+        raise NotImplementedError
+
+    def save_policy_state(
+        self, state: NotificationPolicyState, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+    def add_fact_or_get_existing(self, fact: NotificationFact) -> NotificationFact:
+        raise NotImplementedError
+
+    def get_fact(
+        self, workspace_id: UUID, fact_id: UUID
+    ) -> NotificationFact | None:
+        raise NotImplementedError
+
+    def list_thread_facts(
+        self,
+        workspace_id: UUID,
+        thread_id: UUID,
+        *,
+        cursor: tuple[datetime, UUID] | None = None,
+        limit: int = 50,
+    ) -> tuple[NotificationFact, ...]:
+        raise NotImplementedError
+
+    def get_thread(
+        self, workspace_id: UUID, thread_id: UUID, *, for_update: bool = False
+    ) -> InboxThread | None:
+        raise NotImplementedError
+
+    def get_thread_by_key(
+        self,
+        workspace_id: UUID,
+        recipient_type: str,
+        recipient_id: str,
+        thread_key: str,
+        *,
+        for_update: bool = False,
+    ) -> InboxThread | None:
+        raise NotImplementedError
+
+    def add_thread(self, thread: InboxThread) -> None:
+        raise NotImplementedError
+
+    def save_thread(self, thread: InboxThread, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def get_route(
+        self, workspace_id: UUID, route_id: UUID, *, for_update: bool = False
+    ) -> NotificationRoute | None:
+        raise NotImplementedError
+
+    def get_route_by_source_ref(
+        self,
+        workspace_id: UUID,
+        channel_module_instance_id: UUID,
+        source_ref: str,
+        *,
+        for_update: bool = False,
+    ) -> NotificationRoute | None:
+        raise NotImplementedError
+
+    def add_route(self, route: NotificationRoute) -> None:
+        raise NotImplementedError
+
+    def save_route(self, route: NotificationRoute, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def list_routes_for_recipient(
+        self, workspace_id: UUID, recipient_type: str, recipient_id: str
+    ) -> tuple[NotificationRoute, ...]:
+        raise NotImplementedError
+
+    def list_routes_for_resource(
+        self, workspace_id: UUID, resource_type: str, resource_id: UUID
+    ) -> tuple[NotificationRoute, ...]:
+        raise NotImplementedError
+
+    def add_binding_or_get_existing(
+        self, binding: NotificationSourceBinding
+    ) -> NotificationSourceBinding:
+        raise NotImplementedError
+
+    def get_binding(
+        self,
+        workspace_id: UUID,
+        resource_type: str,
+        resource_id: UUID,
+        binding_kind: str,
+    ) -> NotificationSourceBinding | None:
+        raise NotImplementedError
+
+    def copy_origin_binding(
+        self,
+        workspace_id: UUID,
+        source_resource_type: str,
+        source_resource_id: UUID,
+        target_resource_type: str,
+        target_resource_id: UUID,
+    ) -> NotificationSourceBinding | None:
+        raise NotImplementedError
+
+    def add_intent_or_get_existing(
+        self, intent: NotificationDeliveryIntent
+    ) -> NotificationDeliveryIntent:
+        raise NotImplementedError
+
+    def get_intent(
+        self, workspace_id: UUID, intent_id: UUID, *, for_update: bool = False
+    ) -> NotificationDeliveryIntent | None:
+        raise NotImplementedError
+
+    def save_intent(
+        self,
+        intent: NotificationDeliveryIntent,
+        previous_fencing_token: int,
+        expected_status: NotificationDeliveryStatus | str,
+    ) -> None:
+        raise NotImplementedError
+
+    def list_due_intents(
+        self,
+        workspace_id: UUID,
+        channel_module_instance_id: UUID,
+        now: datetime,
+        limit: int,
+        *,
+        for_update_skip_locked: bool = False,
+    ) -> tuple[NotificationDeliveryIntent, ...]:
+        raise NotImplementedError
+
+    def list_expired_claims(
+        self,
+        workspace_id: UUID,
+        now: datetime,
+        limit: int,
+        *,
+        for_update_skip_locked: bool = False,
+    ) -> tuple[NotificationDeliveryIntent, ...]:
+        raise NotImplementedError
+
+    def add_attempt(
+        self, workspace_id: UUID, attempt: NotificationDeliveryAttempt
+    ) -> None:
+        raise NotImplementedError
+
+    def finish_attempt(
+        self, workspace_id: UUID, attempt: NotificationDeliveryAttempt
+    ) -> None:
+        raise NotImplementedError
+
+    def list_attempts(
+        self, workspace_id: UUID, intent_id: UUID
+    ) -> tuple[NotificationDeliveryAttempt, ...]:
+        raise NotImplementedError
+
+    def next_delivery_round(
+        self, intent: NotificationDeliveryIntent, *, now: datetime
+    ) -> NotificationDeliveryIntent:
+        raise NotImplementedError
+
+    def get_or_create_cursor(
+        self, workspace_id: UUID, policy_version: int, *, now: datetime
+    ) -> NotificationReconciliationCursor:
+        raise NotImplementedError
+
+    def claim_cursor(
+        self,
+        workspace_id: UUID,
+        policy_version: int,
+        owner: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> NotificationReconciliationCursor | None:
+        raise NotImplementedError
+
+    def save_cursor(
+        self,
+        cursor: NotificationReconciliationCursor,
+        previous_version: int,
+        expected_owner: str,
+    ) -> None:
+        raise NotImplementedError
+
+
+NotificationLedgerPort = NotificationLedger
+
+
 class ControlPlaneUnitOfWork(Protocol):
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
@@ -2138,6 +2362,7 @@ class ControlPlaneUnitOfWork(Protocol):
     context_assemblies: ContextAssemblyRepositoryPort
     context_packages: ContextPackageRepositoryPort
     knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
+    notifications: NotificationLedger
 
     def flush(self) -> None:
         raise NotImplementedError
