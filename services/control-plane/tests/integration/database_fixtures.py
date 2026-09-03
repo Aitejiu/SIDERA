@@ -16,6 +16,9 @@ from sidera_control_plane.persistence.models import (
     AssignmentLeaseModel,
     AttentionAcknowledgementModel,
     CollaborationEvaluationModel,
+    CollaborationGovernanceHoldModel,
+    CollaborationGovernanceResolutionModel,
+    CollaborationReleaseProposalModel,
     CollaborationRunModel,
     CommandModel,
     ContextPatchAcknowledgementModel,
@@ -73,6 +76,9 @@ WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[2]
 
 PLANNING_CLEANUP_MODELS = (
+    CollaborationGovernanceResolutionModel,
+    CollaborationReleaseProposalModel,
+    CollaborationGovernanceHoldModel,
     RuntimeIntentApplicationModel,
     RuntimeReleaseModel,
     RuntimeIntentModel,

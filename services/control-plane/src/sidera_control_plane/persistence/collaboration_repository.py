@@ -19,6 +19,7 @@ from sidera_control_plane.domain.collaboration import (
     RuntimeDecision,
     RuntimeIntent,
     RuntimeIntentApplication,
+    RuntimeIntentApplicationStatus,
     RuntimeProjectionSnapshot,
     RuntimeRelease,
 )
@@ -520,6 +521,71 @@ class CollaborationLedgerRepository:
         row = self._session.scalar(statement)
         return _to_release(row) if row is not None else None
 
+    def get_decision(
+        self, workspace_id: UUID, decision_id: UUID, *, for_update: bool = False
+    ) -> RuntimeDecision | None:
+        statement = select(RuntimeDecisionModel).where(
+            RuntimeDecisionModel.workspace_id == workspace_id,
+            RuntimeDecisionModel.id == decision_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_decision(row) if row is not None else None
+
+    def get_intent(
+        self, workspace_id: UUID, intent_id: UUID, *, for_update: bool = False
+    ) -> RuntimeIntent | None:
+        statement = select(RuntimeIntentModel).where(
+            RuntimeIntentModel.workspace_id == workspace_id,
+            RuntimeIntentModel.id == intent_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_intent(row) if row is not None else None
+
+    def get_application(
+        self, workspace_id: UUID, application_id: UUID, *, for_update: bool = False
+    ) -> RuntimeIntentApplication | None:
+        statement = select(RuntimeIntentApplicationModel).where(
+            RuntimeIntentApplicationModel.workspace_id == workspace_id,
+            RuntimeIntentApplicationModel.id == application_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_application(row) if row is not None else None
+
+    def save_application(
+        self, application: RuntimeIntentApplication, previous_version: int
+    ) -> None:
+        result = self._session.execute(
+            update(RuntimeIntentApplicationModel)
+            .where(
+                RuntimeIntentApplicationModel.id == application.id,
+                RuntimeIntentApplicationModel.workspace_id == application.workspace_id,
+                RuntimeIntentApplicationModel.resource_version == previous_version,
+            )
+            .values(
+                status=application.status.value,
+                release_id=application.release_id,
+                result_code=application.result_code,
+                result_summary=application.result_summary,
+                resource_version=application.resource_version,
+                applied_at=application.applied_at,
+                updated_at=application.applied_at or application.created_at,
+            )
+        )
+        if not isinstance(result, CursorResult) or result.rowcount != 1:
+            current = self._session.scalar(
+                select(RuntimeIntentApplicationModel.resource_version).where(
+                    RuntimeIntentApplicationModel.id == application.id,
+                    RuntimeIntentApplicationModel.workspace_id == application.workspace_id,
+                )
+            )
+            raise VersionConflict(previous_version, int(current or 0))
+
 
 def _run_model(run: CollaborationRun) -> CollaborationRunModel:
     return CollaborationRunModel(
@@ -753,6 +819,64 @@ def _to_release(row: RuntimeReleaseModel) -> RuntimeRelease:
         execution_request_id=row.execution_request_id,
         request_version_at_release=row.request_version_at_release,
         issued_at=row.issued_at,
+    )
+
+
+def _to_decision(row: RuntimeDecisionModel) -> RuntimeDecision:
+    return RuntimeDecision(
+        id=row.id,
+        workspace_id=row.workspace_id,
+        run_id=row.run_id,
+        evaluation_id=row.evaluation_id,
+        projection_snapshot_id=row.projection_snapshot_id,
+        projection_hash=row.projection_hash,
+        operation_id=row.operation_id,
+        schema_version=row.schema_version,
+        sequence=row.sequence,
+        outcome=row.outcome,
+        reason_code=row.reason_code,
+        summary=row.summary,
+        strategy_state=row.strategy_state_json,
+        content_hash=row.content_hash,
+        runtime_duration_ms=row.runtime_duration_ms,
+        created_at=row.created_at,
+    )
+
+
+def _to_intent(row: RuntimeIntentModel) -> RuntimeIntent:
+    return RuntimeIntent(
+        id=row.id,
+        workspace_id=row.workspace_id,
+        run_id=row.run_id,
+        decision_id=row.decision_id,
+        ordinal=row.ordinal,
+        intent_type=row.intent_type,
+        target_execution_request_id=row.target_execution_request_id,
+        target_request_version=row.target_request_version,
+        reason_code=row.reason_code,
+        summary=row.summary,
+        idempotency_key=row.idempotency_key,
+        payload_json=row.payload_json,
+        created_at=row.created_at,
+    )
+
+
+def _to_application(row: RuntimeIntentApplicationModel) -> RuntimeIntentApplication:
+    return RuntimeIntentApplication(
+        id=row.id,
+        workspace_id=row.workspace_id,
+        intent_id=row.intent_id,
+        status=RuntimeIntentApplicationStatus(row.status),
+        expected_run_version=row.expected_run_version,
+        observed_run_version=row.observed_run_version,
+        expected_request_version=row.expected_request_version,
+        observed_request_version=row.observed_request_version,
+        release_id=row.release_id,
+        result_code=row.result_code,
+        result_summary=row.result_summary,
+        resource_version=row.resource_version,
+        created_at=row.created_at,
+        applied_at=row.applied_at,
     )
 
 

@@ -9,6 +9,7 @@ from sidera_control_plane.application.ports import (
     ArtifactRepositoryPort,
     AttentionAcknowledgementRepositoryPort,
     CollaborationEvaluationRepositoryPort,
+    CollaborationGovernanceRepositoryPort,
     CollaborationLedgerRepositoryPort,
     CollaborationRunRepositoryPort,
     CommandRepositoryPort,
@@ -56,6 +57,9 @@ from sidera_control_plane.application.projection_changes import (
 )
 from sidera_control_plane.persistence.attention_repository import (
     AttentionAcknowledgementRepository,
+)
+from sidera_control_plane.persistence.collaboration_governance_repository import (
+    CollaborationGovernanceRepository,
 )
 from sidera_control_plane.persistence.collaboration_repository import (
     CollaborationEvaluationRepository,
@@ -152,6 +156,7 @@ class SqlAlchemyUnitOfWork:
     collaboration_runs: CollaborationRunRepositoryPort
     collaboration_evaluations: CollaborationEvaluationRepositoryPort
     collaboration_ledger: CollaborationLedgerRepositoryPort
+    collaboration_governance: CollaborationGovernanceRepositoryPort
     handoff_proposals: HandoffProposalRepositoryPort
     handoff_transitions: HandoffTransitionRepositoryPort
     handoff_context_bundles: HandoffContextBundleRepositoryPort
@@ -215,6 +220,7 @@ class SqlAlchemyUnitOfWork:
             self.session
         )
         self.collaboration_ledger = CollaborationLedgerRepository(self.session)
+        self.collaboration_governance = CollaborationGovernanceRepository(self.session)
         self.handoff_proposals = HandoffProposalRepository(self.session)
         self.handoff_transitions = HandoffTransitionRepository(self.session)
         self.handoff_context_bundles = HandoffContextBundleRepository(self.session)

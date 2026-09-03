@@ -34,6 +34,11 @@ from sidera_control_plane.domain.collaboration import (
     RuntimeProjectionSnapshot,
     RuntimeRelease,
 )
+from sidera_control_plane.domain.collaboration_governance import (
+    CollaborationGovernanceHold,
+    CollaborationGovernanceResolution,
+    CollaborationReleaseProposal,
+)
 from sidera_control_plane.domain.commands import (
     CommandEnvelope,
     CommandResult,
@@ -1094,6 +1099,113 @@ class CollaborationLedgerRepositoryPort(Protocol):
         *,
         for_update: bool = False,
     ) -> RuntimeRelease | None:
+        raise NotImplementedError
+
+    def get_decision(
+        self, workspace_id: UUID, decision_id: UUID, *, for_update: bool = False
+    ) -> RuntimeDecision | None:
+        raise NotImplementedError
+
+    def get_intent(
+        self, workspace_id: UUID, intent_id: UUID, *, for_update: bool = False
+    ) -> RuntimeIntent | None:
+        raise NotImplementedError
+
+    def get_application(
+        self, workspace_id: UUID, application_id: UUID, *, for_update: bool = False
+    ) -> RuntimeIntentApplication | None:
+        raise NotImplementedError
+
+    def save_application(
+        self, application: RuntimeIntentApplication, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+
+class CollaborationGovernanceRepositoryPort(Protocol):
+    def get_hold(
+        self, workspace_id: UUID, hold_id: UUID, *, for_update: bool = False
+    ) -> CollaborationGovernanceHold | None:
+        raise NotImplementedError
+
+    def get_active_hold(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        worker_item_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationGovernanceHold | None:
+        raise NotImplementedError
+
+    def get_active_holds(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        worker_item_ids: tuple[UUID, ...],
+        *,
+        for_update: bool = False,
+    ) -> tuple[CollaborationGovernanceHold, ...]:
+        raise NotImplementedError
+
+    def list_active_holds_for_run(
+        self, workspace_id: UUID, run_id: UUID, *, for_update: bool = False
+    ) -> tuple[CollaborationGovernanceHold, ...]:
+        raise NotImplementedError
+
+    def add_hold(self, hold: CollaborationGovernanceHold) -> None:
+        raise NotImplementedError
+
+    def save_hold(self, hold: CollaborationGovernanceHold, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def get_proposal(
+        self, workspace_id: UUID, proposal_id: UUID, *, for_update: bool = False
+    ) -> CollaborationReleaseProposal | None:
+        raise NotImplementedError
+
+    def get_proposal_for_intent(
+        self, workspace_id: UUID, intent_id: UUID
+    ) -> CollaborationReleaseProposal | None:
+        raise NotImplementedError
+
+    def find_matching_proposal(
+        self,
+        workspace_id: UUID,
+        hold_id: UUID,
+        execution_request_id: UUID,
+        target_request_version: int,
+        fingerprint_version: int,
+        fingerprint: str,
+        *,
+        for_update: bool = False,
+    ) -> CollaborationReleaseProposal | None:
+        raise NotImplementedError
+
+    def list_pending_proposals_for_hold(
+        self, workspace_id: UUID, hold_id: UUID, *, for_update: bool = False
+    ) -> tuple[CollaborationReleaseProposal, ...]:
+        raise NotImplementedError
+
+    def list_pending_proposals_for_run(
+        self, workspace_id: UUID, run_id: UUID, *, for_update: bool = False
+    ) -> tuple[CollaborationReleaseProposal, ...]:
+        raise NotImplementedError
+
+    def add_proposal(self, proposal: CollaborationReleaseProposal) -> None:
+        raise NotImplementedError
+
+    def save_proposal(
+        self, proposal: CollaborationReleaseProposal, previous_version: int
+    ) -> None:
+        raise NotImplementedError
+
+    def get_resolution_for_proposal(
+        self, workspace_id: UUID, proposal_id: UUID
+    ) -> CollaborationGovernanceResolution | None:
+        raise NotImplementedError
+
+    def add_resolution(self, resolution: CollaborationGovernanceResolution) -> None:
         raise NotImplementedError
 
 
