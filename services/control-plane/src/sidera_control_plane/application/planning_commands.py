@@ -11,6 +11,10 @@ from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateSubmissionService,
 )
+from sidera_control_plane.application.notification_commands import (
+    bind_planning_request_origin,
+    copy_planning_request_origin_to_root,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.proposal_materializer import (
     ProposalMaterializer,
@@ -454,6 +458,7 @@ class PlanningCommandHandler:
             created_at=request.created_at,
         )
         uow.planning_requests.add(request)
+        bind_planning_request_origin(uow, request, now=request.created_at)
         uow.work_contexts.add(work_context, work_context_revision)
         uow.context_assemblies.add(
             build_planning_context_assembly_request(
@@ -1130,6 +1135,12 @@ class PlanningCommandHandler:
             now=self._clock(),
         )
         materialization = result.materialization
+        copy_planning_request_origin_to_root(
+            uow,
+            request_id=request.id,
+            root_task_id=materialization.root_task_id,
+            workspace_id=request.workspace_id,
+        )
         if self._candidate_submission_service is not None:
             self._candidate_submission_service.activate_planner_submissions(
                 uow,

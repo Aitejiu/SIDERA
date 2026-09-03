@@ -43,6 +43,9 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateSubmissionService,
 )
 from sidera_control_plane.application.module_queries import ModuleQueryService
+from sidera_control_plane.application.notification_commands import (
+    NotificationCommandHandler,
+)
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.plan_revision_queries import (
     PlanRevisionQueryService,
@@ -198,6 +201,11 @@ def get_command_service(
                         quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
                     )
                 ),
+            ),
+            NotificationCommandHandler(
+                local_actor_type=settings.local_actor_type,
+                local_actor_id=settings.local_actor_id,
+                clock=lambda: datetime.now(UTC),
             ),
             WorkContextCommandHandler(
                 local_actor_type=settings.local_actor_type,

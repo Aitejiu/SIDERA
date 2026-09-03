@@ -10,6 +10,9 @@ from sidera_control_plane.api.schemas import (
     CommandRequest,
     RegisterPlanningProfilePayload,
 )
+from sidera_control_plane.application.notification_commands import (
+    NotificationRouteConflict,
+)
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
@@ -36,6 +39,12 @@ from sidera_control_plane.domain.modules import (
     StabilityLevel,
     StructuredOutputCapability,
     UsageReportingCapability,
+)
+from sidera_control_plane.domain.notifications import (
+    NotificationBindingKind,
+    NotificationRoute,
+    NotificationRouteStatus,
+    NotificationSourceBinding,
 )
 from sidera_control_plane.domain.plan_revisions import (
     RootTaskPlanHead,
@@ -460,6 +469,75 @@ class ProjectionPublisher:
         return SimpleNamespace()
 
 
+class NotificationRepository:
+    def __init__(self, routes: tuple[NotificationRoute, ...] = ()) -> None:
+        self.routes = list(routes)
+        self.bindings: dict[tuple[UUID, str, UUID, str], NotificationSourceBinding] = {}
+
+    def list_routes_for_source_ref(
+        self, workspace_id: UUID, source_ref: str, *, for_update: bool = False
+    ) -> tuple[NotificationRoute, ...]:
+        del for_update
+        return tuple(
+            item
+            for item in self.routes
+            if item.workspace_id == workspace_id and item.source_ref == source_ref
+        )
+
+    def get_binding(
+        self,
+        workspace_id: UUID,
+        resource_type: str,
+        resource_id: UUID,
+        binding_kind: str,
+    ) -> NotificationSourceBinding | None:
+        return self.bindings.get((workspace_id, resource_type, resource_id, binding_kind))
+
+    def add_binding_or_get_existing(
+        self, item: NotificationSourceBinding
+    ) -> NotificationSourceBinding:
+        key = (
+            item.workspace_id,
+            item.resource_type,
+            item.resource_id,
+            item.binding_kind.value,
+        )
+        existing = self.bindings.get(key)
+        if existing is not None:
+            if existing != item:
+                raise ValidationError("notification source binding conflicts")
+            return existing
+        self.bindings[key] = item
+        return item
+
+    def copy_origin_binding(
+        self,
+        workspace_id: UUID,
+        source_resource_type: str,
+        source_resource_id: UUID,
+        target_resource_type: str,
+        target_resource_id: UUID,
+    ) -> NotificationSourceBinding | None:
+        source = self.get_binding(
+            workspace_id,
+            source_resource_type,
+            source_resource_id,
+            NotificationBindingKind.ORIGIN.value,
+        )
+        if source is None:
+            return None
+        return self.add_binding_or_get_existing(
+            NotificationSourceBinding(
+                workspace_id=workspace_id,
+                resource_type=target_resource_type,
+                resource_id=target_resource_id,
+                notification_route_id=source.notification_route_id,
+                binding_kind=source.binding_kind,
+                bound_at=source.bound_at,
+            )
+        )
+
+
 def unit(
     definition: ModuleDefinition,
     instance: ModuleInstance,
@@ -468,6 +546,7 @@ def unit(
     current_proposal: object | None = None,
     extra_definitions: tuple[ModuleDefinition, ...] = (),
     extra_instances: tuple[ModuleInstance, ...] = (),
+    notification_routes: tuple[NotificationRoute, ...] = (),
 ) -> Any:
     return SimpleNamespace(
         tasks=SimpleNamespace(),
@@ -489,6 +568,7 @@ def unit(
         context_assemblies=ContextAssemblyRepository(),
         events=EventRepository(),
         projection_changes=ProjectionPublisher(),
+        notifications=NotificationRepository(notification_routes),
     )
 
 
@@ -570,7 +650,12 @@ def register_profile_payload(instance_id: UUID) -> dict[str, object]:
     }
 
 
-def new_request(stored_profile: PlanningProfile) -> PlanningRequest:
+def new_request(
+    stored_profile: PlanningProfile,
+    *,
+    source_type: str = "web",
+    source_ref: str | None = "conversation:test",
+) -> PlanningRequest:
     return PlanningRequest.create(
         request_id=uuid4(),
         workspace_id=WORKSPACE_ID,
@@ -580,8 +665,8 @@ def new_request(stored_profile: PlanningProfile) -> PlanningRequest:
         acceptance_criteria=("The request can be completed",),
         context_refs=("context:test",),
         requested_outputs=("proposal",),
-        source_type="web",
-        source_ref="conversation:test",
+        source_type=source_type,
+        source_ref=source_ref,
         actor="operator",
         correlation_id=uuid4(),
         run_id=uuid4(),
@@ -951,6 +1036,251 @@ def test_submit_planning_request_returns_request_and_run_ids() -> None:
     assert (
         unit_of_work.planning_requests.request.status is PlanningRequestStatus.SUBMITTED
     )
+
+
+def test_submit_private_planning_request_binds_exact_notification_origin() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    source_ref = "src_" + "b" * 32
+    route = NotificationRoute(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        recipient_type="workspace_operator",
+        recipient_id="local",
+        channel_type="akashic_private",
+        channel_module_instance_id=uuid4(),
+        source_ref=source_ref,
+        status=NotificationRouteStatus.ACTIVE,
+        version=1,
+        registered_at=NOW,
+        updated_at=NOW,
+    )
+    unit_of_work = unit(
+        definition,
+        instance,
+        stored_profile=stored_profile,
+        notification_routes=(route,),
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "SubmitPlanningRequest",
+            {
+                "profile_id": str(stored_profile.id),
+                "profile_version": 1,
+                "objective": "Implement planning",
+                "constraints": ["Keep it reviewable"],
+                "acceptance_criteria": ["The route is preserved"],
+                "context_refs": ["context:test"],
+                "requested_outputs": ["proposal"],
+                "source_type": "akashic_private",
+                "source_ref": source_ref,
+            },
+        ),
+    )
+
+    binding = unit_of_work.notifications.get_binding(
+        WORKSPACE_ID,
+        "planning_request",
+        result.aggregate_id,
+        NotificationBindingKind.ORIGIN.value,
+    )
+    assert binding is not None
+    assert binding.notification_route_id == route.id
+
+
+class StubProposalMaterializer:
+    def __init__(self, materialization: object) -> None:
+        self.materialization = materialization
+
+    def materialize(self, *args: object, **kwargs: object):
+        del args, kwargs
+        return SimpleNamespace(
+            materialization=self.materialization,
+            event_ids=(),
+        )
+
+
+def test_confirm_initial_proposal_copies_request_origin_to_root() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = proposal_ready_request(
+        stored_profile
+    )
+    source_ref = "src_" + "c" * 32
+    request.source_type = "akashic_private"
+    request.source_ref = source_ref
+    route = NotificationRoute(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        recipient_type="workspace_operator",
+        recipient_id="local",
+        channel_type="akashic_private",
+        channel_module_instance_id=uuid4(),
+        source_ref=source_ref,
+        status=NotificationRouteStatus.ACTIVE,
+        version=1,
+        registered_at=NOW,
+        updated_at=NOW,
+    )
+    root_task_id = uuid4()
+    materialization = SimpleNamespace(
+        root_task_id=root_task_id,
+        plan_snapshot_id=uuid4(),
+        plan_generation=1,
+        subtask_task_mapping={},
+        worker_item_mapping={},
+        execution_request_mapping={},
+        deep_link="/tasks/root",
+    )
+    proposal = SimpleNamespace(
+        planning_request_id=request.id,
+        revision=1,
+        content_hash=PROPOSAL_HASH,
+        planning_run_id=request.current_run_id,
+    )
+    unit_of_work = unit(
+        definition,
+        instance,
+        stored_profile=stored_profile,
+        stored_request=request,
+        current_proposal=proposal,
+        notification_routes=(route,),
+    )
+    unit_of_work.notifications.add_binding_or_get_existing(
+        NotificationSourceBinding(
+            workspace_id=WORKSPACE_ID,
+            resource_type="planning_request",
+            resource_id=request.id,
+            notification_route_id=route.id,
+            binding_kind=NotificationBindingKind.ORIGIN,
+            bound_at=NOW,
+        )
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local",
+        local_actor_id="operator",
+        clock=lambda: NOW,
+        materializer=StubProposalMaterializer(materialization),
+    )
+
+    handler.handle(
+        unit_of_work,
+        envelope(
+            "ConfirmPlanningProposal",
+            {
+                "proposal_revision": 1,
+                "proposal_content_hash": PROPOSAL_HASH,
+                "profile_id": str(stored_profile.id),
+                "profile_version": 1,
+            },
+            target_type="planning_request",
+            target_id=request.id,
+            expected_version=request.version,
+        ),
+    )
+
+    binding = unit_of_work.notifications.get_binding(
+        WORKSPACE_ID,
+        "root_task",
+        root_task_id,
+        NotificationBindingKind.ORIGIN.value,
+    )
+    assert binding is not None
+    assert binding.notification_route_id == route.id
+
+
+def test_confirm_initial_proposal_rejects_conflicting_root_origin() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = proposal_ready_request(stored_profile)
+    source_ref = "src_" + "d" * 32
+    request.source_type = "akashic_private"
+    request.source_ref = source_ref
+    request_route = NotificationRoute(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        recipient_type="workspace_operator",
+        recipient_id="local",
+        channel_type="akashic_private",
+        channel_module_instance_id=uuid4(),
+        source_ref=source_ref,
+        status=NotificationRouteStatus.ACTIVE,
+        version=1,
+        registered_at=NOW,
+        updated_at=NOW,
+    )
+    root_task_id = uuid4()
+    materialization = SimpleNamespace(
+        root_task_id=root_task_id,
+        plan_snapshot_id=uuid4(),
+        plan_generation=1,
+        subtask_task_mapping={},
+        worker_item_mapping={},
+        execution_request_mapping={},
+        deep_link="/tasks/root",
+    )
+    proposal = SimpleNamespace(
+        planning_request_id=request.id,
+        revision=1,
+        content_hash=PROPOSAL_HASH,
+        planning_run_id=request.current_run_id,
+    )
+    unit_of_work = unit(
+        definition,
+        instance,
+        stored_profile=stored_profile,
+        stored_request=request,
+        current_proposal=proposal,
+        notification_routes=(request_route,),
+    )
+    unit_of_work.notifications.add_binding_or_get_existing(
+        NotificationSourceBinding(
+            workspace_id=WORKSPACE_ID,
+            resource_type="planning_request",
+            resource_id=request.id,
+            notification_route_id=request_route.id,
+            binding_kind=NotificationBindingKind.ORIGIN,
+            bound_at=NOW,
+        )
+    )
+    unit_of_work.notifications.add_binding_or_get_existing(
+        NotificationSourceBinding(
+            workspace_id=WORKSPACE_ID,
+            resource_type="root_task",
+            resource_id=root_task_id,
+            notification_route_id=uuid4(),
+            binding_kind=NotificationBindingKind.ORIGIN,
+            bound_at=NOW,
+        )
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local",
+        local_actor_id="operator",
+        clock=lambda: NOW,
+        materializer=StubProposalMaterializer(materialization),
+    )
+
+    with pytest.raises(NotificationRouteConflict):
+        handler.handle(
+            unit_of_work,
+            envelope(
+                "ConfirmPlanningProposal",
+                {
+                    "proposal_revision": 1,
+                    "proposal_content_hash": PROPOSAL_HASH,
+                    "profile_id": str(stored_profile.id),
+                    "profile_version": 1,
+                },
+                target_type="planning_request",
+                target_id=request.id,
+                expected_version=request.version,
+            ),
+        )
 
 
 def test_cancel_planning_request_requires_expected_version_and_updates_request() -> (

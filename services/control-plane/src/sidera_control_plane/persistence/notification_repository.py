@@ -652,6 +652,25 @@ class SqlAlchemyNotificationRepository:
         row = self._session.scalar(statement)
         return _route_to_domain(row) if row is not None else None
 
+    def list_routes_for_source_ref(
+        self, workspace_id: UUID, source_ref: str, *, for_update: bool = False
+    ) -> tuple[NotificationRoute, ...]:
+        statement = (
+            select(NotificationRouteModel)
+            .where(
+                NotificationRouteModel.workspace_id == workspace_id,
+                NotificationRouteModel.source_ref == source_ref,
+            )
+            .order_by(
+                NotificationRouteModel.registered_at.asc(),
+                NotificationRouteModel.id.asc(),
+            )
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        return tuple(_route_to_domain(row) for row in rows)
+
     def add_route(self, route: NotificationRoute) -> None:
         self._session.add(NotificationRouteModel(**_route_to_model_values(route)))
 

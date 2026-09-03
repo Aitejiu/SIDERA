@@ -349,6 +349,11 @@ class PlanningRequestRepositoryPort(Protocol):
     ) -> PlanningRequest | None:
         raise NotImplementedError
 
+    def list_by_source_ref(
+        self, workspace_id: UUID, source_type: str, source_ref: str
+    ) -> tuple[PlanningRequest, ...]:
+        raise NotImplementedError
+
     def save(self, request: PlanningRequest, previous_version: int) -> None:
         raise NotImplementedError
 
@@ -2187,6 +2192,11 @@ class NotificationLedger(Protocol):
         *,
         for_update: bool = False,
     ) -> NotificationRoute | None:
+        raise NotImplementedError
+
+    def list_routes_for_source_ref(
+        self, workspace_id: UUID, source_ref: str, *, for_update: bool = False
+    ) -> tuple[NotificationRoute, ...]:
         raise NotImplementedError
 
     def add_route(self, route: NotificationRoute) -> None:

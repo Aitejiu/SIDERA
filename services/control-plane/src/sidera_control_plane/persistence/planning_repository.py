@@ -199,6 +199,41 @@ class PlanningRequestRepository:
             ),
         )
 
+    def list_by_source_ref(
+        self, workspace_id: UUID, source_type: str, source_ref: str
+    ) -> tuple[PlanningRequest, ...]:
+        rows = self._session.scalars(
+            select(PlanningRequestModel)
+            .where(
+                PlanningRequestModel.workspace_id == workspace_id,
+                PlanningRequestModel.source_type == source_type,
+                PlanningRequestModel.source_ref == source_ref,
+            )
+            .order_by(
+                PlanningRequestModel.created_at.asc(),
+                PlanningRequestModel.id.asc(),
+            )
+        ).all()
+        return tuple(
+            _to_request(
+                row,
+                briefs=_list_briefs(self._session, row.id, workspace_id),
+                runs=_list_runs(self._session, row.id, workspace_id, row.profile_snapshot),
+                clarifications=tuple(
+                    _to_clarification(item)
+                    for item in self._session.scalars(
+                        select(PlanningClarificationModel)
+                        .where(
+                            PlanningClarificationModel.planning_request_id == row.id,
+                            PlanningClarificationModel.workspace_id == workspace_id,
+                        )
+                        .order_by(PlanningClarificationModel.sequence.asc())
+                    ).all()
+                ),
+            )
+            for row in rows
+        )
+
     def get_active_revision_for_root(
         self,
         root_task_id: UUID,
