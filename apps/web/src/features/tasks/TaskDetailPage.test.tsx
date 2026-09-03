@@ -422,6 +422,40 @@ describe("TaskDetailPage", () => {
     expect(within(collaboration).queryByText("60000000-0000-0000-0000-000000000001")).not.toBeInTheDocument();
   });
 
+  it("surfaces the affected subtask and pending proposal count on the root task", async () => {
+    server.use(
+      http.get(`/api/v1/tasks/${ROOT_TASK_ID}/graph`, () => HttpResponse.json({
+        ...graph,
+        overview: {
+          ...graph.overview,
+          attention_items: [],
+          collaboration: {
+            ...graph.overview.collaboration,
+            status: "attention",
+            attention_required: true,
+            blocked_subtask_count: 0,
+            blocked_subtasks: [],
+            pending_release_proposal_count: 2,
+            attention_subtasks: [{
+              deep_link: `/workspaces/${WORKSPACE_ID}/worker-items/40000000-0000-0000-0000-000000000001`,
+              first_worker_item_title: "审查者",
+              pending_count: 2,
+              subtask_key: "callback-idempotency",
+              subtask_title: "回调幂等",
+            }],
+          },
+        },
+      })),
+    );
+    renderPage();
+
+    const collaboration = await screen.findByRole("region", { name: "协同调度" });
+    expect(within(collaboration).getByText("等待你决定")).toBeVisible();
+    expect(within(collaboration).getByText("支付重构 / 回调幂等")).toBeVisible();
+    expect(within(collaboration).getByText("2 个 Proposal 待确认")).toBeVisible();
+    expect(within(collaboration).queryByText("审查者")).not.toBeInTheDocument();
+  });
+
   it("shows exact knowledge refs, delivery retry state, and review counts without loading body", async () => {
     server.use(
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/work-context`, () => HttpResponse.json(workContext)),

@@ -382,12 +382,11 @@ h1 {
 }
 
 .task-row__title {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--ink);
   font-size: 16px;
   font-weight: 680;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.25;
 }
 
 .task-row__summary,
@@ -4152,6 +4151,16 @@ h1 {
   padding-top: 8px;
 }
 
+.subtask-page__decision-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--attention);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  font-weight: 650;
+}
+
 .subtask-relations {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4478,6 +4487,17 @@ h1 {
   right: 9px;
   bottom: 9px;
   color: var(--dispatch);
+}
+
+.worker-board-card__decision {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-top: 6px;
+  border-top: 1px solid #e5e8eb;
+  color: var(--attention);
+  font-size: 10px;
+  font-weight: 650;
 }
 
 .subtask-summary {
@@ -11725,6 +11745,55 @@ a.knowledge-table__row:focus-visible {
   color: var(--dispatch);
 }
 
+.collaboration-summary__proposal-list {
+  display: grid;
+  gap: 1px;
+  border: 1px solid #dfc39d;
+  background: #dfc39d;
+}
+
+.collaboration-summary__proposal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 0;
+  color: var(--ink);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.collaboration-summary__proposal:hover,
+.collaboration-summary__proposal:focus-visible {
+  background: #fffdf9;
+}
+
+.collaboration-summary__proposal > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.collaboration-summary__proposal strong,
+.collaboration-summary__proposal span span {
+  overflow-wrap: anywhere;
+}
+
+.collaboration-summary__proposal span span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.collaboration-summary__proposal > svg {
+  flex: 0 0 auto;
+  color: var(--dispatch);
+}
+
 .collaboration-summary__latest {
   margin: 0;
 }
@@ -11974,6 +12043,12 @@ a.knowledge-table__row:focus-visible {
 .collaboration-application--stale,
 .collaboration-application--duplicate {
   color: var(--attention);
+}
+
+.collaboration-application__audit {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 9px;
 }
 
 .collaboration-decision__diagnostics {

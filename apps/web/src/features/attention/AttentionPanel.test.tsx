@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
@@ -54,5 +55,31 @@ describe("AttentionPanel", () => {
     expect(requestBody?.command_type).toBe("AcknowledgeAttentionItem");
     expect(requestBody?.target_id).toBe(ROOT_TASK_ID);
     expect((requestBody?.payload as Record<string, unknown>).attention_key).toBe(ITEM.key);
+  });
+
+  it("navigates to a release proposal without acknowledging it", async () => {
+    const proposalItem = {
+      ...ITEM,
+      key: "collaboration_release_proposal:90000000-0000-0000-0000-000000000001",
+      kind: "collaboration_release_proposal",
+      deep_link: `/workspaces/${WORKSPACE_ID}/worker-items/40000000-0000-0000-0000-000000000001`,
+      reason: "审查者的放行建议等待决定",
+    };
+
+    render(
+      <MemoryRouter>
+        <AttentionPanel
+          workspaceId={WORKSPACE_ID}
+          rootTaskId={ROOT_TASK_ID}
+          rootTaskVersion={1}
+          items={[proposalItem]}
+        />
+      </MemoryRouter>,
+    );
+
+    const link = screen.getByRole("link", { name: "查看建议：Blocked worker" });
+    expect(link).toHaveAttribute("href", proposalItem.deep_link);
+    expect(screen.queryByRole("button", { name: "确认已处理" })).not.toBeInTheDocument();
+    expect(screen.getByText("审查者的放行建议等待决定")).toBeVisible();
   });
 });

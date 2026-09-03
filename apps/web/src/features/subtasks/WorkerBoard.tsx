@@ -34,7 +34,7 @@ export function WorkerBoard({
     grouped.set(column.key, []);
   }
   for (const worker of workers) {
-    grouped.get(columnFor(worker.status))?.push(worker);
+    grouped.get(columnFor(worker))?.push(worker);
   }
 
   return (
@@ -113,6 +113,9 @@ function WorkerCard({
         <span className="eyebrow">当前步骤</span>
         {worker.current_step ?? "尚未开始"}
       </span>
+      {worker.attention_state === "decision_required" ? (
+        <span className="worker-board-card__decision"><CircleAlert size={13} aria-hidden="true" />等待你决定</span>
+      ) : null}
       {collaborationLabel ? (
         <span className="worker-board-card__collaboration">
           {collaborationLabel}
@@ -153,7 +156,11 @@ function syncStatusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-function columnFor(status: string): WorkerColumnKey {
+function columnFor(worker: WorkerItemSummary): WorkerColumnKey {
+  if (worker.attention_state === "decision_required") {
+    return "attention";
+  }
+  const { status } = worker;
   if (status === "waiting_user" || status === "blocked" || status === "failed") {
     return "attention";
   }

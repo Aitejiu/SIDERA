@@ -196,6 +196,7 @@ function TaskDeliveryContent({
 
       <CollaborationSummary
         summary={graph.overview.collaboration}
+        rootTaskTitle={graph.overview.title}
         onOpenSubtask={onOpenSubtask}
       />
 
@@ -320,6 +321,7 @@ function taskStatus(graph: TaskGraphProjection): { kind: StatusMarkKind; label: 
   }
   if (
     graph.overview.attention_items.length > 0
+    || (graph.overview.collaboration?.attention_subtasks?.length ?? 0) > 0
     || graph.overview.revision_attention !== null
     && graph.overview.revision_attention !== undefined
   ) {

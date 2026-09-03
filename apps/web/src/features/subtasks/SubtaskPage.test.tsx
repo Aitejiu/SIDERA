@@ -85,6 +85,9 @@ const workspace = {
       blocker: "等待实现者完成",
       collaboration_state: "waiting_release",
       collaboration_waiting_summary: "等待协同放行",
+      attention_state: "decision_required",
+      governance_mode: "paused",
+      proposal_summary: "等待确认本次协同放行建议",
       current_agent_summary: null,
       context_version: 1,
       recent_activity_at: "2026-08-23T07:55:00Z",
@@ -271,6 +274,23 @@ describe("SubtaskPage", () => {
     await user.click(screen.getByRole("button", { name: "打开上游子任务：支付实现" }));
     expect(screen.getByTestId("route-location")).toHaveTextContent(
       `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/payment-implementation`,
+    );
+  });
+
+  it("marks only the affected WorkerItem as waiting for a decision", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const board = await screen.findByRole("region", { name: "Worker 看板" });
+    const attentionColumn = within(board).getByRole("region", { name: "需要处理" });
+    expect(within(attentionColumn).getByRole("button", { name: "打开 Worker：审查者" })).toBeVisible();
+    expect(within(attentionColumn).getByText("等待你决定")).toBeVisible();
+    expect(within(attentionColumn).queryByRole("button", { name: "打开 Worker：实现者" })).not.toBeInTheDocument();
+    expect(screen.getByText("待你决定 1 个 WorkerItem")).toBeVisible();
+
+    await user.click(within(attentionColumn).getByRole("button", { name: "打开 Worker：审查者" }));
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      `/workspaces/${WORKSPACE_ID}/worker-items/${REVIEWER_ID}`,
     );
   });
 

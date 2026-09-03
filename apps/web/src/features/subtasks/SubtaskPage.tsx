@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowRight, ArrowUp, Clock3, FileCheck2, GitBranch, List, MessageSquareText, PackageCheck } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, CircleAlert, Clock3, FileCheck2, GitBranch, List, MessageSquareText, PackageCheck } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -106,6 +106,9 @@ function SubtaskContent({
   rootTaskId: string;
 }) {
   const status = subtaskStatus(workspace.subtask.state);
+  const decisionRequiredWorkerCount = workspace.worker_items.filter(
+    (worker) => worker.attention_state === "decision_required",
+  ).length;
   return (
     <>
       <div className="breadcrumb">
@@ -126,6 +129,11 @@ function SubtaskContent({
         </div>
         <div className="subtask-page__meta">
           <StatusMark kind={status.kind} label={status.label} />
+          {decisionRequiredWorkerCount > 0 ? (
+            <span className="subtask-page__decision-count">
+              <CircleAlert size={13} aria-hidden="true" />待你决定 {decisionRequiredWorkerCount} 个 WorkerItem
+            </span>
+          ) : null}
           <span className="mono-label">验收 {workspace.subtask.evidence_satisfied} / {workspace.subtask.evidence_required}</span>
           <span className="mono-label">CURSOR {workspace.last_change_cursor}</span>
         </div>

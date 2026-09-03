@@ -1,5 +1,6 @@
-import { Check, CircleAlert } from "lucide-react";
+import { ArrowRight, Check, CircleAlert } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
   ApiProblem,
@@ -94,21 +95,45 @@ export function AttentionPanel({
                   持续 {formatElapsed(item.occurred_at)} · SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}
                 </span>
               </div>
-              <button
-                className="quiet-button attention-item__action"
-                type="button"
-                onClick={() => void acknowledge(item)}
-                disabled={pendingKey !== null || rootTaskVersion === undefined}
-              >
-                <Check size={14} aria-hidden="true" />
-                {pendingKey === item.key ? "正在确认" : "确认已处理"}
-              </button>
+              {item.kind === "collaboration_release_proposal" ? (
+                <Link
+                  className="quiet-button attention-item__action"
+                  to={attentionHref(item, workspaceId, rootTaskId)}
+                  aria-label={`查看建议：${item.subtask_title}`}
+                >
+                  <ArrowRight size={14} aria-hidden="true" />查看建议
+                </Link>
+              ) : (
+                <button
+                  className="quiet-button attention-item__action"
+                  type="button"
+                  onClick={() => void acknowledge(item)}
+                  disabled={pendingKey !== null || rootTaskVersion === undefined}
+                >
+                  <Check size={14} aria-hidden="true" />
+                  {pendingKey === item.key ? "正在确认" : "确认已处理"}
+                </button>
+              )}
             </article>
           ))}
         </div>
       )}
     </section>
   );
+}
+
+function attentionHref(
+  item: AttentionItem,
+  workspaceId: string,
+  rootTaskId: string,
+): string {
+  if (item.deep_link) {
+    return item.deep_link;
+  }
+  if (item.worker_item_id) {
+    return `/workspaces/${encodeURIComponent(workspaceId)}/worker-items/${encodeURIComponent(item.worker_item_id)}`;
+  }
+  return `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(rootTaskId)}/subtasks/${encodeURIComponent(item.subtask_key)}`;
 }
 
 function formatElapsed(value: string): string {

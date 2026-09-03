@@ -131,6 +131,34 @@ describe("TaskListPage", () => {
     expect(screen.getAllByText(/刚刚更新|分钟前更新|更新于/).length).toBeGreaterThan(0);
   });
 
+  it("surfaces the task and subtask when a release decision is pending", async () => {
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/task-overviews`, () => HttpResponse.json(
+        overviews.map((overview, index) => index === 0 ? {
+          ...overview,
+          collaboration: {
+            ...overview.collaboration,
+            attention_required: true,
+            pending_release_proposal_count: 2,
+            attention_subtasks: [{
+              deep_link: `/workspaces/${WORKSPACE_ID}/worker-items/40000000-0000-0000-0000-000000000001`,
+              first_worker_item_title: "审查者",
+              pending_count: 2,
+              subtask_key: "trace-viewer",
+              subtask_title: "Trace viewer needs input",
+            }],
+          },
+        } : overview),
+      )),
+    );
+    renderPage();
+
+    expect(await screen.findByText("Ship control room / Trace viewer needs input")).toBeVisible();
+    expect(screen.getByText("等待你决定")).toBeVisible();
+    expect(screen.getByText("2 个 Proposal 待确认")).toBeVisible();
+    expect(screen.queryByText("审查者")).not.toBeInTheDocument();
+  });
+
   it("shows one empty state for an empty workspace", async () => {
     server.use(
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/task-overviews`, () =>

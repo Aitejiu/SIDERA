@@ -9,15 +9,19 @@ import type { CollaborationStatus, RootCollaborationSummary } from "./types";
 export function CollaborationSummary({
   summary,
   onOpenSubtask,
+  rootTaskTitle,
 }: {
   summary: RootCollaborationSummary | null | undefined;
   onOpenSubtask: (subtaskKey: string) => void;
+  rootTaskTitle?: string;
 }) {
   if (summary === null || summary === undefined) {
     return null;
   }
 
   const status = collaborationStatus(summary.status);
+  const attentionSubtasks = summary.attention_subtasks ?? [];
+  const pendingReleaseProposalCount = summary.pending_release_proposal_count ?? 0;
   const blockedSubtask = summary.blocked_subtasks[0];
   return (
     <section
@@ -39,7 +43,31 @@ export function CollaborationSummary({
         <SummaryCount icon={<CircleCheck size={15} aria-hidden="true" />} label="已完成" value={summary.completed_count} />
       </div>
 
-      {summary.blocked_subtasks.length > 0 ? (
+      {attentionSubtasks.length > 0 ? (
+        <div className="collaboration-summary__attention" aria-label="待决定 Proposal">
+          <div className="collaboration-summary__attention-heading">
+            <span className="eyebrow"><AlertTriangle size={13} aria-hidden="true" />等待你决定</span>
+            <span className="mono-label">{pendingReleaseProposalCount} 个 Proposal</span>
+          </div>
+          <div className="collaboration-summary__proposal-list">
+            {attentionSubtasks.map((item) => (
+              <button
+                className="collaboration-summary__proposal"
+                key={item.subtask_key}
+                type="button"
+                onClick={() => onOpenSubtask(item.subtask_key)}
+                aria-label={`打开子任务：${item.subtask_title}`}
+              >
+                <span>
+                  <strong>{rootTaskTitle ? `${rootTaskTitle} / ${item.subtask_title}` : item.subtask_title}</strong>
+                  <span>{item.pending_count} 个 Proposal 待确认</span>
+                </span>
+                <ArrowRight size={15} aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : summary.blocked_subtasks.length > 0 ? (
         <div className="collaboration-summary__attention" aria-label="协同卡点">
           <div className="collaboration-summary__attention-heading">
             <span className="eyebrow"><AlertTriangle size={13} aria-hidden="true" />需要关注</span>
@@ -75,7 +103,7 @@ export function CollaborationSummary({
           查看协同记录 <ArrowRight size={14} aria-hidden="true" />
         </Link>
       </div>
-      {blockedSubtask === undefined && summary.attention_required ? (
+      {blockedSubtask === undefined && attentionSubtasks.length === 0 && summary.attention_required ? (
         <span className="collaboration-summary__status-note">协同运行需要进一步处理</span>
       ) : null}
     </section>

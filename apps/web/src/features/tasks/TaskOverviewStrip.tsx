@@ -12,6 +12,8 @@ export function TaskOverviewStrip({
   overview: TaskOverview;
 }) {
   const collaboration = overview.collaboration;
+  const collaborationAttentionSubtasks = collaboration?.attention_subtasks ?? [];
+  const collaborationAttentionSubtask = collaborationAttentionSubtasks[0];
   const collaborationAttention = collaboration?.attention_required === true
     ? collaboration.blocked_subtasks[0]
     : undefined;
@@ -54,7 +56,14 @@ export function TaskOverviewStrip({
       </div>
       <div className="task-row__attention">
         <span className="eyebrow">需要我</span>
-        {collaborationAttention ? (
+        {collaborationAttentionSubtask ? (
+          <>
+            <strong className="attention-value"><AlertTriangle size={14} aria-hidden="true" />{overview.title} / {collaborationAttentionSubtask.subtask_title}</strong>
+            <span className="task-row__attention-label">等待你决定</span>
+            <span>{collaborationAttentionSubtask.pending_count} 个 Proposal 待确认</span>
+            {collaborationAttentionSubtasks.length > 1 ? <span>另有 {collaborationAttentionSubtasks.length - 1} 个子任务待处理</span> : null}
+          </>
+        ) : collaborationAttention ? (
           <>
             <strong className="attention-value"><AlertTriangle size={14} aria-hidden="true" />{overview.title} / {collaborationAttention.title}</strong>
             <span className="task-row__attention-label">协同卡点</span>

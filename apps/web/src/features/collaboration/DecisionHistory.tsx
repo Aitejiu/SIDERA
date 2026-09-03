@@ -106,12 +106,16 @@ function DecisionRow({ decision }: { decision: CollaborationDecision }) {
 
         {decision.applications.length > 0 ? (
           <div className="collaboration-decision__applications">
-            {decision.applications.map((application) => (
-              <span className={`collaboration-application collaboration-application--${application.status}`} key={application.intent_id}>
-                {applicationStatusIcon(application.status)}
-                {applicationStatusLabel(application.status)}
-              </span>
-            ))}
+            {decision.applications.map((application) => {
+              const lineage = governanceLineage(application);
+              return (
+                <span className={`collaboration-application collaboration-application--${application.status}`} key={application.intent_id}>
+                  {applicationStatusIcon(application.status)}
+                  <span>{lineage?.label ?? applicationStatusLabel(application.status)}</span>
+                  {lineage?.audit ? <span className="collaboration-application__audit">{lineage.audit}</span> : null}
+                </span>
+              );
+            })}
           </div>
         ) : null}
 
@@ -153,6 +157,44 @@ function applicationStatusIcon(status: CollaborationDecision["applications"][num
   if (status === "applied") return <Check size={13} aria-hidden="true" />;
   if (status === "pending") return <CircleDashed size={13} aria-hidden="true" />;
   return <AlertTriangle size={13} aria-hidden="true" />;
+}
+
+function governanceLineage(
+  application: CollaborationDecision["applications"][number],
+): { label: string; audit: string | null } | null {
+  const audit = auditMetadata(application);
+  if (application.status === "duplicate" || application.result_code === "governance_proposal_duplicate") {
+    return { label: "重复跳过", audit: null };
+  }
+  if (
+    application.resolution_result === "stale"
+    || application.status === "stale"
+    || application.proposal_status === "stale"
+  ) {
+    return { label: "已过期", audit };
+  }
+  if (application.resolution_action === "approve" && application.resolution_result === "applied") {
+    return { label: "已批准", audit };
+  }
+  if (application.resolution_action === "reject" && application.resolution_result === "applied") {
+    return { label: "已驳回", audit };
+  }
+  if (
+    application.proposal_status === "pending"
+    && application.resolution_action === null
+    && application.resolution_result === null
+  ) {
+    return { label: "已延后放行", audit: null };
+  }
+  return null;
+}
+
+function auditMetadata(
+  application: CollaborationDecision["applications"][number],
+): string | null {
+  const values = [application.resolution_actor, application.resolution_transport]
+    .filter((value): value is string => value !== null && value !== undefined && value.length > 0);
+  return values.length > 0 ? values.join(" · ") : null;
 }
 
 function formatDateTime(value: string): string {

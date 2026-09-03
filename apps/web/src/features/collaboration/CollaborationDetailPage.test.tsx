@@ -62,6 +62,90 @@ const firstDecision = {
   }],
 };
 
+const governanceDecision = {
+  decision_id: "80000000-0000-0000-0000-000000000002",
+  sequence: 3,
+  outcome: "intents",
+  reason_code: "release_governance",
+  summary: "记录本轮放行建议的处理结果。",
+  created_at: "2026-09-03T12:04:00Z",
+  projection_id: "90000000-0000-0000-0000-000000000002",
+  projection_hash: "b".repeat(64),
+  target_paths: [detail.blocked_subtasks[0]],
+  applications: [
+    {
+      intent_id: "a0000000-0000-0000-0000-000000000002",
+      status: "rejected",
+      result_code: "governance_deferred",
+      result_summary: "Proposal 等待处理",
+      release_id: null,
+      error_code: null,
+      proposal_id: "b0000000-0000-0000-0000-000000000001",
+      proposal_status: "pending",
+      resolution_action: null,
+      resolution_result: null,
+      resolution_actor: null,
+      resolution_transport: null,
+    },
+    {
+      intent_id: "a0000000-0000-0000-0000-000000000003",
+      status: "duplicate",
+      result_code: "governance_proposal_duplicate",
+      result_summary: "Proposal 已存在",
+      release_id: null,
+      error_code: null,
+      proposal_id: null,
+      proposal_status: null,
+      resolution_action: null,
+      resolution_result: null,
+      resolution_actor: null,
+      resolution_transport: null,
+    },
+    {
+      intent_id: "a0000000-0000-0000-0000-000000000004",
+      status: "applied",
+      result_code: "governance_approved",
+      result_summary: "Release 已签发",
+      release_id: "c0000000-0000-0000-0000-000000000001",
+      error_code: null,
+      proposal_id: "b0000000-0000-0000-0000-000000000002",
+      proposal_status: "approved",
+      resolution_action: "approve",
+      resolution_result: "applied",
+      resolution_actor: "aitejiu",
+      resolution_transport: "web",
+    },
+    {
+      intent_id: "a0000000-0000-0000-0000-000000000005",
+      status: "rejected",
+      result_code: "governance_rejected",
+      result_summary: "Proposal 已驳回",
+      release_id: null,
+      error_code: null,
+      proposal_id: "b0000000-0000-0000-0000-000000000003",
+      proposal_status: "rejected",
+      resolution_action: "reject",
+      resolution_result: "applied",
+      resolution_actor: "aitejiu",
+      resolution_transport: "main_agent",
+    },
+    {
+      intent_id: "a0000000-0000-0000-0000-000000000006",
+      status: "stale",
+      result_code: "collaboration_release_proposal_stale",
+      result_summary: "计划代已变化",
+      release_id: null,
+      error_code: null,
+      proposal_id: "b0000000-0000-0000-0000-000000000004",
+      proposal_status: "stale",
+      resolution_action: "approve",
+      resolution_result: "stale",
+      resolution_actor: "aitejiu",
+      resolution_transport: "web",
+    },
+  ],
+};
+
 function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -136,5 +220,23 @@ describe("CollaborationDetailPage", () => {
     expect(await screen.findByText("无法读取协同记录")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "重试读取协同记录" }));
     expect(await screen.findByRole("heading", { name: "协同记录" })).toBeVisible();
+  });
+
+  it("shows compact governance lineage and audit metadata without exposing reasons", async () => {
+    server.use(
+      http.get(decisionsPath, () => HttpResponse.json({ items: [governanceDecision], next_cursor: null })),
+    );
+    renderPage();
+
+    const decision = await screen.findByRole("article", { name: "第 3 次协同决策" });
+    expect(within(decision).getByText("已延后放行")).toBeVisible();
+    expect(within(decision).getAllByText("重复跳过").length).toBeGreaterThan(0);
+    expect(within(decision).getByText("已批准")).toBeVisible();
+    expect(within(decision).getByText("已驳回")).toBeVisible();
+    expect(within(decision).getAllByText("已过期").length).toBeGreaterThan(0);
+    expect(within(decision).getAllByText("aitejiu · web").length).toBeGreaterThan(0);
+    expect(within(decision).getByText("aitejiu · main_agent")).toBeVisible();
+    expect(within(decision).queryByText("Proposal 等待处理")).not.toBeInTheDocument();
+    expect(within(decision).queryByText("计划代已变化")).not.toBeInTheDocument();
   });
 });

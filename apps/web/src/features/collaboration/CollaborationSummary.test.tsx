@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -62,5 +63,38 @@ describe("CollaborationSummary", () => {
       "href",
       summary.detail_href,
     );
+  });
+
+  it("names the affected subtask and pending proposal count before worker detail", async () => {
+    const user = userEvent.setup();
+    const openSubtask = vi.fn();
+    render(
+      <MemoryRouter>
+        <CollaborationSummary
+          summary={{
+            ...summary,
+            blocked_subtasks: [],
+            blocked_subtask_count: 0,
+            attention_required: true,
+            pending_release_proposal_count: 2,
+            attention_subtasks: [{
+              deep_link: "/workspaces/ws-1/worker-items/worker-1",
+              first_worker_item_title: "审查者",
+              pending_count: 2,
+              subtask_key: "payment-callback",
+              subtask_title: "验证支付回调",
+            }],
+          }}
+          onOpenSubtask={openSubtask}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("等待你决定")).toBeVisible();
+    expect(screen.getByText("2 个 Proposal 待确认")).toBeVisible();
+    expect(screen.queryByText("审查者")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "打开子任务：验证支付回调" }));
+    expect(openSubtask).toHaveBeenCalledWith("payment-callback");
   });
 });
