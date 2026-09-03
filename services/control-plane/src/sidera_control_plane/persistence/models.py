@@ -3724,7 +3724,7 @@ class RuntimeIntentApplicationModel(TimestampMixin, Base):
     __tablename__ = "runtime_intent_applications"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'applied', 'rejected', 'stale', 'duplicate')",
+            "status IN ('pending', 'applied', 'rejected', 'stale', 'duplicate', 'deferred')",
             name="ck_runtime_intent_applications_status",
         ),
         CheckConstraint(
@@ -3789,6 +3789,81 @@ class RuntimeIntentApplicationModel(TimestampMixin, Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class CollaborationGovernanceHoldModel(TimestampMixin, Base):
+    __tablename__ = "collaboration_governance_holds"
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'resumed', 'superseded')", name="ck_collaboration_governance_holds_status"),
+        CheckConstraint("plan_generation >= 1 AND resource_version >= 1", name="ck_collaboration_governance_holds_versions"),
+        CheckConstraint("plan_content_hash ~ '^[0-9a-f]{64}$'", name="ck_collaboration_governance_holds_plan_hash"),
+        ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], name="fk_collaboration_governance_holds_workspace"),
+        UniqueConstraint("id", "workspace_id", name="uq_collaboration_governance_holds_identity"),
+        Index("uq_collaboration_governance_holds_active", "workspace_id", "run_id", "worker_item_id", unique=True, postgresql_where=text("status = 'active'")),
+    )
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    root_task_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    plan_snapshot_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    worker_item_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_by_actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_via: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(2000))
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CollaborationReleaseProposalModel(TimestampMixin, Base):
+    __tablename__ = "collaboration_release_proposals"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'rejected', 'stale')", name="ck_collaboration_release_proposals_status"),
+        CheckConstraint("target_request_version >= 1 AND input_fingerprint_version >= 1 AND resource_version >= 1", name="ck_collaboration_release_proposals_versions"),
+        CheckConstraint("projection_hash ~ '^[0-9a-f]{64}$' AND input_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_collaboration_release_proposals_hashes"),
+        UniqueConstraint("id", "workspace_id", name="uq_collaboration_release_proposals_identity"),
+        Index("uq_collaboration_release_proposals_pending_request", "workspace_id", "hold_id", "execution_request_id", unique=True, postgresql_where=text("status = 'pending'")),
+        Index("uq_collaboration_release_proposals_fingerprint", "workspace_id", "hold_id", "execution_request_id", "target_request_version", "input_fingerprint_version", "input_fingerprint", unique=True),
+    )
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    hold_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    projection_snapshot_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    intent_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_request_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    target_request_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_fingerprint_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(String(16384), nullable=False)
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CollaborationGovernanceResolutionModel(TimestampMixin, Base):
+    __tablename__ = "collaboration_governance_resolutions"
+    __table_args__ = (
+        CheckConstraint("action IN ('approve', 'reject')", name="ck_collaboration_governance_resolutions_action"),
+        CheckConstraint("result IN ('applied', 'stale')", name="ck_collaboration_governance_resolutions_result"),
+        UniqueConstraint("id", "workspace_id", name="uq_collaboration_governance_resolutions_identity"),
+        UniqueConstraint("workspace_id", "proposal_id", name="uq_collaboration_governance_resolutions_proposal"),
+        UniqueConstraint("workspace_id", "command_id", name="uq_collaboration_governance_resolutions_command"),
+    )
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    transport: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(2000))
+    command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
 
 
 class WorkContextModel(TimestampMixin, Base):
