@@ -5419,3 +5419,624 @@ class ExecutionWorkspaceTransferModel(TimestampMixin, Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class NotificationPolicyStateModel(Base):
+    __tablename__ = "notification_policy_states"
+    __table_args__ = (
+        CheckConstraint(
+            "policy_version >= 1 AND resource_version >= 1",
+            name="ck_notification_policy_states_versions",
+        ),
+        CheckConstraint(
+            "(not_before IS NULL AND first_observed_at IS NULL) OR "
+            "(not_before IS NOT NULL AND first_observed_at IS NOT NULL AND "
+            "not_before >= first_observed_at)",
+            name="ck_notification_policy_states_pending_window",
+        ),
+        CheckConstraint(
+            "observed_fingerprint IS NULL OR "
+            "observed_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_notification_policy_states_observed_fingerprint",
+        ),
+        CheckConstraint(
+            "last_notified_fingerprint IS NULL OR "
+            "last_notified_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_notification_policy_states_notified_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_policy_states_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["active_thread_id", "workspace_id"],
+            ["notification_threads.id", "notification_threads.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_policy_states_thread_workspace",
+        ),
+        PrimaryKeyConstraint(
+            "workspace_id",
+            "recipient_type",
+            "recipient_id",
+            "subject_type",
+            "subject_id",
+            "topic",
+            name="pk_notification_policy_states_scope",
+        ),
+        Index(
+            "ix_notification_policy_states_due",
+            "workspace_id",
+            "not_before",
+            postgresql_where=text("not_before IS NOT NULL"),
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    recipient_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    recipient_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    observed_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    first_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_notified_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    active_thread_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class NotificationFactModel(TimestampMixin, Base):
+    __tablename__ = "notification_facts"
+    __table_args__ = (
+        CheckConstraint(
+            "policy_version >= 1 AND source_projection_cursor >= 0 AND "
+            "source_resource_version >= 1",
+            name="ck_notification_facts_versions",
+        ),
+        CheckConstraint(
+            "priority IN ('action', 'progress', 'operations')",
+            name="ck_notification_facts_priority",
+        ),
+        CheckConstraint(
+            "transition IN ('opened', 'updated', 'recovered', 'completed', 'degraded')",
+            name="ck_notification_facts_transition",
+        ),
+        CheckConstraint(
+            "semantic_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_notification_facts_hashes",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_facts_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_facts_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["subtask_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_facts_subtask_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_facts_worker_item_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_notification_facts_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "recipient_type",
+            "recipient_id",
+            "semantic_fingerprint",
+            name="uq_notification_facts_semantic",
+        ),
+        Index(
+            "ix_notification_facts_history",
+            "workspace_id",
+            "recipient_type",
+            "recipient_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    recipient_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    recipient_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    priority: Mapped[str] = mapped_column(String(32), nullable=False)
+    transition: Mapped[str] = mapped_column(String(32), nullable=False)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    subtask_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    worker_item_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    source_projection_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_projection_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_resource_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    semantic_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    summary: Mapped[str] = mapped_column(String(16_384), nullable=False)
+    action: Mapped[str] = mapped_column(String(255), nullable=False)
+    deep_link: Mapped[str] = mapped_column(String(2_048), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    baseline_import: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class NotificationThreadModel(Base):
+    __tablename__ = "notification_threads"
+    __table_args__ = (
+        CheckConstraint(
+            "business_status IN ('open', 'resolved')",
+            name="ck_notification_threads_business_status",
+        ),
+        CheckConstraint(
+            "organization_status IN ('active', 'archived')",
+            name="ck_notification_threads_organization_status",
+        ),
+        CheckConstraint(
+            "unread_count >= 0",
+            name="ck_notification_threads_unread_count",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_notification_threads_versions",
+        ),
+        CheckConstraint(
+            "((business_status = 'open' AND resolved_at IS NULL) OR "
+            "(business_status = 'resolved' AND resolved_at IS NOT NULL)) AND "
+            "((organization_status = 'active' AND archived_at IS NULL) OR "
+            "(organization_status = 'archived' AND archived_at IS NOT NULL))",
+            name="ck_notification_threads_timestamps",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_threads_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_threads_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["subtask_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_threads_subtask_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_threads_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["latest_fact_id", "workspace_id"],
+            ["notification_facts.id", "notification_facts.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_threads_latest_fact_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["last_read_fact_id", "workspace_id"],
+            ["notification_facts.id", "notification_facts.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_threads_last_read_fact_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_notification_threads_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "recipient_type",
+            "recipient_id",
+            "thread_key",
+            name="uq_notification_threads_key",
+        ),
+        Index(
+            "ix_notification_threads_inbox",
+            "workspace_id",
+            "recipient_type",
+            "recipient_id",
+            "organization_status",
+            "business_status",
+            "unread_count",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    recipient_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    recipient_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    thread_key: Mapped[str] = mapped_column(String(1_024), nullable=False)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    subtask_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    worker_item_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    latest_fact_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    business_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    organization_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_read_fact_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    unread_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class NotificationRouteModel(Base):
+    __tablename__ = "notification_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'draining', 'disabled', 'revoked')",
+            name="ck_notification_routes_status",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_notification_routes_version",
+        ),
+        CheckConstraint(
+            "source_ref ~ '^[A-Za-z0-9][A-Za-z0-9._~:/+\\-]{31,511}$'",
+            name="ck_notification_routes_source_ref",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_routes_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["channel_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_routes_module_workspace",
+        ),
+        UniqueConstraint("id", "workspace_id", name="uq_notification_routes_identity"),
+        UniqueConstraint(
+            "workspace_id",
+            "channel_module_instance_id",
+            "source_ref",
+            name="uq_notification_routes_source",
+        ),
+        Index(
+            "ix_notification_routes_active",
+            "workspace_id",
+            "status",
+            "channel_type",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    recipient_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    recipient_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    channel_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    channel_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class NotificationSourceBindingModel(Base):
+    __tablename__ = "notification_source_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "resource_type IN ('planning_request', 'root_task')",
+            name="ck_notification_source_bindings_resource",
+        ),
+        CheckConstraint(
+            "binding_kind = 'origin'",
+            name="ck_notification_source_bindings_kind",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_source_bindings_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["notification_route_id", "workspace_id"],
+            ["notification_routes.id", "notification_routes.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_source_bindings_route_workspace",
+        ),
+        PrimaryKeyConstraint(
+            "workspace_id",
+            "resource_type",
+            "resource_id",
+            "binding_kind",
+            name="pk_notification_source_bindings_identity",
+        ),
+        Index(
+            "ix_notification_source_bindings_lookup",
+            "workspace_id",
+            "resource_type",
+            "resource_id",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    notification_route_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    binding_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    bound_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class NotificationDeliveryIntentModel(TimestampMixin, Base):
+    __tablename__ = "notification_delivery_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'claimed', 'retry_wait', 'delivered', 'exhausted', 'suppressed')",
+            name="ck_notification_delivery_intents_status",
+        ),
+        CheckConstraint(
+            "delivery_round >= 1 AND contract_version >= 1 AND attempts >= 0 AND "
+            "fencing_token >= 1",
+            name="ck_notification_delivery_intents_attempts",
+        ),
+        CheckConstraint(
+            "(status = 'claimed' AND claimed_until IS NOT NULL AND claim_token IS NOT NULL) OR "
+            "(status <> 'claimed' AND claimed_until IS NULL)",
+            name="ck_notification_delivery_intents_claim",
+        ),
+        CheckConstraint(
+            "(status = 'delivered' AND delivered_at IS NOT NULL) OR "
+            "(status <> 'delivered' AND delivered_at IS NULL)",
+            name="ck_notification_delivery_intents_delivered_timestamp",
+        ),
+        CheckConstraint(
+            "(status = 'exhausted' AND exhausted_at IS NOT NULL) OR "
+            "(status <> 'exhausted' AND exhausted_at IS NULL)",
+            name="ck_notification_delivery_intents_terminal_timestamps",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_delivery_intents_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["notification_fact_id", "workspace_id"],
+            ["notification_facts.id", "notification_facts.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_delivery_intents_fact_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["notification_route_id", "workspace_id"],
+            ["notification_routes.id", "notification_routes.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_delivery_intents_route_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["channel_module_instance_id", "workspace_id"],
+            ["module_instances.id", "module_instances.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_notification_delivery_intents_module_workspace",
+        ),
+        UniqueConstraint(
+            "id", "workspace_id", name="uq_notification_delivery_intents_identity"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "notification_fact_id",
+            "notification_route_id",
+            "delivery_round",
+            name="uq_notification_delivery_intents_round",
+        ),
+        Index(
+            "ix_notification_delivery_intents_due",
+            "workspace_id",
+            "channel_module_instance_id",
+            "status",
+            "next_attempt_at",
+            postgresql_where=text("status IN ('pending', 'retry_wait')"),
+        ),
+        Index(
+            "ix_notification_delivery_intents_claimed",
+            "workspace_id",
+            "channel_module_instance_id",
+            "claimed_until",
+            postgresql_where=text("status = 'claimed'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    notification_fact_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    notification_route_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    channel_module_instance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    delivery_round: Mapped[int] = mapped_column(Integer, nullable=False)
+    contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_token: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_message_ref: Mapped[str | None] = mapped_column(String(512))
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exhausted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class NotificationDeliveryAttemptModel(Base):
+    __tablename__ = "notification_delivery_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "(outcome IS NULL AND error_code IS NULL AND finished_at IS NULL) OR "
+            "(outcome = 'delivered' AND error_code IS NULL AND finished_at IS NOT NULL) OR "
+            "(outcome <> 'delivered' AND error_code IS NOT NULL AND finished_at IS NOT NULL)",
+            name="ck_notification_delivery_attempts_settlement",
+        ),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN "
+            "('delivered', 'retryable_failure', 'terminal_failure', 'unknown_result')",
+            name="ck_notification_delivery_attempts_error",
+        ),
+        CheckConstraint(
+            "attempt_number >= 1 AND fencing_token >= 1",
+            name="ck_notification_delivery_attempts_versions",
+        ),
+        ForeignKeyConstraint(
+            ["delivery_intent_id"],
+            ["notification_delivery_intents.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_delivery_attempts_intent",
+        ),
+        PrimaryKeyConstraint(
+            "delivery_intent_id",
+            "attempt_number",
+            name="pk_notification_delivery_attempts_identity",
+        ),
+        Index(
+            "ix_notification_delivery_attempts_claims",
+            "delivery_intent_id",
+            "fencing_token",
+            "attempt_number",
+        ),
+    )
+
+    delivery_intent_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    claim_token: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(String(32))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    provider_message_ref: Mapped[str | None] = mapped_column(String(512))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationReconciliationCursorModel(Base):
+    __tablename__ = "notification_reconciliation_cursors"
+    __table_args__ = (
+        CheckConstraint(
+            "policy_version >= 1 AND last_projection_cursor >= 0 AND version >= 1",
+            name="ck_notification_reconciliation_cursors_versions",
+        ),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_until IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_until IS NOT NULL)",
+            name="ck_notification_reconciliation_cursors_lease",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_notification_reconciliation_cursors_workspace",
+        ),
+        PrimaryKeyConstraint(
+            "workspace_id",
+            "policy_version",
+            name="pk_notification_reconciliation_cursors_identity",
+        ),
+        Index(
+            "ix_notification_reconciliation_cursors_processing",
+            "workspace_id",
+            "policy_version",
+            "last_projection_cursor",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_projection_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_reconciled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
