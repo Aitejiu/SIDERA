@@ -14,6 +14,7 @@ from sidera_control_plane.domain.collaboration_projections import (
     CollaborationDetailProjection,
     CollaborationProjectionFacts,
     CollaborationProjectionService,
+    WorkerItemCollaborationSummaryProjection,
 )
 
 
@@ -66,6 +67,18 @@ class CollaborationQueryService:
             ),
         )
 
+    def get_worker_item_summary(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        worker_item_id: UUID,
+    ) -> WorkerItemCollaborationSummaryProjection:
+        facts = self._require_facts(workspace_id, root_task_id)
+        summary = self._projection.worker_summary(facts, worker_item_id=worker_item_id)
+        if summary is None:
+            raise NotFound("collaboration worker item not found")
+        return summary
+
     def _require_facts(
         self, workspace_id: UUID, root_task_id: UUID
     ) -> CollaborationProjectionFacts:
@@ -102,6 +115,14 @@ def decode_decision_cursor(cursor: str) -> tuple[datetime, UUID]:
         if created_at.tzinfo is None:
             raise ValueError("cursor timestamp must be timezone-aware")
         decision_id = UUID(value[1])
-    except (ValueError, TypeError, KeyError, IndexError, UnicodeError, json.JSONDecodeError, binascii.Error) as exc:
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        UnicodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
         raise InvalidCursor("invalid collaboration decision cursor") from exc
     return created_at.astimezone(UTC), decision_id

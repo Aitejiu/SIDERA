@@ -1,10 +1,17 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
 from sidera_control_plane.domain.collaboration_projections import (
+    CollaborationDecisionProjectionFact,
     CollaborationExecutionProjectionFact,
+    CollaborationGovernanceHoldProjectionFact,
+    CollaborationGovernanceResolutionProjectionFact,
+    CollaborationIntentApplicationProjectionFact,
+    CollaborationIntentProjectionFact,
     CollaborationProjectionFacts,
     CollaborationProjectionService,
+    CollaborationReleaseProposalProjectionFact,
     CollaborationRequestDependencyProjectionFact,
     CollaborationRequestProjectionFact,
     CollaborationRunProjectionFact,
@@ -32,6 +39,13 @@ DOWNSTREAM_REQUEST_ID = UUID("50000000-0000-0000-0000-000000000002")
 RUN_ID = UUID("60000000-0000-0000-0000-000000000001")
 EXECUTION_ID = UUID("70000000-0000-0000-0000-000000000001")
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
+HOLD_ID = UUID("80000000-0000-0000-0000-000000000001")
+PROPOSAL_ID = UUID("80000000-0000-0000-0000-000000000002")
+RESOLUTION_ID = UUID("80000000-0000-0000-0000-000000000003")
+DECISION_ID = UUID("80000000-0000-0000-0000-000000000004")
+INTENT_ID = UUID("80000000-0000-0000-0000-000000000005")
+APPLICATION_ID = UUID("80000000-0000-0000-0000-000000000006")
+RELEASE_ID = UUID("80000000-0000-0000-0000-000000000007")
 
 
 def _plan() -> CanonicalTaskPlan:
@@ -128,7 +142,9 @@ def _facts(*, run_status: str = "active") -> CollaborationProjectionFacts:
             config_version=3,
             strategy_label="all_required",
             policy_enabled=True,
-            blocked_reason="runtime_output_invalid" if run_status == "blocked" else None,
+            blocked_reason="runtime_output_invalid"
+            if run_status == "blocked"
+            else None,
             updated_at=NOW,
         ),
         requests=(
@@ -220,3 +236,183 @@ def test_subtask_summary_exposes_fan_in_and_worker_waiting_state() -> None:
     assert worker is not None
     assert worker.state == "waiting_evidence"
     assert worker.upstream_links[0].href.endswith("/subtasks/payment-implementation")
+
+
+def _governance_facts(
+    *,
+    policy_enabled: bool = True,
+    hold_status: str | None = None,
+    proposal_status: str | None = None,
+    application_status: str | None = None,
+    released: bool = False,
+) -> CollaborationProjectionFacts:
+    facts = _facts()
+    hold = (
+        CollaborationGovernanceHoldProjectionFact(
+            id=HOLD_ID,
+            run_id=RUN_ID,
+            worker_item_id=DOWNSTREAM_WORKER_ID,
+            status=hold_status,
+            resource_version=2 if hold_status != "active" else 1,
+            reason="用户需要先核对回调证据",
+            created_by_actor_id="aitejiu",
+            created_via="web",
+            created_at=NOW,
+            resolved_at=NOW if hold_status != "active" else None,
+        )
+        if hold_status is not None
+        else None
+    )
+    proposal = (
+        CollaborationReleaseProposalProjectionFact(
+            id=PROPOSAL_ID,
+            hold_id=HOLD_ID,
+            run_id=RUN_ID,
+            decision_id=DECISION_ID,
+            intent_id=INTENT_ID,
+            execution_request_id=DOWNSTREAM_REQUEST_ID,
+            worker_item_id=DOWNSTREAM_WORKER_ID,
+            target_request_version=1,
+            status=proposal_status,
+            resource_version=2 if proposal_status != "pending" else 1,
+            reason_code="release_recommended",
+            summary="建议放行回调验证 WorkerItem",
+            created_at=NOW,
+            resolved_at=NOW if proposal_status != "pending" else None,
+        )
+        if proposal_status is not None
+        else None
+    )
+    return replace(
+        facts,
+        run=replace(facts.run, policy_enabled=policy_enabled),
+        released_request_ids=(DOWNSTREAM_REQUEST_ID,) if released else (),
+        holds=(hold,) if hold is not None else (),
+        proposals=(proposal,) if proposal is not None else (),
+    )
+
+
+def test_worker_governance_actions_are_server_computed() -> None:
+    service = CollaborationProjectionService()
+
+    automatic = service.worker_summary(
+        _governance_facts(), worker_item_id=DOWNSTREAM_WORKER_ID
+    )
+    paused = service.worker_summary(
+        _governance_facts(hold_status="active"),
+        worker_item_id=DOWNSTREAM_WORKER_ID,
+    )
+    pending = service.worker_summary(
+        _governance_facts(hold_status="active", proposal_status="pending"),
+        worker_item_id=DOWNSTREAM_WORKER_ID,
+    )
+    resolved = service.worker_summary(
+        _governance_facts(hold_status="active", proposal_status="approved"),
+        worker_item_id=DOWNSTREAM_WORKER_ID,
+    )
+    disabled = service.worker_summary(
+        _governance_facts(policy_enabled=False),
+        worker_item_id=DOWNSTREAM_WORKER_ID,
+    )
+
+    assert automatic is not None
+    assert automatic.governance_mode == "automatic"
+    assert automatic.available_actions == ("pause",)
+    assert paused is not None and paused.available_actions == ("resume_automatic",)
+    assert pending is not None
+    assert pending.available_actions == ("approve", "reject", "resume_automatic")
+    assert resolved is not None and resolved.available_actions == ("resume_automatic",)
+    assert disabled is not None
+    assert disabled.enabled is False
+    assert disabled.available_actions == ()
+
+
+def test_worker_governance_history_is_bounded_newest_first_and_explains_lineage() -> (
+    None
+):
+    facts = _governance_facts(
+        hold_status="active",
+        proposal_status="approved",
+        application_status="applied",
+        released=True,
+    )
+    facts = replace(
+        facts,
+        decisions=(
+            CollaborationDecisionProjectionFact(
+                id=DECISION_ID,
+                sequence=1,
+                outcome="accepted",
+                reason_code="release_recommended",
+                summary="建议放行",
+                projection_id=UUID("90000000-0000-0000-0000-000000000001"),
+                projection_hash="a" * 64,
+                created_at=NOW,
+            ),
+        ),
+        intents=(
+            CollaborationIntentProjectionFact(
+                id=INTENT_ID,
+                decision_id=DECISION_ID,
+                target_request_id=DOWNSTREAM_REQUEST_ID,
+                ordinal=0,
+                summary="放行回调验证",
+                reason_code="release_recommended",
+                created_at=NOW,
+            ),
+        ),
+        applications=(
+            CollaborationIntentApplicationProjectionFact(
+                intent_id=INTENT_ID,
+                status="applied",
+                result_code="governance_approved",
+                result_summary="放行已签发",
+                release_id=RELEASE_ID,
+                created_at=NOW,
+                applied_at=NOW,
+            ),
+        ),
+        resolutions=(
+            CollaborationGovernanceResolutionProjectionFact(
+                id=RESOLUTION_ID,
+                proposal_id=PROPOSAL_ID,
+                action="approve",
+                result="applied",
+                actor_id="aitejiu",
+                transport="web",
+                created_at=NOW,
+            ),
+        ),
+    )
+
+    summary = CollaborationProjectionService().worker_summary(
+        facts, worker_item_id=DOWNSTREAM_WORKER_ID
+    )
+
+    assert summary is not None
+    assert summary.hold_reason == "用户需要先核对回调证据"
+    assert summary.active_proposal is not None
+    assert summary.governance_history
+    assert [item.kind for item in summary.governance_history] == [
+        "release",
+        "resolution",
+        "proposal",
+        "application",
+        "runtime_intent",
+        "hold",
+    ]
+    assert summary.governance_history[0].release_id == RELEASE_ID
+    assert all(len(item.summary) <= 2000 for item in summary.governance_history)
+
+
+def test_root_summary_counts_current_governance_and_names_subtask_path() -> None:
+    facts = _governance_facts(hold_status="active", proposal_status="pending")
+
+    summary = CollaborationProjectionService().root_summary(facts)
+
+    assert summary.paused_worker_item_count == 1
+    assert summary.pending_release_proposal_count == 1
+    assert summary.attention_required is True
+    assert summary.attention_subtasks[0].subtask_title == "验证支付回调"
+    assert summary.attention_subtasks[0].pending_count == 1
+    assert "用户需要先核对" not in summary.attention_subtasks[0].first_worker_item_title

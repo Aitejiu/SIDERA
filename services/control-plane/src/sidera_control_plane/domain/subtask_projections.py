@@ -168,6 +168,10 @@ class WorkerItemSummaryProjection:
     plan_sync: WorkerPlanSyncProjection | None = None
     collaboration_state: str | None = None
     collaboration_waiting_summary: str | None = None
+    governance_mode: str | None = None
+    attention_state: str | None = None
+    proposal_summary: str | None = None
+    worker_item_href: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,9 +299,7 @@ class SubtaskWorkspaceProjectionService:
         session_values = tuple(sessions)
         worker_values = {worker.id: worker for worker in workers}
         artifact_values = tuple(
-            artifact
-            for artifact in artifacts
-            if artifact.task_id == subtask.task_id
+            artifact for artifact in artifacts if artifact.task_id == subtask.task_id
         )
         evidence_values = tuple(
             claim for claim in evidence if claim.task_id == subtask.task_id
@@ -305,9 +307,7 @@ class SubtaskWorkspaceProjectionService:
         activity_values = tuple(
             item for item in activity if item.task_id == subtask.task_id
         )
-        execution_by_worker_item = _group_executions_by_worker_item(
-            execution_values
-        )
+        execution_by_worker_item = _group_executions_by_worker_item(execution_values)
         session_by_execution = _latest_sessions(session_values)
         activity_by_worker_item = _group_activity_by_worker_item(activity_values)
         activity_by_task = _group_activity_by_task(activity_values)
@@ -319,9 +319,7 @@ class SubtaskWorkspaceProjectionService:
         item_states = {
             placement.worker_item_id: _worker_item_state(
                 worker_items.get(placement.worker_item_id),
-                _latest(
-                    execution_by_worker_item.get(placement.worker_item_id, ())
-                ),
+                _latest(execution_by_worker_item.get(placement.worker_item_id, ())),
                 task,
             )
             for placement in placement_values
@@ -369,13 +367,13 @@ class SubtaskWorkspaceProjectionService:
             execution = _latest(
                 execution_by_worker_item.get(placement.worker_item_id, ())
             )
-            session = (
-                session_by_execution.get(execution.id) if execution else None
-            )
+            session = session_by_execution.get(execution.id) if execution else None
             worker_id = (
                 execution.assigned_worker_id
                 if execution and execution.assigned_worker_id
-                else session.worker_id if session else None
+                else session.worker_id
+                if session
+                else None
             )
             worker = worker_values.get(worker_id) if worker_id else None
             latest_activity = _latest(
@@ -421,6 +419,24 @@ class SubtaskWorkspaceProjectionService:
                         collaboration_worker_values[item.id].waiting_summary
                         if item.id in collaboration_worker_values
                         else None
+                    ),
+                    governance_mode=(
+                        collaboration_worker_values[item.id].governance_mode
+                        if item.id in collaboration_worker_values
+                        else None
+                    ),
+                    attention_state=(
+                        collaboration_worker_values[item.id].attention_state
+                        if item.id in collaboration_worker_values
+                        else None
+                    ),
+                    proposal_summary=(
+                        collaboration_worker_values[item.id].proposal_summary
+                        if item.id in collaboration_worker_values
+                        else None
+                    ),
+                    worker_item_href=(
+                        f"/workspaces/{plan.workspace_id}/worker-items/{item.id}"
                     ),
                 )
             )
@@ -703,7 +719,10 @@ def _subtask_state(
     if task and task.status in {"running", "ready"}:
         return "running"
     if (
-        (not item_states or all(state in {"succeeded", "canceled"} for state in item_states))
+        (
+            not item_states
+            or all(state in {"succeeded", "canceled"} for state in item_states)
+        )
         and task
         and task.status == "succeeded"
         and evidence_satisfied >= evidence_required
@@ -755,14 +774,18 @@ def _evidence_satisfied(
     evidence: Iterable[SubtaskEvidenceFact],
 ) -> int:
     refs = set(subtask.acceptance_refs)
-    return len({claim.acceptance_ref for claim in evidence if claim.acceptance_ref in refs})
+    return len(
+        {claim.acceptance_ref for claim in evidence if claim.acceptance_ref in refs}
+    )
 
 
 def _worker_graph(
     plan: CanonicalTaskPlan,
     placements: Mapping[str, SubtaskPlacementFact],
 ) -> WorkerItemGraphProjection:
-    worker_item_ids = tuple(placement.worker_item_id for placement in placements.values())
+    worker_item_ids = tuple(
+        placement.worker_item_id for placement in placements.values()
+    )
     edges: list[WorkerItemGraphEdgeProjection] = []
     for dependency in plan.worker_item_dependencies:
         upstream = placements.get(dependency.upstream_worker_item_key)
@@ -823,7 +846,11 @@ def _is_attention_state(state: str) -> bool:
 def _active_scheduling_block(
     execution: SubtaskExecutionFact | None,
 ) -> SubtaskExecutionFact | None:
-    if execution is not None and execution.status == "queued" and execution.active_block_id is not None:
+    if (
+        execution is not None
+        and execution.status == "queued"
+        and execution.active_block_id is not None
+    ):
         return execution
     return None
 

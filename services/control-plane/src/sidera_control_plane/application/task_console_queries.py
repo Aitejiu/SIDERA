@@ -92,7 +92,9 @@ class TaskConsoleQueryService:
     ) -> TaskConsoleOverviewProjection:
         return self.get_graph(workspace_id, root_task_id).overview
 
-    def get_graph(self, workspace_id: UUID, root_task_id: UUID) -> TaskConsoleGraphProjection:
+    def get_graph(
+        self, workspace_id: UUID, root_task_id: UUID
+    ) -> TaskConsoleGraphProjection:
         loaded = self._require_loaded(workspace_id, root_task_id)
         return self._compose_graph(loaded)
 
@@ -117,6 +119,7 @@ class TaskConsoleQueryService:
                 if loaded.collaboration_facts is not None
                 else None
             ),
+            collaboration_facts=loaded.collaboration_facts,
         )
 
     def get_activity(

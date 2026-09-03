@@ -97,9 +97,7 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
             if subtask is None:
                 return None
 
-            task_ids = {
-                item.task_id for item in plan.subtasks if item.task_id
-            }
+            task_ids = {item.task_id for item in plan.subtasks if item.task_id}
             task_ids.add(root_task_id)
             task_rows = session.scalars(
                 select(TaskModel).where(
@@ -130,9 +128,7 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
             worker_items = {row.id: _worker_item(row) for row in worker_item_rows}
 
             execution_filters: list[ColumnElement[bool]] = [
-                ExecutionModel.worker_item_id.in_(
-                    worker_item_ids or {UUID(int=0)}
-                )
+                ExecutionModel.worker_item_id.in_(worker_item_ids or {UUID(int=0)})
             ]
             if subtask.task_id is not None:
                 execution_filters.append(ExecutionModel.task_id == subtask.task_id)
@@ -212,7 +208,9 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
                     EvidenceClaimModel.workspace_id == workspace_id,
                     EvidenceClaimModel.task_id == subtask_task_id,
                 )
-                .order_by(EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc())
+                .order_by(
+                    EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc()
+                )
             ).all()
             evidence = tuple(_evidence(row) for row in evidence_rows)
 
@@ -270,17 +268,34 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
                 )
             )
             if last_cursor is None:
-                last_cursor = session.scalar(
-                    select(ProjectionChangeModel.cursor)
-                    .where(ProjectionChangeModel.workspace_id == workspace_id)
-                    .order_by(ProjectionChangeModel.cursor.desc())
-                    .limit(1)
-                ) or 0
+                last_cursor = (
+                    session.scalar(
+                        select(ProjectionChangeModel.cursor)
+                        .where(ProjectionChangeModel.workspace_id == workspace_id)
+                        .order_by(ProjectionChangeModel.cursor.desc())
+                        .limit(1)
+                    )
+                    or 0
+                )
+            collaboration_facts = self._collaboration_store.load_in_session(
+                session,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                plan=plan,
+            )
+            governance_timestamps = (
+                tuple(value.created_at for value in collaboration_facts.holds)
+                + tuple(value.created_at for value in collaboration_facts.proposals)
+                + tuple(value.created_at for value in collaboration_facts.resolutions)
+                if collaboration_facts is not None
+                else ()
+            )
             as_of = max(
                 snapshot.published_at,
                 *(fact.occurred_at for fact in activity),
                 *(fact.updated_at for fact in worker_items.values()),
                 *(fact.updated_at for fact in tasks.values()),
+                *governance_timestamps,
             )
             convergence_facts = load_plan_convergence_facts(
                 session,
@@ -304,12 +319,7 @@ class SqlAlchemySubtaskWorkspaceQueryStore:
                 last_change_cursor=int(last_cursor),
                 as_of=as_of,
                 convergence_facts=convergence_facts,
-                collaboration_facts=self._collaboration_store.load_in_session(
-                    session,
-                    workspace_id=workspace_id,
-                    root_task_id=root_task_id,
-                    plan=plan,
-                ),
+                collaboration_facts=collaboration_facts,
             )
 
 

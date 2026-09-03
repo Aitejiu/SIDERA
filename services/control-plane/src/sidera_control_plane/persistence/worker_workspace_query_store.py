@@ -128,8 +128,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
             sessions = tuple(_session(row) for row in session_rows)
 
             binding_rows = session.scalars(
-                select(ExecutionBindingModel)
-                .where(
+                select(ExecutionBindingModel).where(
                     ExecutionBindingModel.workspace_id == workspace_id,
                     ExecutionBindingModel.execution_id.in_(
                         execution_ids or {UUID(int=0)}
@@ -194,7 +193,9 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                         execution_ids or {UUID(int=0)}
                     ),
                 )
-                .order_by(ExecutionInputModel.updated_at.asc(), ExecutionInputModel.id.asc())
+                .order_by(
+                    ExecutionInputModel.updated_at.asc(), ExecutionInputModel.id.asc()
+                )
             ).all()
             inputs = tuple(_input(row) for row in input_rows)
 
@@ -202,9 +203,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 select(ArtifactModel)
                 .where(
                     ArtifactModel.workspace_id == workspace_id,
-                    ArtifactModel.execution_id.in_(
-                        execution_ids or {UUID(int=0)}
-                    ),
+                    ArtifactModel.execution_id.in_(execution_ids or {UUID(int=0)}),
                 )
                 .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
             ).all()
@@ -214,9 +213,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 select(EvidenceClaimModel)
                 .where(
                     EvidenceClaimModel.workspace_id == workspace_id,
-                    EvidenceClaimModel.execution_id.in_(
-                        execution_ids or {UUID(int=0)}
-                    ),
+                    EvidenceClaimModel.execution_id.in_(execution_ids or {UUID(int=0)}),
                 )
                 .order_by(
                     EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc()
@@ -230,12 +227,15 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 )
             )
             if last_cursor is None:
-                last_cursor = session.scalar(
-                    select(ProjectionChangeModel.cursor)
-                    .where(ProjectionChangeModel.workspace_id == workspace_id)
-                    .order_by(ProjectionChangeModel.cursor.desc())
-                    .limit(1)
-                ) or 0
+                last_cursor = (
+                    session.scalar(
+                        select(ProjectionChangeModel.cursor)
+                        .where(ProjectionChangeModel.workspace_id == workspace_id)
+                        .order_by(ProjectionChangeModel.cursor.desc())
+                        .limit(1)
+                    )
+                    or 0
+                )
             active_handoff = self._handoff_store.load_in_session(
                 session,
                 workspace_id,
@@ -269,22 +269,32 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                     root_task_id=worker_item.root_task_id,
                     plan=plan,
                 )
-            as_of = max((
-                worker_item.updated_at,
-                *(execution.updated_at for execution in execution_rows),
-                *(session.last_activity_at for session in sessions),
-                *(event.occurred_at for event in events),
-                *(item.updated_at for item in inputs),
-                *(artifact.created_at for artifact in artifacts),
-                *(claim.created_at for claim in evidence),
-                *(block.first_seen_at for block in active_block_rows),
-                *(block.last_seen_at for block in active_block_rows),
-                *(
-                    (active_handoff.updated_at,)
-                    if active_handoff is not None
-                    else ()
-                ),
-            ))
+            governance_timestamps = (
+                tuple(value.created_at for value in collaboration_facts.holds)
+                + tuple(value.created_at for value in collaboration_facts.proposals)
+                + tuple(value.created_at for value in collaboration_facts.resolutions)
+                if collaboration_facts is not None
+                else ()
+            )
+            as_of = max(
+                (
+                    worker_item.updated_at,
+                    *(execution.updated_at for execution in execution_rows),
+                    *(session.last_activity_at for session in sessions),
+                    *(event.occurred_at for event in events),
+                    *(item.updated_at for item in inputs),
+                    *(artifact.created_at for artifact in artifacts),
+                    *(claim.created_at for claim in evidence),
+                    *(block.first_seen_at for block in active_block_rows),
+                    *(block.last_seen_at for block in active_block_rows),
+                    *(
+                        (active_handoff.updated_at,)
+                        if active_handoff is not None
+                        else ()
+                    ),
+                    *governance_timestamps,
+                )
+            )
             convergence_facts = load_plan_convergence_facts(
                 session,
                 workspace_id=workspace_id,
@@ -295,8 +305,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 worker_item=worker_item,
                 placements=placements,
                 executions=tuple(
-                    _execution(row, active_blocks.get(row.id))
-                    for row in execution_rows
+                    _execution(row, active_blocks.get(row.id)) for row in execution_rows
                 ),
                 sessions=sessions,
                 workers=workers,
@@ -312,6 +321,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 active_handoff=active_handoff,
                 collaboration_facts=collaboration_facts,
             )
+
 
 def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
     snapshot = TaskPlanSnapshot.from_payload(dict(row.payload))
@@ -375,9 +385,7 @@ def _execution(
         adapter_preferences=tuple(row.adapter_preferences or ()),
         adapter_forbidden=tuple(sorted(row.adapter_forbidden or ())),
         scheduling_status=(
-            "waiting"
-            if row.status == "queued" and active_block is not None
-            else ""
+            "waiting" if row.status == "queued" and active_block is not None else ""
         ),
         waiting_reason=active_block.reason_code if active_block is not None else None,
         waiting_details_summary=(
@@ -392,9 +400,7 @@ def _execution(
             bool(active_block.requires_operator) if active_block is not None else False
         ),
         blocked_since=(
-            _as_utc(active_block.first_seen_at)
-            if active_block is not None
-            else None
+            _as_utc(active_block.first_seen_at) if active_block is not None else None
         ),
     )
 

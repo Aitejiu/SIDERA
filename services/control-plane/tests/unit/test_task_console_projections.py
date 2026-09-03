@@ -1,6 +1,13 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sidera_control_plane.domain.collaboration_projections import (
+    CollaborationProjectionFacts,
+    CollaborationProjectionService,
+    CollaborationReleaseProposalProjectionFact,
+    CollaborationRequestProjectionFact,
+    CollaborationRunProjectionFact,
+)
 from sidera_control_plane.domain.plan_normalization import (
     CanonicalTaskPlan,
     CanonicalWorkerItemPlan,
@@ -31,6 +38,9 @@ REVIEWER_ID = UUID("40000000-0000-0000-0000-000000000002")
 INTEGRATOR_ID = UUID("40000000-0000-0000-0000-000000000003")
 RUNNING_EXECUTION_ID = UUID("50000000-0000-0000-0000-000000000001")
 WAITING_EXECUTION_ID = UUID("50000000-0000-0000-0000-000000000002")
+COLLABORATION_RUN_ID = UUID("80000000-0000-0000-0000-000000000001")
+COLLABORATION_PROPOSAL_ID = UUID("80000000-0000-0000-0000-000000000002")
+COLLABORATION_REQUEST_ID = UUID("80000000-0000-0000-0000-000000000003")
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 
@@ -345,3 +355,94 @@ def test_succeeded_requires_subtask_evidence() -> None:
     )
 
     assert graph.nodes[1].state != "succeeded"
+
+
+def test_task_graph_projects_one_attention_item_per_pending_release_proposal() -> None:
+    plan = _plan()
+    collaboration_facts = CollaborationProjectionFacts(
+        plan=plan,
+        run=CollaborationRunProjectionFact(
+            id=COLLABORATION_RUN_ID,
+            workspace_id=WORKSPACE_ID,
+            root_task_id=ROOT_TASK_ID,
+            plan_snapshot_id=plan.snapshot_id,
+            plan_generation=plan.generation,
+            status="active",
+            provider="reference",
+            interface_version="collaboration-runtime-v1",
+            config_version=1,
+            strategy_label="all_required",
+            policy_enabled=True,
+            blocked_reason=None,
+            updated_at=NOW,
+        ),
+        requests=(
+            CollaborationRequestProjectionFact(
+                id=COLLABORATION_REQUEST_ID,
+                subtask_key="callback-idempotency",
+                worker_item_key="callback-reviewer",
+                worker_item_id=REVIEWER_ID,
+                status="blocked",
+                collaboration_gate_mode="release_required",
+                gate_reason="waiting_release",
+                version=3,
+                expected_artifact_refs=(),
+                expected_evidence_refs=(),
+                updated_at=NOW,
+            ),
+        ),
+        dependencies=(),
+        executions=(),
+        released_request_ids=(),
+        decisions=(),
+        intents=(),
+        applications=(),
+        proposals=(
+            CollaborationReleaseProposalProjectionFact(
+                id=COLLABORATION_PROPOSAL_ID,
+                hold_id=UUID("80000000-0000-0000-0000-000000000004"),
+                run_id=COLLABORATION_RUN_ID,
+                decision_id=UUID("80000000-0000-0000-0000-000000000005"),
+                intent_id=UUID("80000000-0000-0000-0000-000000000006"),
+                execution_request_id=COLLABORATION_REQUEST_ID,
+                worker_item_id=REVIEWER_ID,
+                target_request_version=3,
+                status="pending",
+                resource_version=1,
+                reason_code="release_recommended",
+                summary="建议放行回调复核",
+                created_at=NOW,
+                resolved_at=None,
+            ),
+        ),
+    )
+    graph = TaskConsoleProjectionService().compose(
+        plan,
+        tasks=_tasks(),
+        worker_items=_worker_items(),
+        placements=_placements(),
+        executions=(),
+        evidence=(),
+        activity=(),
+        last_change_cursor=1,
+        as_of=NOW,
+        collaboration=CollaborationProjectionService().root_summary(
+            collaboration_facts
+        ),
+        collaboration_facts=collaboration_facts,
+    )
+
+    items = [
+        item
+        for item in graph.overview.attention_items
+        if item.kind == "collaboration_release_proposal"
+    ]
+
+    assert len(items) == 1
+    assert items[0].key == f"collaboration_release_proposal:{COLLABORATION_PROPOSAL_ID}"
+    assert items[0].subtask_title == "回调幂等"
+    assert items[0].worker_item_id == REVIEWER_ID
+    assert items[0].requires_operator is True
+    assert (
+        items[0].deep_link == f"/workspaces/{WORKSPACE_ID}/worker-items/{REVIEWER_ID}"
+    )

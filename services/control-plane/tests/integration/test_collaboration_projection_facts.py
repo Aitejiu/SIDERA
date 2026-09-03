@@ -7,7 +7,12 @@ from sqlalchemy import update
 from sidera_control_plane.application.collaboration_projection import (
     CollaborationProjectionAssembler,
 )
-from sidera_control_plane.domain.collaboration import CollaborationRun
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicyEntry,
+    CollaborationPolicySnapshotV1,
+    CollaborationRun,
+    CollaborationStrategy,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
     CollaborationRuntimeCapabilityProfile,
@@ -19,8 +24,13 @@ from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.collaboration_fact_store import (
     SqlAlchemyCollaborationFactStore,
 )
+from sidera_control_plane.persistence.collaboration_query_store import (
+    SqlAlchemyCollaborationQueryStore,
+)
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
+    CollaborationGovernanceHoldModel,
+    CollaborationReleaseProposalModel,
     EvidenceClaimModel,
     PlanSnapshotModel,
     RootTaskPlanHeadModel,
@@ -175,6 +185,19 @@ def test_fact_store_is_current_generation_scoped_and_private_column_safe(
         )
         session.commit()
 
+    policy = CollaborationPolicySnapshotV1(
+        schema_version=1,
+        runtime_definition_id=ids["module_definition"],
+        runtime_instance_id=ids["module_instance"],
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=1,
+        runtime_capability_snapshot=_capability(),
+        default_policy=CollaborationPolicyEntry(
+            enabled=True,
+            strategy_id=CollaborationStrategy.ALL_REQUIRED,
+        ),
+        subtask_overrides=(),
+    )
     run = CollaborationRun.create(
         run_id=uuid4(),
         workspace_id=workspace_id,
@@ -187,11 +210,57 @@ def test_fact_store_is_current_generation_scoped_and_private_column_safe(
         runtime_interface_version="collaboration-runtime-v1",
         runtime_config_version=1,
         runtime_capability_snapshot=_capability(),
-        policy_snapshot={"schema_version": 1, "strategy": "all_required"},
+        policy_snapshot=policy.to_mapping(),
         now=NOW,
     )
     with uow_factory() as uow:
         uow.collaboration_runs.add(run)
+
+    hold_id = uuid4()
+    proposal_id = uuid4()
+    with database.session() as session:
+        session.add(
+            CollaborationGovernanceHoldModel(
+                id=hold_id,
+                workspace_id=workspace_id,
+                root_task_id=ids["root_task"],
+                run_id=run.id,
+                plan_snapshot_id=current_snapshot.id,
+                plan_generation=current_snapshot.generation,
+                plan_content_hash=current_hash,
+                worker_item_id=ids["worker_item"],
+                status="active",
+                created_by_actor_id="aitejiu",
+                created_via="web",
+                reason="r" * 2000,
+                resource_version=1,
+                resolved_at=None,
+                created_at=NOW,
+            )
+        )
+        session.add(
+            CollaborationReleaseProposalModel(
+                id=proposal_id,
+                workspace_id=workspace_id,
+                hold_id=hold_id,
+                run_id=run.id,
+                projection_snapshot_id=uuid4(),
+                projection_hash="b" * 64,
+                decision_id=uuid4(),
+                intent_id=uuid4(),
+                execution_request_id=ids["request"],
+                target_request_version=1,
+                input_fingerprint_version=1,
+                input_fingerprint="c" * 64,
+                status="pending",
+                reason_code="release_recommended",
+                summary="s" * 3000,
+                resource_version=1,
+                resolved_at=None,
+                created_at=NOW,
+            )
+        )
+        session.commit()
 
     facts = SqlAlchemyCollaborationFactStore(database).load(
         workspace_id, run, fact_cursor=7
@@ -204,6 +273,17 @@ def test_fact_store_is_current_generation_scoped_and_private_column_safe(
     assert b"trace-body" not in encoded
     assert b"trace body" not in encoded
     assert b"knowledge body" not in encoded
+
+    query_facts = SqlAlchemyCollaborationQueryStore(database).load(
+        workspace_id, ids["root_task"]
+    )
+    assert query_facts is not None
+    assert [item.id for item in query_facts.holds] == [hold_id]
+    assert [item.id for item in query_facts.proposals] == [proposal_id]
+    assert len(query_facts.holds[0].reason or "") == 2000
+    assert len(query_facts.proposals[0].summary) == 2000
+    assert query_facts.proposals[0].worker_item_id == ids["worker_item"]
+    assert query_facts.applications == ()
 
     run.last_evaluated_change_cursor = 8
     with pytest.raises(ValidationError, match="behind the run watermark"):

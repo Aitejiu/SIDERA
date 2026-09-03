@@ -3,6 +3,7 @@ from uuid import UUID
 
 from sidera_control_plane.domain.collaboration_projections import (
     SubtaskCollaborationSummaryProjection,
+    WorkerItemCollaborationSummaryProjection,
 )
 from sidera_control_plane.domain.plan_normalization import (
     CanonicalTaskPlan,
@@ -328,6 +329,17 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
         last_change_cursor=19,
         as_of=NOW,
         collaboration=collaboration,
+        collaboration_workers={
+            IMPLEMENTER_ID: WorkerItemCollaborationSummaryProjection(
+                enabled=True,
+                state="waiting_release",
+                waiting_summary="等待协同放行",
+                upstream_links=(),
+                governance_mode="paused",
+                attention_state="decision_required",
+                proposal_summary="建议放行回调实现",
+            ),
+        },
     )
 
     assert workspace.subtask.key == "callback-idempotency"
@@ -351,12 +363,24 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
     assert workspace.attention_items[0].key.startswith("scheduling_block:")
     assert workspace.attention_items[0].reason == "2 个候选执行节点暂不可用"
     assert workspace.attention_items[0].waiting_reason == "no_eligible_worker"
-    assert workspace.attention_items[0].waiting_details_summary == "2 个候选执行节点暂不可用"
+    assert (
+        workspace.attention_items[0].waiting_details_summary
+        == "2 个候选执行节点暂不可用"
+    )
     assert workspace.attention_items[0].requires_operator is True
     assert workspace.attention_items[0].blocked_since == datetime(
         2026, 8, 22, 11, 50, tzinfo=UTC
     )
     assert workspace.recent_activity[0].summary == "运行回调测试"
     assert workspace.collaboration == collaboration
+    implementer = next(
+        item for item in workspace.worker_items if item.worker_item_id == IMPLEMENTER_ID
+    )
+    assert implementer.governance_mode == "paused"
+    assert implementer.attention_state == "decision_required"
+    assert implementer.proposal_summary == "建议放行回调实现"
+    assert implementer.worker_item_href == (
+        f"/workspaces/{WORKSPACE_ID}/worker-items/{IMPLEMENTER_ID}"
+    )
     assert not hasattr(workspace, "trace_events")
     assert not hasattr(workspace, "intervention_composer_uri")

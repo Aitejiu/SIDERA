@@ -92,9 +92,7 @@ class SqlAlchemyTaskConsoleQueryStore:
             snapshot = _plan(plan_row)
             plan = self._normalizer.normalize(snapshot)
 
-            task_ids = {
-                subtask.task_id for subtask in plan.subtasks if subtask.task_id
-            }
+            task_ids = {subtask.task_id for subtask in plan.subtasks if subtask.task_id}
             task_ids.add(root_task_id)
             task_rows = session.scalars(
                 select(TaskModel).where(
@@ -130,9 +128,7 @@ class SqlAlchemyTaskConsoleQueryStore:
                 ExecutionModel.workspace_id == workspace_id,
                 or_(
                     ExecutionModel.task_id.in_(task_ids or {UUID(int=0)}),
-                    ExecutionModel.worker_item_id.in_(
-                        worker_item_ids or {UUID(int=0)}
-                    ),
+                    ExecutionModel.worker_item_id.in_(worker_item_ids or {UUID(int=0)}),
                 ),
             )
             execution_rows = session.scalars(
@@ -182,7 +178,9 @@ class SqlAlchemyTaskConsoleQueryStore:
                     EvidenceClaimModel.workspace_id == workspace_id,
                     EvidenceClaimModel.task_id.in_(task_ids or {UUID(int=0)}),
                 )
-                .order_by(EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc())
+                .order_by(
+                    EvidenceClaimModel.created_at.asc(), EvidenceClaimModel.id.asc()
+                )
             ).all()
             evidence = tuple(_evidence(row) for row in evidence_rows)
 
@@ -219,35 +217,43 @@ class SqlAlchemyTaskConsoleQueryStore:
                 )
             )
             if last_cursor is None:
-                last_cursor = session.scalar(
-                    select(ProjectionChangeModel.cursor)
-                    .where(ProjectionChangeModel.workspace_id == workspace_id)
-                    .order_by(ProjectionChangeModel.cursor.desc())
-                    .limit(1)
-                ) or 0
+                last_cursor = (
+                    session.scalar(
+                        select(ProjectionChangeModel.cursor)
+                        .where(ProjectionChangeModel.workspace_id == workspace_id)
+                        .order_by(ProjectionChangeModel.cursor.desc())
+                        .limit(1)
+                    )
+                    or 0
+                )
             handoffs = self._handoff_store.load_for_root_in_session(
                 session,
                 workspace_id,
                 root_task_id,
                 tuple(sorted(worker_item_ids, key=str)),
             )
+            collaboration_facts = self._collaboration_store.load_in_session(
+                session,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                plan=plan,
+            )
+            governance_timestamps = (
+                tuple(value.created_at for value in collaboration_facts.holds)
+                + tuple(value.created_at for value in collaboration_facts.proposals)
+                + tuple(value.created_at for value in collaboration_facts.resolutions)
+                if collaboration_facts is not None
+                else ()
+            )
             as_of = max(
-                (
-                    value.occurred_at
-                    for value in activity
-                ),
+                (value.occurred_at for value in activity),
                 default=snapshot.published_at,
             )
             as_of = max(
                 as_of,
-                *(
-                    value.updated_at
-                    for value in worker_items.values()
-                ),
-                *(
-                value.updated_at
-                for value in tasks.values()
-                ),
+                *(value.updated_at for value in worker_items.values()),
+                *(value.updated_at for value in tasks.values()),
+                *governance_timestamps,
             )
             if handoffs:
                 as_of = max(as_of, *(item.updated_at for item in handoffs.values()))
@@ -271,12 +277,7 @@ class SqlAlchemyTaskConsoleQueryStore:
                 as_of=as_of,
                 convergence_facts=convergence_facts,
                 handoffs=handoffs,
-                collaboration_facts=self._collaboration_store.load_in_session(
-                    session,
-                    workspace_id=workspace_id,
-                    root_task_id=root_task_id,
-                    plan=plan,
-                ),
+                collaboration_facts=collaboration_facts,
             )
 
     def list_current_root_ids(self, workspace_id: UUID) -> tuple[UUID, ...]:
@@ -432,7 +433,5 @@ def _latest_session_ids(
 
 def _as_utc(value: datetime) -> datetime:
     return (
-        value.astimezone(UTC)
-        if value.tzinfo is not None
-        else value.replace(tzinfo=UTC)
+        value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
     )

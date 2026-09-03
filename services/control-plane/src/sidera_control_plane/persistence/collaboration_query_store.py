@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -12,9 +13,12 @@ from sidera_control_plane.domain.collaboration import CollaborationPolicySnapsho
 from sidera_control_plane.domain.collaboration_projections import (
     CollaborationDecisionProjectionFact,
     CollaborationExecutionProjectionFact,
+    CollaborationGovernanceHoldProjectionFact,
+    CollaborationGovernanceResolutionProjectionFact,
     CollaborationIntentApplicationProjectionFact,
     CollaborationIntentProjectionFact,
     CollaborationProjectionFacts,
+    CollaborationReleaseProposalProjectionFact,
     CollaborationRequestDependencyProjectionFact,
     CollaborationRequestProjectionFact,
     CollaborationRunProjectionFact,
@@ -27,6 +31,9 @@ from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
+    CollaborationGovernanceHoldModel,
+    CollaborationGovernanceResolutionModel,
+    CollaborationReleaseProposalModel,
     CollaborationRunModel,
     EvidenceClaimModel,
     ExecutionModel,
@@ -174,7 +181,9 @@ class SqlAlchemyCollaborationQueryStore:
                 RuntimeIntentModel.run_id == run.id,
                 RuntimeIntentModel.decision_id.in_(decision_ids or {UUID(int=0)}),
             )
-            .order_by(RuntimeIntentModel.decision_id.asc(), RuntimeIntentModel.ordinal.asc())
+            .order_by(
+                RuntimeIntentModel.decision_id.asc(), RuntimeIntentModel.ordinal.asc()
+            )
         ).all()
         intents = tuple(_intent(row) for row in intent_rows)
         intent_ids = {intent.id for intent in intents}
@@ -182,11 +191,84 @@ class SqlAlchemyCollaborationQueryStore:
             select(RuntimeIntentApplicationModel)
             .where(
                 RuntimeIntentApplicationModel.workspace_id == workspace_id,
-                RuntimeIntentApplicationModel.intent_id.in_(intent_ids or {UUID(int=0)}),
+                RuntimeIntentApplicationModel.intent_id.in_(
+                    intent_ids or {UUID(int=0)}
+                ),
             )
             .order_by(RuntimeIntentApplicationModel.intent_id.asc())
         ).all()
         applications = tuple(_application(row) for row in application_rows)
+
+        current_worker_item_ids = {request.worker_item_id for request in requests}
+        hold_rows = session.scalars(
+            select(CollaborationGovernanceHoldModel)
+            .where(
+                CollaborationGovernanceHoldModel.workspace_id == workspace_id,
+                CollaborationGovernanceHoldModel.root_task_id == root_task_id,
+                CollaborationGovernanceHoldModel.run_id == run.id,
+                CollaborationGovernanceHoldModel.plan_snapshot_id == plan.snapshot_id,
+                CollaborationGovernanceHoldModel.plan_generation == plan.generation,
+                CollaborationGovernanceHoldModel.worker_item_id.in_(
+                    current_worker_item_ids or {UUID(int=0)}
+                ),
+            )
+            .order_by(
+                CollaborationGovernanceHoldModel.worker_item_id.asc(),
+                CollaborationGovernanceHoldModel.created_at.asc(),
+                CollaborationGovernanceHoldModel.id.asc(),
+            )
+        ).all()
+        holds = tuple(_hold(row) for row in hold_rows)
+        proposal_rows = session.scalars(
+            select(CollaborationReleaseProposalModel)
+            .where(
+                CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                CollaborationReleaseProposalModel.run_id == run.id,
+                CollaborationReleaseProposalModel.execution_request_id.in_(
+                    request_ids or {UUID(int=0)}
+                ),
+            )
+            .order_by(
+                CollaborationReleaseProposalModel.execution_request_id.asc(),
+                CollaborationReleaseProposalModel.created_at.asc(),
+                CollaborationReleaseProposalModel.id.asc(),
+            )
+        ).all()
+        request_by_id = {request.id: request for request in requests}
+        hold_by_id = {hold.id: hold for hold in holds}
+        proposals = tuple(
+            _proposal(
+                row,
+                worker_item_id=(
+                    request_by_id[row.execution_request_id].worker_item_id
+                    if row.execution_request_id in request_by_id
+                    else hold_by_id[row.hold_id].worker_item_id
+                ),
+            )
+            for row in proposal_rows
+            if row.execution_request_id in request_by_id or row.hold_id in hold_by_id
+        )
+        proposal_ids = {proposal.id for proposal in proposals}
+        resolution_rows = session.scalars(
+            select(CollaborationGovernanceResolutionModel)
+            .where(
+                CollaborationGovernanceResolutionModel.workspace_id == workspace_id,
+                CollaborationGovernanceResolutionModel.proposal_id.in_(
+                    proposal_ids or {UUID(int=0)}
+                ),
+            )
+            .order_by(
+                CollaborationGovernanceResolutionModel.proposal_id.asc(),
+                CollaborationGovernanceResolutionModel.created_at.asc(),
+                CollaborationGovernanceResolutionModel.id.asc(),
+            )
+        ).all()
+        resolutions = tuple(_resolution(row) for row in resolution_rows)
+        applications = _attach_governance_lineage(
+            applications,
+            proposals=proposals,
+            resolutions=resolutions,
+        )
 
         provider = session.scalar(
             select(ModuleDefinitionModel.provider).where(
@@ -214,12 +296,8 @@ class SqlAlchemyCollaborationQueryStore:
                     item.subtask_key: item.strategy_id.value
                     for item in policy.subtask_overrides
                 },
-                latest_decision_summary=(
-                    decisions[-1].summary if decisions else None
-                ),
-                latest_decision_at=(
-                    decisions[-1].created_at if decisions else None
-                ),
+                latest_decision_summary=(decisions[-1].summary if decisions else None),
+                latest_decision_at=(decisions[-1].created_at if decisions else None),
             ),
             requests=requests,
             dependencies=dependencies,
@@ -228,6 +306,9 @@ class SqlAlchemyCollaborationQueryStore:
             decisions=decisions,
             intents=intents,
             applications=applications,
+            holds=holds,
+            proposals=proposals,
+            resolutions=resolutions,
         )
 
     @staticmethod
@@ -279,7 +360,9 @@ class SqlAlchemyCollaborationQueryStore:
     ) -> tuple[dict[UUID, tuple[str, ...]], dict[UUID, tuple[str, ...]]]:
         if not execution_ids:
             return {}, {}
-        lineage_by_execution = {item.execution_id: item.lineage_id for item in executions}
+        lineage_by_execution = {
+            item.execution_id: item.lineage_id for item in executions
+        }
         artifact_by_lineage: dict[UUID, set[str]] = defaultdict(set)
         artifact_rows = session.scalars(
             select(ArtifactModel).where(
@@ -290,7 +373,9 @@ class SqlAlchemyCollaborationQueryStore:
         for row in artifact_rows:
             lineage_id = lineage_by_execution.get(row.execution_id)
             if lineage_id is not None:
-                artifact_by_lineage[lineage_id].add(f"artifact_type:{row.artifact_type}")
+                artifact_by_lineage[lineage_id].add(
+                    f"artifact_type:{row.artifact_type}"
+                )
 
         evidence_by_lineage: dict[UUID, set[str]] = defaultdict(set)
         evidence_rows = session.scalars(
@@ -340,7 +425,9 @@ def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
     return snapshot
 
 
-def _policy_snapshot(value: Mapping[str, object]) -> CollaborationPolicySnapshotV1 | None:
+def _policy_snapshot(
+    value: Mapping[str, object],
+) -> CollaborationPolicySnapshotV1 | None:
     try:
         return CollaborationPolicySnapshotV1.from_mapping(value)
     except (KeyError, TypeError, ValueError):
@@ -354,13 +441,16 @@ def _request(
         (
             item
             for item in plan.worker_items
-            if item.worker_item_id == row.worker_item_id or item.key == row.worker_item_key
+            if item.worker_item_id == row.worker_item_id
+            or item.key == row.worker_item_key
         ),
         None,
     )
     return CollaborationRequestProjectionFact(
         id=row.id,
-        subtask_key=(worker_plan.subtask_key if worker_plan is not None else row.worker_item_key),
+        subtask_key=(
+            worker_plan.subtask_key if worker_plan is not None else row.worker_item_key
+        ),
         worker_item_key=row.worker_item_key,
         worker_item_id=row.worker_item_id,
         status=row.status,
@@ -406,7 +496,9 @@ def _intent(row: RuntimeIntentModel) -> CollaborationIntentProjectionFact:
         decision_id=row.decision_id,
         target_request_id=row.target_execution_request_id,
         ordinal=row.ordinal,
-        summary=row.summary,
+        summary=_bounded(row.summary, 2000),
+        reason_code=_bounded(row.reason_code, 255),
+        created_at=_as_utc(row.created_at),
     )
 
 
@@ -416,13 +508,131 @@ def _application(
     return CollaborationIntentApplicationProjectionFact(
         intent_id=row.intent_id,
         status=row.status,
-        result_code=row.result_code,
-        result_summary=row.result_summary,
-        release_id=row.release_id,
-        error_code=(
-            row.result_code if row.status in {"rejected", "stale"} else None
+        result_code=(
+            "governance_proposal_duplicate"
+            if row.status == "duplicate"
+            else _bounded(row.result_code, 255)
         ),
+        result_summary=_bounded(row.result_summary, 2000),
+        release_id=row.release_id,
+        error_code=(row.result_code if row.status in {"rejected", "stale"} else None),
+        created_at=_as_utc(row.created_at),
+        applied_at=_optional_utc(row.applied_at),
     )
+
+
+def _hold(
+    row: CollaborationGovernanceHoldModel,
+) -> CollaborationGovernanceHoldProjectionFact:
+    return CollaborationGovernanceHoldProjectionFact(
+        id=row.id,
+        run_id=row.run_id,
+        worker_item_id=row.worker_item_id,
+        status=row.status,
+        resource_version=row.resource_version,
+        reason=_bounded_optional(row.reason, 2000),
+        created_at=_as_utc(row.created_at),
+        resolved_at=_optional_utc(row.resolved_at),
+        created_by_actor_id=_bounded(row.created_by_actor_id, 255),
+        created_via=_bounded(row.created_via, 32),
+    )
+
+
+def _proposal(
+    row: CollaborationReleaseProposalModel,
+    *,
+    worker_item_id: UUID,
+) -> CollaborationReleaseProposalProjectionFact:
+    return CollaborationReleaseProposalProjectionFact(
+        id=row.id,
+        hold_id=row.hold_id,
+        run_id=row.run_id,
+        decision_id=row.decision_id,
+        intent_id=row.intent_id,
+        execution_request_id=row.execution_request_id,
+        worker_item_id=worker_item_id,
+        target_request_version=row.target_request_version,
+        status=row.status,
+        resource_version=row.resource_version,
+        reason_code=_bounded(row.reason_code, 255),
+        summary=_bounded(row.summary, 2000),
+        created_at=_as_utc(row.created_at),
+        resolved_at=_optional_utc(row.resolved_at),
+    )
+
+
+def _resolution(
+    row: CollaborationGovernanceResolutionModel,
+) -> CollaborationGovernanceResolutionProjectionFact:
+    return CollaborationGovernanceResolutionProjectionFact(
+        id=row.id,
+        proposal_id=row.proposal_id,
+        action=_bounded(row.action, 32),
+        result=_bounded(row.result, 32),
+        actor_id=_bounded(row.actor_id, 255),
+        transport=_bounded(row.transport, 32),
+        created_at=_as_utc(row.created_at),
+    )
+
+
+def _attach_governance_lineage(
+    applications: tuple[CollaborationIntentApplicationProjectionFact, ...],
+    *,
+    proposals: tuple[CollaborationReleaseProposalProjectionFact, ...],
+    resolutions: tuple[CollaborationGovernanceResolutionProjectionFact, ...],
+) -> tuple[CollaborationIntentApplicationProjectionFact, ...]:
+    proposal_by_intent = {proposal.intent_id: proposal for proposal in proposals}
+    resolution_by_proposal = {
+        resolution.proposal_id: resolution for resolution in resolutions
+    }
+    result: list[CollaborationIntentApplicationProjectionFact] = []
+    for application in applications:
+        if application.status == "duplicate":
+            result.append(
+                replace(
+                    application,
+                    result_code="governance_proposal_duplicate",
+                    proposal_id=None,
+                    proposal_status=None,
+                    resolution_action=None,
+                    resolution_result=None,
+                    resolution_actor=None,
+                    resolution_transport=None,
+                    proposal_created_at=None,
+                    proposal_resolved_at=None,
+                    resolution_created_at=None,
+                )
+            )
+            continue
+        proposal = proposal_by_intent.get(application.intent_id)
+        resolution = (
+            resolution_by_proposal.get(proposal.id) if proposal is not None else None
+        )
+        result.append(
+            replace(
+                application,
+                proposal_id=proposal.id if proposal is not None else None,
+                proposal_status=proposal.status if proposal is not None else None,
+                resolution_action=resolution.action if resolution is not None else None,
+                resolution_result=resolution.result if resolution is not None else None,
+                resolution_actor=resolution.actor_id
+                if resolution is not None
+                else None,
+                resolution_transport=(
+                    resolution.transport if resolution is not None else None
+                ),
+                proposal_created_at=(
+                    proposal.created_at if proposal is not None else None
+                ),
+                proposal_resolved_at=(
+                    proposal.resolved_at if proposal is not None else None
+                ),
+                resolution_created_at=(
+                    resolution.created_at if resolution is not None else None
+                ),
+            )
+        )
+    return tuple(result)
 
 
 def _with_outputs(
@@ -446,8 +656,18 @@ def _with_outputs(
 
 
 def _as_utc(value: datetime) -> datetime:
-    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return (
+        value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    )
 
 
 def _optional_utc(value: datetime | None) -> datetime | None:
     return _as_utc(value) if value is not None else None
+
+
+def _bounded(value: str, limit: int) -> str:
+    return value[:limit]
+
+
+def _bounded_optional(value: str | None, limit: int) -> str | None:
+    return _bounded(value, limit) if value is not None else None

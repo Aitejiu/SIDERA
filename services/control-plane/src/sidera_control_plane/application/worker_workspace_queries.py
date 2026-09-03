@@ -9,6 +9,7 @@ from sidera_control_plane.application.errors import InvalidCursor, NotFound
 from sidera_control_plane.domain.collaboration_projections import (
     CollaborationProjectionFacts,
     CollaborationProjectionService,
+    WorkerItemCollaborationSummaryProjection,
 )
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
@@ -102,15 +103,10 @@ class WorkerWorkspaceQueryService:
         return loaded
 
     @staticmethod
-    def _composer(snapshot: WorkerWorkspaceQuerySnapshot) -> WorkerItemProjectionService:
-        collaboration = (
-            CollaborationProjectionService().worker_summary(
-                snapshot.collaboration_facts,
-                worker_item_id=snapshot.worker_item.id,
-            )
-            if snapshot.collaboration_facts is not None
-            else None
-        )
+    def _composer(
+        snapshot: WorkerWorkspaceQuerySnapshot,
+    ) -> WorkerItemProjectionService:
+        collaboration = WorkerWorkspaceQueryService._collaboration_summary(snapshot)
         return WorkerItemProjectionService(
             worker_item=snapshot.worker_item,
             placements=snapshot.placements,
@@ -129,4 +125,15 @@ class WorkerWorkspaceQueryService:
             convergence_facts=snapshot.convergence_facts,
             active_handoff=snapshot.active_handoff,
             collaboration=collaboration,
+        )
+
+    @staticmethod
+    def _collaboration_summary(
+        snapshot: WorkerWorkspaceQuerySnapshot,
+    ) -> WorkerItemCollaborationSummaryProjection | None:
+        if snapshot.collaboration_facts is None:
+            return None
+        return CollaborationProjectionService().worker_summary(
+            snapshot.collaboration_facts,
+            worker_item_id=snapshot.worker_item.id,
         )

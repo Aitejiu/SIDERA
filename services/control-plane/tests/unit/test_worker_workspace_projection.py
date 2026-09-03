@@ -5,6 +5,9 @@ from uuid import UUID
 
 import pytest
 
+from sidera_control_plane.domain.collaboration_projections import (
+    WorkerItemCollaborationSummaryProjection,
+)
 from sidera_control_plane.domain.worker_item_projections import (
     ArtifactSummaryProjection,
     CheckpointSummaryProjection,
@@ -281,6 +284,34 @@ def test_worker_workspace_exposes_current_runtime_and_placement_history() -> Non
         cached_tokens=0,
         cost_microunits=0,
     )
+
+
+def test_worker_workspace_keeps_governance_summary_next_to_work_surface() -> None:
+    collaboration = WorkerItemCollaborationSummaryProjection(
+        enabled=True,
+        state="waiting_release",
+        waiting_summary="等待协同放行",
+        upstream_links=(),
+        governance_mode="paused",
+        active_hold_id=UUID("a2000000-0000-0000-0000-000000000010"),
+        hold_resource_version=2,
+        hold_reason="用户需要先核对回调证据",
+        release_state="proposed",
+        available_actions=("approve", "reject", "resume_automatic"),
+        proposal_summary="建议放行回调实现",
+    )
+
+    workspace = _service(collaboration=collaboration).compose_workspace()
+
+    assert workspace.collaboration == collaboration
+    assert workspace.collaboration is not None
+    assert workspace.collaboration.governance_mode == "paused"
+    assert workspace.collaboration.available_actions == (
+        "approve",
+        "reject",
+        "resume_automatic",
+    )
+    assert workspace.collaboration.hold_reason == "用户需要先核对回调证据"
 
 
 @pytest.mark.parametrize(

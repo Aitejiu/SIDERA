@@ -12,6 +12,7 @@ from sidera_control_plane.domain.attention import (
     AttentionSource,
 )
 from sidera_control_plane.domain.collaboration_projections import (
+    CollaborationProjectionFacts,
     RootCollaborationSummaryProjection,
 )
 from sidera_control_plane.domain.plan_convergence_projections import (
@@ -239,6 +240,7 @@ class TaskConsoleProjectionService:
         convergence_facts: PlanConvergenceFacts | None = None,
         handoffs: Mapping[UUID, ActiveHandoffProjection] | None = None,
         collaboration: RootCollaborationSummaryProjection | None = None,
+        collaboration_facts: CollaborationProjectionFacts | None = None,
     ) -> TaskConsoleGraphProjection:
         handoff_values = handoffs or {}
         placement_values = tuple(
@@ -263,15 +265,15 @@ class TaskConsoleProjectionService:
             item_states = tuple(
                 _worker_item_state(
                     worker_items.get(placement.worker_item_id),
-                    _latest(executions_by_worker_item.get(placement.worker_item_id, ())),
+                    _latest(
+                        executions_by_worker_item.get(placement.worker_item_id, ())
+                    ),
                     task,
                 )
                 for placement in item_placements
             )
             evidence_task_values = evidence_by_task.get(task_id, ()) if task_id else ()
-            evidence_satisfied = _evidence_satisfied(
-                subtask, evidence_task_values
-            )
+            evidence_satisfied = _evidence_satisfied(subtask, evidence_task_values)
             state = _subtask_state(
                 subtask,
                 task,
@@ -285,13 +287,12 @@ class TaskConsoleProjectionService:
             latest_activity = _latest(
                 activity_by_task.get(task_id, ()) if task_id else ()
             )
-            task_executions = (
-                executions_by_task.get(task_id, ()) if task_id else ()
-            )
+            task_executions = executions_by_task.get(task_id, ()) if task_id else ()
             latest_block = _latest(
                 execution
                 for execution in task_executions
-                if execution.status == "queued" and execution.active_block_id is not None
+                if execution.status == "queued"
+                and execution.active_block_id is not None
             )
             nodes.append(
                 SubtaskNodeProjection(
@@ -311,10 +312,10 @@ class TaskConsoleProjectionService:
                     )
                     + sum(
                         bool(
-                            handoff_values.get(
+                            handoff_values.get(placement.worker_item_id)
+                            and handoff_values[
                                 placement.worker_item_id
-                            )
-                            and handoff_values[placement.worker_item_id].attention_required
+                            ].attention_required
                         )
                         for placement in item_placements
                     ),
@@ -349,11 +350,15 @@ class TaskConsoleProjectionService:
                         else None
                     ),
                     handoff_running_count=sum(
-                        _handoff_is_running(handoff_values.get(placement.worker_item_id))
+                        _handoff_is_running(
+                            handoff_values.get(placement.worker_item_id)
+                        )
                         for placement in item_placements
                     ),
                     handoff_blocked_count=sum(
-                        _handoff_is_blocked(handoff_values.get(placement.worker_item_id))
+                        _handoff_is_blocked(
+                            handoff_values.get(placement.worker_item_id)
+                        )
                         for placement in item_placements
                     ),
                     handoff_worker_item_ids=tuple(
@@ -394,6 +399,7 @@ class TaskConsoleProjectionService:
             convergence=convergence,
             handoffs=handoff_values,
             collaboration=collaboration,
+            collaboration_facts=collaboration_facts,
         )
         return TaskConsoleGraphProjection(
             schema_version=1,
@@ -444,9 +450,7 @@ class TaskConsoleProjectionService:
                 for item in page
             ),
             next_cursor=(
-                _activity_cursor(page[-1])
-                if len(ordered) > limit and page
-                else None
+                _activity_cursor(page[-1]) if len(ordered) > limit and page else None
             ),
         )
 
@@ -464,13 +468,9 @@ class TaskConsoleProjectionService:
                 waiting.add(dependency.downstream_subtask_key)
         result: list[SubtaskNodeProjection] = []
         for node in nodes:
-            if (
-                node.subtask_key in waiting
-                and node.state in {"planned", "succeeded"}
-            ):
+            if node.subtask_key in waiting and node.state in {"planned", "succeeded"}:
                 payload = {
-                    field: getattr(node, field)
-                    for field in node.__dataclass_fields__
+                    field: getattr(node, field) for field in node.__dataclass_fields__
                 }
                 payload["state"] = "waiting_dependency"
                 result.append(SubtaskNodeProjection(**payload))
@@ -484,7 +484,9 @@ class TaskConsoleProjectionService:
         nodes: Mapping[str, SubtaskNodeProjection],
     ) -> tuple[SubtaskMilestoneProjection, ...]:
         result: list[SubtaskMilestoneProjection] = []
-        for milestone in sorted(plan.milestones, key=lambda value: (value.order_hint, value.key)):
+        for milestone in sorted(
+            plan.milestones, key=lambda value: (value.order_hint, value.key)
+        ):
             milestone_nodes = [nodes[key] for key in milestone.subtask_keys]
             completed = sum(node.state == "succeeded" for node in milestone_nodes)
             planned = sum(node.state == "planned" for node in milestone_nodes)
@@ -493,7 +495,8 @@ class TaskConsoleProjectionService:
             elif any(node.state == "running" for node in milestone_nodes):
                 state = "running"
             elif any(
-                node.state in {"waiting_user", "blocked", "failed", "waiting_dependency"}
+                node.state
+                in {"waiting_user", "blocked", "failed", "waiting_dependency"}
                 for node in milestone_nodes
             ):
                 state = "waiting"
@@ -528,6 +531,7 @@ class TaskConsoleProjectionService:
         convergence: PlanRootProjection | None,
         handoffs: Mapping[UUID, ActiveHandoffProjection],
         collaboration: RootCollaborationSummaryProjection | None,
+        collaboration_facts: CollaborationProjectionFacts | None,
     ) -> TaskConsoleOverviewProjection:
         active_milestone = next(
             (milestone for milestone in milestones if milestone.state != "completed"),
@@ -539,7 +543,9 @@ class TaskConsoleProjectionService:
         placement_by_worker_item = {
             placement.worker_item_id: placement for placement in placements
         }
-        handoff_by_subtask: dict[str, list[tuple[UUID, ActiveHandoffProjection]]] = defaultdict(list)
+        handoff_by_subtask: dict[str, list[tuple[UUID, ActiveHandoffProjection]]] = (
+            defaultdict(list)
+        )
         for worker_item_id, handoff in handoffs.items():
             placement = placement_by_worker_item.get(worker_item_id)
             if placement is not None:
@@ -547,10 +553,14 @@ class TaskConsoleProjectionService:
                     (worker_item_id, handoff)
                 )
         for subtask_key, values in sorted(handoff_by_subtask.items()):
-            node = next((item for item in nodes if item.subtask_key == subtask_key), None)
+            node = next(
+                (item for item in nodes if item.subtask_key == subtask_key), None
+            )
             if node is None:
                 continue
-            for worker_item_id, handoff in sorted(values, key=lambda item: str(item[0])):
+            for worker_item_id, handoff in sorted(
+                values, key=lambda item: str(item[0])
+            ):
                 if not handoff.attention_required:
                     continue
                 item = TaskConsoleAttentionProjection(
@@ -583,6 +593,58 @@ class TaskConsoleProjectionService:
                     for acknowledgement in acknowledgements
                 ):
                     attention.append(item)
+        if collaboration_facts is not None and collaboration_facts.run.policy_enabled:
+            requests = {request.id: request for request in collaboration_facts.requests}
+            placement_by_worker_item = {
+                placement.worker_item_id: placement for placement in placements
+            }
+            subtask_by_key = {item.key: item for item in plan.subtasks}
+            pending_proposals = sorted(
+                (
+                    proposal
+                    for proposal in collaboration_facts.proposals
+                    if proposal.run_id == collaboration_facts.run.id
+                    and proposal.status == "pending"
+                    and proposal.execution_request_id in requests
+                ),
+                key=lambda item: (item.created_at, str(item.id)),
+            )
+            for proposal in pending_proposals:
+                request = requests[proposal.execution_request_id]
+                placement = placement_by_worker_item.get(request.worker_item_id)
+                subtask = subtask_by_key.get(request.subtask_key)
+                if placement is None or subtask is None:
+                    continue
+                item = TaskConsoleAttentionProjection(
+                    key=f"collaboration_release_proposal:{proposal.id}",
+                    kind="collaboration_release_proposal",
+                    task_title=plan.title,
+                    subtask_key=placement.subtask_key,
+                    subtask_title=subtask.title,
+                    reason=proposal.summary,
+                    resource_id=proposal.id,
+                    resource_version=proposal.resource_version,
+                    correlation_id=proposal.id,
+                    occurred_at=proposal.created_at,
+                    requires_operator=True,
+                    worker_item_id=placement.worker_item_id,
+                    deep_link=(
+                        f"/workspaces/{plan.workspace_id}/worker-items/"
+                        f"{placement.worker_item_id}"
+                    ),
+                )
+                source = AttentionSource(
+                    attention_key=item.key,
+                    root_task_id=plan.root_task_id,
+                    resource_id=item.resource_id,
+                    resource_version=item.resource_version,
+                    correlation_id=item.correlation_id,
+                )
+                if not any(
+                    acknowledgement.applies_to(source)
+                    for acknowledgement in acknowledgements
+                ):
+                    attention.append(item)
         for node in nodes:
             if node.state not in {"waiting_user", "blocked", "failed"}:
                 continue
@@ -597,7 +659,8 @@ class TaskConsoleProjectionService:
             latest_block = _latest(
                 execution
                 for execution in task_executions
-                if execution.status == "queued" and execution.active_block_id is not None
+                if execution.status == "queued"
+                and execution.active_block_id is not None
             )
             if latest_block is not None and latest_block.active_block_id is not None:
                 attention_key = (
@@ -607,9 +670,8 @@ class TaskConsoleProjectionService:
                 resource_id = latest_block.active_block_id
                 resource_version = latest_block.active_block_version or 1
                 correlation_id = latest_block.active_block_id
-                reason = (
-                    latest_block.active_block_summary
-                    or _default_attention_reason(node.state)
+                reason = latest_block.active_block_summary or _default_attention_reason(
+                    node.state
                 )
                 occurred_at = latest_block.active_block_first_seen_at or as_of
             else:
@@ -619,9 +681,7 @@ class TaskConsoleProjectionService:
                 resource_id = node.task_id or plan.root_task_id
                 resource_version = task.version if task else 1
                 correlation_id = (
-                    latest_activity.correlation_id
-                    if latest_activity
-                    else UUID(int=0)
+                    latest_activity.correlation_id if latest_activity else UUID(int=0)
                 )
                 reason = node.current_action or _default_attention_reason(node.state)
                 occurred_at = latest_activity.occurred_at if latest_activity else as_of
@@ -689,7 +749,9 @@ class TaskConsoleProjectionService:
             planned_subtask_count=sum(node.state == "planned" for node in nodes),
             running_subtask_count=sum(node.state == "running" for node in nodes),
             completed_subtask_count=sum(node.state == "succeeded" for node in nodes),
-            failed_subtask_count=sum(node.state in {"failed", "blocked"} for node in nodes),
+            failed_subtask_count=sum(
+                node.state in {"failed", "blocked"} for node in nodes
+            ),
             next_subtask_keys=next_keys,
             attention_items=tuple(attention),
             last_change_cursor=last_change_cursor,
@@ -810,7 +872,9 @@ def _subtask_state(
     task_executions: tuple[TaskConsoleExecutionFact, ...],
 ) -> str:
     del subtask
-    if "waiting_user" in item_states or (task and task.status in {"waiting", "waiting_user"}):
+    if "waiting_user" in item_states or (
+        task and task.status in {"waiting", "waiting_user"}
+    ):
         return "waiting_user"
     if "blocked" in item_states:
         return "blocked"
@@ -831,7 +895,10 @@ def _subtask_state(
     if task and task.status in {"running", "ready"} and not task_executions:
         return "running"
     if (
-        (not item_states or all(value in {"succeeded", "canceled"} for value in item_states))
+        (
+            not item_states
+            or all(value in {"succeeded", "canceled"} for value in item_states)
+        )
         and evidence_satisfied >= evidence_required
         and task
         and task.status == "succeeded"
@@ -850,11 +917,7 @@ def _evidence_satisfied(
 ) -> int:
     refs = set(subtask.acceptance_refs)
     return len(
-        {
-            item.acceptance_ref
-            for item in evidence
-            if item.acceptance_ref in refs
-        }
+        {item.acceptance_ref for item in evidence if item.acceptance_ref in refs}
     )
 
 

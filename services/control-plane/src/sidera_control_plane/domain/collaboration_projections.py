@@ -90,6 +90,8 @@ class CollaborationIntentProjectionFact:
     target_request_id: UUID
     ordinal: int
     summary: str
+    reason_code: str | None = None
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +102,88 @@ class CollaborationIntentApplicationProjectionFact:
     result_summary: str
     release_id: UUID | None
     error_code: str | None = None
+    created_at: datetime | None = None
+    applied_at: datetime | None = None
+    proposal_id: UUID | None = None
+    proposal_status: str | None = None
+    resolution_action: str | None = None
+    resolution_result: str | None = None
+    resolution_actor: str | None = None
+    resolution_transport: str | None = None
+    proposal_created_at: datetime | None = None
+    proposal_resolved_at: datetime | None = None
+    resolution_created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationGovernanceHoldProjectionFact:
+    id: UUID
+    run_id: UUID
+    worker_item_id: UUID
+    status: str
+    resource_version: int
+    reason: str | None
+    created_at: datetime
+    resolved_at: datetime | None
+    created_by_actor_id: str | None = None
+    created_via: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationReleaseProposalProjectionFact:
+    id: UUID
+    hold_id: UUID
+    run_id: UUID
+    decision_id: UUID
+    intent_id: UUID
+    execution_request_id: UUID
+    worker_item_id: UUID
+    target_request_version: int
+    status: str
+    resource_version: int
+    reason_code: str
+    summary: str
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationGovernanceResolutionProjectionFact:
+    id: UUID
+    proposal_id: UUID
+    action: str
+    result: str
+    actor_id: str
+    transport: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationReleaseProposalSummaryProjection:
+    proposal_id: UUID
+    status: str
+    resource_version: int
+    reason_code: str
+    summary: str
+    created_at: datetime
+    target_request_version: int
+    resolved_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationGovernanceHistoryProjection:
+    kind: str
+    resource_id: UUID
+    status: str
+    summary: str
+    occurred_at: datetime
+    result_code: str | None = None
+    proposal_id: UUID | None = None
+    resolution_action: str | None = None
+    resolution_result: str | None = None
+    resolution_actor: str | None = None
+    resolution_transport: str | None = None
+    release_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +201,15 @@ class CollaborationDecisionApplicationProjection:
     result_summary: str
     release_id: UUID | None
     error_code: str | None
+    proposal_id: UUID | None = None
+    proposal_status: str | None = None
+    resolution_action: str | None = None
+    resolution_result: str | None = None
+    resolution_actor: str | None = None
+    resolution_transport: str | None = None
+    proposal_created_at: datetime | None = None
+    proposal_resolved_at: datetime | None = None
+    resolution_created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +242,16 @@ class BlockedSubtaskProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class CollaborationAttentionSubtaskProjection:
+    subtask_key: str
+    subtask_title: str
+    pending_count: int
+    first_worker_item_title: str
+    deep_link: str
+    subtask_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RootCollaborationSummaryProjection:
     enabled: bool
     status: str
@@ -165,6 +268,9 @@ class RootCollaborationSummaryProjection:
     latest_decision_at: datetime | None
     attention_required: bool
     detail_href: str
+    paused_worker_item_count: int = 0
+    pending_release_proposal_count: int = 0
+    attention_subtasks: tuple[CollaborationAttentionSubtaskProjection, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +292,17 @@ class WorkerItemCollaborationSummaryProjection:
     state: str
     waiting_summary: str | None
     upstream_links: tuple[CollaborationLinkProjection, ...]
+    governance_mode: str = "automatic"
+    active_hold_id: UUID | None = None
+    hold_resource_version: int | None = None
+    hold_reason: str | None = None
+    hold_created_at: datetime | None = None
+    release_state: str = "unreleased"
+    active_proposal: CollaborationReleaseProposalSummaryProjection | None = None
+    available_actions: tuple[str, ...] = ()
+    governance_history: tuple[CollaborationGovernanceHistoryProjection, ...] = ()
+    attention_state: str = "none"
+    proposal_summary: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +316,20 @@ class CollaborationProjectionFacts:
     decisions: tuple[CollaborationDecisionProjectionFact, ...]
     intents: tuple[CollaborationIntentProjectionFact, ...]
     applications: tuple[CollaborationIntentApplicationProjectionFact, ...]
+    holds: tuple[CollaborationGovernanceHoldProjectionFact, ...] = ()
+    proposals: tuple[CollaborationReleaseProposalProjectionFact, ...] = ()
+    resolutions: tuple[CollaborationGovernanceResolutionProjectionFact, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerGovernanceProjection:
+    hold: CollaborationGovernanceHoldProjectionFact | None
+    pending_proposal: CollaborationReleaseProposalProjectionFact | None
+    active_proposal: CollaborationReleaseProposalSummaryProjection | None
+    release_state: str
+    governance_mode: str
+    available_actions: tuple[str, ...]
+    history: tuple[CollaborationGovernanceHistoryProjection, ...]
 
 
 class CollaborationProjectionService:
@@ -224,18 +355,35 @@ class CollaborationProjectionService:
         completed_count = sum(
             _is_completed(executions.get(request.id)) for request in facts.requests
         )
-        waiting_count = sum(
-            state.startswith("waiting_")
-            for state in states.values()
-        )
+        waiting_count = sum(state.startswith("waiting_") for state in states.values())
         blocked_subtasks = self._blocked_subtasks(
             facts,
             states=states,
             executions=executions,
         )
-        attention_required = facts.run.status == "blocked" or any(
-            _is_attention_reason(request.gate_reason)
-            for request in facts.requests
+        current_request_ids = {request.id for request in facts.requests}
+        current_worker_item_ids = {request.worker_item_id for request in facts.requests}
+        active_holds = {
+            hold.worker_item_id: hold
+            for hold in facts.holds
+            if hold.run_id == facts.run.id
+            and hold.worker_item_id in current_worker_item_ids
+            and hold.status == "active"
+        }
+        pending_proposals = tuple(
+            proposal
+            for proposal in facts.proposals
+            if proposal.run_id == facts.run.id
+            and proposal.execution_request_id in current_request_ids
+            and proposal.status == "pending"
+        )
+        attention_subtasks = self._attention_subtasks(facts, pending_proposals)
+        attention_required = (
+            facts.run.status == "blocked"
+            or any(
+                _is_attention_reason(request.gate_reason) for request in facts.requests
+            )
+            or (facts.run.policy_enabled and bool(pending_proposals))
         )
         if attention_required:
             status = "attention"
@@ -276,6 +424,13 @@ class CollaborationProjectionService:
             ),
             attention_required=attention_required,
             detail_href=_detail_href(facts.plan.workspace_id, facts.plan.root_task_id),
+            paused_worker_item_count=(
+                len(active_holds) if facts.run.policy_enabled else 0
+            ),
+            pending_release_proposal_count=(
+                len(pending_proposals) if facts.run.policy_enabled else 0
+            ),
+            attention_subtasks=(attention_subtasks if facts.run.policy_enabled else ()),
         )
 
     def subtask_summary(
@@ -345,14 +500,10 @@ class CollaborationProjectionService:
         self, facts: CollaborationProjectionFacts, *, worker_item_id: UUID
     ) -> WorkerItemCollaborationSummaryProjection | None:
         request = next(
-            (
-                item
-                for item in facts.requests
-                if item.worker_item_id == worker_item_id
-            ),
+            (item for item in facts.requests if item.worker_item_id == worker_item_id),
             None,
         )
-        if request is None or not facts.run.policy_enabled:
+        if request is None:
             return None
         executions = self._latest_executions(facts.executions)
         released = set(facts.released_request_ids)
@@ -375,14 +526,283 @@ class CollaborationProjectionService:
                 link = self._subtask_link(facts.plan, upstream.subtask_key)
                 if link not in upstream_links:
                     upstream_links.append(link)
+        governance = self._worker_governance(facts, request)
+        available_actions = governance.available_actions
+        if not facts.run.policy_enabled:
+            available_actions = ()
         return WorkerItemCollaborationSummaryProjection(
-            enabled=True,
+            enabled=facts.run.policy_enabled,
             state=state,
             waiting_summary=_state_summary(state, request.gate_reason),
             upstream_links=tuple(upstream_links),
+            governance_mode=(
+                governance.governance_mode if facts.run.policy_enabled else "automatic"
+            ),
+            active_hold_id=(
+                governance.hold.id if governance.hold is not None else None
+            ),
+            hold_resource_version=(
+                governance.hold.resource_version
+                if governance.hold is not None
+                else None
+            ),
+            hold_reason=(
+                governance.hold.reason if governance.hold is not None else None
+            ),
+            hold_created_at=(
+                governance.hold.created_at if governance.hold is not None else None
+            ),
+            release_state=governance.release_state,
+            active_proposal=governance.active_proposal,
+            available_actions=available_actions,
+            governance_history=governance.history,
+            attention_state=(
+                "decision_required"
+                if governance.pending_proposal is not None
+                else "none"
+            ),
+            proposal_summary=(
+                governance.pending_proposal.summary
+                if governance.pending_proposal is not None
+                else None
+            ),
         )
 
-    def detail(self, facts: CollaborationProjectionFacts) -> CollaborationDetailProjection:
+    def _worker_governance(
+        self,
+        facts: CollaborationProjectionFacts,
+        request: CollaborationRequestProjectionFact,
+    ) -> _WorkerGovernanceProjection:
+        holds = tuple(
+            hold
+            for hold in facts.holds
+            if hold.run_id == facts.run.id
+            and hold.worker_item_id == request.worker_item_id
+        )
+        active_hold = max(
+            (hold for hold in holds if hold.status == "active"),
+            key=lambda item: (item.created_at, item.resource_version, str(item.id)),
+            default=None,
+        )
+        proposals = tuple(
+            proposal
+            for proposal in facts.proposals
+            if proposal.run_id == facts.run.id
+            and proposal.execution_request_id == request.id
+        )
+        ordered_proposals = tuple(
+            sorted(
+                proposals,
+                key=lambda item: (item.created_at, item.resource_version, str(item.id)),
+                reverse=True,
+            )
+        )
+        pending_proposal = next(
+            (
+                proposal
+                for proposal in ordered_proposals
+                if proposal.status == "pending"
+            ),
+            None,
+        )
+        latest_proposal = ordered_proposals[0] if ordered_proposals else None
+        application_by_intent = {
+            application.intent_id: application for application in facts.applications
+        }
+        release_state = "unreleased"
+        if (
+            request.id in facts.released_request_ids
+            or any(
+                application.release_id is not None
+                for proposal in proposals
+                for application in (application_by_intent.get(proposal.intent_id),)
+                if application is not None
+            )
+            or any(proposal.status == "approved" for proposal in proposals)
+        ):
+            release_state = "released"
+        elif proposals:
+            release_state = "proposed"
+
+        if active_hold is None:
+            available_actions = ("pause",) if release_state != "released" else ()
+            governance_mode = "automatic"
+        elif pending_proposal is not None:
+            available_actions = ("approve", "reject", "resume_automatic")
+            governance_mode = "paused"
+        else:
+            available_actions = ("resume_automatic",)
+            governance_mode = "paused"
+
+        resolution_by_proposal = {
+            resolution.proposal_id: resolution for resolution in facts.resolutions
+        }
+        history: list[CollaborationGovernanceHistoryProjection] = []
+        for hold in holds:
+            history.append(
+                CollaborationGovernanceHistoryProjection(
+                    kind="hold",
+                    resource_id=hold.id,
+                    status=hold.status,
+                    summary=_bounded_summary(hold.reason or "自动放行已暂停"),
+                    occurred_at=hold.resolved_at or hold.created_at,
+                )
+            )
+        decision_by_id = {decision.id: decision for decision in facts.decisions}
+        for intent in facts.intents:
+            if intent.target_request_id != request.id:
+                continue
+            decision = decision_by_id.get(intent.decision_id)
+            application = application_by_intent.get(intent.id)
+            intent_at = (
+                intent.created_at
+                or (decision.created_at if decision is not None else None)
+                or (application.created_at if application is not None else None)
+                or facts.run.updated_at
+                or _MIN_DATETIME
+            )
+            history.append(
+                CollaborationGovernanceHistoryProjection(
+                    kind="runtime_intent",
+                    resource_id=intent.id,
+                    status="created",
+                    summary=_bounded_summary(intent.summary),
+                    occurred_at=intent_at,
+                    result_code=intent.reason_code,
+                )
+            )
+            if application is not None:
+                result_code = (
+                    "governance_proposal_duplicate"
+                    if application.status == "duplicate"
+                    else application.result_code
+                )
+                history.append(
+                    CollaborationGovernanceHistoryProjection(
+                        kind="application",
+                        resource_id=application.intent_id,
+                        status=application.status,
+                        summary=_bounded_summary(application.result_summary),
+                        occurred_at=(
+                            application.applied_at
+                            or application.created_at
+                            or intent_at
+                        ),
+                        result_code=result_code,
+                    )
+                )
+        for proposal in proposals:
+            history.append(
+                CollaborationGovernanceHistoryProjection(
+                    kind="proposal",
+                    resource_id=proposal.id,
+                    status=proposal.status,
+                    summary=_bounded_summary(proposal.summary),
+                    occurred_at=proposal.resolved_at or proposal.created_at,
+                    result_code=proposal.reason_code,
+                    proposal_id=proposal.id,
+                )
+            )
+            application = application_by_intent.get(proposal.intent_id)
+            if application is not None and application.status == "duplicate":
+                continue
+            resolution = resolution_by_proposal.get(proposal.id)
+            if resolution is not None:
+                history.append(
+                    CollaborationGovernanceHistoryProjection(
+                        kind="resolution",
+                        resource_id=resolution.id,
+                        status=resolution.result,
+                        summary=f"{resolution.action} -> {resolution.result}",
+                        occurred_at=resolution.created_at,
+                        proposal_id=proposal.id,
+                        resolution_action=resolution.action,
+                        resolution_result=resolution.result,
+                        resolution_actor=resolution.actor_id,
+                        resolution_transport=resolution.transport,
+                    )
+                )
+            if application is not None and application.release_id is not None:
+                history.append(
+                    CollaborationGovernanceHistoryProjection(
+                        kind="release",
+                        resource_id=application.release_id,
+                        status="issued",
+                        summary="Release 已签发",
+                        occurred_at=(
+                            application.applied_at
+                            or application.created_at
+                            or proposal.resolved_at
+                            or proposal.created_at
+                        ),
+                        proposal_id=proposal.id,
+                        release_id=application.release_id,
+                    )
+                )
+        history.sort(key=_governance_history_sort_key, reverse=True)
+        return _WorkerGovernanceProjection(
+            hold=active_hold,
+            pending_proposal=pending_proposal,
+            active_proposal=(
+                _proposal_summary(latest_proposal)
+                if latest_proposal is not None
+                else None
+            ),
+            release_state=release_state,
+            governance_mode=governance_mode,
+            available_actions=available_actions,
+            history=tuple(history[:20]),
+        )
+
+    @staticmethod
+    def _attention_subtasks(
+        facts: CollaborationProjectionFacts,
+        proposals: Iterable[CollaborationReleaseProposalProjectionFact],
+    ) -> tuple[CollaborationAttentionSubtaskProjection, ...]:
+        requests = {request.id: request for request in facts.requests}
+        grouped: dict[str, list[CollaborationReleaseProposalProjectionFact]] = {}
+        for proposal in proposals:
+            request = requests.get(proposal.execution_request_id)
+            if request is not None:
+                grouped.setdefault(request.subtask_key, []).append(proposal)
+        result: list[CollaborationAttentionSubtaskProjection] = []
+        for subtask in facts.plan.subtasks:
+            values = grouped.get(subtask.key)
+            if not values:
+                continue
+            first_request = min(
+                (requests[item.execution_request_id] for item in values),
+                key=lambda item: (item.worker_item_key, str(item.id)),
+            )
+            worker_plan = next(
+                (
+                    item
+                    for item in facts.plan.worker_items
+                    if item.worker_item_id == first_request.worker_item_id
+                ),
+                None,
+            )
+            result.append(
+                CollaborationAttentionSubtaskProjection(
+                    subtask_key=subtask.key,
+                    subtask_title=subtask.title,
+                    pending_count=len(values),
+                    first_worker_item_title=(
+                        worker_plan.title
+                        if worker_plan is not None
+                        else first_request.worker_item_key
+                    ),
+                    deep_link=CollaborationProjectionService._subtask_link(
+                        facts.plan, subtask.key
+                    ).href,
+                    subtask_id=subtask.task_id,
+                )
+            )
+        return tuple(result)
+
+    def detail(
+        self, facts: CollaborationProjectionFacts
+    ) -> CollaborationDetailProjection:
         summary = self.root_summary(facts)
         return CollaborationDetailProjection(
             enabled=summary.enabled,
@@ -404,6 +824,9 @@ class CollaborationProjectionService:
             interface_version=facts.run.interface_version,
             config_version=facts.run.config_version,
             config_summary=f"配置版本 {facts.run.config_version}",
+            paused_worker_item_count=summary.paused_worker_item_count,
+            pending_release_proposal_count=summary.pending_release_proposal_count,
+            attention_subtasks=summary.attention_subtasks,
         )
 
     def decision_history(
@@ -428,8 +851,7 @@ class CollaborationProjectionService:
                 if (item.created_at, item.id) < (after_at, after_id)
             ]
         return tuple(
-            self._decision_projection(facts, decision)
-            for decision in decisions[:limit]
+            self._decision_projection(facts, decision) for decision in decisions[:limit]
         )
 
     def decision_history_page(
@@ -469,22 +891,18 @@ class CollaborationProjectionService:
         decision: CollaborationDecisionProjectionFact,
     ) -> CollaborationDecisionProjection:
         intents = sorted(
-            (
-                intent
-                for intent in facts.intents
-                if intent.decision_id == decision.id
-            ),
+            (intent for intent in facts.intents if intent.decision_id == decision.id),
             key=lambda item: (item.ordinal, str(item.id)),
         )
         requests = {request.id: request for request in facts.requests}
         links = tuple(
-            CollaborationProjectionService._subtask_link(facts.plan, request.subtask_key)
+            CollaborationProjectionService._subtask_link(
+                facts.plan, request.subtask_key
+            )
             for intent in intents
             if (request := requests.get(intent.target_request_id)) is not None
         )
-        applications = {
-            item.intent_id: item for item in facts.applications
-        }
+        applications = {item.intent_id: item for item in facts.applications}
         return CollaborationDecisionProjection(
             decision_id=decision.id,
             sequence=decision.sequence,
@@ -503,6 +921,15 @@ class CollaborationProjectionService:
                     result_summary=application.result_summary,
                     release_id=application.release_id,
                     error_code=application.error_code,
+                    proposal_id=application.proposal_id,
+                    proposal_status=application.proposal_status,
+                    resolution_action=application.resolution_action,
+                    resolution_result=application.resolution_result,
+                    resolution_actor=application.resolution_actor,
+                    resolution_transport=application.resolution_transport,
+                    proposal_created_at=application.proposal_created_at,
+                    proposal_resolved_at=application.proposal_resolved_at,
+                    resolution_created_at=application.resolution_created_at,
                 )
                 for intent in intents
                 if (application := applications.get(intent.id)) is not None
@@ -718,6 +1145,9 @@ class CollaborationDetailProjection:
     interface_version: str
     config_version: int
     config_summary: str
+    paused_worker_item_count: int = 0
+    pending_release_proposal_count: int = 0
+    attention_subtasks: tuple[CollaborationAttentionSubtaskProjection, ...] = ()
 
 
 @dataclass(slots=True)
@@ -825,3 +1255,36 @@ def _append_unique(target: list[str], values: Iterable[str]) -> None:
     for value in values:
         if value not in target:
             target.append(value)
+
+
+def _proposal_summary(
+    proposal: CollaborationReleaseProposalProjectionFact,
+) -> CollaborationReleaseProposalSummaryProjection:
+    return CollaborationReleaseProposalSummaryProjection(
+        proposal_id=proposal.id,
+        status=proposal.status,
+        resource_version=proposal.resource_version,
+        reason_code=proposal.reason_code,
+        summary=_bounded_summary(proposal.summary),
+        created_at=proposal.created_at,
+        target_request_version=proposal.target_request_version,
+        resolved_at=proposal.resolved_at,
+    )
+
+
+def _bounded_summary(value: str) -> str:
+    return value[:2000]
+
+
+def _governance_history_sort_key(
+    item: CollaborationGovernanceHistoryProjection,
+) -> tuple[datetime, int, str]:
+    priority = {
+        "release": 60,
+        "resolution": 50,
+        "proposal": 40,
+        "application": 30,
+        "runtime_intent": 20,
+        "hold": 10,
+    }.get(item.kind, 0)
+    return item.occurred_at, priority, str(item.resource_id)
