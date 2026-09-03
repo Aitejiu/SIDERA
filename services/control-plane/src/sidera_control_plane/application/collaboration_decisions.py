@@ -179,6 +179,65 @@ class CollaborationDecisionApplicationResult:
 _IntentAssessment = ReleaseEligibilityAssessment
 
 
+def update_collaboration_request_gates(
+    uow: ControlPlaneUnitOfWork,
+    assessments: tuple[ReleaseEligibilityAssessment, ...],
+    *,
+    releases: Mapping[UUID, RuntimeRelease | None],
+    new_releases: tuple[RuntimeRelease, ...],
+    run: CollaborationRun,
+    head: RootTaskPlanHead | None,
+    current_projection: RuntimeProjectionV1 | None,
+    now: datetime,
+    plan_transition_allows: PlanTransitionCheck,
+) -> None:
+    """Apply the shared static-plus-collaboration activation gate."""
+    new_by_request = {item.execution_request_id: item for item in new_releases}
+    entries = _projection_requests(current_projection)
+    for assessment in assessments:
+        if assessment.status not in {
+            RuntimeIntentApplicationStatus.APPLIED,
+            RuntimeIntentApplicationStatus.DUPLICATE,
+        }:
+            continue
+        request = assessment.request
+        if request is None or request.status not in {
+            ExecutionRequestStatus.BLOCKED,
+            ExecutionRequestStatus.READY,
+        }:
+            continue
+        entry = entries.get(request.id)
+        static_decision = _static_decision(entry)
+        release = new_by_request.get(request.id) or releases.get(request.id)
+        collaboration = CollaborationGateFact.for_request(
+            request,
+            run=run,
+            release=release,
+            plan_head=head,
+        )
+        decision = ComposedActivationGate.evaluate(
+            plan_transition_allows=plan_transition_allows(uow, request),
+            static_decision=static_decision,
+            collaboration=collaboration,
+        )
+        if decision.ready:
+            if (
+                request.gate_reason == "ready"
+                and request.status is ExecutionRequestStatus.READY
+            ):
+                continue
+            previous_version = request.version
+            request.mark_ready(now=now, decision=decision)
+            uow.execution_requests.save(request, previous_version)
+        elif (
+            request.gate_reason != decision.reason
+            or request.status is not ExecutionRequestStatus.BLOCKED
+        ):
+            previous_version = request.version
+            request.refresh_gate(decision=decision, now=now)
+            uow.execution_requests.save(request, previous_version)
+
+
 class CollaborationDecisionService:
     """Apply one parsed Runtime Decision in one short, authoritative transaction."""
 
@@ -322,12 +381,16 @@ class CollaborationDecisionService:
                     stale_reason=stale_reason,
                 )
                 proposals = ()
-                if current_projection is not None and not any(
-                    item.status is RuntimeIntentApplicationStatus.STALE
-                    for item in assessments
-                ) and not any(
-                    item.status is RuntimeIntentApplicationStatus.REJECTED
-                    for item in assessments
+                if (
+                    current_projection is not None
+                    and not any(
+                        item.status is RuntimeIntentApplicationStatus.STALE
+                        for item in assessments
+                    )
+                    and not any(
+                        item.status is RuntimeIntentApplicationStatus.REJECTED
+                        for item in assessments
+                    )
                 ):
                     disposition = self._governance_disposition.dispose(
                         uow=uow,
@@ -776,50 +839,17 @@ class CollaborationDecisionService:
         current_projection: RuntimeProjectionV1 | None,
         now: datetime,
     ) -> None:
-        new_by_request = {item.execution_request_id: item for item in new_releases}
-        entries = _projection_requests(current_projection)
-        for assessment in assessments:
-            if assessment.status not in {
-                RuntimeIntentApplicationStatus.APPLIED,
-                RuntimeIntentApplicationStatus.DUPLICATE,
-            }:
-                continue
-            request = assessment.request
-            if request is None or request.status not in {
-                ExecutionRequestStatus.BLOCKED,
-                ExecutionRequestStatus.READY,
-            }:
-                continue
-            entry = entries.get(request.id)
-            static_decision = _static_decision(entry)
-            release = new_by_request.get(request.id) or releases.get(request.id)
-            collaboration = CollaborationGateFact.for_request(
-                request,
-                run=run,
-                release=release,
-                plan_head=head,
-            )
-            decision = ComposedActivationGate.evaluate(
-                plan_transition_allows=self._plan_transition_allows(uow, request),
-                static_decision=static_decision,
-                collaboration=collaboration,
-            )
-            if decision.ready:
-                if (
-                    request.gate_reason == "ready"
-                    and request.status is ExecutionRequestStatus.READY
-                ):
-                    continue
-                previous_version = request.version
-                request.mark_ready(now=now, decision=decision)
-                uow.execution_requests.save(request, previous_version)
-            elif (
-                request.gate_reason != decision.reason
-                or request.status is not ExecutionRequestStatus.BLOCKED
-            ):
-                previous_version = request.version
-                request.refresh_gate(decision=decision, now=now)
-                uow.execution_requests.save(request, previous_version)
+        update_collaboration_request_gates(
+            uow,
+            assessments,
+            releases=releases,
+            new_releases=new_releases,
+            run=run,
+            head=head,
+            current_projection=current_projection,
+            now=now,
+            plan_transition_allows=self._plan_transition_allows,
+        )
 
     def _emit_evaluation_completed(
         self,

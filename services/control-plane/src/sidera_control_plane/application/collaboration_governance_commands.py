@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, NoReturn, Protocol
+from typing import Any, NoReturn, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
@@ -111,6 +111,11 @@ class CollaborationGovernanceCommandHandler:
                 _raise(
                     "collaboration_governance_disabled",
                     "approval service is not configured",
+                )
+            transactional = getattr(self._approver, "approve_in_transaction", None)
+            if callable(transactional):
+                return cast(Callable[..., CommandResult], transactional)(
+                    uow, envelope, now=self._clock()
                 )
             return self._approver.approve(envelope, now=self._clock())
         _raise(
