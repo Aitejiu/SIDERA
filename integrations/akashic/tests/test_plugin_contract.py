@@ -57,7 +57,7 @@ class FakeContext:
         return task
 
 
-def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
+def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 
     metadata = [
@@ -65,7 +65,7 @@ def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
         for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
-    assert len(metadata) == 17
+    assert len(metadata) == 22
     assert {item.tool_name for item in metadata} == {
         "sidera_submit_brief",
         "sidera_get_planning_status",
@@ -81,6 +81,11 @@ def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
         "sidera_cancel_plan_revision",
         "sidera_get_plan_transition",
         "sidera_get_task_status",
+        "sidera_get_collaboration_governance",
+        "sidera_pause_collaboration_release",
+        "sidera_approve_collaboration_release",
+        "sidera_reject_collaboration_release",
+        "sidera_resume_automatic_collaboration",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
         "sidera_submit_knowledge_candidate",
@@ -90,6 +95,7 @@ def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
         "sidera_get_task_status",
         "sidera_get_plan_revision",
         "sidera_get_plan_transition",
+        "sidera_get_collaboration_governance",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
     }
@@ -103,6 +109,7 @@ def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
         "sidera_submit_brief",
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_get_collaboration_governance",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
     }
@@ -121,6 +128,10 @@ def test_plugin_declares_exact_seventeen_tools_and_risks() -> None:
         "sidera_reject_plan_revision",
         "sidera_cancel_plan_revision",
         "sidera_get_plan_transition",
+        "sidera_pause_collaboration_release",
+        "sidera_approve_collaboration_release",
+        "sidera_reject_collaboration_release",
+        "sidera_resume_automatic_collaboration",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
         "sidera_submit_knowledge_candidate",
@@ -173,6 +184,61 @@ def test_knowledge_tool_schemas_expose_business_fields_only() -> None:
     assert submit is not None
     assert submit["properties"]["sections"]["type"] == "array"
     assert submit["properties"]["sources"]["type"] == "array"
+
+
+def test_governance_tool_schemas_expose_only_bounded_business_fields() -> None:
+    from agent.plugins.registry import MetadataKind, plugin_registry
+
+    metadata = {
+        item.tool_name: item
+        for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
+        if item.kind is MetadataKind.TOOL
+    }
+    forbidden = {
+        "workspace_id",
+        "actor",
+        "transport",
+        "command_id",
+        "idempotency_key",
+        "correlation_id",
+        "channel",
+        "chat_id",
+        "source_ref",
+        "token",
+        "authorization",
+        "runtime_payload",
+        "provider_config",
+    }
+    for name in (
+        "sidera_get_collaboration_governance",
+        "sidera_pause_collaboration_release",
+        "sidera_approve_collaboration_release",
+        "sidera_reject_collaboration_release",
+        "sidera_resume_automatic_collaboration",
+    ):
+        schema = metadata[name].tool_schema
+        assert schema is not None
+        assert not forbidden.intersection(schema["properties"])
+
+    read_schema = metadata["sidera_get_collaboration_governance"].tool_schema
+    assert read_schema is not None
+    assert set(read_schema["properties"]) == {"worker_item_id"}
+
+    pause_schema = metadata["sidera_pause_collaboration_release"].tool_schema
+    assert pause_schema is not None
+    assert set(pause_schema["properties"]) == {
+        "worker_item_id",
+        "worker_item_version",
+        "target_plan_generation",
+        "reason",
+    }
+    assert pause_schema["properties"]["worker_item_version"]["type"] == "number"
+    assert pause_schema["properties"]["target_plan_generation"]["type"] == "number"
+
+    approve_schema = metadata["sidera_approve_collaboration_release"].tool_schema
+    assert approve_schema is not None
+    assert approve_schema["properties"]["explicit_user_confirmation"]["type"] == "boolean"
+    assert "explicit_user_confirmation" in approve_schema["required"]
 
 
 def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:

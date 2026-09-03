@@ -23,6 +23,9 @@ TASK_ID = UUID("00000000-0000-0000-0000-000000000020")
 COMMAND_ID = UUID("00000000-0000-0000-0000-000000000030")
 BASE_SNAPSHOT_ID = UUID("00000000-0000-0000-0000-000000000040")
 TRANSITION_ID = UUID("00000000-0000-0000-0000-000000000050")
+WORKER_ITEM_ID = UUID("00000000-0000-0000-0000-000000000060")
+PROPOSAL_ID = UUID("00000000-0000-0000-0000-000000000061")
+HOLD_ID = UUID("00000000-0000-0000-0000-000000000062")
 
 
 class MemoryKV:
@@ -59,6 +62,9 @@ class FakeClient:
         self.active_plan: dict[str, Any] = {}
         self.revision_diff: dict[str, Any] = {}
         self.transition: dict[str, Any] = {}
+        self.governance_worker: dict[str, Any] = {}
+        self.governance_proposal: dict[str, Any] = {}
+        self.worker_workspace: dict[str, Any] = {}
 
     async def get_planning_detail(self, _request_id: UUID) -> dict[str, Any]:
         return self.detail
@@ -91,15 +97,36 @@ class FakeClient:
     async def get_plan_transition(self, _transition_id: UUID) -> dict[str, Any]:
         return self.transition
 
+    async def get_collaboration_governance_worker_item(
+        self, _worker_item_id: UUID
+    ) -> dict[str, Any]:
+        return self.governance_worker
 
-def config() -> TaskBridgeConfig:
-    return TaskBridgeConfig.model_validate(
-        {
-            "workspace_id": WORKSPACE_ID,
-            "planning_profile_id": PROFILE_ID,
-            "planning_profile_version": 3,
-        }
-    )
+    async def get_collaboration_governance_proposal(
+        self, _proposal_id: UUID
+    ) -> dict[str, Any]:
+        return self.governance_proposal
+
+    async def get_worker_item_workspace(
+        self, _worker_item_id: UUID
+    ) -> dict[str, Any]:
+        return self.worker_workspace
+
+
+def config(*, governance: bool = False) -> TaskBridgeConfig:
+    values: dict[str, Any] = {
+        "workspace_id": WORKSPACE_ID,
+        "planning_profile_id": PROFILE_ID,
+        "planning_profile_version": 3,
+    }
+    if governance:
+        values.update(
+            {
+                "governance_actor_type": "local",
+                "governance_actor_id": "main-agent",
+            }
+        )
+    return TaskBridgeConfig.model_validate(values)
 
 
 def tools(
@@ -107,6 +134,8 @@ def tools(
     dispatcher: FakeDispatcher | None = None,
     client: FakeClient | None = None,
     source: str = "telegram",
+    governance: bool = False,
+    state: BridgeStateStore | None = None,
 ) -> tuple[SideraTaskTools, FakeDispatcher, FakeClient]:
     resolved_client = client or FakeClient()
     resolved_dispatcher = dispatcher or FakeDispatcher(
@@ -114,10 +143,10 @@ def tools(
     )
     return (
         SideraTaskTools(
-            config(),
+            config(governance=governance),
             client=resolved_client,
             dispatcher=resolved_dispatcher,
-            state=BridgeStateStore(MemoryKV()),
+            state=state or BridgeStateStore(MemoryKV()),
             source_resolver=SourceContextResolver(
                 source_ref_factory=lambda: "src_test"
             ),
@@ -172,6 +201,11 @@ def test_submit_schema_exposes_only_business_fields() -> None:
         "sidera_submit_brief",
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_get_collaboration_governance",
+        "sidera_pause_collaboration_release",
+        "sidera_approve_collaboration_release",
+        "sidera_reject_collaboration_release",
+        "sidera_resume_automatic_collaboration",
         "sidera_answer_clarifications",
         "sidera_request_proposal_revision",
         "sidera_confirm_proposal",
@@ -913,5 +947,440 @@ def test_get_plan_transition_redacts_runtime_details_and_surfaces_blocked_unknow
         assert "source_session_id" not in json.dumps(result)
         assert "private-patch-hash" not in json.dumps(result)
         assert "operations" not in json.dumps(result)
+
+    asyncio.run(scenario())
+
+
+def governance_worker_view() -> dict[str, Any]:
+    return {
+        "workspace_id": str(WORKSPACE_ID),
+        "root_task_id": str(TASK_ID),
+        "subtask_id": str(UUID("00000000-0000-0000-0000-000000000063")),
+        "subtask_key": "api",
+        "subtask_title": "API",
+        "worker_item_id": str(WORKER_ITEM_ID),
+        "worker_item_key": "backend",
+        "worker_item_title": "Backend",
+        "worker_item_role": "implementer",
+        "worker_item_responsibility": "Implement the API",
+        "governance": {
+            "enabled": True,
+            "state": "waiting_release",
+            "waiting_summary": "等待协同放行",
+            "upstream_links": [],
+            "governance_mode": "paused",
+            "active_hold_id": str(HOLD_ID),
+            "hold_resource_version": 4,
+            "hold_reason": "private user reason",
+            "release_state": "proposed",
+            "active_proposal": {
+                "proposal_id": str(PROPOSAL_ID),
+                "status": "pending",
+                "resource_version": 3,
+                "reason_code": "waiting_evidence",
+                "summary": "The required evidence is ready for review.",
+                "created_at": "2026-09-04T00:00:00Z",
+                "target_request_version": 8,
+                "resolved_at": None,
+            },
+            "available_actions": ["approve", "reject", "resume_automatic"],
+            "governance_history": [
+                {
+                    "kind": "hold",
+                    "resource_version": 1,
+                    "occurred_at": "2026-09-04T00:00:00Z",
+                    "reason": "private history reason",
+                },
+                {
+                    "kind": "resolution",
+                    "resource_version": 2,
+                    "occurred_at": "2026-09-04T00:01:00Z",
+                    "action": "approve",
+                    "result": "applied",
+                },
+            ],
+            "attention_state": "decision_required",
+            "proposal_summary": "The required evidence is ready for review.",
+            "runtime_payload": {"provider_key": "must-not-leak"},
+            "projection": {"secret": "must-not-leak"},
+        },
+    }
+
+
+def worker_workspace_view() -> dict[str, Any]:
+    return {
+        "workspace_id": str(WORKSPACE_ID),
+        "worker_item": {
+            "id": str(WORKER_ITEM_ID),
+            "root_task_id": str(TASK_ID),
+            "version": 7,
+            "status": "waiting_release",
+        },
+    }
+
+
+def governance_command_result(
+    command_id: UUID,
+    *,
+    aggregate_id: UUID,
+    data: dict[str, Any],
+) -> DispatchResult:
+    return DispatchResult(
+        status="applied",
+        command_id=command_id,
+        execution=CommandExecution(
+            status="applied",
+            command_id=command_id,
+            result=CommandResponse(
+                command_id=command_id,
+                aggregate_id=aggregate_id,
+                aggregate_version=2,
+                event_ids=(),
+                data=data,
+            ),
+        ),
+    )
+
+
+def test_governance_read_is_bounded_and_redacts_reasons_and_runtime_data() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_worker = governance_worker_view()
+        bridge, _, _ = tools(client=client)
+
+        result = decode(
+            await bridge.sidera_get_collaboration_governance(
+                None, str(WORKER_ITEM_ID)
+            )
+        )
+
+        assert result["outcome"] == "ok"
+        assert result["resource_ref"] == f"worker-item:{WORKER_ITEM_ID}"
+        assert result["web_url"] == (
+            f"http://127.0.0.1:4174/workspaces/{WORKSPACE_ID}/worker-items/{WORKER_ITEM_ID}"
+        )
+        assert result["data"]["root_task_id"] == str(TASK_ID)
+        assert result["data"]["subtask_key"] == "api"
+        assert result["data"]["worker_item_key"] == "backend"
+        assert result["data"]["governance"]["active_hold_id"] == str(HOLD_ID)
+        encoded = json.dumps(result)
+        assert "private user reason" not in encoded
+        assert "private history reason" not in encoded
+        assert "must-not-leak" not in encoded
+        assert "runtime_payload" not in encoded
+        assert "projection" not in encoded
+
+    asyncio.run(scenario())
+
+
+def test_governance_writes_are_unavailable_without_opt_in_principal() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_worker = governance_worker_view()
+        bridge, dispatcher, _ = tools(client=client)
+
+        result = decode(
+            await bridge.sidera_pause_collaboration_release(
+                None, str(WORKER_ITEM_ID), 7, 3, "pause for review"
+            )
+        )
+
+        assert result["outcome"] == "unavailable"
+        assert result["error_code"] == "governance_principal_unavailable"
+        assert dispatcher.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_false_governance_approval_confirmation_sends_nothing() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_proposal = {
+            "proposal_id": str(PROPOSAL_ID),
+            "root_task_id": str(TASK_ID),
+            "worker_item_id": str(WORKER_ITEM_ID),
+            "status": "pending",
+            "resource_version": 3,
+        }
+        bridge, dispatcher, _ = tools(client=client, governance=True)
+
+        result = decode(
+            await bridge.sidera_approve_collaboration_release(
+                None, str(PROPOSAL_ID), 3, False, "approve it"
+            )
+        )
+
+        assert result["outcome"] == "needs_user"
+        assert result["error_code"] == "explicit_confirmation_required"
+        assert dispatcher.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_private_source_conflict_is_rejected_before_governance_dispatch() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_worker = governance_worker_view()
+        client.worker_workspace = worker_workspace_view()
+        client.active_plan = {
+            "root_task_id": str(TASK_ID),
+            "active_generation": 3,
+        }
+        state = BridgeStateStore(MemoryKV())
+        await state.bind_resource_source(
+            "task", TASK_ID, "akashic_private", "src_other"
+        )
+        bridge, dispatcher, _ = tools(client=client, governance=True, state=state)
+
+        with tool_execution_context_scope(private_context()):
+            result = decode(
+                await bridge.sidera_pause_collaboration_release(
+                    None, str(WORKER_ITEM_ID), 7, 3, None
+                )
+            )
+
+        assert result["outcome"] == "conflict"
+        assert result["error_code"] == "source_binding_conflict"
+        assert result["web_url"].endswith(f"/worker-items/{WORKER_ITEM_ID}")
+        assert dispatcher.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_exact_bound_pause_injects_fixed_command_and_omits_reason_from_result() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_worker = governance_worker_view()
+        client.governance_worker["governance"]["governance_mode"] = "automatic"
+        client.governance_worker["governance"]["active_hold_id"] = None
+        client.governance_worker["governance"]["hold_resource_version"] = None
+        client.governance_worker["governance"]["available_actions"] = ["pause"]
+        client.worker_workspace = worker_workspace_view()
+        client.active_plan = {
+            "root_task_id": str(TASK_ID),
+            "active_generation": 3,
+        }
+        state = BridgeStateStore(MemoryKV())
+        await state.bind_resource_source(
+            "task", TASK_ID, "akashic_private", "src_test"
+        )
+        dispatcher = FakeDispatcher(
+            governance_command_result(
+                COMMAND_ID,
+                aggregate_id=HOLD_ID,
+                data={
+                    "hold_id": str(HOLD_ID),
+                    "hold_version": 1,
+                    "governance_mode": "paused",
+                    "reason": "private user reason",
+                },
+            )
+        )
+        bridge, dispatcher, _ = tools(
+            client=client,
+            dispatcher=dispatcher,
+            governance=True,
+            state=state,
+        )
+
+        with tool_execution_context_scope(private_context()):
+            result = decode(
+                await bridge.sidera_pause_collaboration_release(
+                    None, str(WORKER_ITEM_ID), 7, 3, "pause for review"
+                )
+            )
+
+        assert result["outcome"] == "ok"
+        assert result["data"] == {
+            "hold_id": str(HOLD_ID),
+            "hold_version": 1,
+            "governance_mode": "paused",
+        }
+        assert "pause for review" not in json.dumps(result)
+        _, command = dispatcher.calls[0]
+        assert isinstance(command, CommandIntent)
+        assert command.command_type == "PauseCollaborationRelease"
+        assert command.target_type == "worker_item"
+        assert command.target_id == WORKER_ITEM_ID
+        assert command.expected_version == 7
+        assert command.payload == {
+            "transport": "main_agent",
+            "target_plan_generation": 3,
+            "reason": "pause for review",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_stale_proposal_confirmation_sends_nothing_and_web_marker_allows_exact_approval() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_proposal = {
+            "workspace_id": str(WORKSPACE_ID),
+            "root_task_id": str(TASK_ID),
+            "subtask_id": None,
+            "subtask_key": "api",
+            "subtask_title": "API",
+            "worker_item_id": str(WORKER_ITEM_ID),
+            "worker_item_key": "backend",
+            "worker_item_title": "Backend",
+            "proposal_id": str(PROPOSAL_ID),
+            "status": "pending",
+            "resource_version": 4,
+            "reason_code": "waiting_evidence",
+            "target_request_version": 8,
+            "summary": "safe proposal",
+            "hold_id": str(HOLD_ID),
+            "hold_resource_version": 1,
+            "governance_mode": "paused",
+            "available_actions": ["approve", "reject", "resume_automatic"],
+            "deep_link": f"/workspaces/{WORKSPACE_ID}/worker-items/{WORKER_ITEM_ID}",
+        }
+        client.governance_worker = governance_worker_view()
+        client.governance_worker["governance"]["active_hold_id"] = str(HOLD_ID)
+        client.governance_worker["governance"]["hold_resource_version"] = 1
+        dispatcher = FakeDispatcher(
+            governance_command_result(
+                COMMAND_ID,
+                aggregate_id=PROPOSAL_ID,
+                data={
+                    "proposal_id": str(PROPOSAL_ID),
+                    "proposal_status": "approved",
+                    "hold_id": str(HOLD_ID),
+                    "release_id": str(UUID("00000000-0000-0000-0000-000000000064")),
+                },
+            )
+        )
+        bridge, dispatcher, _ = tools(
+            client=client,
+            dispatcher=dispatcher,
+            governance=True,
+            source="sidera_web",
+        )
+
+        with tool_execution_context_scope(private_context()):
+            stale = decode(
+                await bridge.sidera_approve_collaboration_release(
+                    None, str(PROPOSAL_ID), 3, True, None
+                )
+            )
+        assert stale["outcome"] == "conflict"
+        assert stale["error_code"] == "version_conflict"
+        assert dispatcher.calls == []
+
+        client.governance_proposal["resource_version"] = 3
+        with tool_execution_context_scope(private_context()):
+            approved = decode(
+                await bridge.sidera_approve_collaboration_release(
+                    None, str(PROPOSAL_ID), 3, True, "release after review"
+                )
+            )
+
+        assert approved["outcome"] == "ok"
+        assert approved["data"]["proposal_id"] == str(PROPOSAL_ID)
+        assert "release after review" not in json.dumps(approved)
+        _, command = dispatcher.calls[0]
+        assert isinstance(command, CommandIntent)
+        assert command.command_type == "ApproveCollaborationReleaseProposal"
+        assert command.target_type == "collaboration_release_proposal"
+        assert command.target_id == PROPOSAL_ID
+        assert command.expected_version == 3
+        assert command.payload == {
+            "transport": "main_agent",
+            "reason": "release after review",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_reject_and_resume_use_exact_proposal_and_hold_fences() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        client.governance_worker = governance_worker_view()
+        client.governance_proposal = {
+            "workspace_id": str(WORKSPACE_ID),
+            "root_task_id": str(TASK_ID),
+            "subtask_id": None,
+            "subtask_key": "api",
+            "subtask_title": "API",
+            "worker_item_id": str(WORKER_ITEM_ID),
+            "worker_item_key": "backend",
+            "worker_item_title": "Backend",
+            "proposal_id": str(PROPOSAL_ID),
+            "status": "pending",
+            "resource_version": 3,
+            "target_request_version": 8,
+            "reason_code": "waiting_evidence",
+            "summary": "safe proposal",
+            "hold_id": str(HOLD_ID),
+            "hold_resource_version": 4,
+            "governance_mode": "paused",
+            "available_actions": ["approve", "reject", "resume_automatic"],
+            "deep_link": f"/workspaces/{WORKSPACE_ID}/worker-items/{WORKER_ITEM_ID}",
+        }
+        client.worker_workspace = worker_workspace_view()
+        dispatcher = FakeDispatcher(
+            governance_command_result(
+                COMMAND_ID,
+                aggregate_id=PROPOSAL_ID,
+                data={
+                    "proposal_id": str(PROPOSAL_ID),
+                    "proposal_status": "rejected",
+                },
+            )
+        )
+        bridge, dispatcher, _ = tools(
+            client=client,
+            dispatcher=dispatcher,
+            governance=True,
+            source="sidera_web",
+        )
+
+        with tool_execution_context_scope(private_context()):
+            rejected = decode(
+                await bridge.sidera_reject_collaboration_release(
+                    None, str(PROPOSAL_ID), 3, "reject after review"
+                )
+            )
+
+        assert rejected["outcome"] == "ok"
+        _, reject_command = dispatcher.calls[0]
+        assert isinstance(reject_command, CommandIntent)
+        assert reject_command.command_type == "RejectCollaborationReleaseProposal"
+        assert reject_command.target_type == "collaboration_release_proposal"
+        assert reject_command.target_id == PROPOSAL_ID
+        assert reject_command.expected_version == 3
+        assert reject_command.payload == {
+            "transport": "main_agent",
+            "reason": "reject after review",
+        }
+
+        client.governance_worker["governance"]["available_actions"] = [
+            "resume_automatic"
+        ]
+        dispatcher.result = governance_command_result(
+            COMMAND_ID,
+            aggregate_id=HOLD_ID,
+            data={
+                "hold_id": str(HOLD_ID),
+                "hold_version": 5,
+                "governance_mode": "automatic",
+            },
+        )
+        with tool_execution_context_scope(private_context()):
+            resumed = decode(
+                await bridge.sidera_resume_automatic_collaboration(
+                    None, str(WORKER_ITEM_ID), str(HOLD_ID), 4, None
+                )
+            )
+
+        assert resumed["outcome"] == "ok"
+        _, resume_command = dispatcher.calls[1]
+        assert isinstance(resume_command, CommandIntent)
+        assert resume_command.command_type == "ResumeAutomaticCollaboration"
+        assert resume_command.target_type == "collaboration_governance_hold"
+        assert resume_command.target_id == HOLD_ID
+        assert resume_command.expected_version == 4
+        assert resume_command.payload == {"transport": "main_agent"}
 
     asyncio.run(scenario())

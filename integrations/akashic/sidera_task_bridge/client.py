@@ -20,6 +20,15 @@ from .state import (
     same_logical_request,
 )
 
+_GOVERNANCE_COMMAND_TYPES = frozenset(
+    {
+        "PauseCollaborationRelease",
+        "ApproveCollaborationReleaseProposal",
+        "RejectCollaborationReleaseProposal",
+        "ResumeAutomaticCollaboration",
+    }
+)
+
 
 class CommandEnvelope(BaseModel):
     """Command fields supplied by the bridge dispatcher."""
@@ -175,10 +184,8 @@ class ControlPlaneClient:
     def build_request_json(self, envelope: CommandEnvelope) -> dict[str, JsonValue]:
         body = cast(dict[str, JsonValue], envelope.model_dump(mode="json"))
         body["workspace_id"] = str(self._config.workspace_id)
-        body["actor"] = {
-            "type": self._config.actor_type,
-            "id": self._config.actor_id,
-        }
+        body["actor"] = self._actor_json(envelope.command_type)
+        self._fix_governance_transport(body)
         return body
 
     def build_intent_request_json(
@@ -186,10 +193,8 @@ class ControlPlaneClient:
     ) -> dict[str, JsonValue]:
         body = cast(dict[str, JsonValue], intent.model_dump(mode="json"))
         body["workspace_id"] = str(self._config.workspace_id)
-        body["actor"] = {
-            "type": self._config.actor_type,
-            "id": self._config.actor_id,
-        }
+        body["actor"] = self._actor_json(intent.command_type)
+        self._fix_governance_transport(body)
         return body
 
     async def execute_command_json(
@@ -323,6 +328,36 @@ class ControlPlaneClient:
         )
         return self._parse_json_object(response)
 
+    async def get_collaboration_governance_worker_item(
+        self, worker_item_id: UUID
+    ) -> dict[str, JsonValue]:
+        """Read the bounded governance view for one WorkerItem."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"collaboration-governance/worker-items/{worker_item_id}"
+        )
+
+    async def get_collaboration_governance_proposal(
+        self, proposal_id: UUID
+    ) -> dict[str, JsonValue]:
+        """Read the bounded governance view for one release Proposal."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"collaboration-governance/proposals/{proposal_id}"
+        )
+
+    async def get_worker_item_workspace(
+        self, worker_item_id: UUID
+    ) -> dict[str, JsonValue]:
+        """Read current WorkerItem identity/version for optimistic fences."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"worker-items/{worker_item_id}/workspace"
+        )
+
     async def iter_projection_changes(
         self, *, after: int
     ) -> AsyncIterator[ProjectionChange]:
@@ -379,6 +414,31 @@ class ControlPlaneClient:
         """Release the HTTP transport owned by this client."""
 
         await self._client.aclose()
+
+    def _actor_json(self, command_type: str) -> dict[str, JsonValue]:
+        if command_type in _GOVERNANCE_COMMAND_TYPES:
+            actor_type = self._config.governance_actor_type
+            actor_id = self._config.governance_actor_id
+            if actor_type is None or actor_id is None:
+                raise ControlPlaneRejected(
+                    "governance_principal_unavailable", {}
+                )
+            return {"type": actor_type, "id": actor_id}
+        return {
+            "type": self._config.actor_type,
+            "id": self._config.actor_id,
+        }
+
+    @staticmethod
+    def _fix_governance_transport(body: dict[str, JsonValue]) -> None:
+        command_type = body.get("command_type")
+        if command_type not in _GOVERNANCE_COMMAND_TYPES:
+            return
+        payload = body.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+            body["payload"] = payload
+        payload["transport"] = "main_agent"
 
     async def _get_object(self, path: str) -> dict[str, JsonValue]:
         response = await self._request("GET", path)

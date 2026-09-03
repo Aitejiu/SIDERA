@@ -132,6 +132,34 @@ def test_config_rejects_empty_actor_identity(field: str) -> None:
         make_config(**{field: "   "})
 
 
+def test_config_requires_an_opt_in_governance_principal_pair() -> None:
+    config = make_config(
+        governance_actor_type="local",
+        governance_actor_id="main-agent",
+    )
+
+    assert config.governance_actor_type == "local"
+    assert config.governance_actor_id == "main-agent"
+
+    with pytest.raises(ValidationError, match="governance actor"):
+        make_config(governance_actor_type="local")
+    with pytest.raises(ValidationError, match="governance actor"):
+        make_config(governance_actor_id="main-agent")
+    with pytest.raises(ValidationError):
+        make_config(governance_actor_type="   ", governance_actor_id="main-agent")
+
+
+def test_config_can_verify_governance_principal_against_control_plane_identity() -> None:
+    config = make_config(
+        governance_actor_type="local",
+        governance_actor_id="main-agent",
+    )
+
+    assert config.governance_principal_matches("local", "main-agent") is True
+    assert config.governance_principal_matches("local", "other-agent") is False
+    assert config.governance_principal_matches("integration", "main-agent") is False
+
+
 def test_config_rejects_extra_fields_and_invalid_timeout_bounds() -> None:
     with pytest.raises(ValidationError):
         make_config(secret="must not become a config field")

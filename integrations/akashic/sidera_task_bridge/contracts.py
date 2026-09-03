@@ -16,6 +16,10 @@ ToolOutcome = Literal[
     "failed",
 ]
 
+GovernanceAction = Literal["pause", "approve", "reject", "resume_automatic"]
+GovernanceMode = Literal["automatic", "paused"]
+GovernanceProposalStatus = Literal["pending", "approved", "rejected", "stale"]
+
 
 class PlanRevisionBrief(BaseModel):
     """The bounded, provider-neutral brief accepted by a plan revision."""
@@ -74,3 +78,47 @@ class ToolEnvelope(BaseModel):
         if not value:
             raise ValueError("summary must not be empty")
         return value
+
+
+class GovernanceWorkerItemView(BaseModel):
+    """Strict outer contract for the bounded Control Plane governance view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID | None
+    subtask_key: str
+    subtask_title: str
+    worker_item_id: UUID
+    worker_item_key: str
+    worker_item_title: str
+    worker_item_role: str
+    worker_item_responsibility: str
+    governance: dict[str, JsonValue]
+
+
+class GovernanceProposalView(BaseModel):
+    """Strict outer contract for one current release Proposal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID | None
+    subtask_key: str
+    subtask_title: str
+    worker_item_id: UUID
+    worker_item_key: str
+    worker_item_title: str
+    proposal_id: UUID
+    status: GovernanceProposalStatus
+    resource_version: int = Field(ge=1)
+    target_request_version: int = Field(ge=1)
+    reason_code: str
+    summary: str
+    hold_id: UUID
+    hold_resource_version: int = Field(ge=1)
+    governance_mode: GovernanceMode
+    available_actions: tuple[GovernanceAction, ...]
+    deep_link: str

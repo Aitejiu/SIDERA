@@ -50,6 +50,10 @@ _CONTROL_PLANE_COMMAND_TYPES = frozenset(
         "ConfirmPlanningProposal",
         "RejectPlanningProposal",
         "ConfirmPlanRevision",
+        "PauseCollaborationRelease",
+        "ApproveCollaborationReleaseProposal",
+        "RejectCollaborationReleaseProposal",
+        "ResumeAutomaticCollaboration",
     }
 )
 _KNOWLEDGE_COMMAND_TYPES = frozenset({"SubmitKnowledgeCandidate"})
@@ -560,6 +564,107 @@ class SideraTaskBridge(Plugin):
         return await self._toolset().sidera_get_task_status(event, task_id)
 
     @tool(
+        name="sidera_get_collaboration_governance",
+        risk="read-only",
+        always_on=True,
+    )
+    async def sidera_get_collaboration_governance(
+        self, event: object, worker_item_id: str
+    ) -> str:
+        """Read bounded release-governance status for one WorkerItem."""
+
+        return await self._toolset().sidera_get_collaboration_governance(
+            event, worker_item_id
+        )
+
+    @tool(
+        name="sidera_pause_collaboration_release",
+        risk="write",
+        search_hint="SIDERA pause automatic collaboration release WorkerItem",
+    )
+    async def sidera_pause_collaboration_release(
+        self,
+        event: object,
+        worker_item_id: str,
+        worker_item_version: int,
+        target_plan_generation: int,
+        reason: str | None = None,
+    ) -> str:
+        """Pause release for one exact WorkerItem after current-fact checks."""
+
+        return await self._toolset().sidera_pause_collaboration_release(
+            event,
+            worker_item_id,
+            worker_item_version,
+            target_plan_generation,
+            reason,
+        )
+
+    @tool(
+        name="sidera_approve_collaboration_release",
+        risk="write",
+        search_hint="SIDERA approve collaboration release proposal",
+    )
+    async def sidera_approve_collaboration_release(
+        self,
+        event: object,
+        proposal_id: str,
+        proposal_version: int,
+        explicit_user_confirmation: bool,
+        reason: str | None = None,
+    ) -> str:
+        """Approve one exact release Proposal after explicit user confirmation."""
+
+        return await self._toolset().sidera_approve_collaboration_release(
+            event,
+            proposal_id,
+            proposal_version,
+            explicit_user_confirmation,
+            reason,
+        )
+
+    @tool(
+        name="sidera_reject_collaboration_release",
+        risk="write",
+        search_hint="SIDERA reject collaboration release proposal",
+    )
+    async def sidera_reject_collaboration_release(
+        self,
+        event: object,
+        proposal_id: str,
+        proposal_version: int,
+        reason: str | None = None,
+    ) -> str:
+        """Reject one exact release Proposal after current-fact checks."""
+
+        return await self._toolset().sidera_reject_collaboration_release(
+            event, proposal_id, proposal_version, reason
+        )
+
+    @tool(
+        name="sidera_resume_automatic_collaboration",
+        risk="write",
+        search_hint="SIDERA resume automatic collaboration WorkerItem Hold",
+    )
+    async def sidera_resume_automatic_collaboration(
+        self,
+        event: object,
+        worker_item_id: str,
+        hold_id: str,
+        hold_version: int,
+        reason: str | None = None,
+    ) -> str:
+        """Resume automatic collaboration for one exact active Hold."""
+
+        return await self._toolset().sidera_resume_automatic_collaboration(
+            event,
+            worker_item_id,
+            hold_id,
+            hold_version,
+            reason,
+        )
+
+    @tool(
         name="sidera_search_knowledge",
         risk="read-only",
         always_on=True,
@@ -698,11 +803,34 @@ def _patch_host_tool_schemas() -> None:
             "request_version": "number",
             "proposal_revision": "number",
         },
+        "sidera_pause_collaboration_release": {
+            "worker_item_version": "number",
+            "target_plan_generation": "number",
+        },
+        "sidera_approve_collaboration_release": {
+            "proposal_version": "number",
+            "explicit_user_confirmation": "boolean",
+        },
+        "sidera_reject_collaboration_release": {"proposal_version": "number"},
+        "sidera_resume_automatic_collaboration": {"hold_version": "number"},
         "sidera_search_knowledge": {"limit": "number"},
     }
     numeric_bounds = {
         "sidera_search_knowledge": {
             "limit": {"minimum": 1, "maximum": 20},
+        },
+        "sidera_pause_collaboration_release": {
+            "worker_item_version": {"minimum": 1},
+            "target_plan_generation": {"minimum": 1},
+        },
+        "sidera_approve_collaboration_release": {
+            "proposal_version": {"minimum": 1},
+        },
+        "sidera_reject_collaboration_release": {
+            "proposal_version": {"minimum": 1},
+        },
+        "sidera_resume_automatic_collaboration": {
+            "hold_version": {"minimum": 1},
         },
     }
     for metadata in plugin_registry.get_handlers_by_module_path(__name__):

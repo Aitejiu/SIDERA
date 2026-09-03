@@ -9,6 +9,7 @@ import pytest
 
 from sidera_task_bridge.client import (
     CommandEnvelope,
+    CommandIntent,
     CommandResultUnknown,
     ControlPlaneClient,
     ControlPlaneRejected,
@@ -187,6 +188,89 @@ def test_client_reads_revision_inputs_and_transition_query() -> None:
         ]
 
     asyncio.run(scenario())
+
+
+def test_client_reads_governance_views_and_worker_version() -> None:
+    async def scenario() -> None:
+        worker_item_id = UUID("00000000-0000-0000-0000-000000000023")
+        proposal_id = UUID("00000000-0000-0000-0000-000000000024")
+        request_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            request_paths.append(request.url.path)
+            if request.url.path.endswith("/workspace"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "worker_item": {
+                            "id": str(worker_item_id),
+                            "root_task_id": str(UUID("00000000-0000-0000-0000-000000000025")),
+                            "version": 7,
+                        }
+                    },
+                )
+            if request.url.path.endswith(f"worker-items/{worker_item_id}"):
+                return httpx.Response(200, json={"worker_item_id": str(worker_item_id)})
+            if request.url.path.endswith(f"proposals/{proposal_id}"):
+                return httpx.Response(200, json={"proposal_id": str(proposal_id)})
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+        client = ControlPlaneClient(
+            make_config(), transport=httpx.MockTransport(handler)
+        )
+        assert (await client.get_collaboration_governance_worker_item(worker_item_id))[
+            "worker_item_id"
+        ] == str(worker_item_id)
+        assert (await client.get_collaboration_governance_proposal(proposal_id))[
+            "proposal_id"
+        ] == str(proposal_id)
+        workspace = await client.get_worker_item_workspace(worker_item_id)
+        assert workspace["worker_item"]["version"] == 7
+        await client.close()
+
+        assert request_paths == [
+            f"/api/v1/workspaces/{WORKSPACE_ID}/collaboration-governance/worker-items/{worker_item_id}",
+            f"/api/v1/workspaces/{WORKSPACE_ID}/collaboration-governance/proposals/{proposal_id}",
+            f"/api/v1/workspaces/{WORKSPACE_ID}/worker-items/{worker_item_id}/workspace",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_client_uses_governance_principal_only_for_allowlisted_commands() -> None:
+    config = make_config(
+        governance_actor_type="local",
+        governance_actor_id="main-agent",
+    )
+    client = ControlPlaneClient(config)
+    try:
+        governance = client.build_intent_request_json(
+            CommandIntent(
+                command_type="PauseCollaborationRelease",
+                target_type="worker_item",
+                target_id=UUID("00000000-0000-0000-0000-000000000023"),
+                expected_version=7,
+                payload={"transport": "web", "target_plan_generation": 3},
+            )
+        )
+        planning = client.build_intent_request_json(
+            CommandIntent(
+                command_type="SubmitPlanningRequest",
+                target_type="workspace",
+                target_id=None,
+                expected_version=None,
+                payload={"objective": "Build an API"},
+            )
+        )
+    finally:
+        asyncio.run(client.close())
+
+    assert governance["actor"] == {"type": "local", "id": "main-agent"}
+    assert governance["payload"]["transport"] == "main_agent"
+    assert planning["actor"] == {
+        "type": "integration",
+        "id": "akashic-task-bridge",
+    }
 
 
 def test_client_maps_safe_conflict_details_without_raw_body() -> None:

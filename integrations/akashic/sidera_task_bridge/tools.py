@@ -15,6 +15,8 @@ from .client import (
 )
 from .config import TaskBridgeConfig
 from .contracts import (
+    GovernanceProposalView,
+    GovernanceWorkerItemView,
     JsonValue,
     PlanRevisionBrief,
     PlanRevisionConfirmation,
@@ -39,6 +41,7 @@ _UNAVAILABLE_CODES = {
     "service_unavailable",
     "command_status_unavailable",
 }
+_GOVERNANCE_ACTIONS = {"pause", "approve", "reject", "resume_automatic"}
 
 
 class SideraTaskTools:
@@ -1127,6 +1130,509 @@ class SideraTaskTools:
         except ControlPlaneRejected as exc:
             return _encode(_rejected_envelope(exc.code, "Task status"))
 
+    async def sidera_get_collaboration_governance(
+        self, event: object, worker_item_id: str
+    ) -> str:
+        """Read one bounded WorkerItem release-governance summary."""
+
+        del event
+        parsed_worker_item_id = _parse_uuid(worker_item_id)
+        if parsed_worker_item_id is None:
+            return _encode(_invalid_resource("WorkerItem"))
+        try:
+            view = await self._governance_worker_view(parsed_worker_item_id)
+            view_error = _worker_view_preflight(
+                view, parsed_worker_item_id, self._config.workspace_id
+            )
+            if view_error is not None:
+                return _encode(view_error)
+            return _encode(
+                _governance_read_envelope(
+                    view, web_url=self._worker_item_url(parsed_worker_item_id)
+                )
+            )
+        except TransportUnavailable:
+            return _encode(_unavailable_error())
+        except ControlPlaneRejected as exc:
+            return _encode(_governance_rejected(exc, "governance status"))
+        except (TypeError, ValueError):
+            return _encode(
+                _governance_invalid_control_plane(
+                    f"worker-item:{parsed_worker_item_id}",
+                    self._worker_item_url(parsed_worker_item_id),
+                )
+            )
+
+    async def sidera_pause_collaboration_release(
+        self,
+        event: object,
+        worker_item_id: str,
+        worker_item_version: int,
+        target_plan_generation: int,
+        reason: str | None = None,
+    ) -> str:
+        """Pause automatic release for exactly one current WorkerItem."""
+
+        del event
+        parsed_worker_item_id = _parse_uuid(worker_item_id)
+        if parsed_worker_item_id is None:
+            return _encode(_invalid_resource("WorkerItem"))
+        invalid = _governance_input_preflight(
+            worker_item_version, target_plan_generation
+        )
+        if invalid is not None:
+            return _encode(invalid)
+        if not self._governance_principal_configured():
+            return _encode(_governance_unavailable())
+        normalized_reason, reason_error = _governance_reason(reason)
+        if reason_error is not None:
+            return _encode(reason_error)
+        try:
+            view = await self._governance_worker_view(parsed_worker_item_id)
+            view_error = _worker_view_preflight(
+                view, parsed_worker_item_id, self._config.workspace_id
+            )
+            if view_error is not None:
+                return _encode(view_error)
+            version = await self._worker_item_version(
+                parsed_worker_item_id, view.root_task_id
+            )
+            if version != worker_item_version:
+                return _encode(_governance_version_conflict("WorkerItem"))
+            generation = await self._active_plan_generation(view.root_task_id)
+            if generation != target_plan_generation:
+                return _encode(_governance_generation_conflict())
+            source_error = await self._governance_source_preflight(
+                view.root_task_id,
+                resource_ref=f"worker-item:{parsed_worker_item_id}",
+                web_url=self._worker_item_url(parsed_worker_item_id),
+            )
+            if source_error is not None:
+                return _encode(source_error)
+            action_error = _available_action_preflight(view, "pause")
+            if action_error is not None:
+                return _encode(action_error)
+            payload: dict[str, JsonValue] = {
+                "transport": "main_agent",
+                "target_plan_generation": target_plan_generation,
+            }
+            if normalized_reason is not None:
+                payload["reason"] = normalized_reason
+            result = await self._dispatcher.execute(
+                f"collaboration:worker-item:{parsed_worker_item_id}",
+                CommandIntent(
+                    command_type="PauseCollaborationRelease",
+                    target_type="worker_item",
+                    target_id=parsed_worker_item_id,
+                    expected_version=worker_item_version,
+                    payload=payload,
+                ),
+            )
+            return _encode(
+                _governance_mutation_result(
+                    result,
+                    operation="collaboration release pause",
+                    resource_ref=f"worker-item:{parsed_worker_item_id}",
+                    web_url=self._worker_item_url(parsed_worker_item_id),
+                    allowed_data=("hold_id", "hold_version", "governance_mode"),
+                )
+            )
+        except (MissingToolContext, StateConflict):
+            return _encode(_governance_source_context_error())
+        except (TypeError, ValueError):
+            return _encode(
+                _governance_invalid_control_plane(
+                    f"worker-item:{parsed_worker_item_id}",
+                    self._worker_item_url(parsed_worker_item_id),
+                )
+            )
+        except TransportUnavailable:
+            return _encode(
+                _with_governance_ref(
+                    _unavailable_error(),
+                    f"worker-item:{parsed_worker_item_id}",
+                    self._worker_item_url(parsed_worker_item_id),
+                )
+            )
+        except CommandResultUnknown:
+            return _encode(
+                _with_governance_ref(
+                    ToolEnvelope(
+                        outcome="result_unknown",
+                        summary="The collaboration release pause result is pending confirmation.",
+                        error_code="result_unknown",
+                    ),
+                    f"worker-item:{parsed_worker_item_id}",
+                    self._worker_item_url(parsed_worker_item_id),
+                )
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                _with_governance_ref(
+                    _rejected_envelope(exc.code, "collaboration release pause"),
+                    f"worker-item:{parsed_worker_item_id}",
+                    self._worker_item_url(parsed_worker_item_id),
+                )
+            )
+
+    async def sidera_approve_collaboration_release(
+        self,
+        event: object,
+        proposal_id: str,
+        proposal_version: int,
+        explicit_user_confirmation: bool,
+        reason: str | None = None,
+    ) -> str:
+        """Approve exactly one current release Proposal after user confirmation."""
+
+        del event
+        parsed_proposal_id = _parse_uuid(proposal_id)
+        if parsed_proposal_id is None:
+            return _encode(_invalid_resource("release Proposal"))
+        if explicit_user_confirmation is not True:
+            return _encode(_explicit_confirmation_required())
+        if not _valid_positive_int(proposal_version):
+            return _encode(_invalid_governance_input())
+        if not self._governance_principal_configured():
+            return _encode(_governance_unavailable())
+        normalized_reason, reason_error = _governance_reason(reason)
+        if reason_error is not None:
+            return _encode(reason_error)
+        return await self._resolve_proposal_governance_write(
+            parsed_proposal_id,
+            proposal_version,
+            command_type="ApproveCollaborationReleaseProposal",
+            operation="collaboration release approval",
+            normalized_reason=normalized_reason,
+        )
+
+    async def sidera_reject_collaboration_release(
+        self,
+        event: object,
+        proposal_id: str,
+        proposal_version: int,
+        reason: str | None = None,
+    ) -> str:
+        """Reject exactly one current release Proposal."""
+
+        del event
+        parsed_proposal_id = _parse_uuid(proposal_id)
+        if parsed_proposal_id is None:
+            return _encode(_invalid_resource("release Proposal"))
+        if not _valid_positive_int(proposal_version):
+            return _encode(_invalid_governance_input())
+        if not self._governance_principal_configured():
+            return _encode(_governance_unavailable())
+        normalized_reason, reason_error = _governance_reason(reason)
+        if reason_error is not None:
+            return _encode(reason_error)
+        return await self._resolve_proposal_governance_write(
+            parsed_proposal_id,
+            proposal_version,
+            command_type="RejectCollaborationReleaseProposal",
+            operation="collaboration release rejection",
+            normalized_reason=normalized_reason,
+        )
+
+    async def sidera_resume_automatic_collaboration(
+        self,
+        event: object,
+        worker_item_id: str,
+        hold_id: str,
+        hold_version: int,
+        reason: str | None = None,
+    ) -> str:
+        """Resume automatic release for exactly one active governance Hold."""
+
+        del event
+        parsed_worker_item_id = _parse_uuid(worker_item_id)
+        parsed_hold_id = _parse_uuid(hold_id)
+        if parsed_worker_item_id is None:
+            return _encode(_invalid_resource("WorkerItem"))
+        if parsed_hold_id is None:
+            return _encode(_invalid_resource("governance Hold"))
+        if not _valid_positive_int(hold_version):
+            return _encode(_invalid_governance_input())
+        if not self._governance_principal_configured():
+            return _encode(_governance_unavailable())
+        normalized_reason, reason_error = _governance_reason(reason)
+        if reason_error is not None:
+            return _encode(reason_error)
+        resource_ref = f"worker-item:{parsed_worker_item_id}"
+        web_url = self._worker_item_url(parsed_worker_item_id)
+        try:
+            view = await self._governance_worker_view(parsed_worker_item_id)
+            view_error = _worker_view_preflight(
+                view, parsed_worker_item_id, self._config.workspace_id
+            )
+            if view_error is not None:
+                return _encode(view_error)
+            await self._worker_item_version(
+                parsed_worker_item_id, view.root_task_id
+            )
+            governance = _governance_mapping(view.governance)
+            active_hold_id = _parse_uuid(governance.get("active_hold_id"))
+            actual_hold_version = _positive_int(
+                governance.get("hold_resource_version")
+            )
+            if active_hold_id != parsed_hold_id or actual_hold_version != hold_version:
+                return _encode(_governance_hold_conflict())
+            source_error = await self._governance_source_preflight(
+                view.root_task_id,
+                resource_ref=resource_ref,
+                web_url=web_url,
+            )
+            if source_error is not None:
+                return _encode(source_error)
+            action_error = _available_action_preflight(view, "resume_automatic")
+            if action_error is not None:
+                return _encode(action_error)
+            payload: dict[str, JsonValue] = {"transport": "main_agent"}
+            if normalized_reason is not None:
+                payload["reason"] = normalized_reason
+            result = await self._dispatcher.execute(
+                f"collaboration:hold:{parsed_hold_id}",
+                CommandIntent(
+                    command_type="ResumeAutomaticCollaboration",
+                    target_type="collaboration_governance_hold",
+                    target_id=parsed_hold_id,
+                    expected_version=hold_version,
+                    payload=payload,
+                ),
+            )
+            return _encode(
+                _governance_mutation_result(
+                    result,
+                    operation="automatic collaboration resume",
+                    resource_ref=resource_ref,
+                    web_url=web_url,
+                    allowed_data=(
+                        "hold_id",
+                        "hold_version",
+                        "governance_mode",
+                        "staled_proposal_count",
+                    ),
+                    warning="Pending release proposals become stale when automatic collaboration resumes.",
+                )
+            )
+        except (MissingToolContext, StateConflict):
+            return _encode(_governance_source_context_error())
+        except (TypeError, ValueError):
+            return _encode(_governance_invalid_control_plane(resource_ref, web_url))
+        except TransportUnavailable:
+            return _encode(_with_governance_ref(_unavailable_error(), resource_ref, web_url))
+        except CommandResultUnknown:
+            return _encode(
+                _with_governance_ref(
+                    ToolEnvelope(
+                        outcome="result_unknown",
+                        summary="The automatic collaboration resume result is pending confirmation.",
+                        error_code="result_unknown",
+                    ),
+                    resource_ref,
+                    web_url,
+                )
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                _with_governance_ref(
+                    _rejected_envelope(exc.code, "automatic collaboration resume"),
+                    resource_ref,
+                    web_url,
+                )
+            )
+
+    async def _resolve_proposal_governance_write(
+        self,
+        proposal_id: UUID,
+        proposal_version: int,
+        *,
+        command_type: str,
+        operation: str,
+        normalized_reason: str | None,
+    ) -> str:
+        proposal_ref = f"proposal:{proposal_id}"
+        try:
+            proposal = await self._governance_proposal_view(proposal_id)
+            proposal_error = _proposal_view_preflight(
+                proposal, proposal_id, self._config.workspace_id
+            )
+            if proposal_error is not None:
+                return _encode(proposal_error)
+            if proposal.resource_version != proposal_version:
+                return _encode(_governance_version_conflict("Proposal"))
+            if proposal.status != "pending":
+                return _encode(_governance_proposal_not_pending())
+            action = "approve" if command_type.startswith("Approve") else "reject"
+
+            worker = await self._governance_worker_view(proposal.worker_item_id)
+            worker_error = _worker_view_preflight(
+                worker, proposal.worker_item_id, self._config.workspace_id
+            )
+            if worker_error is not None:
+                return _encode(worker_error)
+            worker_governance = _governance_mapping(worker.governance)
+            worker_hold_id = _parse_uuid(worker_governance.get("active_hold_id"))
+            worker_proposal = _active_proposal_id(worker_governance)
+            if (
+                worker.root_task_id != proposal.root_task_id
+                or worker_hold_id != proposal.hold_id
+                or worker_proposal != proposal.proposal_id
+            ):
+                return _encode(_governance_lineage_conflict())
+            source_error = await self._governance_source_preflight(
+                proposal.root_task_id,
+                resource_ref=proposal_ref,
+                web_url=self._proposal_url(proposal_id, proposal.deep_link),
+            )
+            if source_error is not None:
+                return _encode(source_error)
+            action_error = _available_action_preflight(proposal, action)
+            if action_error is not None:
+                return _encode(action_error)
+            payload: dict[str, JsonValue] = {"transport": "main_agent"}
+            if normalized_reason is not None:
+                payload["reason"] = normalized_reason
+            result = await self._dispatcher.execute(
+                f"collaboration:proposal:{proposal_id}",
+                CommandIntent(
+                    command_type=command_type,
+                    target_type="collaboration_release_proposal",
+                    target_id=proposal_id,
+                    expected_version=proposal_version,
+                    payload=payload,
+                ),
+            )
+            return _encode(
+                _governance_mutation_result(
+                    result,
+                    operation=operation,
+                    resource_ref=proposal_ref,
+                    web_url=self._proposal_url(proposal_id, proposal.deep_link),
+                    allowed_data=(
+                        "proposal_id",
+                        "proposal_status",
+                        "application_status",
+                        "hold_id",
+                        "release_id",
+                        "result",
+                    ),
+                )
+            )
+        except (MissingToolContext, StateConflict):
+            return _encode(_governance_source_context_error())
+        except (TypeError, ValueError):
+            return _encode(
+                _governance_invalid_control_plane(
+                    proposal_ref, self._proposal_url(proposal_id)
+                )
+            )
+        except TransportUnavailable:
+            return _encode(
+                _with_governance_ref(
+                    _unavailable_error(), proposal_ref, self._proposal_url(proposal_id)
+                )
+            )
+        except CommandResultUnknown:
+            return _encode(
+                _with_governance_ref(
+                    ToolEnvelope(
+                        outcome="result_unknown",
+                        summary=f"The {operation} result is pending confirmation.",
+                        error_code="result_unknown",
+                    ),
+                    proposal_ref,
+                    self._proposal_url(proposal_id),
+                )
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                _with_governance_ref(
+                    _rejected_envelope(exc.code, operation),
+                    proposal_ref,
+                    self._proposal_url(proposal_id),
+                )
+            )
+
+    async def _governance_worker_view(
+        self, worker_item_id: UUID
+    ) -> GovernanceWorkerItemView:
+        return GovernanceWorkerItemView.model_validate(
+            await self._client.get_collaboration_governance_worker_item(worker_item_id)
+        )
+
+    async def _governance_proposal_view(
+        self, proposal_id: UUID
+    ) -> GovernanceProposalView:
+        return GovernanceProposalView.model_validate(
+            await self._client.get_collaboration_governance_proposal(proposal_id)
+        )
+
+    async def _worker_item_version(
+        self, worker_item_id: UUID, root_task_id: UUID
+    ) -> int:
+        workspace = await self._client.get_worker_item_workspace(worker_item_id)
+        worker = workspace.get("worker_item")
+        if not isinstance(worker, Mapping):
+            raise TypeError("worker item identity is missing")
+        returned_id = _parse_uuid(worker.get("id"))
+        returned_root_task_id = _parse_uuid(worker.get("root_task_id"))
+        version = _positive_int(worker.get("version"))
+        if (
+            returned_id != worker_item_id
+            or returned_root_task_id != root_task_id
+            or version is None
+        ):
+            raise ValueError("worker item identity is invalid")
+        return version
+
+    async def _active_plan_generation(self, root_task_id: UUID) -> int:
+        active_plan = await self._client.get_active_plan(root_task_id)
+        returned_root = _parse_uuid(active_plan.get("root_task_id"))
+        generation = _positive_int(active_plan.get("active_generation"))
+        if returned_root != root_task_id or generation is None:
+            raise ValueError("active plan identity is invalid")
+        return generation
+
+    async def _governance_source_preflight(
+        self,
+        root_task_id: UUID,
+        *,
+        resource_ref: str,
+        web_url: str,
+    ) -> ToolEnvelope | None:
+        source = await self._resolve_source()
+        if source.source_type == "sidera_web_chat":
+            return None
+        snapshot = await self._state.snapshot()
+        binding = snapshot.resource_sources.get(f"task:{root_task_id}")
+        if binding is None:
+            return ToolEnvelope(
+                outcome="needs_user",
+                summary="This task is not bound to the current private source yet.",
+                resource_ref=resource_ref,
+                web_url=web_url,
+                error_code="source_binding_required",
+            )
+        if (
+            binding.source_type != source.source_type
+            or binding.source_ref != source.source_ref
+        ):
+            return ToolEnvelope(
+                outcome="conflict",
+                summary="This private source cannot govern another task source.",
+                resource_ref=resource_ref,
+                web_url=web_url,
+                error_code="source_binding_conflict",
+            )
+        return None
+
+    def _governance_principal_configured(self) -> bool:
+        return (
+            self._config.governance_actor_type is not None
+            and self._config.governance_actor_id is not None
+        )
+
     async def _resolve_source(self) -> SourceResolution:
         context = get_current_tool_context()
         if context is None:
@@ -1162,6 +1668,20 @@ class SideraTaskTools:
         return (
             f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
             f"{self._config.workspace_id}/tasks/{task_id}"
+        )
+
+    def _worker_item_url(self, worker_item_id: UUID) -> str:
+        return (
+            f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
+            f"{self._config.workspace_id}/worker-items/{worker_item_id}"
+        )
+
+    def _proposal_url(self, proposal_id: UUID, deep_link: str | None = None) -> str:
+        if deep_link is not None and deep_link.startswith("/"):
+            return f"{str(self._config.web_base_url).rstrip('/')}{deep_link}"
+        return (
+            f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
+            f"{self._config.workspace_id}/collaboration-governance/proposals/{proposal_id}"
         )
 
 
@@ -1640,6 +2160,346 @@ def _plan_transition_summary(
         else 0
     )
     return data
+
+
+def _governance_read_envelope(
+    view: GovernanceWorkerItemView, *, web_url: str
+) -> ToolEnvelope:
+    data: dict[str, JsonValue] = {
+        "root_task_id": str(view.root_task_id),
+        "subtask_id": str(view.subtask_id) if view.subtask_id is not None else None,
+        "subtask_key": view.subtask_key,
+        "subtask_title": view.subtask_title[:200],
+        "worker_item_id": str(view.worker_item_id),
+        "worker_item_key": view.worker_item_key,
+        "worker_item_title": view.worker_item_title[:200],
+        "worker_item_role": view.worker_item_role[:100],
+        "worker_item_responsibility": view.worker_item_responsibility[:500],
+        "path": (
+            f"Task/{view.root_task_id} > Subtask/{view.subtask_key} > "
+            f"WorkerItem/{view.worker_item_key}"
+        ),
+    }
+    governance = _governance_mapping(view.governance)
+    safe_governance: dict[str, JsonValue] = {}
+    if isinstance(governance.get("enabled"), bool):
+        safe_governance["enabled"] = bool(governance["enabled"])
+    for key in (
+        "state",
+        "waiting_summary",
+        "governance_mode",
+        "release_state",
+        "attention_state",
+        "proposal_summary",
+    ):
+        value = _string(governance.get(key), limit=2000)
+        if value is not None:
+            safe_governance[key] = value
+    for key in ("active_hold_id",):
+        value = _parse_uuid(governance.get(key))
+        if value is not None:
+            safe_governance[key] = str(value)
+    for key in ("hold_resource_version",):
+        value = _positive_int(governance.get(key))
+        if value is not None:
+            safe_governance[key] = value
+    actions = governance.get("available_actions")
+    if isinstance(actions, list | tuple):
+        safe_actions: list[JsonValue] = []
+        for action in actions:
+            if isinstance(action, str) and action in _GOVERNANCE_ACTIONS:
+                safe_actions.append(action)
+            if len(safe_actions) == 4:
+                break
+        safe_governance["available_actions"] = safe_actions
+    proposal = governance.get("active_proposal")
+    if isinstance(proposal, Mapping):
+        safe_proposal: dict[str, JsonValue] = {}
+        proposal_id = _parse_uuid(proposal.get("proposal_id"))
+        if proposal_id is not None:
+            safe_proposal["proposal_id"] = str(proposal_id)
+        for key in ("status", "reason_code"):
+            value = _string(proposal.get(key), limit=200)
+            if value is not None:
+                safe_proposal[key] = value
+        summary = _string(proposal.get("summary"), limit=2000)
+        if summary is not None:
+            safe_proposal["summary"] = summary
+        for key in ("resource_version", "target_request_version"):
+            value = _positive_int(proposal.get(key))
+            if value is not None:
+                safe_proposal[key] = value
+        for key in ("created_at", "resolved_at"):
+            value = _string(proposal.get(key), limit=64)
+            if value is not None:
+                safe_proposal[key] = value
+        if safe_proposal:
+            safe_governance["active_proposal"] = safe_proposal
+    history = governance.get("governance_history")
+    if isinstance(history, list | tuple):
+        safe_history: list[JsonValue] = []
+        for item in history[:20]:
+            if not isinstance(item, Mapping):
+                continue
+            safe_item: dict[str, JsonValue] = {}
+            for key in ("kind", "status", "action", "result"):
+                value = _string(item.get(key), limit=100)
+                if value is not None:
+                    safe_item[key] = value
+            for key in ("resource_version",):
+                value = _positive_int(item.get(key))
+                if value is not None:
+                    safe_item[key] = value
+            occurred_at = _string(item.get("occurred_at"), limit=64)
+            if occurred_at is not None:
+                safe_item["occurred_at"] = occurred_at
+            if safe_item:
+                safe_history.append(safe_item)
+        if safe_history:
+            safe_governance["governance_history"] = safe_history
+    data["governance"] = safe_governance
+    return ToolEnvelope(
+        outcome="ok",
+        summary="Collaboration governance status loaded.",
+        resource_ref=f"worker-item:{view.worker_item_id}",
+        web_url=web_url,
+        data=data,
+    )
+
+
+def _governance_mapping(value: object) -> Mapping[str, JsonValue]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _worker_view_preflight(
+    view: GovernanceWorkerItemView,
+    expected_worker_item_id: UUID,
+    expected_workspace_id: UUID,
+) -> ToolEnvelope | None:
+    if (
+        view.workspace_id != expected_workspace_id
+        or view.worker_item_id != expected_worker_item_id
+        or view.root_task_id is None
+    ):
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an invalid WorkerItem lineage.",
+            error_code="invalid_control_plane_response",
+        )
+    if not isinstance(view.governance, Mapping):
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an incomplete governance view.",
+            error_code="invalid_control_plane_response",
+        )
+    return None
+
+
+def _proposal_view_preflight(
+    view: GovernanceProposalView,
+    expected_proposal_id: UUID,
+    expected_workspace_id: UUID,
+) -> ToolEnvelope | None:
+    if (
+        view.workspace_id != expected_workspace_id
+        or view.proposal_id != expected_proposal_id
+        or view.root_task_id is None
+        or view.worker_item_id is None
+    ):
+        return ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an invalid Proposal lineage.",
+            error_code="invalid_control_plane_response",
+        )
+    return None
+
+
+def _available_action_preflight(
+    view: GovernanceWorkerItemView | GovernanceProposalView,
+    action: str,
+) -> ToolEnvelope | None:
+    if isinstance(view, GovernanceWorkerItemView):
+        raw_actions = _governance_mapping(view.governance).get("available_actions")
+    else:
+        raw_actions = view.available_actions
+    actions = raw_actions if isinstance(raw_actions, (list, tuple)) else ()
+    if action not in actions:
+        return ToolEnvelope(
+            outcome="conflict",
+            summary="The requested governance action is no longer available.",
+            error_code="governance_action_unavailable",
+        )
+    return None
+
+
+def _active_proposal_id(governance: Mapping[str, JsonValue]) -> UUID | None:
+    proposal = governance.get("active_proposal")
+    if not isinstance(proposal, Mapping):
+        return None
+    return _parse_uuid(proposal.get("proposal_id"))
+
+
+def _valid_positive_int(value: object) -> bool:
+    return _positive_int(value) is not None
+
+
+def _governance_input_preflight(
+    worker_item_version: object, target_plan_generation: object
+) -> ToolEnvelope | None:
+    if not _valid_positive_int(worker_item_version) or not _valid_positive_int(
+        target_plan_generation
+    ):
+        return _invalid_governance_input()
+    return None
+
+
+def _governance_reason(value: object) -> tuple[str | None, ToolEnvelope | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, _invalid_governance_input()
+    normalized = value.strip()
+    if len(normalized) > 2000:
+        return None, _invalid_governance_input()
+    return normalized or None, None
+
+
+def _invalid_governance_input() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="failed",
+        summary="The governance command arguments are invalid.",
+        error_code="invalid_input",
+    )
+
+
+def _governance_unavailable() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="unavailable",
+        summary="Governance writes are unavailable until the local principal is configured.",
+        error_code="governance_principal_unavailable",
+    )
+
+
+def _explicit_confirmation_required() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="needs_user",
+        summary="Explicit user confirmation is required before approving a release.",
+        error_code="explicit_confirmation_required",
+    )
+
+
+def _governance_source_context_error() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="failed",
+        summary="The request source could not be identified safely.",
+        error_code="missing_tool_context",
+    )
+
+
+def _governance_invalid_control_plane(resource_ref: str, web_url: str) -> ToolEnvelope:
+    return _with_governance_ref(
+        ToolEnvelope(
+            outcome="failed",
+            summary="The control plane returned an invalid governance view.",
+            error_code="invalid_control_plane_response",
+        ),
+        resource_ref,
+        web_url,
+    )
+
+
+def _governance_version_conflict(resource_name: str) -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="conflict",
+        summary=f"The {resource_name} has changed; reload the latest governance status.",
+        error_code="version_conflict",
+    )
+
+
+def _governance_generation_conflict() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="conflict",
+        summary="The plan generation has changed; reload the current WorkerItem status.",
+        error_code="generation_conflict",
+    )
+
+
+def _governance_hold_conflict() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="conflict",
+        summary="The requested governance Hold is no longer current.",
+        error_code="hold_conflict",
+    )
+
+
+def _governance_proposal_not_pending() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="conflict",
+        summary="The release Proposal is no longer pending.",
+        error_code="proposal_not_pending",
+    )
+
+
+def _governance_lineage_conflict() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="conflict",
+        summary="The release Proposal is no longer attached to the current WorkerItem Hold.",
+        error_code="governance_lineage_conflict",
+    )
+
+
+def _with_governance_ref(
+    envelope: ToolEnvelope, resource_ref: str, web_url: str
+) -> ToolEnvelope:
+    return envelope.model_copy(update={"resource_ref": resource_ref, "web_url": web_url})
+
+
+def _governance_rejected(
+    error: ControlPlaneRejected, operation: str
+) -> ToolEnvelope:
+    if error.code == "not_found":
+        return ToolEnvelope(
+            outcome="failed",
+            summary=f"The requested {operation} resource was not found.",
+            error_code="not_found",
+        )
+    return _rejected_envelope(error.code, operation)
+
+
+def _governance_mutation_result(
+    result: DispatchResult,
+    *,
+    operation: str,
+    resource_ref: str,
+    web_url: str,
+    allowed_data: tuple[str, ...],
+    warning: str | None = None,
+) -> ToolEnvelope:
+    if result.status != "applied":
+        return _with_governance_ref(
+            _dispatch_envelope(result, operation), resource_ref, web_url
+        )
+    data = _result_data(result)
+    safe_data: dict[str, JsonValue] = {}
+    for key in allowed_data:
+        value = data.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (str, int)):
+            safe_data[key] = value
+    if warning is not None:
+        safe_data["warning"] = warning
+    return ToolEnvelope(
+        outcome="ok",
+        summary=(
+            f"The {operation} was accepted. {warning}"
+            if warning is not None
+            else f"The {operation} was accepted."
+        ),
+        resource_ref=resource_ref,
+        web_url=web_url,
+        data=safe_data,
+    )
 
 
 def _encode(envelope: ToolEnvelope) -> str:

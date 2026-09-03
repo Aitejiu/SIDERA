@@ -73,6 +73,8 @@ class TaskBridgeConfig(BaseModel):
     workspace_id: UUID
     actor_type: str = "integration"
     actor_id: str = "akashic-task-bridge"
+    governance_actor_type: str | None = None
+    governance_actor_id: str | None = None
     planning_profile_id: UUID
     planning_profile_version: int = Field(ge=1)
     web_base_url: AnyHttpUrl = Field(
@@ -151,3 +153,31 @@ class TaskBridgeConfig(BaseModel):
         if not value:
             raise ValueError("actor identity must not be empty")
         return value
+
+    @field_validator("governance_actor_type", "governance_actor_id")
+    @classmethod
+    def validate_governance_actor_identity(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("governance actor identity must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_governance_actor_pair(self) -> Self:
+        if (self.governance_actor_type is None) != (
+            self.governance_actor_id is None
+        ):
+            raise ValueError(
+                "governance actor type and id must be provided together"
+            )
+        return self
+
+    def governance_principal_matches(self, actor_type: str, actor_id: str) -> bool:
+        """Check the opt-in bridge principal against Control Plane readiness data."""
+
+        return (
+            self.governance_actor_type == actor_type.strip()
+            and self.governance_actor_id == actor_id.strip()
+        )
