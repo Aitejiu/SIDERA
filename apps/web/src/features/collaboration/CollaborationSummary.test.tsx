@@ -27,6 +27,9 @@ const summary: RootCollaborationSummary = {
   latest_decision_at: "2026-09-03T11:58:00Z",
   attention_required: true,
   detail_href: "/workspaces/ws-1/tasks/root-1/collaboration",
+  paused_worker_item_count: 0,
+  pending_release_proposal_count: 0,
+  attention_subtasks: [],
 };
 
 describe("CollaborationSummary", () => {

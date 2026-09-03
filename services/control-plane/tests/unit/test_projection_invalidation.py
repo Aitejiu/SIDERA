@@ -206,6 +206,37 @@ def test_collaboration_run_events_invalidate_the_root_runtime_projection() -> No
     assert targets == (type(targets[0])("collaboration_runtime", ROOT_TASK_ID),)
 
 
+@pytest.mark.parametrize(
+    ("event_type", "aggregate_type"),
+    [
+        ("CollaborationReleasePaused", "collaboration_governance_hold"),
+        ("CollaborationReleaseProposalCreated", "collaboration_release_proposal"),
+        ("CollaborationReleaseProposalApproved", "collaboration_release_proposal"),
+        ("CollaborationReleaseProposalRejected", "collaboration_release_proposal"),
+        ("CollaborationReleaseProposalStale", "collaboration_release_proposal"),
+        ("CollaborationAutomaticReleaseResumed", "collaboration_governance_hold"),
+    ],
+)
+def test_governance_events_refresh_governance_views_without_runtime_wake(
+    event_type: str, aggregate_type: str
+) -> None:
+    targets = projection_targets_for_event(
+        _event(event_type, aggregate_type=aggregate_type)
+    )
+
+    assert {
+        target.projection_type for target in targets
+    } == {
+        "collaboration_governance",
+        "task_overview",
+        "task_graph",
+        "subtask_workspace",
+        "worker_item_workspace",
+        "worker_item_activity",
+    }
+    assert all(target.projection_type != "collaboration_runtime" for target in targets)
+
+
 def test_candidate_submission_invalidates_its_related_resources() -> None:
     targets = projection_targets_for_event(
         _event(

@@ -63,8 +63,11 @@ class WorkerWorkspaceQueryStore(Protocol):
 
 
 class WorkerWorkspaceQueryService:
-    def __init__(self, store: WorkerWorkspaceQueryStore) -> None:
+    def __init__(
+        self, store: WorkerWorkspaceQueryStore, *, governance_enabled: bool = True
+    ) -> None:
         self._store = store
+        self._governance_enabled = governance_enabled
 
     def get_workspace(
         self, workspace_id: UUID, worker_item_id: UUID
@@ -102,11 +105,13 @@ class WorkerWorkspaceQueryService:
             raise NotFound("worker item not found")
         return loaded
 
-    @staticmethod
     def _composer(
+        self,
         snapshot: WorkerWorkspaceQuerySnapshot,
     ) -> WorkerItemProjectionService:
-        collaboration = WorkerWorkspaceQueryService._collaboration_summary(snapshot)
+        collaboration = WorkerWorkspaceQueryService._collaboration_summary(
+            snapshot, governance_enabled=self._governance_enabled
+        )
         return WorkerItemProjectionService(
             worker_item=snapshot.worker_item,
             placements=snapshot.placements,
@@ -130,10 +135,14 @@ class WorkerWorkspaceQueryService:
     @staticmethod
     def _collaboration_summary(
         snapshot: WorkerWorkspaceQuerySnapshot,
+        *,
+        governance_enabled: bool = True,
     ) -> WorkerItemCollaborationSummaryProjection | None:
         if snapshot.collaboration_facts is None:
             return None
-        return CollaborationProjectionService().worker_summary(
+        return CollaborationProjectionService(
+            governance_enabled=governance_enabled
+        ).worker_summary(
             snapshot.collaboration_facts,
             worker_item_id=snapshot.worker_item.id,
         )

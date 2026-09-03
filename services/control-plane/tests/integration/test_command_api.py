@@ -27,7 +27,10 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def client(database_url: str) -> Iterator[TestClient]:
-    settings = Settings(database_url=database_url)
+    settings = Settings(
+        database_url=database_url,
+        collaboration_governance_enabled=False,
+    )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
 

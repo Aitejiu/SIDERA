@@ -70,10 +70,14 @@ class TaskConsoleQueryService:
         *,
         actor_type: str | None = None,
         actor_id: str | None = None,
+        governance_enabled: bool = True,
     ) -> None:
         self._store = store
         self._composer = TaskConsoleProjectionService()
-        self._collaboration = CollaborationProjectionService()
+        self._collaboration = CollaborationProjectionService(
+            governance_enabled=governance_enabled
+        )
+        self._governance_enabled = governance_enabled
         self._actor_type = actor_type
         self._actor_id = actor_id
 
@@ -119,7 +123,9 @@ class TaskConsoleQueryService:
                 if loaded.collaboration_facts is not None
                 else None
             ),
-            collaboration_facts=loaded.collaboration_facts,
+            collaboration_facts=(
+                loaded.collaboration_facts if self._governance_enabled else None
+            ),
         )
 
     def get_activity(

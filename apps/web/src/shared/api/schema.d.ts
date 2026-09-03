@@ -531,6 +531,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collaboration Governance Proposal */
+        get: operations["get_collaboration_governance_proposal"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collaboration Governance Worker Item */
+        get: operations["get_collaboration_governance_worker_item"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/collaboration-metrics": {
         parameters: {
             query?: never;
@@ -1365,6 +1399,19 @@ export interface components {
             /** Answers */
             answers: components["schemas"]["PlanningClarificationAnswerPayload"][];
         };
+        /** ApproveCollaborationReleaseProposalPayload */
+        ApproveCollaborationReleaseProposalPayload: {
+            /**
+             * Reason
+             * @default null
+             */
+            reason: string | null;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "web" | "main_agent";
+        };
         /** ArchiveWorkContextPayload */
         ArchiveWorkContextPayload: {
             /** Current Content Hash */
@@ -1504,6 +1551,21 @@ export interface components {
         };
         /** ClearExecutionWorkerPinPayload */
         ClearExecutionWorkerPinPayload: Record<string, never>;
+        /** CollaborationAttentionSubtaskResponse */
+        CollaborationAttentionSubtaskResponse: {
+            /** Deep Link */
+            deep_link: string;
+            /** First Worker Item Title */
+            first_worker_item_title: string;
+            /** Pending Count */
+            pending_count: number;
+            /** Subtask Id */
+            subtask_id?: string | null;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Subtask Title */
+            subtask_title: string;
+        };
         /** CollaborationDecisionApplicationResponse */
         CollaborationDecisionApplicationResponse: {
             /** Error Code */
@@ -1513,8 +1575,26 @@ export interface components {
              * Format: uuid
              */
             intent_id: string;
+            /** Proposal Created At */
+            proposal_created_at?: string | null;
+            /** Proposal Id */
+            proposal_id?: string | null;
+            /** Proposal Resolved At */
+            proposal_resolved_at?: string | null;
+            /** Proposal Status */
+            proposal_status?: ("pending" | "approved" | "rejected" | "stale") | null;
             /** Release Id */
             release_id: string | null;
+            /** Resolution Action */
+            resolution_action?: ("approve" | "reject") | null;
+            /** Resolution Actor */
+            resolution_actor?: string | null;
+            /** Resolution Created At */
+            resolution_created_at?: string | null;
+            /** Resolution Result */
+            resolution_result?: ("applied" | "stale") | null;
+            /** Resolution Transport */
+            resolution_transport?: ("web" | "main_agent") | null;
             /** Result Code */
             result_code: string;
             /** Result Summary */
@@ -1571,6 +1651,11 @@ export interface components {
         CollaborationDetailResponse: {
             /** Attention Required */
             attention_required: boolean;
+            /**
+             * Attention Subtasks
+             * @default []
+             */
+            attention_subtasks: components["schemas"]["CollaborationAttentionSubtaskResponse"][];
             /** Blocked Subtask Count */
             blocked_subtask_count: number;
             /** Blocked Subtasks */
@@ -1591,6 +1676,16 @@ export interface components {
             latest_decision_at: string | null;
             /** Latest Decision Summary */
             latest_decision_summary: string | null;
+            /**
+             * Paused Worker Item Count
+             * @default 0
+             */
+            paused_worker_item_count: number;
+            /**
+             * Pending Release Proposal Count
+             * @default 0
+             */
+            pending_release_proposal_count: number;
             /** Plan Generation */
             plan_generation: number;
             /** Provider */
@@ -1613,6 +1708,147 @@ export interface components {
             strategy_label: string;
             /** Waiting Count */
             waiting_count: number;
+        };
+        /** CollaborationGovernanceHistoryResponse */
+        CollaborationGovernanceHistoryResponse: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "hold" | "runtime_intent" | "application" | "proposal" | "resolution" | "release";
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Proposal Id */
+            proposal_id?: string | null;
+            /** Release Id */
+            release_id?: string | null;
+            /** Resolution Action */
+            resolution_action?: ("approve" | "reject") | null;
+            /** Resolution Actor */
+            resolution_actor?: string | null;
+            /** Resolution Result */
+            resolution_result?: ("applied" | "stale") | null;
+            /** Resolution Transport */
+            resolution_transport?: ("web" | "main_agent") | null;
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /** Result Code */
+            result_code?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "resumed" | "superseded" | "created" | "deferred" | "pending" | "applied" | "rejected" | "stale" | "duplicate" | "issued";
+            /** Summary */
+            summary: string;
+        };
+        /** CollaborationGovernanceProposalResponse */
+        CollaborationGovernanceProposalResponse: {
+            /** Available Actions */
+            available_actions: ("pause" | "approve" | "reject" | "resume_automatic")[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Deep Link */
+            deep_link: string;
+            /**
+             * Governance Mode
+             * @enum {string}
+             */
+            governance_mode: "automatic" | "paused";
+            /**
+             * Hold Id
+             * Format: uuid
+             */
+            hold_id: string;
+            /** Hold Resource Version */
+            hold_resource_version: number;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Resolved At */
+            resolved_at: string | null;
+            /** Resource Version */
+            resource_version: number;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "approved" | "rejected" | "stale";
+            /** Subtask Id */
+            subtask_id: string | null;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Subtask Title */
+            subtask_title: string;
+            /** Summary */
+            summary: string;
+            /** Target Request Version */
+            target_request_version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Key */
+            worker_item_key: string;
+            /** Worker Item Title */
+            worker_item_title: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** CollaborationGovernanceWorkerItemResponse */
+        CollaborationGovernanceWorkerItemResponse: {
+            governance: components["schemas"]["WorkerItemCollaborationSummaryResponse"];
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Subtask Id */
+            subtask_id: string | null;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Subtask Title */
+            subtask_title: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Key */
+            worker_item_key: string;
+            /** Worker Item Responsibility */
+            worker_item_responsibility: string;
+            /** Worker Item Role */
+            worker_item_role: string;
+            /** Worker Item Title */
+            worker_item_title: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** CollaborationLinkResponse */
         CollaborationLinkResponse: {
@@ -1648,6 +1884,34 @@ export interface components {
              * Format: uuid
              */
             workspace_id: string;
+        };
+        /** CollaborationReleaseProposalSummaryResponse */
+        CollaborationReleaseProposalSummaryResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Resolved At */
+            resolved_at?: string | null;
+            /** Resource Version */
+            resource_version: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "approved" | "rejected" | "stale";
+            /** Summary */
+            summary: string;
+            /** Target Request Version */
+            target_request_version: number;
         };
         /** CollaborationRuntimeCapabilityPayload */
         CollaborationRuntimeCapabilityPayload: {
@@ -1701,7 +1965,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition" | "collaboration_governance_hold" | "collaboration_release_proposal";
             /**
              * Workspace Id
              * Format: uuid
@@ -3383,6 +3647,21 @@ export interface components {
             /** Provider */
             provider: string;
         };
+        /** PauseCollaborationReleasePayload */
+        PauseCollaborationReleasePayload: {
+            /**
+             * Reason
+             * @default null
+             */
+            reason: string | null;
+            /** Target Plan Generation */
+            target_plan_generation: number;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "web" | "main_agent";
+        };
         /** PinExecutionWorkerPayload */
         PinExecutionWorkerPayload: {
             /**
@@ -4454,6 +4733,19 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** RejectCollaborationReleaseProposalPayload */
+        RejectCollaborationReleaseProposalPayload: {
+            /**
+             * Reason
+             * @default null
+             */
+            reason: string | null;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "web" | "main_agent";
+        };
         /** RejectPlanningProposalPayload */
         RejectPlanningProposalPayload: {
             /** Current Proposal Content Hash */
@@ -4480,6 +4772,19 @@ export interface components {
             current_proposal_revision: number;
             /** Feedback */
             feedback: string;
+        };
+        /** ResumeAutomaticCollaborationPayload */
+        ResumeAutomaticCollaborationPayload: {
+            /**
+             * Reason
+             * @default null
+             */
+            reason: string | null;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "web" | "main_agent";
         };
         /** RetryBlockedPlanningRunPayload */
         RetryBlockedPlanningRunPayload: {
@@ -4743,6 +5048,11 @@ export interface components {
         RootCollaborationSummaryResponse: {
             /** Attention Required */
             attention_required: boolean;
+            /**
+             * Attention Subtasks
+             * @default []
+             */
+            attention_subtasks: components["schemas"]["CollaborationAttentionSubtaskResponse"][];
             /** Blocked Subtask Count */
             blocked_subtask_count: number;
             /** Blocked Subtasks */
@@ -4757,6 +5067,16 @@ export interface components {
             latest_decision_at: string | null;
             /** Latest Decision Summary */
             latest_decision_summary: string | null;
+            /**
+             * Paused Worker Item Count
+             * @default 0
+             */
+            paused_worker_item_count: number;
+            /**
+             * Pending Release Proposal Count
+             * @default 0
+             */
+            pending_release_proposal_count: number;
             /** Plan Generation */
             plan_generation: number;
             /** Released Count */
@@ -6310,8 +6630,47 @@ export interface components {
         };
         /** WorkerItemCollaborationSummaryResponse */
         WorkerItemCollaborationSummaryResponse: {
+            /** Active Hold Id */
+            active_hold_id?: string | null;
+            active_proposal?: components["schemas"]["CollaborationReleaseProposalSummaryResponse"] | null;
+            /**
+             * Attention State
+             * @default none
+             * @enum {string}
+             */
+            attention_state: "none" | "decision_required";
+            /**
+             * Available Actions
+             * @default []
+             */
+            available_actions: ("pause" | "approve" | "reject" | "resume_automatic")[];
             /** Enabled */
             enabled: boolean;
+            /**
+             * Governance History
+             * @default []
+             */
+            governance_history: components["schemas"]["CollaborationGovernanceHistoryResponse"][];
+            /**
+             * Governance Mode
+             * @default automatic
+             * @enum {string}
+             */
+            governance_mode: "automatic" | "paused";
+            /** Hold Created At */
+            hold_created_at?: string | null;
+            /** Hold Reason */
+            hold_reason?: string | null;
+            /** Hold Resource Version */
+            hold_resource_version?: number | null;
+            /** Proposal Summary */
+            proposal_summary?: string | null;
+            /**
+             * Release State
+             * @default unreleased
+             * @enum {string}
+             */
+            release_state: "unreleased" | "proposed" | "released";
             /**
              * State
              * @enum {string}
@@ -6398,6 +6757,8 @@ export interface components {
         };
         /** WorkerItemSummaryProjectionResponse */
         WorkerItemSummaryProjectionResponse: {
+            /** Attention State */
+            attention_state?: ("none" | "decision_required") | null;
             /** Blocker */
             blocker: string | null;
             /** Collaboration State */
@@ -6410,7 +6771,11 @@ export interface components {
             current_agent_summary: string | null;
             /** Current Step */
             current_step: string | null;
+            /** Governance Mode */
+            governance_mode?: ("automatic" | "paused") | null;
             plan_sync?: components["schemas"]["WorkerPlanSyncProjectionResponse"] | null;
+            /** Proposal Summary */
+            proposal_summary?: string | null;
             /** Recent Activity At */
             recent_activity_at: string | null;
             /** Responsibility */
@@ -6423,6 +6788,8 @@ export interface components {
             status: string;
             /** Title */
             title: string;
+            /** Worker Item Href */
+            worker_item_href?: string | null;
             /**
              * Worker Item Id
              * Format: uuid
@@ -7841,6 +8208,70 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_collaboration_governance_proposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollaborationGovernanceProposalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_collaboration_governance_worker_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollaborationGovernanceWorkerItemResponse"];
                 };
             };
             /** @description Validation Error */

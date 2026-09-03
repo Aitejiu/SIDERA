@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.schemas import (
     AnswerPlanningClarificationPayload,
+    ApproveCollaborationReleaseProposalPayload,
     ArchiveWorkContextPayload,
     AttachKnowledgeRevisionPayload,
     CancelPlanningRequestPayload,
@@ -22,6 +23,7 @@ from sidera_control_plane.api.schemas import (
     ErrorBody,
     ErrorResponse,
     ExecutionContextAddressPayload,
+    PauseCollaborationReleasePayload,
     PinExecutionWorkerPayload,
     PrepareWorkerHandoffPayload,
     ReconcileWorkerTransitionPayload,
@@ -30,8 +32,10 @@ from sidera_control_plane.api.schemas import (
     RegisterCollaborationRuntimeModulePayload,
     RegisterPlannerModulePayload,
     RegisterPlanningProfilePayload,
+    RejectCollaborationReleaseProposalPayload,
     RejectPlanningProposalPayload,
     RequestProposalRevisionPayload,
+    ResumeAutomaticCollaborationPayload,
     RetryBlockedPlanningRunPayload,
     RetryContextAssemblyPayload,
     ReviseWorkContextPayload,
@@ -85,11 +89,25 @@ _HANDOFF_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RecoverWorkerHandoff", RecoverWorkerHandoffPayload),
 )
 
+_GOVERNANCE_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("PauseCollaborationRelease", PauseCollaborationReleasePayload),
+    (
+        "ApproveCollaborationReleaseProposal",
+        ApproveCollaborationReleaseProposalPayload,
+    ),
+    (
+        "RejectCollaborationReleaseProposal",
+        RejectCollaborationReleaseProposalPayload,
+    ),
+    ("ResumeAutomaticCollaboration", ResumeAutomaticCollaborationPayload),
+)
+
 _COMMAND_PAYLOADS = (
     _PLANNING_COMMAND_PAYLOADS
     + _RUNTIME_COMMAND_PAYLOADS
     + _TRANSITION_COMMAND_PAYLOADS
     + _HANDOFF_COMMAND_PAYLOADS
+    + _GOVERNANCE_COMMAND_PAYLOADS
 )
 
 

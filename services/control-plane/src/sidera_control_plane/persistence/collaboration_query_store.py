@@ -46,6 +46,7 @@ from sidera_control_plane.persistence.models import (
     RuntimeIntentApplicationModel,
     RuntimeIntentModel,
     RuntimeReleaseModel,
+    WorkerItemModel,
 )
 
 
@@ -72,6 +73,69 @@ class SqlAlchemyCollaborationQueryStore:
                 workspace_id=workspace_id,
                 root_task_id=root_task_id,
                 plan=plan,
+            )
+
+    def load_for_worker_item(
+        self, workspace_id: UUID, worker_item_id: UUID
+    ) -> CollaborationProjectionFacts | None:
+        with self._database.session() as session:
+            session.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            )
+            root_task_id = session.scalar(
+                select(WorkerItemModel.root_task_id).where(
+                    WorkerItemModel.workspace_id == workspace_id,
+                    WorkerItemModel.id == worker_item_id,
+                )
+            )
+            if root_task_id is None:
+                return None
+            plan_row = _current_plan_row(session, workspace_id, root_task_id)
+            if plan_row is None:
+                return None
+            return self.load_in_session(
+                session,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                plan=self._normalizer.normalize(_plan(plan_row)),
+            )
+
+    def load_for_proposal(
+        self, workspace_id: UUID, proposal_id: UUID
+    ) -> CollaborationProjectionFacts | None:
+        with self._database.session() as session:
+            session.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            )
+            root_task_id = session.scalar(
+                select(CollaborationGovernanceHoldModel.root_task_id)
+                .join(
+                    CollaborationReleaseProposalModel,
+                    (
+                        CollaborationReleaseProposalModel.hold_id
+                        == CollaborationGovernanceHoldModel.id
+                    )
+                    & (
+                        CollaborationReleaseProposalModel.workspace_id
+                        == CollaborationGovernanceHoldModel.workspace_id
+                    ),
+                )
+                .where(
+                    CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                    CollaborationReleaseProposalModel.id == proposal_id,
+                    CollaborationGovernanceHoldModel.workspace_id == workspace_id,
+                )
+            )
+            if root_task_id is None:
+                return None
+            plan_row = _current_plan_row(session, workspace_id, root_task_id)
+            if plan_row is None:
+                return None
+            return self.load_in_session(
+                session,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                plan=self._normalizer.normalize(_plan(plan_row)),
             )
 
     def load_in_session(

@@ -47,6 +47,8 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions",
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}",
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}",
     "/api/v1/workspaces/{workspace_id}/collaboration-metrics",
 }
 
@@ -77,6 +79,8 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff-candidates": "HandoffCandidateListResponse",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration": "CollaborationDetailResponse",
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/collaboration/decisions": "CollaborationDecisionPageResponse",
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}": "CollaborationGovernanceWorkerItemResponse",
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}": "CollaborationGovernanceProposalResponse",
     "/api/v1/workspaces/{workspace_id}/collaboration-metrics": "CollaborationMetricsResponse",
 }
 
@@ -116,6 +120,10 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "ConfirmWorkerHandoff": "ConfirmWorkerHandoffPayload",
     "CancelWorkerHandoff": "CancelWorkerHandoffPayload",
     "RecoverWorkerHandoff": "RecoverWorkerHandoffPayload",
+    "PauseCollaborationRelease": "PauseCollaborationReleasePayload",
+    "ApproveCollaborationReleaseProposal": "ApproveCollaborationReleaseProposalPayload",
+    "RejectCollaborationReleaseProposal": "RejectCollaborationReleaseProposalPayload",
+    "ResumeAutomaticCollaboration": "ResumeAutomaticCollaborationPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {

@@ -26,6 +26,7 @@ PROJECTION_TYPES = frozenset(
         "context_package",
         "knowledge_candidate_submission",
         "collaboration_runtime",
+        "collaboration_governance",
     }
 )
 
@@ -97,6 +98,15 @@ _COLLABORATION_EVENT_TYPES = {
     "RuntimeReleaseRecorded",
     "RuntimeReleaseIssued",
     "ExecutionRequestReleased",
+}
+_COLLABORATION_GOVERNANCE_EVENT_TYPES = {
+    "CollaborationReleasePaused",
+    "CollaborationReleaseProposalCreated",
+    "CollaborationReleaseProposalApproved",
+    "CollaborationReleaseProposalRejected",
+    "CollaborationReleaseProposalStale",
+    "CollaborationAutomaticReleaseResumed",
+    "CollaborationGovernanceHoldSuperseded",
 }
 
 
@@ -246,6 +256,22 @@ def projection_targets_for_event(
                 root_task_id=root_task_id,
                 change_type=planning_change_type or "planning_run_updated",
             )
+    if event.aggregate_type in {
+        "collaboration_governance_hold",
+        "collaboration_release_proposal",
+    } or event.event_type in _COLLABORATION_GOVERNANCE_EVENT_TYPES:
+        return _targets(
+            (
+                "collaboration_governance",
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+                "worker_item_activity",
+            ),
+            worker_item_id or _payload_uuid(payload, "worker_item_id"),
+            root_task_id or _payload_uuid(payload, "root_task_id"),
+        )
     if event.aggregate_type in {
         "collaboration_run",
         "collaboration_evaluation",

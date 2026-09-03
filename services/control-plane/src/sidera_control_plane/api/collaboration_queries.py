@@ -9,6 +9,8 @@ from sidera_control_plane.api.dependencies import get_collaboration_query_servic
 from sidera_control_plane.api.schemas import (
     CollaborationDecisionPageResponse,
     CollaborationDetailResponse,
+    CollaborationGovernanceProposalResponse,
+    CollaborationGovernanceWorkerItemResponse,
 )
 from sidera_control_plane.application.collaboration_queries import (
     CollaborationQueryService,
@@ -55,4 +57,38 @@ def list_collaboration_decisions(
                 limit=limit,
             )
         )
+    )
+
+
+@router.get(
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}",
+    response_model=CollaborationGovernanceWorkerItemResponse,
+    operation_id="get_collaboration_governance_worker_item",
+)
+def get_collaboration_governance_worker_item(
+    workspace_id: UUID,
+    worker_item_id: UUID,
+    service: Annotated[
+        CollaborationQueryService, Depends(get_collaboration_query_service)
+    ],
+) -> dict[str, Any]:
+    return jsonable_encoder(
+        asdict(service.get_governance_worker_item(workspace_id, worker_item_id))
+    )
+
+
+@router.get(
+    "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}",
+    response_model=CollaborationGovernanceProposalResponse,
+    operation_id="get_collaboration_governance_proposal",
+)
+def get_collaboration_governance_proposal(
+    workspace_id: UUID,
+    proposal_id: UUID,
+    service: Annotated[
+        CollaborationQueryService, Depends(get_collaboration_query_service)
+    ],
+) -> dict[str, Any]:
+    return jsonable_encoder(
+        asdict(service.get_governance_proposal(workspace_id, proposal_id))
     )

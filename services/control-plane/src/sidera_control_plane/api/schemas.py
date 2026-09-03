@@ -107,6 +107,8 @@ AggregateType = Literal[
     "worker_item",
     "handoff_proposal",
     "handoff_transition",
+    "collaboration_governance_hold",
+    "collaboration_release_proposal",
 ]
 
 
@@ -737,6 +739,9 @@ class RootCollaborationSummaryResponse(BaseModel):
     latest_decision_at: datetime | None
     attention_required: bool
     detail_href: str
+    paused_worker_item_count: int = 0
+    pending_release_proposal_count: int = 0
+    attention_subtasks: tuple["CollaborationAttentionSubtaskResponse", ...] = ()
 
 
 class SubtaskCollaborationSummaryResponse(BaseModel):
@@ -751,6 +756,55 @@ class SubtaskCollaborationSummaryResponse(BaseModel):
     missing_evidence_refs: tuple[str, ...]
     released_worker_item_count: int
     waiting_worker_item_count: int
+
+
+class CollaborationReleaseProposalSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: UUID
+    status: Literal["pending", "approved", "rejected", "stale"]
+    resource_version: int
+    reason_code: str
+    summary: str
+    created_at: datetime
+    target_request_version: int
+    resolved_at: datetime | None = None
+
+
+class CollaborationGovernanceHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[
+        "hold",
+        "runtime_intent",
+        "application",
+        "proposal",
+        "resolution",
+        "release",
+    ]
+    resource_id: UUID
+    status: Literal[
+        "active",
+        "resumed",
+        "superseded",
+        "created",
+        "deferred",
+        "pending",
+        "applied",
+        "rejected",
+        "stale",
+        "duplicate",
+        "issued",
+    ]
+    summary: str
+    occurred_at: datetime
+    result_code: str | None = None
+    proposal_id: UUID | None = None
+    resolution_action: Literal["approve", "reject"] | None = None
+    resolution_result: Literal["applied", "stale"] | None = None
+    resolution_actor: str | None = None
+    resolution_transport: Literal["web", "main_agent"] | None = None
+    release_id: UUID | None = None
 
 
 class WorkerItemCollaborationSummaryResponse(BaseModel):
@@ -768,6 +822,19 @@ class WorkerItemCollaborationSummaryResponse(BaseModel):
     ]
     waiting_summary: str | None
     upstream_links: tuple[CollaborationLinkResponse, ...]
+    governance_mode: Literal["automatic", "paused"] = "automatic"
+    active_hold_id: UUID | None = None
+    hold_resource_version: int | None = None
+    hold_reason: str | None = None
+    hold_created_at: datetime | None = None
+    release_state: Literal["unreleased", "proposed", "released"] = "unreleased"
+    active_proposal: CollaborationReleaseProposalSummaryResponse | None = None
+    available_actions: tuple[
+        Literal["pause", "approve", "reject", "resume_automatic"], ...
+    ] = ()
+    governance_history: tuple[CollaborationGovernanceHistoryResponse, ...] = ()
+    attention_state: Literal["none", "decision_required"] = "none"
+    proposal_summary: str | None = None
 
 
 class CollaborationDecisionApplicationResponse(BaseModel):
@@ -779,6 +846,15 @@ class CollaborationDecisionApplicationResponse(BaseModel):
     result_summary: str
     release_id: UUID | None
     error_code: str | None
+    proposal_id: UUID | None = None
+    proposal_status: Literal["pending", "approved", "rejected", "stale"] | None = None
+    resolution_action: Literal["approve", "reject"] | None = None
+    resolution_result: Literal["applied", "stale"] | None = None
+    resolution_actor: str | None = None
+    resolution_transport: Literal["web", "main_agent"] | None = None
+    proposal_created_at: datetime | None = None
+    proposal_resolved_at: datetime | None = None
+    resolution_created_at: datetime | None = None
 
 
 class CollaborationDecisionResponse(BaseModel):
@@ -818,6 +894,64 @@ class CollaborationDetailResponse(BaseModel):
     interface_version: str
     config_version: int
     config_summary: str
+    paused_worker_item_count: int = 0
+    pending_release_proposal_count: int = 0
+    attention_subtasks: tuple["CollaborationAttentionSubtaskResponse", ...] = ()
+
+
+class CollaborationAttentionSubtaskResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtask_key: str
+    subtask_title: str
+    pending_count: int
+    first_worker_item_title: str
+    deep_link: str
+    subtask_id: UUID | None = None
+
+
+class CollaborationGovernanceWorkerItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID | None
+    subtask_key: str
+    subtask_title: str
+    worker_item_id: UUID
+    worker_item_key: str
+    worker_item_title: str
+    worker_item_role: str
+    worker_item_responsibility: str
+    governance: WorkerItemCollaborationSummaryResponse
+
+
+class CollaborationGovernanceProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID | None
+    subtask_key: str
+    subtask_title: str
+    worker_item_id: UUID
+    worker_item_key: str
+    worker_item_title: str
+    proposal_id: UUID
+    status: Literal["pending", "approved", "rejected", "stale"]
+    resource_version: int
+    target_request_version: int
+    reason_code: str
+    summary: str
+    created_at: datetime
+    resolved_at: datetime | None
+    hold_id: UUID
+    hold_resource_version: int
+    governance_mode: Literal["automatic", "paused"]
+    available_actions: tuple[
+        Literal["pause", "approve", "reject", "resume_automatic"], ...
+    ]
+    deep_link: str
 
 
 class CollaborationDecisionPageResponse(BaseModel):
@@ -954,6 +1088,10 @@ class WorkerItemSummaryProjectionResponse(BaseModel):
     plan_sync: WorkerPlanSyncProjectionResponse | None = None
     collaboration_state: str | None = None
     collaboration_waiting_summary: str | None = None
+    governance_mode: Literal["automatic", "paused"] | None = None
+    attention_state: Literal["none", "decision_required"] | None = None
+    proposal_summary: str | None = None
+    worker_item_href: str | None = None
 
 
 class WorkerItemGraphEdgeProjectionResponse(BaseModel):
@@ -1993,6 +2131,35 @@ class RecoverWorkerHandoffPayload(BaseModel):
     replacement_target_worker_id: UUID | None = None
 
 
+class PauseCollaborationReleasePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["web", "main_agent"]
+    reason: str | None = Field(default=None, max_length=2000)
+    target_plan_generation: int = Field(ge=1)
+
+
+class ApproveCollaborationReleaseProposalPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["web", "main_agent"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class RejectCollaborationReleaseProposalPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["web", "main_agent"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ResumeAutomaticCollaborationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["web", "main_agent"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+
 class ContinueExecutionSessionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2199,6 +2366,26 @@ class CommandRequest(BaseModel):
                     "RecoverWorkerHandoff expected_transition_version must match "
                     "expected_version"
                 )
+        elif self.command_type in {
+            "PauseCollaborationRelease",
+            "ApproveCollaborationReleaseProposal",
+            "RejectCollaborationReleaseProposal",
+            "ResumeAutomaticCollaboration",
+        }:
+            target_types: dict[str, AggregateType] = {
+                "PauseCollaborationRelease": "worker_item",
+                "ApproveCollaborationReleaseProposal": "collaboration_release_proposal",
+                "RejectCollaborationReleaseProposal": "collaboration_release_proposal",
+                "ResumeAutomaticCollaboration": "collaboration_governance_hold",
+            }
+            self._require_mutation_target(target_types[self.command_type])
+            payload_types = {
+                "PauseCollaborationRelease": PauseCollaborationReleasePayload,
+                "ApproveCollaborationReleaseProposal": ApproveCollaborationReleaseProposalPayload,
+                "RejectCollaborationReleaseProposal": RejectCollaborationReleaseProposalPayload,
+                "ResumeAutomaticCollaboration": ResumeAutomaticCollaborationPayload,
+            }
+            parsed = payload_types[self.command_type].model_validate(self.payload)
         elif self.command_type in {
             "ReconcileWorkerTransition",
             "ConfirmWorkerTransitionStopped",

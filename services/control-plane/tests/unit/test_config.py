@@ -94,6 +94,7 @@ def test_workspace_settings_have_safe_defaults_and_validate_retention():
 def test_collaboration_settings_have_bounded_defaults():
     settings = Settings(database_url="postgresql+psycopg://test")
 
+    assert settings.collaboration_governance_enabled is False
     assert settings.collaboration_batch_size == 20
     assert settings.collaboration_poll_seconds == 1.0
     assert settings.collaboration_lease_ttl_seconds == 60
@@ -112,3 +113,12 @@ def test_collaboration_settings_have_bounded_defaults():
             database_url="postgresql+psycopg://test",
             collaboration_batch_size=201,
         )
+
+
+def test_collaboration_governance_rollout_switch_can_be_enabled():
+    settings = Settings(
+        database_url="postgresql+psycopg://test",
+        collaboration_governance_enabled=True,
+    )
+
+    assert settings.collaboration_governance_enabled is True

@@ -17,6 +17,7 @@ const PLANNING_REQUEST_ID = "planning-request-1";
 const CONTEXT_ID = "context-1";
 const PACKAGE_ID = "package-1";
 const CANDIDATE_ID = "candidate-1";
+const PROPOSAL_ID = "proposal-1";
 
 function change(
   projection_type: string,
@@ -96,6 +97,46 @@ describe("WorkspaceStreamProvider projection matching", () => {
         change("subtask_workspace", ROOT_TASK_ID),
       ),
     ).toBe(true);
+  });
+
+  it("refreshes governance detail and resource queries without treating it as runtime", () => {
+    const governanceChange = change("collaboration_governance", ROOT_TASK_ID);
+
+    expect(
+      matchesProjectionQuery(
+        ["collaboration-detail", WORKSPACE_ID, ROOT_TASK_ID],
+        WORKSPACE_ID,
+        governanceChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["collaboration-decisions", WORKSPACE_ID, ROOT_TASK_ID],
+        WORKSPACE_ID,
+        governanceChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["collaboration-governance-worker-item", WORKSPACE_ID, WORKER_ITEM_ID],
+        WORKSPACE_ID,
+        change("collaboration_governance", WORKER_ITEM_ID),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["collaboration-governance-proposal", WORKSPACE_ID, PROPOSAL_ID],
+        WORKSPACE_ID,
+        change("collaboration_governance", PROPOSAL_ID),
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
+        ["collaboration-runtime", WORKSPACE_ID, ROOT_TASK_ID],
+        WORKSPACE_ID,
+        governanceChange,
+      ),
+    ).toBe(false);
   });
 
   it("treats a null resource as workspace-wide for its projection type", () => {

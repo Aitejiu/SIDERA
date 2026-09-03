@@ -5,6 +5,9 @@ from fastapi import APIRouter, Depends, Response
 
 from sidera_control_plane.api.dependencies import get_command_service, get_settings
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
+from sidera_control_plane.application.collaboration_governance_commands import (
+    CollaborationGovernanceCommandError,
+)
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.handoff_commands import HandoffCommandError
 from sidera_control_plane.config import Settings
@@ -18,6 +21,15 @@ _HANDOFF_COMMAND_TYPES = frozenset(
         "ConfirmWorkerHandoff",
         "CancelWorkerHandoff",
         "RecoverWorkerHandoff",
+    }
+)
+
+_GOVERNANCE_COMMAND_TYPES = frozenset(
+    {
+        "PauseCollaborationRelease",
+        "ApproveCollaborationReleaseProposal",
+        "RejectCollaborationReleaseProposal",
+        "ResumeAutomaticCollaboration",
     }
 )
 
@@ -104,6 +116,15 @@ def _execute_command(
     service: CommandService,
     settings: Settings,
 ) -> CommandResponse:
+    if request.command_type in _GOVERNANCE_COMMAND_TYPES and (
+        request.actor.type != settings.local_actor_type
+        or request.actor.id != settings.local_actor_id
+    ):
+        raise CollaborationGovernanceCommandError(
+            "collaboration_governance_actor_forbidden",
+            "governance commands require the configured local actor",
+            details={"actor_type": settings.local_actor_type},
+        )
     if request.command_type in _HANDOFF_COMMAND_TYPES and (
         request.actor.type != settings.local_actor_type
         or request.actor.id != settings.local_actor_id

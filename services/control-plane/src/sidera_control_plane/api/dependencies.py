@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import Depends, Request
 
@@ -9,6 +9,15 @@ from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
+)
+from sidera_control_plane.application.collaboration_governance_commands import (
+    CollaborationGovernanceCommandHandler,
+)
+from sidera_control_plane.application.collaboration_governance_release import (
+    CollaborationGovernanceReleaseApplier,
+)
+from sidera_control_plane.application.collaboration_projection import (
+    CollaborationProjectionAssembler,
 )
 from sidera_control_plane.application.collaboration_queries import (
     CollaborationQueryService,
@@ -77,6 +86,9 @@ from sidera_control_plane.application.worker_workspace_queries import (
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
+)
+from sidera_control_plane.persistence.collaboration_fact_store import (
+    SqlAlchemyCollaborationFactStore,
 )
 from sidera_control_plane.persistence.collaboration_query_store import (
     SqlAlchemyCollaborationQueryStore,
@@ -151,6 +163,14 @@ def get_command_service(
         factory,
         runtime_resolver=runtime_resolver,
     )
+    governance_approver = CollaborationGovernanceReleaseApplier(
+        fact_store_factory=lambda uow: SqlAlchemyCollaborationFactStore(
+            session=cast(SqlAlchemyUnitOfWork, uow).session
+        ),
+        projection_assembler=CollaborationProjectionAssembler(
+            max_projection_bytes=settings.collaboration_max_projection_bytes
+        ),
+    )
     return CommandService(
         factory,
         (
@@ -195,6 +215,13 @@ def get_command_service(
                 candidate_service=handoff_candidates,
                 runtime_resolver=runtime_resolver,
                 recovery_service=handoff_recovery,
+            ),
+            CollaborationGovernanceCommandHandler(
+                lambda: datetime.now(UTC),
+                local_actor_type=settings.local_actor_type,
+                local_actor_id=settings.local_actor_id,
+                enabled=settings.collaboration_governance_enabled,
+                approver=governance_approver,
             ),
         ),
     )
@@ -327,8 +354,12 @@ def get_task_first_query_service(
 
 def get_collaboration_query_service(
     database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> CollaborationQueryService:
-    return CollaborationQueryService(SqlAlchemyCollaborationQueryStore(database))
+    return CollaborationQueryService(
+        SqlAlchemyCollaborationQueryStore(database),
+        governance_enabled=settings.collaboration_governance_enabled,
+    )
 
 
 def get_task_console_query_service(
@@ -339,13 +370,18 @@ def get_task_console_query_service(
         SqlAlchemyTaskConsoleQueryStore(database),
         actor_type=settings.local_actor_type,
         actor_id=settings.local_actor_id,
+        governance_enabled=settings.collaboration_governance_enabled,
     )
 
 
 def get_subtask_workspace_query_service(
     database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> SubtaskWorkspaceQueryService:
-    return SubtaskWorkspaceQueryService(SqlAlchemySubtaskWorkspaceQueryStore(database))
+    return SubtaskWorkspaceQueryService(
+        SqlAlchemySubtaskWorkspaceQueryStore(database),
+        governance_enabled=settings.collaboration_governance_enabled,
+    )
 
 
 def get_worker_trace_query_service(
@@ -356,8 +392,12 @@ def get_worker_trace_query_service(
 
 def get_worker_workspace_query_service(
     database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> WorkerWorkspaceQueryService:
-    return WorkerWorkspaceQueryService(SqlAlchemyWorkerWorkspaceQueryStore(database))
+    return WorkerWorkspaceQueryService(
+        SqlAlchemyWorkerWorkspaceQueryStore(database),
+        governance_enabled=settings.collaboration_governance_enabled,
+    )
 
 
 def get_artifact_content_service(

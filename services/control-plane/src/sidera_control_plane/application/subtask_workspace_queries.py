@@ -62,10 +62,14 @@ class SubtaskWorkspaceQueryStore(Protocol):
 
 
 class SubtaskWorkspaceQueryService:
-    def __init__(self, store: SubtaskWorkspaceQueryStore) -> None:
+    def __init__(
+        self, store: SubtaskWorkspaceQueryStore, *, governance_enabled: bool = True
+    ) -> None:
         self._store = store
         self._composer = SubtaskWorkspaceProjectionService()
-        self._collaboration = CollaborationProjectionService()
+        self._collaboration = CollaborationProjectionService(
+            governance_enabled=governance_enabled
+        )
 
     def get(
         self,

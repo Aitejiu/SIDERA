@@ -46,6 +46,17 @@ class GovernanceReleaseApprover(Protocol):
         raise NotImplementedError
 
 
+class TransactionalGovernanceReleaseApprover(Protocol):
+    def approve_in_transaction(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        command: CommandEnvelope,
+        *,
+        now: datetime,
+    ) -> CommandResult:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True, slots=True)
 class _CommandPayload:
     transport: GovernanceTransport
@@ -78,7 +89,9 @@ class CollaborationGovernanceCommandHandler:
         local_actor_type: str = "local",
         local_actor_id: str = "aitejiu",
         enabled: bool = True,
-        approver: GovernanceReleaseApprover | None = None,
+        approver: GovernanceReleaseApprover
+        | TransactionalGovernanceReleaseApprover
+        | None = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._local_actor_type = local_actor_type
@@ -114,10 +127,12 @@ class CollaborationGovernanceCommandHandler:
                 )
             transactional = getattr(self._approver, "approve_in_transaction", None)
             if callable(transactional):
-                return cast(Callable[..., CommandResult], transactional)(
-                    uow, envelope, now=self._clock()
-                )
-            return self._approver.approve(envelope, now=self._clock())
+                return cast(
+                    TransactionalGovernanceReleaseApprover, self._approver
+                ).approve_in_transaction(uow, envelope, now=self._clock())
+            return cast(GovernanceReleaseApprover, self._approver).approve(
+                envelope, now=self._clock()
+            )
         _raise(
             "collaboration_governance_target_invalid", "unsupported governance command"
         )

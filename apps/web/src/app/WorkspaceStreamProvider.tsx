@@ -220,6 +220,11 @@ export function matchesProjectionQuery(
       return queryType === "worker-item-workspace" && matchesResource();
     case "worker_item_activity":
       return queryType === "worker-item-activity" && matchesResource();
+    case "collaboration_governance":
+      return queryType === "collaboration-detail"
+        || queryType === "collaboration-decisions"
+        || (queryType === "collaboration-governance-worker-item" && matchesResource())
+        || (queryType === "collaboration-governance-proposal" && matchesResource());
     case "worker_trace":
       return queryType === "worker-traces" ||
         (queryType === "worker-trace" && matchesResource());

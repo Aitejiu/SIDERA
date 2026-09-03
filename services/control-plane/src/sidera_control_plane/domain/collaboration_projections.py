@@ -335,6 +335,9 @@ class _WorkerGovernanceProjection:
 class CollaborationProjectionService:
     """Compose bounded, current-plan collaboration views from query facts."""
 
+    def __init__(self, *, governance_enabled: bool = True) -> None:
+        self._governance_enabled = governance_enabled
+
     def root_summary(
         self, facts: CollaborationProjectionFacts
     ) -> RootCollaborationSummaryProjection:
@@ -377,13 +380,19 @@ class CollaborationProjectionService:
             and proposal.execution_request_id in current_request_ids
             and proposal.status == "pending"
         )
+        if not self._governance_enabled:
+            pending_proposals = ()
         attention_subtasks = self._attention_subtasks(facts, pending_proposals)
         attention_required = (
             facts.run.status == "blocked"
             or any(
                 _is_attention_reason(request.gate_reason) for request in facts.requests
             )
-            or (facts.run.policy_enabled and bool(pending_proposals))
+            or (
+                self._governance_enabled
+                and facts.run.policy_enabled
+                and bool(pending_proposals)
+            )
         )
         if attention_required:
             status = "attention"
@@ -425,12 +434,20 @@ class CollaborationProjectionService:
             attention_required=attention_required,
             detail_href=_detail_href(facts.plan.workspace_id, facts.plan.root_task_id),
             paused_worker_item_count=(
-                len(active_holds) if facts.run.policy_enabled else 0
+                len(active_holds)
+                if self._governance_enabled and facts.run.policy_enabled
+                else 0
             ),
             pending_release_proposal_count=(
-                len(pending_proposals) if facts.run.policy_enabled else 0
+                len(pending_proposals)
+                if self._governance_enabled and facts.run.policy_enabled
+                else 0
             ),
-            attention_subtasks=(attention_subtasks if facts.run.policy_enabled else ()),
+            attention_subtasks=(
+                attention_subtasks
+                if self._governance_enabled and facts.run.policy_enabled
+                else ()
+            ),
         )
 
     def subtask_summary(
@@ -527,43 +544,52 @@ class CollaborationProjectionService:
                 if link not in upstream_links:
                     upstream_links.append(link)
         governance = self._worker_governance(facts, request)
-        available_actions = governance.available_actions
-        if not facts.run.policy_enabled:
-            available_actions = ()
+        governance_visible = self._governance_enabled and facts.run.policy_enabled
+        available_actions = governance.available_actions if governance_visible else ()
         return WorkerItemCollaborationSummaryProjection(
             enabled=facts.run.policy_enabled,
             state=state,
             waiting_summary=_state_summary(state, request.gate_reason),
             upstream_links=tuple(upstream_links),
             governance_mode=(
-                governance.governance_mode if facts.run.policy_enabled else "automatic"
+                governance.governance_mode if governance_visible else "automatic"
             ),
             active_hold_id=(
-                governance.hold.id if governance.hold is not None else None
+                governance.hold.id
+                if governance_visible and governance.hold is not None
+                else None
             ),
             hold_resource_version=(
                 governance.hold.resource_version
-                if governance.hold is not None
+                if governance_visible and governance.hold is not None
                 else None
             ),
             hold_reason=(
-                governance.hold.reason if governance.hold is not None else None
+                governance.hold.reason
+                if governance_visible and governance.hold is not None
+                else None
             ),
             hold_created_at=(
-                governance.hold.created_at if governance.hold is not None else None
+                governance.hold.created_at
+                if governance_visible and governance.hold is not None
+                else None
             ),
-            release_state=governance.release_state,
-            active_proposal=governance.active_proposal,
+            release_state=(
+                governance.release_state if governance_visible else "unreleased"
+            ),
+            active_proposal=(
+                governance.active_proposal if governance_visible else None
+            ),
             available_actions=available_actions,
-            governance_history=governance.history,
+            governance_history=(governance.history if governance_visible else ()),
             attention_state=(
                 "decision_required"
-                if governance.pending_proposal is not None
+                if governance_visible and governance.pending_proposal is not None
                 else "none"
             ),
             proposal_summary=(
                 governance.pending_proposal.summary
-                if governance.pending_proposal is not None
+                if governance_visible and governance.pending_proposal is not None
                 else None
             ),
         )
