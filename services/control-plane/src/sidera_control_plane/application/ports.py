@@ -2096,6 +2096,7 @@ class ControlPlaneUnitOfWork(Protocol):
     collaboration_runs: CollaborationRunRepositoryPort
     collaboration_evaluations: CollaborationEvaluationRepositoryPort
     collaboration_ledger: CollaborationLedgerRepositoryPort
+    collaboration_governance: CollaborationGovernanceRepositoryPort
     handoff_proposals: HandoffProposalRepositoryPort
     handoff_transitions: HandoffTransitionRepositoryPort
     handoff_context_bundles: HandoffContextBundleRepositoryPort

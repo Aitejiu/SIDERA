@@ -8,8 +8,15 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_control_plane.application.collaboration_governance_disposition import (
+    CollaborationGovernanceDispositionService,
+)
 from sidera_control_plane.application.collaboration_projection import (
     CollaborationProjectionAssembler,
+)
+from sidera_control_plane.application.collaboration_release_validation import (
+    CollaborationReleaseEligibilityValidator,
+    ReleaseEligibilityAssessment,
 )
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.ports import (
@@ -27,6 +34,9 @@ from sidera_control_plane.domain.collaboration import (
     RuntimeIntentApplication,
     RuntimeIntentApplicationStatus,
     RuntimeRelease,
+)
+from sidera_control_plane.domain.collaboration_governance import (
+    CollaborationReleaseProposal,
 )
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionOutcome,
@@ -158,6 +168,7 @@ class CollaborationDecisionApplicationResult:
     intents: tuple[RuntimeIntent, ...]
     applications: tuple[RuntimeIntentApplication, ...]
     releases: tuple[RuntimeRelease, ...]
+    proposals: tuple[CollaborationReleaseProposal, ...]
     status: str
 
     @property
@@ -165,13 +176,7 @@ class CollaborationDecisionApplicationResult:
         return tuple(item.id for item in self.releases)
 
 
-@dataclass(frozen=True, slots=True)
-class _IntentAssessment:
-    status: RuntimeIntentApplicationStatus
-    result_code: str
-    result_summary: str
-    request: ExecutionRequest | None
-    existing_release: RuntimeRelease | None = None
+_IntentAssessment = ReleaseEligibilityAssessment
 
 
 class CollaborationDecisionService:
@@ -194,6 +199,8 @@ class CollaborationDecisionService:
             projection_assembler or CollaborationProjectionAssembler()
         )
         self._owner_id = owner_id.strip()
+        self._release_validator = CollaborationReleaseEligibilityValidator()
+        self._governance_disposition = CollaborationGovernanceDispositionService()
         self._plan_transition_allows = plan_transition_allows or (
             lambda _uow, _request: True
         )
@@ -302,6 +309,7 @@ class CollaborationDecisionService:
                 assessments: tuple[_IntentAssessment, ...] = ()
                 applications: tuple[RuntimeIntentApplication, ...] = ()
                 new_releases: tuple[RuntimeRelease, ...] = ()
+                proposals: tuple[CollaborationReleaseProposal, ...] = ()
                 status = "stale" if stale_reason is not None else "no_change"
             else:
                 assessments = self._assess_intents(
@@ -313,6 +321,24 @@ class CollaborationDecisionService:
                     current_projection=current_projection,
                     stale_reason=stale_reason,
                 )
+                proposals = ()
+                if current_projection is not None and not any(
+                    item.status is RuntimeIntentApplicationStatus.STALE
+                    for item in assessments
+                ) and not any(
+                    item.status is RuntimeIntentApplicationStatus.REJECTED
+                    for item in assessments
+                ):
+                    disposition = self._governance_disposition.dispose(
+                        uow=uow,
+                        intents=intents,
+                        assessments=assessments,
+                        run=run,
+                        current_projection=current_projection,
+                        now=now,
+                    )
+                    assessments = disposition.assessments
+                    proposals = disposition.proposals
                 if any(
                     item.status is RuntimeIntentApplicationStatus.STALE
                     for item in assessments
@@ -346,6 +372,11 @@ class CollaborationDecisionService:
                     for item in assessments
                 ):
                     status = "duplicate"
+                elif proposals and not any(
+                    item.status is RuntimeIntentApplicationStatus.APPLIED
+                    for item in assessments
+                ):
+                    status = "deferred"
                 else:
                     status = "applied"
 
@@ -408,6 +439,8 @@ class CollaborationDecisionService:
                         run=run,
                         intent=intent,
                     )
+            for proposal in proposals:
+                self._emit_proposal_created(uow, proposal, run=run)
             if stale_reason is not None:
                 uow.projection_changes.changed(
                     workspace_id=run.workspace_id,
@@ -440,6 +473,7 @@ class CollaborationDecisionService:
                 intents=intents,
                 applications=applications,
                 releases=new_releases,
+                proposals=proposals,
                 status=status,
             )
 
@@ -628,7 +662,6 @@ class CollaborationDecisionService:
                 )
                 for item in intents
             )
-        entries = _projection_requests(current_projection)
         assessments: list[_IntentAssessment] = []
         seen_targets: set[UUID] = set()
         for intent in intents:
@@ -646,114 +679,14 @@ class CollaborationDecisionService:
                 )
                 continue
             seen_targets.add(request_id)
-            if request is None:
-                assessments.append(
-                    _rejected(
-                        None,
-                        "intent_target_invalid",
-                        "the target ExecutionRequest does not exist in this workspace",
-                    )
-                )
-                continue
-            if not _request_matches_run(request, run):
-                assessments.append(
-                    _rejected(
-                        request,
-                        "intent_target_invalid",
-                        "the target ExecutionRequest is outside the current Run",
-                        existing_release=existing,
-                    )
-                )
-                continue
-            if existing is not None:
-                if (
-                    _release_matches(
-                        request,
-                        run=run,
-                        release=existing,
-                        plan_head=head,
-                    )
-                    and existing.request_version_at_release
-                    == intent.target_request_version
-                ):
-                    assessments.append(
-                        _IntentAssessment(
-                            status=RuntimeIntentApplicationStatus.DUPLICATE,
-                            result_code="duplicate",
-                            result_summary="the target request already has this Release",
-                            request=request,
-                            existing_release=existing,
-                        )
-                    )
-                else:
-                    assessments.append(
-                        _rejected(
-                            request,
-                            "decision_conflict",
-                            "the target request has a different Release identity",
-                            existing_release=existing,
-                        )
-                    )
-                continue
-            if request.version != intent.target_request_version:
-                assessments.append(
-                    _IntentAssessment(
-                        status=RuntimeIntentApplicationStatus.STALE,
-                        result_code="projection_stale",
-                        result_summary="the target request version changed",
-                        request=request,
-                    )
-                )
-                continue
-            if (
-                request.collaboration_gate_mode
-                is not CollaborationGateMode.RELEASE_REQUIRED
-            ):
-                assessments.append(
-                    _rejected(
-                        request,
-                        "intent_target_invalid",
-                        "only release-required requests can receive a Runtime Release",
-                    )
-                )
-                continue
-            if request.status not in {
-                ExecutionRequestStatus.BLOCKED,
-                ExecutionRequestStatus.READY,
-            }:
-                assessments.append(
-                    _rejected(
-                        request,
-                        "intent_target_invalid",
-                        "the target request is already closed",
-                    )
-                )
-                continue
-            entry = entries.get(request.id)
-            if entry is None:
-                assessments.append(
-                    _rejected(
-                        request,
-                        "intent_target_invalid",
-                        "the target request is absent from the current Projection",
-                    )
-                )
-                continue
-            if entry.get("eligible") is not True:
-                assessments.append(
-                    _rejected(
-                        request,
-                        "join_condition_unsatisfied",
-                        "the target request no longer satisfies all_required",
-                    )
-                )
-                continue
             assessments.append(
-                _IntentAssessment(
-                    status=RuntimeIntentApplicationStatus.APPLIED,
-                    result_code="applied",
-                    result_summary="Release issued",
+                self._release_validator.assess(
+                    intent,
                     request=request,
+                    run=run,
+                    plan_head=head,
+                    current_projection=current_projection,
+                    existing_release=existing,
                 )
             )
         return tuple(assessments)
@@ -795,7 +728,11 @@ class CollaborationDecisionService:
                 result_summary=assessment.result_summary,
                 resource_version=1,
                 created_at=now,
-                applied_at=now,
+                applied_at=(
+                    None
+                    if assessment.status is RuntimeIntentApplicationStatus.DEFERRED
+                    else now
+                ),
             )
             for intent, assessment in zip(intents, assessments, strict=True)
         )
@@ -958,6 +895,31 @@ class CollaborationDecisionService:
                 "request_version_at_release": release.request_version_at_release,
                 "status": request.status.value,
                 "gate_reason": request.gate_reason,
+            },
+        )
+
+    def _emit_proposal_created(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        proposal: CollaborationReleaseProposal,
+        *,
+        run: CollaborationRun,
+    ) -> None:
+        self._emit_event(
+            uow,
+            event_type="CollaborationReleaseProposalCreated",
+            aggregate_type="collaboration_release_proposal",
+            aggregate_id=proposal.id,
+            aggregate_version=proposal.resource_version,
+            run=run,
+            payload={
+                "proposal_id": str(proposal.id),
+                "hold_id": str(proposal.hold_id),
+                "execution_request_id": str(proposal.execution_request_id),
+                "intent_id": str(proposal.intent_id),
+                "status": proposal.status.value,
+                "reason_code": proposal.reason_code,
+                "input_fingerprint_version": proposal.input_fingerprint_version,
             },
         )
 
