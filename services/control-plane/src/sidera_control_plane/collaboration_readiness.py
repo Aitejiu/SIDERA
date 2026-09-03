@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 import sys
@@ -16,6 +17,9 @@ from sqlalchemy import text
 
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
     ReferenceCollaborationRuntime,
+)
+from sidera_control_plane.application.collaboration_governance_commands import (
+    CollaborationGovernanceCommandHandler,
 )
 from sidera_control_plane.application.collaboration_runtime_resolver import (
     CollaborationRuntimeFactory,
@@ -35,6 +39,22 @@ from sidera_control_plane.persistence.database import Database
 
 _STABLE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_GOVERNANCE_MIGRATION_HEAD = "0024_r6_3_2_human_release_governance"
+_GOVERNANCE_TABLES = frozenset(
+    {
+        "collaboration_governance_holds",
+        "collaboration_release_proposals",
+        "collaboration_governance_resolutions",
+    }
+)
+_GOVERNANCE_COMMAND_TYPES = frozenset(
+    {
+        "PauseCollaborationRelease",
+        "ApproveCollaborationReleaseProposal",
+        "RejectCollaborationReleaseProposal",
+        "ResumeAutomaticCollaboration",
+    }
+)
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(?:api[_-]?key|provider[_-]?key|token|secret|password|authorization)"
     r"\s*[:=]\s*[^\s,;]+"
@@ -125,14 +145,30 @@ def build_collaboration_readiness(
     factory = runtime_factory or RegistryCollaborationRuntimeFactory(
         {"reference": lambda _instance: ReferenceCollaborationRuntime()}
     )
-    return CollaborationReadiness(
-        checks=(
-            lambda: _database_check(database),
-            lambda: _alembic_check(database),
-            lambda: _reference_runtime_check(factory),
-            lambda: _capability_check(),
+    checks: list[CheckFactory] = [
+        lambda: _database_check(database),
+        lambda: _alembic_check(
+            database,
+            required_head=(
+                _GOVERNANCE_MIGRATION_HEAD
+                if settings.collaboration_governance_enabled
+                else None
+            ),
+        ),
+        lambda: _reference_runtime_check(factory),
+        _capability_check,
+    ]
+    if settings.collaboration_governance_enabled:
+        checks.extend(
+            (
+                lambda: _governance_schema_check(database),
+                _governance_handler_check,
+                _collaboration_worker_check,
+            )
         )
-    )
+    else:
+        checks.append(_governance_disabled_check)
+    return CollaborationReadiness(checks=tuple(checks))
 
 
 def _database_check(database: Database) -> ReadinessCheck:
@@ -154,7 +190,11 @@ def _database_check(database: Database) -> ReadinessCheck:
     )
 
 
-def _alembic_check(database: Database) -> ReadinessCheck:
+def _alembic_check(
+    database: Database,
+    *,
+    required_head: str | None = None,
+) -> ReadinessCheck:
     try:
         control_plane_root = Path(__file__).resolve().parents[2]
         config = AlembicConfig(str(control_plane_root / "alembic.ini"))
@@ -163,8 +203,14 @@ def _alembic_check(database: Database) -> ReadinessCheck:
         )
         heads = set(ScriptDirectory.from_config(config).get_heads())
         with database.engine.connect() as connection:
-            current = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        if not heads or current not in heads:
+            current = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+        if (
+            not heads
+            or current not in heads
+            or (required_head is not None and current != required_head)
+        ):
             return ReadinessCheck(
                 name="alembic",
                 ready=False,
@@ -183,6 +229,137 @@ def _alembic_check(database: Database) -> ReadinessCheck:
         ready=True,
         code="ok",
         summary="database is at the current Alembic head",
+    )
+
+
+def _governance_disabled_check() -> ReadinessCheck:
+    return ReadinessCheck(
+        name="governance",
+        ready=True,
+        code="governance_disabled",
+        summary=(
+            "human release governance is disabled; automatic collaboration remains active"
+        ),
+    )
+
+
+def _governance_schema_check(database: Database) -> ReadinessCheck:
+    try:
+        with database.engine.connect() as connection:
+            tables = {
+                str(item)
+                for item in connection.execute(
+                    text(
+                        "SELECT table_name "
+                        "FROM information_schema.tables "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name IN ("
+                        "'collaboration_governance_holds', "
+                        "'collaboration_release_proposals', "
+                        "'collaboration_governance_resolutions')"
+                    )
+                ).scalars()
+            }
+            constraint_definition = connection.execute(
+                text(
+                    "SELECT pg_get_constraintdef(constraint_oid) "
+                    "FROM ("
+                    "SELECT c.oid AS constraint_oid "
+                    "FROM pg_constraint AS c "
+                    "JOIN pg_class AS r ON r.oid = c.conrelid "
+                    "JOIN pg_namespace AS n ON n.oid = r.relnamespace "
+                    "WHERE n.nspname = 'public' "
+                    "AND r.relname = 'runtime_intent_applications' "
+                    "AND c.conname = 'ck_runtime_intent_applications_status'"
+                    ") AS current_constraint"
+                )
+            ).scalar()
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="governance_schema",
+            ready=False,
+            code="governance_schema_unavailable",
+            summary="governance schema could not be verified",
+        )
+    if tables != _GOVERNANCE_TABLES:
+        return ReadinessCheck(
+            name="governance_schema",
+            ready=False,
+            code="governance_tables_missing",
+            summary="the governance ledger tables are not all present",
+        )
+    if (
+        not isinstance(constraint_definition, str)
+        or "deferred" not in constraint_definition
+    ):
+        return ReadinessCheck(
+            name="governance_schema",
+            ready=False,
+            code="governance_deferred_status_missing",
+            summary="Runtime Intent Applications do not support deferred status",
+        )
+    return ReadinessCheck(
+        name="governance_schema",
+        ready=True,
+        code="ok",
+        summary="governance ledger tables and deferred status are available",
+    )
+
+
+def _governance_handler_check() -> ReadinessCheck:
+    try:
+        handler_types = CollaborationGovernanceCommandHandler.command_types
+        if handler_types != _GOVERNANCE_COMMAND_TYPES or not callable(
+            CollaborationGovernanceCommandHandler.handle
+        ):
+            raise TypeError("governance command handler contract is incomplete")
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="governance_handler",
+            ready=False,
+            code="governance_handler_unavailable",
+            summary="the four governance commands are not registered",
+        )
+    return ReadinessCheck(
+        name="governance_handler",
+        ready=True,
+        code="ok",
+        summary="Pause, Approve, Reject, and Resume commands are available",
+    )
+
+
+def _collaboration_worker_check() -> ReadinessCheck:
+    try:
+        from sidera_control_plane.application.collaboration_reconciler import (
+            CollaborationReconciler,
+        )
+        from sidera_control_plane.collaboration_worker import CollaborationWorker
+
+        worker_parameters = inspect.signature(CollaborationWorker).parameters
+        reconciler_parameters = inspect.signature(CollaborationReconciler).parameters
+        required_worker = {"run_once", "run_forever"}
+        if not all(
+            callable(getattr(CollaborationWorker, name, None))
+            for name in required_worker
+        ):
+            raise TypeError("collaboration worker methods are incomplete")
+        if (
+            "recovery_sweep" not in worker_parameters
+            or "governance_reconciler" not in reconciler_parameters
+        ):
+            raise TypeError("collaboration worker has no governance recovery support")
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="collaboration_worker",
+            ready=False,
+            code="collaboration_worker_incompatible",
+            summary="the collaboration worker cannot consume governance state",
+        )
+    return ReadinessCheck(
+        name="collaboration_worker",
+        ready=True,
+        code="ok",
+        summary="the collaboration worker supports governance disposition and recovery",
     )
 
 
@@ -271,7 +448,9 @@ def _reference_capability() -> CollaborationRuntimeCapabilityProfile:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Audit SIDERA collaboration worker readiness")
+    parser = argparse.ArgumentParser(
+        description="Audit SIDERA collaboration worker readiness"
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
     database: Database | None = None
@@ -280,11 +459,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         database = Database(settings.database_url)
         report = build_collaboration_readiness(settings, database).check()
         if args.as_json:
-            print(json.dumps(report.to_payload(), sort_keys=True, separators=(",", ":")))
-        else:
             print(
-                f"collaboration worker: {'READY' if report.ready else 'NOT READY'}"
+                json.dumps(report.to_payload(), sort_keys=True, separators=(",", ":"))
             )
+        else:
+            print(f"collaboration worker: {'READY' if report.ready else 'NOT READY'}")
             for check in report.checks:
                 print(f"{check.name}: {check.code} - {check.summary}")
         return 0 if report.ready else 2

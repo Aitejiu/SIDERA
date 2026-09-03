@@ -5,9 +5,15 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, case, func, select
 
 from sidera_control_plane.application.collaboration_metrics import (
+    COLLABORATION_GOVERNANCE_COMMAND_RESULTS,
+    COLLABORATION_GOVERNANCE_COMMANDS,
+    COLLABORATION_GOVERNANCE_CONFLICT_OPERATIONS,
+    COLLABORATION_GOVERNANCE_RESOLUTION_ACTIONS,
+    COLLABORATION_GOVERNANCE_RESOLUTION_RESULTS,
+    COLLABORATION_GOVERNANCE_STALE_REASONS,
     CollaborationMetricSample,
     CollaborationMetricsView,
 )
@@ -20,7 +26,11 @@ from sidera_control_plane.application.runtime_metrics import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     CollaborationEvaluationModel,
+    CollaborationGovernanceHoldModel,
+    CollaborationGovernanceResolutionModel,
+    CollaborationReleaseProposalModel,
     CollaborationRunModel,
+    CommandModel,
     EventModel,
     ExecutionBindingModel,
     ExecutionModel,
@@ -32,6 +42,24 @@ from sidera_control_plane.persistence.models import (
 )
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyResourceQueryStore,
+)
+
+_GOVERNANCE_COMMAND_LABELS = {
+    "PauseCollaborationRelease": "pause",
+    "ApproveCollaborationReleaseProposal": "approve",
+    "RejectCollaborationReleaseProposal": "reject",
+    "ResumeAutomaticCollaboration": "resume_automatic",
+}
+_GOVERNANCE_COMMAND_TYPES = tuple(_GOVERNANCE_COMMAND_LABELS)
+_GOVERNANCE_CONFLICT_CODES = frozenset(
+    {
+        "version_conflict",
+        "plan_generation_conflict",
+        "collaboration_governance_hold_exists",
+        "collaboration_governance_hold_not_active",
+        "collaboration_governance_proposal_not_pending",
+        "collaboration_governance_generation_stale",
+    }
 )
 
 
@@ -70,7 +98,9 @@ class SqlAlchemyRuntimeMetricsStore:
             duration
             for event_type, payload in event_rows
             if event_type == "ExecutionRuntimeBound"
-            for duration in (_duration_value(payload.get("assignment_duration_seconds")),)
+            for duration in (
+                _duration_value(payload.get("assignment_duration_seconds")),
+            )
             if duration is not None
         )
         runtime_status = Counter(
@@ -103,7 +133,8 @@ class SqlAlchemyRuntimeMetricsStore:
                     ExecutionBindingModel,
                     and_(
                         ExecutionBindingModel.execution_id == ExecutionModel.id,
-                        ExecutionBindingModel.workspace_id == ExecutionModel.workspace_id,
+                        ExecutionBindingModel.workspace_id
+                        == ExecutionModel.workspace_id,
                     ),
                 )
                 .where(
@@ -126,8 +157,12 @@ class SqlAlchemyRuntimeMetricsStore:
         mismatches = tuple(
             worker for worker in readiness_workers if worker.runtime_status == "invalid"
         )
-        missing = sum(worker.runtime_status == "missing" for worker in readiness_workers)
-        invalid = sum(worker.runtime_status == "invalid" for worker in readiness_workers)
+        missing = sum(
+            worker.runtime_status == "missing" for worker in readiness_workers
+        )
+        invalid = sum(
+            worker.runtime_status == "invalid" for worker in readiness_workers
+        )
         return RuntimeReadinessView(
             workspace_id=workspace_id,
             as_of=datetime.now(UTC),
@@ -183,9 +218,118 @@ class SqlAlchemyRuntimeMetricsStore:
                     )
                 ).all()
             )
+            active_holds = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(CollaborationGovernanceHoldModel)
+                    .where(
+                        CollaborationGovernanceHoldModel.workspace_id == workspace_id,
+                        CollaborationGovernanceHoldModel.status == "active",
+                    )
+                )
+                or 0
+            )
+            pending_proposals = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(CollaborationReleaseProposalModel)
+                    .where(
+                        CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                        CollaborationReleaseProposalModel.status == "pending",
+                    )
+                )
+                or 0
+            )
+            oldest_pending_proposal = session.scalar(
+                select(func.min(CollaborationReleaseProposalModel.created_at)).where(
+                    CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                    CollaborationReleaseProposalModel.status == "pending",
+                )
+            )
+            command_result = case(
+                (
+                    and_(
+                        CommandModel.status == "applied",
+                        CommandModel.command_type
+                        == "ApproveCollaborationReleaseProposal",
+                        CollaborationGovernanceResolutionModel.result == "stale",
+                    ),
+                    "stale",
+                ),
+                (CommandModel.status == "applied", "applied"),
+                (
+                    CommandModel.rejection_reason.in_(_GOVERNANCE_CONFLICT_CODES),
+                    "conflict",
+                ),
+                else_="rejected",
+            ).label("result")
+            command_rows = session.execute(
+                select(CommandModel.command_type, command_result, func.count())
+                .select_from(CommandModel)
+                .outerjoin(
+                    CollaborationGovernanceResolutionModel,
+                    and_(
+                        CollaborationGovernanceResolutionModel.workspace_id
+                        == CommandModel.workspace_id,
+                        CollaborationGovernanceResolutionModel.command_id
+                        == CommandModel.id,
+                    ),
+                )
+                .where(
+                    CommandModel.workspace_id == workspace_id,
+                    CommandModel.command_type.in_(_GOVERNANCE_COMMAND_TYPES),
+                )
+                .group_by(CommandModel.command_type, command_result)
+            ).all()
+            resolution_rows = session.execute(
+                select(
+                    CollaborationGovernanceResolutionModel.action,
+                    CollaborationGovernanceResolutionModel.result,
+                    func.count(),
+                )
+                .where(
+                    CollaborationGovernanceResolutionModel.workspace_id == workspace_id
+                )
+                .group_by(
+                    CollaborationGovernanceResolutionModel.action,
+                    CollaborationGovernanceResolutionModel.result,
+                )
+            ).all()
+            stale_event_reason = func.coalesce(
+                EventModel.payload["reason_code"].as_string(),
+                EventModel.payload["code"].as_string(),
+            )
+            stale_reason = case(
+                *(
+                    (stale_event_reason == reason, reason)
+                    for reason in COLLABORATION_GOVERNANCE_STALE_REASONS
+                    if reason != "unknown"
+                ),
+                else_="unknown",
+            ).label("reason_code")
+            stale_rows = session.execute(
+                select(stale_reason, func.count())
+                .select_from(CollaborationReleaseProposalModel)
+                .outerjoin(
+                    EventModel,
+                    and_(
+                        EventModel.workspace_id == workspace_id,
+                        EventModel.aggregate_type == "collaboration_release_proposal",
+                        EventModel.aggregate_id == CollaborationReleaseProposalModel.id,
+                        EventModel.event_type == "CollaborationReleaseProposalStale",
+                    ),
+                )
+                .where(
+                    CollaborationReleaseProposalModel.workspace_id == workspace_id,
+                    CollaborationReleaseProposalModel.status == "stale",
+                )
+                .group_by(stale_reason)
+            ).all()
 
         counts: Counter[tuple[str, tuple[tuple[str, str], ...]]] = Counter()
-        values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(float)
+        values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(
+            float
+        )
 
         for evaluation in evaluations:
             _increment_metric(
@@ -228,17 +372,17 @@ class SqlAlchemyRuntimeMetricsStore:
             # Applications are the authoritative result for an intent. Missing
             # applications remain visible as pending without exposing intent IDs.
             application = next(
-                (
-                    item
-                    for item in applications
-                    if item.intent_id == _intent.id
-                ),
+                (item for item in applications if item.intent_id == _intent.id),
                 None,
             )
             _increment_metric(
                 counts,
                 "sidera_collaboration_intents_total",
-                {"outcome": _stable_intent_outcome(application.status if application else "pending")},
+                {
+                    "outcome": _stable_intent_outcome(
+                        application.status if application else "pending"
+                    )
+                },
             )
         for _release in releases:
             _increment_metric(
@@ -247,11 +391,25 @@ class SqlAlchemyRuntimeMetricsStore:
                 {"outcome": "issued"},
             )
 
+        _add_governance_metrics(
+            counts,
+            values,
+            active_holds=active_holds,
+            pending_proposals=pending_proposals,
+            oldest_pending_proposal=oldest_pending_proposal,
+            now=now,
+            command_rows=command_rows,
+            resolution_rows=resolution_rows,
+            stale_rows=stale_rows,
+        )
         _add_collaboration_zero_series(counts, values)
         samples = tuple(
             CollaborationMetricSample(name=name, labels=labels, value=float(value))
             for (name, labels), value in sorted(
-                (*((key, float(value)) for key, value in counts.items()), *values.items())
+                (
+                    *((key, float(value)) for key, value in counts.items()),
+                    *values.items(),
+                )
             )
         )
         return CollaborationMetricsView(
@@ -297,7 +455,9 @@ def _sorted_counts(values: Counter[str]) -> dict[str, int]:
     return {key: int(values[key]) for key in sorted(values)}
 
 
-def _metric_key(name: str, labels: dict[str, str]) -> tuple[str, tuple[tuple[str, str], ...]]:
+def _metric_key(
+    name: str, labels: dict[str, str]
+) -> tuple[str, tuple[tuple[str, str], ...]]:
     return name, tuple(sorted(labels.items()))
 
 
@@ -330,7 +490,14 @@ def _add_collaboration_zero_series(
             ),
             0.0,
         )
-    for outcome in ("pending", "applied", "rejected", "stale", "duplicate"):
+    for outcome in (
+        "pending",
+        "applied",
+        "rejected",
+        "stale",
+        "duplicate",
+        "deferred",
+    ):
         counts.setdefault(
             _metric_key("sidera_collaboration_intents_total", {"outcome": outcome}),
             0,
@@ -366,14 +533,169 @@ def _add_collaboration_zero_series(
             _metric_key("sidera_collaboration_retries_total", {"reason": reason}),
             0,
         )
+    counts.setdefault(
+        _metric_key("sidera_collaboration_governance_active_holds", {}),
+        0,
+    )
+    counts.setdefault(
+        _metric_key("sidera_collaboration_governance_pending_proposals", {}),
+        0,
+    )
+    values.setdefault(
+        _metric_key("sidera_collaboration_governance_proposal_age_seconds", {}),
+        0.0,
+    )
+    for command in COLLABORATION_GOVERNANCE_COMMANDS:
+        for result in COLLABORATION_GOVERNANCE_COMMAND_RESULTS:
+            counts.setdefault(
+                _metric_key(
+                    "sidera_collaboration_governance_commands_total",
+                    {"command": command, "result": result},
+                ),
+                0,
+            )
+    for action in COLLABORATION_GOVERNANCE_RESOLUTION_ACTIONS:
+        for result in COLLABORATION_GOVERNANCE_RESOLUTION_RESULTS:
+            counts.setdefault(
+                _metric_key(
+                    "sidera_collaboration_governance_resolution_total",
+                    {"action": action, "result": result},
+                ),
+                0,
+            )
+    for reason_code in COLLABORATION_GOVERNANCE_STALE_REASONS:
+        counts.setdefault(
+            _metric_key(
+                "sidera_collaboration_governance_stale_total",
+                {"reason_code": reason_code},
+            ),
+            0,
+        )
+    for operation in COLLABORATION_GOVERNANCE_CONFLICT_OPERATIONS:
+        counts.setdefault(
+            _metric_key(
+                "sidera_collaboration_governance_conflicts_total",
+                {"operation": operation},
+            ),
+            0,
+        )
+
+
+def _add_governance_metrics(
+    counts: Counter[tuple[str, tuple[tuple[str, str], ...]]],
+    values: dict[tuple[str, tuple[tuple[str, str], ...]], float],
+    *,
+    active_holds: int,
+    pending_proposals: int,
+    oldest_pending_proposal: object,
+    now: datetime,
+    command_rows: list[tuple[object, object, object]],
+    resolution_rows: list[tuple[object, object, object]],
+    stale_rows: list[tuple[object, object]],
+) -> None:
+    _add_metric_count(
+        counts,
+        "sidera_collaboration_governance_active_holds",
+        {},
+        active_holds,
+    )
+    _add_metric_count(
+        counts,
+        "sidera_collaboration_governance_pending_proposals",
+        {},
+        pending_proposals,
+    )
+    values[_metric_key("sidera_collaboration_governance_proposal_age_seconds", {})] = (
+        _queue_age(oldest_pending_proposal, now) if pending_proposals else 0.0
+    )
+
+    for command_type, result, value in command_rows:
+        command = _GOVERNANCE_COMMAND_LABELS.get(str(command_type))
+        stable_result = str(result)
+        if (
+            command is None
+            or stable_result not in COLLABORATION_GOVERNANCE_COMMAND_RESULTS
+        ):
+            continue
+        count = _bounded_count(value)
+        _add_metric_count(
+            counts,
+            "sidera_collaboration_governance_commands_total",
+            {"command": command, "result": stable_result},
+            count,
+        )
+        if stable_result == "conflict":
+            _add_metric_count(
+                counts,
+                "sidera_collaboration_governance_conflicts_total",
+                {"operation": command},
+                count,
+            )
+
+    for action, result, value in resolution_rows:
+        stable_action = str(action)
+        stable_result = str(result)
+        if (
+            stable_action not in COLLABORATION_GOVERNANCE_RESOLUTION_ACTIONS
+            or stable_result not in COLLABORATION_GOVERNANCE_RESOLUTION_RESULTS
+        ):
+            continue
+        count = _bounded_count(value)
+        _add_metric_count(
+            counts,
+            "sidera_collaboration_governance_resolution_total",
+            {"action": stable_action, "result": stable_result},
+            count,
+        )
+        if stable_result == "stale":
+            _add_metric_count(
+                counts,
+                "sidera_collaboration_governance_conflicts_total",
+                {"operation": stable_action},
+                count,
+            )
+
+    for reason_code, value in stale_rows:
+        stable_reason = str(reason_code)
+        if stable_reason not in COLLABORATION_GOVERNANCE_STALE_REASONS:
+            stable_reason = "unknown"
+        _add_metric_count(
+            counts,
+            "sidera_collaboration_governance_stale_total",
+            {"reason_code": stable_reason},
+            _bounded_count(value),
+        )
+
+
+def _add_metric_count(
+    counts: Counter[tuple[str, tuple[tuple[str, str], ...]]],
+    name: str,
+    labels: dict[str, str],
+    value: int,
+) -> None:
+    counts[_metric_key(name, labels)] += max(0, value)
+
+
+def _bounded_count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 
 
 def _evaluation_outcome(status: str) -> str:
-    return status if status in {"pending", "evaluating", "retry_wait", "completed", "blocked"} else "blocked"
+    return (
+        status
+        if status in {"pending", "evaluating", "retry_wait", "completed", "blocked"}
+        else "blocked"
+    )
 
 
 def _stable_run_status(status: str) -> str:
-    return status if status in {"pending", "active", "blocked", "completed", "superseded"} else "blocked"
+    return (
+        status
+        if status in {"pending", "active", "blocked", "completed", "superseded"}
+        else "blocked"
+    )
 
 
 def _stable_outcome(outcome: str) -> str:
@@ -381,7 +703,19 @@ def _stable_outcome(outcome: str) -> str:
 
 
 def _stable_intent_outcome(status: str) -> str:
-    return status if status in {"pending", "applied", "rejected", "stale", "duplicate"} else "rejected"
+    return (
+        status
+        if status
+        in {
+            "pending",
+            "applied",
+            "rejected",
+            "stale",
+            "duplicate",
+            "deferred",
+        }
+        else "rejected"
+    )
 
 
 def _stable_retry_reason(reason: str | None) -> str:
@@ -405,4 +739,6 @@ def _queue_age(value: object, now: datetime) -> float:
 
 
 def _as_utc(value: datetime) -> datetime:
-    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return (
+        value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    )

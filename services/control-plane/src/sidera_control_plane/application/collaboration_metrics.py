@@ -2,8 +2,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Protocol
 from uuid import UUID
+
+COLLABORATION_GOVERNANCE_COMMANDS = (
+    "pause",
+    "approve",
+    "reject",
+    "resume_automatic",
+)
+COLLABORATION_GOVERNANCE_COMMAND_RESULTS = (
+    "applied",
+    "rejected",
+    "stale",
+    "conflict",
+)
+COLLABORATION_GOVERNANCE_RESOLUTION_ACTIONS = ("approve", "reject")
+COLLABORATION_GOVERNANCE_RESOLUTION_RESULTS = ("applied", "stale")
+COLLABORATION_GOVERNANCE_STALE_REASONS = (
+    "plan_generation_stale",
+    "plan_generation_superseded",
+    "collaboration_run_not_active",
+    "worker_item_placement_stale",
+    "intent_target_invalid",
+    "projection_stale",
+    "decision_conflict",
+    "governance_fingerprint_stale",
+    "governance_resumed",
+    "unknown",
+)
+COLLABORATION_GOVERNANCE_CONFLICT_OPERATIONS = (
+    "pause",
+    "approve",
+    "reject",
+    "resume_automatic",
+)
 
 COLLABORATION_METRIC_NAMES = frozenset(
     {
@@ -15,6 +49,13 @@ COLLABORATION_METRIC_NAMES = frozenset(
         "sidera_collaboration_intents_total",
         "sidera_collaboration_releases_total",
         "sidera_collaboration_retries_total",
+        "sidera_collaboration_governance_active_holds",
+        "sidera_collaboration_governance_pending_proposals",
+        "sidera_collaboration_governance_commands_total",
+        "sidera_collaboration_governance_resolution_total",
+        "sidera_collaboration_governance_proposal_age_seconds",
+        "sidera_collaboration_governance_stale_total",
+        "sidera_collaboration_governance_conflicts_total",
     }
 )
 
@@ -27,6 +68,13 @@ _METRIC_LABELS = {
     "sidera_collaboration_intents_total": frozenset({"outcome"}),
     "sidera_collaboration_releases_total": frozenset({"outcome"}),
     "sidera_collaboration_retries_total": frozenset({"reason"}),
+    "sidera_collaboration_governance_active_holds": frozenset(),
+    "sidera_collaboration_governance_pending_proposals": frozenset(),
+    "sidera_collaboration_governance_commands_total": frozenset({"command", "result"}),
+    "sidera_collaboration_governance_resolution_total": frozenset({"action", "result"}),
+    "sidera_collaboration_governance_proposal_age_seconds": frozenset(),
+    "sidera_collaboration_governance_stale_total": frozenset({"reason_code"}),
+    "sidera_collaboration_governance_conflicts_total": frozenset({"operation"}),
 }
 
 _ALLOWED_LABEL_VALUES = {
@@ -43,6 +91,7 @@ _ALLOWED_LABEL_VALUES = {
             "rejected",
             "stale",
             "duplicate",
+            "deferred",
             "issued",
             "none",
         }
@@ -63,6 +112,16 @@ _ALLOWED_LABEL_VALUES = {
             "unknown",
         }
     ),
+    "command": frozenset(COLLABORATION_GOVERNANCE_COMMANDS),
+    "result": frozenset(
+        {
+            *COLLABORATION_GOVERNANCE_COMMAND_RESULTS,
+            *COLLABORATION_GOVERNANCE_RESOLUTION_RESULTS,
+        }
+    ),
+    "action": frozenset(COLLABORATION_GOVERNANCE_RESOLUTION_ACTIONS),
+    "reason_code": frozenset(COLLABORATION_GOVERNANCE_STALE_REASONS),
+    "operation": frozenset(COLLABORATION_GOVERNANCE_CONFLICT_OPERATIONS),
 }
 
 
@@ -85,8 +144,10 @@ class CollaborationMetricSample:
         for key, value in self.labels:
             if value not in _ALLOWED_LABEL_VALUES[key]:
                 raise ValueError(f"unsupported collaboration metric label: {value}")
-        if self.value < 0:
-            raise ValueError("collaboration metric values cannot be negative")
+        if self.value < 0 or not isfinite(self.value):
+            raise ValueError(
+                "collaboration metric values must be finite and non-negative"
+            )
 
 
 @dataclass(frozen=True, slots=True)

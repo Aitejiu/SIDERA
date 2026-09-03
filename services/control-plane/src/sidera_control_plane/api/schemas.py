@@ -82,6 +82,7 @@ from sidera_control_plane.application.work_context_queries import (
     WorkContextRevisionSummaryView,
     WorkContextRevisionView,
 )
+from sidera_control_plane.collaboration_readiness import ReadinessReport
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
@@ -4751,7 +4752,9 @@ class CollaborationMetricsResponse(BaseModel):
     samples: tuple[CollaborationMetricSampleResponse, ...]
 
     @classmethod
-    def from_view(cls, view: CollaborationMetricsView) -> "CollaborationMetricsResponse":
+    def from_view(
+        cls, view: CollaborationMetricsView
+    ) -> "CollaborationMetricsResponse":
         return cls(
             workspace_id=view.workspace_id,
             as_of=view.as_of,
@@ -4762,6 +4765,41 @@ class CollaborationMetricsResponse(BaseModel):
                     value=sample.value,
                 )
                 for sample in view.samples
+            ),
+        )
+
+
+class CollaborationReadinessCheckResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    ready: bool
+    code: str
+    summary: str
+
+
+class CollaborationReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: str
+    as_of: datetime
+    status: Literal["ready", "not_ready"]
+    checks: tuple[CollaborationReadinessCheckResponse, ...]
+
+    @classmethod
+    def from_report(cls, report: ReadinessReport) -> "CollaborationReadinessResponse":
+        return cls(
+            component=report.component,
+            as_of=report.as_of,
+            status="ready" if report.ready else "not_ready",
+            checks=tuple(
+                CollaborationReadinessCheckResponse(
+                    name=check.name,
+                    ready=check.ready,
+                    code=check.code,
+                    summary=check.summary,
+                )
+                for check in report.checks
             ),
         )
 
