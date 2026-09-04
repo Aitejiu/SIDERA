@@ -91,6 +91,14 @@ class ProjectionChangeRepository:
         ) or 0
         return max(int(cursor_table_value), int(projection_value))
 
+    def oldest_cursor(self, workspace_id: UUID) -> int | None:
+        cursor = self._session.scalar(
+            select(func.min(ProjectionChangeModel.cursor)).where(
+                ProjectionChangeModel.workspace_id == workspace_id
+            )
+        )
+        return int(cursor) if cursor is not None else None
+
     def latest_target_cursor(
         self, workspace_id: UUID, projection_type: str, resource_id: UUID
     ) -> int:

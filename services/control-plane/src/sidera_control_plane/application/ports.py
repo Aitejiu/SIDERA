@@ -11,6 +11,10 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateProposalV1,
     KnowledgeCandidateSubmission,
 )
+from sidera_control_plane.application.notification_observations import (
+    NotificationObservation,
+    NotificationRouteBackfillCandidate,
+)
 from sidera_control_plane.application.planner_runtime import (
     PlannerInput,
     PlannerResult,
@@ -1448,6 +1452,24 @@ class ProjectionChangePublisherPort(Protocol):
     ) -> int:
         raise NotImplementedError
 
+    def oldest_cursor(self, workspace_id: UUID) -> int | None:
+        raise NotImplementedError
+
+
+class NotificationObservationStore(Protocol):
+    def list_after(
+        self, workspace_id: UUID, *, cursor: int, limit: int
+    ) -> tuple[ProjectionChange, ...]:
+        raise NotImplementedError
+
+    def observe(self, change: ProjectionChange) -> NotificationObservation | None:
+        raise NotImplementedError
+
+    def list_route_backfill_candidates(
+        self, workspace_id: UUID, *, now: datetime, window: timedelta
+    ) -> tuple[NotificationRouteBackfillCandidate, ...]:
+        raise NotImplementedError
+
 
 class WorkerRepositoryPort(Protocol):
     def get(
@@ -2334,6 +2356,7 @@ class ControlPlaneUnitOfWork(Protocol):
     context_patches: ContextPatchRepositoryPort
     attention: AttentionAcknowledgementRepositoryPort
     projection_changes: ProjectionChangePublisherPort
+    notification_observations: NotificationObservationStore
     workers: WorkerRepositoryPort
     worker_items: WorkerItemRepositoryPort
     executions: ExecutionRepositoryPort

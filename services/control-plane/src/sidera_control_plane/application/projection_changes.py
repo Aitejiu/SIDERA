@@ -62,3 +62,6 @@ class ProjectionChangePublisher:
         return self._repository.latest_target_cursor(
             workspace_id, projection_type, resource_id
         )
+
+    def oldest_cursor(self, workspace_id: UUID) -> int | None:
+        return self._repository.oldest_cursor(workspace_id)

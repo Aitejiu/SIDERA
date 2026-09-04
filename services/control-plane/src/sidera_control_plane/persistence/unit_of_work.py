@@ -33,6 +33,7 @@ from sidera_control_plane.application.ports import (
     LeaseStorePort,
     ModuleRepositoryPort,
     NotificationLedger,
+    NotificationObservationStore,
     PlanEntityLineageRepositoryPort,
     PlanningLeaseRepositoryPort,
     PlanningProfileRepositoryPort,
@@ -100,6 +101,9 @@ from sidera_control_plane.persistence.lease_store import LeaseStore
 from sidera_control_plane.persistence.module_repository import (
     ExecutionBindingRepository,
     ModuleRepository,
+)
+from sidera_control_plane.persistence.notification_observation_store import (
+    SqlAlchemyNotificationObservationStore,
 )
 from sidera_control_plane.persistence.notification_repository import (
     SqlAlchemyNotificationRepository,
@@ -190,6 +194,7 @@ class SqlAlchemyUnitOfWork:
     context_packages: ContextPackageRepositoryPort
     knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
     notifications: NotificationLedger
+    notification_observations: NotificationObservationStore
 
     def __init__(
         self, database: Database, *, projection_change_retention_seconds: int = 604_800
@@ -268,6 +273,9 @@ class SqlAlchemyUnitOfWork:
         )
         self.notifications = SqlAlchemyNotificationRepository(
             self.session, self.projection_changes
+        )
+        self.notification_observations = SqlAlchemyNotificationObservationStore(
+            self.session
         )
         return self
 
