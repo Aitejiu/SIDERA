@@ -1,3 +1,4 @@
+import ipaddress
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, cast
@@ -46,6 +47,9 @@ from sidera_control_plane.application.module_queries import ModuleQueryService
 from sidera_control_plane.application.notification_commands import (
     NotificationCommandHandler,
 )
+from sidera_control_plane.application.notification_queries import (
+    NotificationQueryService,
+)
 from sidera_control_plane.application.plan_commands import PublishPlanSnapshotHandler
 from sidera_control_plane.application.plan_revision_queries import (
     PlanRevisionQueryService,
@@ -87,6 +91,7 @@ from sidera_control_plane.application.worker_workspace_queries import (
     WorkerWorkspaceQueryService,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
 )
@@ -105,6 +110,9 @@ from sidera_control_plane.persistence.context_package_query_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.handoff_query_store import (
     SqlAlchemyHandoffQueryStore,
+)
+from sidera_control_plane.persistence.notification_query_store import (
+    SqlAlchemyNotificationQueryStore,
 )
 from sidera_control_plane.persistence.plan_revision_query_store import (
     SqlAlchemyPlanRevisionQueryStore,
@@ -147,6 +155,25 @@ def get_database(request: Request) -> Database:
 def get_settings(request: Request) -> Settings:
     settings: Settings = request.app.state.settings
     return settings
+
+
+class AdapterWorkflowRequiresLoopback(ValidationError):
+    code = "adapter_workflow_requires_loopback"
+
+
+def require_loopback_adapter_workflow(settings: Settings) -> None:
+    bind_host = settings.api_bind_host.strip().lower().strip("[]")
+    if bind_host == "localhost":
+        return
+    try:
+        is_loopback = ipaddress.ip_address(bind_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise AdapterWorkflowRequiresLoopback(
+            "adapter workflow endpoints require a loopback api_bind_host",
+            details={"api_bind_host": settings.api_bind_host},
+        )
 
 
 def get_command_service(
@@ -279,6 +306,12 @@ def get_planning_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> PlanningQueryService:
     return PlanningQueryService(SqlAlchemyPlanningQueryStore(database))
+
+
+def get_notification_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> NotificationQueryService:
+    return NotificationQueryService(SqlAlchemyNotificationQueryStore(database))
 
 
 def get_plan_revision_query_service(

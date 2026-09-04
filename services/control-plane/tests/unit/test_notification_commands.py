@@ -9,7 +9,12 @@ from sidera_control_plane.application.notification_commands import (
     NotificationRouteConflict,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
-from sidera_control_plane.domain.errors import OperatorRequired, ValidationError
+from sidera_control_plane.domain.errors import (
+    InvalidTransition,
+    OperatorRequired,
+    ValidationError,
+    VersionConflict,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
     NOTIFICATION_CHANNEL_MODULE_TYPE,
@@ -22,10 +27,14 @@ from sidera_control_plane.domain.modules import (
     StabilityLevel,
 )
 from sidera_control_plane.domain.notifications import (
+    InboxThread,
     NotificationBindingKind,
+    NotificationFact,
+    NotificationPriority,
     NotificationRoute,
     NotificationRouteStatus,
     NotificationSourceBinding,
+    NotificationTransition,
 )
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -123,9 +132,16 @@ class ModuleRepository:
 
 
 class NotificationRepository:
-    def __init__(self, routes: tuple[NotificationRoute, ...] = ()) -> None:
+    def __init__(
+        self,
+        routes: tuple[NotificationRoute, ...] = (),
+        threads: tuple[InboxThread, ...] = (),
+        facts: tuple[NotificationFact, ...] = (),
+    ) -> None:
         self.routes = list(routes)
         self.bindings: dict[tuple[UUID, str, UUID, str], NotificationSourceBinding] = {}
+        self.threads = {item.id: item for item in threads}
+        self.facts = {item.id: item for item in facts}
 
     def get_route_by_source_ref(
         self,
@@ -159,6 +175,25 @@ class NotificationRepository:
 
     def add_route(self, item: NotificationRoute) -> None:
         self.routes.append(item)
+
+    def get_thread(
+        self, workspace_id: UUID, thread_id: UUID, *, for_update: bool = False
+    ) -> InboxThread | None:
+        del for_update
+        item = self.threads.get(thread_id)
+        return item if item is not None and item.workspace_id == workspace_id else None
+
+    def get_fact(self, workspace_id: UUID, fact_id: UUID) -> NotificationFact | None:
+        item = self.facts.get(fact_id)
+        return item if item is not None and item.workspace_id == workspace_id else None
+
+    def save_thread(self, item: InboxThread, previous_version: int) -> None:
+        current = self.threads.get(item.id)
+        if current is None:
+            raise AssertionError("thread is missing")
+        if current.version != previous_version:
+            raise VersionConflict(previous_version, current.version)
+        self.threads[item.id] = item
 
     def get_binding(
         self,
@@ -238,6 +273,8 @@ def make_uow(
     instance: ModuleInstance,
     *,
     routes: tuple[NotificationRoute, ...] = (),
+    threads: tuple[InboxThread, ...] = (),
+    facts: tuple[NotificationFact, ...] = (),
     extra_modules: tuple[tuple[ModuleDefinition, ModuleInstance], ...] = (),
     requests: tuple[object, ...] = (),
 ) -> SimpleNamespace:
@@ -247,7 +284,7 @@ def make_uow(
     )
     return SimpleNamespace(
         modules=modules,
-        notifications=NotificationRepository(routes),
+        notifications=NotificationRepository(routes, threads=threads, facts=facts),
         planning_requests=SimpleNamespace(
             list_by_source_ref=lambda workspace_id, source_type, source_ref: tuple(
                 item
@@ -294,6 +331,70 @@ def command(
     }
     values.update(overrides)
     return CommandEnvelope(**values)  # type: ignore[arg-type]
+
+
+def thread_command(
+    command_type: str,
+    thread: InboxThread,
+    *,
+    payload: dict[str, object] | None = None,
+    expected_version: int | None = None,
+    **overrides: object,
+) -> CommandEnvelope:
+    values: dict[str, object] = {
+        "id": uuid4(),
+        "workspace_id": thread.workspace_id,
+        "command_type": command_type,
+        "target_type": "notification_thread",
+        "actor_type": "local",
+        "actor_id": "operator",
+        "target_id": thread.id,
+        "payload": payload or {},
+        "expected_version": (
+            thread.version if expected_version is None else expected_version
+        ),
+        "idempotency_key": uuid4().hex,
+        "correlation_id": uuid4(),
+    }
+    values.update(overrides)
+    return CommandEnvelope(**values)  # type: ignore[arg-type]
+
+
+def notification_fact(
+    *,
+    workspace_id: UUID = WORKSPACE_ID,
+    root_task_id: UUID | None = None,
+    priority: NotificationPriority = NotificationPriority.ACTION,
+    transition: NotificationTransition = NotificationTransition.OPENED,
+    fingerprint: str = "b" * 64,
+) -> NotificationFact:
+    root_task_id = root_task_id or uuid4()
+    return NotificationFact.create(
+        workspace_id=workspace_id,
+        policy_version=1,
+        recipient_type="workspace_operator",
+        recipient_id="local",
+        kind="execution_attention",
+        priority=priority,
+        transition=transition,
+        topic="execution_attention",
+        root_task_id=root_task_id,
+        subtask_id=None,
+        worker_item_id=None,
+        source_projection_cursor=1,
+        source_projection_type="task_overview",
+        source_resource_id=root_task_id,
+        source_resource_version=1,
+        authoritative_fingerprint=fingerprint,
+        title="需要关注的任务",
+        summary="任务状态发生变化。",
+        action="打开任务",
+        deep_link=f"/tasks/{root_task_id}",
+        correlation_id="notification-command-test",
+        baseline_import=False,
+        occurred_at=NOW,
+        created_at=NOW,
+    )
 
 
 def test_register_notification_route_is_idempotent_and_repairs_exact_requests() -> None:
@@ -344,6 +445,123 @@ def test_register_notification_route_is_idempotent_and_repairs_exact_requests() 
     assert len(uow.notifications.routes) == 1
     assert len(uow.events.events) == 1
     assert len(uow.projection_changes.changes) == 1
+
+
+def test_notification_thread_read_and_archive_commands_are_scoped_and_versioned() -> None:
+    definition, instance = module_pair()
+    fact = notification_fact()
+    thread = InboxThread.open_from_fact(fact, thread_id=uuid4(), now=NOW)
+    uow = make_uow(definition, instance, threads=(thread,), facts=(fact,))
+    handler = NotificationCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    read_result = handler.handle(
+        uow,
+        thread_command(
+            "MarkNotificationThreadRead",
+            thread,
+            payload={"expected_latest_fact_id": str(fact.id)},
+        ),
+    )
+
+    read_thread = uow.notifications.threads[thread.id]
+    assert read_result.aggregate_id == thread.id
+    assert read_thread.unread_count == 0
+    assert read_thread.business_status.value == "open"
+    assert read_thread.version == 2
+    assert uow.projection_changes.changes[-1]["projection_type"] == (
+        "notification_thread"
+    )
+
+    with pytest.raises(InvalidTransition, match="open thread cannot be archived"):
+        handler.handle(
+            uow,
+            thread_command("ArchiveNotificationThread", read_thread),
+        )
+
+    completed = notification_fact(
+        root_task_id=fact.root_task_id,
+        priority=NotificationPriority.PROGRESS,
+        transition=NotificationTransition.COMPLETED,
+        fingerprint="c" * 64,
+    )
+    resolved = thread.apply_fact(completed, now=NOW)
+    resolved_uow = make_uow(
+        definition,
+        instance,
+        threads=(resolved,),
+        facts=(fact, completed),
+    )
+    archive_result = handler.handle(
+        resolved_uow,
+        thread_command("ArchiveNotificationThread", resolved),
+    )
+
+    archived = resolved_uow.notifications.threads[thread.id]
+    assert archive_result.aggregate_id == thread.id
+    assert archived.organization_status.value == "archived"
+    assert archived.business_status.value == "resolved"
+    assert archived.version == resolved.version + 1
+
+
+@pytest.mark.parametrize(
+    ("command_type", "payload"),
+    (
+        ("MarkNotificationThreadRead", {}),
+        (
+            "MarkNotificationThreadRead",
+            {"expected_latest_fact_id": str(uuid4()), "actor": "operator"},
+        ),
+        ("ArchiveNotificationThread", {"expected_latest_fact_id": str(uuid4())}),
+    ),
+)
+def test_notification_thread_commands_reject_ambiguous_payloads(
+    command_type: str, payload: dict[str, object]
+) -> None:
+    definition, instance = module_pair()
+    fact = notification_fact()
+    thread = InboxThread.open_from_fact(fact, thread_id=uuid4(), now=NOW)
+    uow = make_uow(definition, instance, threads=(thread,), facts=(fact,))
+    handler = NotificationCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    with pytest.raises(ValidationError):
+        handler.handle(
+            uow,
+            thread_command(command_type, thread, payload=payload),
+        )
+
+
+def test_notification_thread_read_requires_current_fact_and_version() -> None:
+    definition, instance = module_pair()
+    fact = notification_fact()
+    thread = InboxThread.open_from_fact(fact, thread_id=uuid4(), now=NOW)
+    uow = make_uow(definition, instance, threads=(thread,), facts=(fact,))
+    handler = NotificationCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    with pytest.raises(VersionConflict):
+        handler.handle(
+            uow,
+            thread_command(
+                "MarkNotificationThreadRead",
+                thread,
+                expected_version=thread.version + 1,
+                payload={"expected_latest_fact_id": str(fact.id)},
+            ),
+        )
+    with pytest.raises(InvalidTransition, match="expected latest fact"):
+        handler.handle(
+            uow,
+            thread_command(
+                "MarkNotificationThreadRead",
+                thread,
+                payload={"expected_latest_fact_id": str(uuid4())},
+            ),
+        )
 
 
 def test_register_notification_route_requires_trusted_local_actor() -> None:

@@ -9,6 +9,7 @@ from sidera_control_plane.api.app import create_app
 from sidera_control_plane.api.schemas import (
     AnswerPlanningClarificationPayload,
     ApproveCollaborationReleaseProposalPayload,
+    ArchiveNotificationThreadPayload,
     ArchiveWorkContextPayload,
     AttachKnowledgeRevisionPayload,
     CancelPlanningRequestPayload,
@@ -23,6 +24,7 @@ from sidera_control_plane.api.schemas import (
     ErrorBody,
     ErrorResponse,
     ExecutionContextAddressPayload,
+    MarkNotificationThreadReadPayload,
     PauseCollaborationReleasePayload,
     PinExecutionWorkerPayload,
     PrepareWorkerHandoffPayload,
@@ -102,12 +104,18 @@ _GOVERNANCE_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("ResumeAutomaticCollaboration", ResumeAutomaticCollaborationPayload),
 )
 
+_NOTIFICATION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("MarkNotificationThreadRead", MarkNotificationThreadReadPayload),
+    ("ArchiveNotificationThread", ArchiveNotificationThreadPayload),
+)
+
 _COMMAND_PAYLOADS = (
     _PLANNING_COMMAND_PAYLOADS
     + _RUNTIME_COMMAND_PAYLOADS
     + _TRANSITION_COMMAND_PAYLOADS
     + _HANDOFF_COMMAND_PAYLOADS
     + _GOVERNANCE_COMMAND_PAYLOADS
+    + _NOTIFICATION_COMMAND_PAYLOADS
 )
 
 

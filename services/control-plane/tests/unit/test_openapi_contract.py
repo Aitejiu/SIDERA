@@ -50,6 +50,11 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}",
     "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}",
     "/api/v1/workspaces/{workspace_id}/collaboration-metrics",
+    "/api/v1/workspaces/{workspace_id}/notification-summary",
+    "/api/v1/workspaces/{workspace_id}/notification-threads",
+    "/api/v1/workspaces/{workspace_id}/notification-threads/{thread_id}",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/attempts",
+    "/api/v1/workspaces/{workspace_id}/notification-routes/{route_id}/threads",
 }
 
 EXPECTED_TYPED_RESPONSES = {
@@ -124,6 +129,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "ApproveCollaborationReleaseProposal": "ApproveCollaborationReleaseProposalPayload",
     "RejectCollaborationReleaseProposal": "RejectCollaborationReleaseProposalPayload",
     "ResumeAutomaticCollaboration": "ResumeAutomaticCollaborationPayload",
+    "MarkNotificationThreadRead": "MarkNotificationThreadReadPayload",
+    "ArchiveNotificationThread": "ArchiveNotificationThreadPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {
@@ -156,6 +163,18 @@ EXPECTED_CONTEXT_PACKAGE_RESPONSE_SCHEMAS = {
     "KnowledgeSubmissionPageResponse",
     "KnowledgeSubmissionResponse",
     "ContextMaterializationResponse",
+}
+
+EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS = {
+    "NotificationSummaryResponse",
+    "NotificationThreadResponse",
+    "NotificationThreadPageResponse",
+    "NotificationThreadDetailResponse",
+    "NotificationFactResponse",
+    "NotificationFactPageResponse",
+    "NotificationDeliveryResponse",
+    "NotificationAttemptResponse",
+    "NotificationAttemptPageResponse",
 }
 
 
@@ -237,6 +256,16 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     )
     assert EXPECTED_WORK_CONTEXT_RESPONSE_SCHEMAS <= schemas.keys()
     assert EXPECTED_CONTEXT_PACKAGE_RESPONSE_SCHEMAS <= schemas.keys()
+    assert EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS <= schemas.keys()
+    for schema_name in EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS:
+        assert schemas[schema_name]["additionalProperties"] is False
+    notification_schemas = " ".join(
+        json.dumps(schemas[name], sort_keys=True)
+        for name in EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS
+    )
+    assert "source_ref" not in notification_schemas
+    assert "claim_token" not in notification_schemas
+    assert "provider_message_ref" not in notification_schemas
 
     command_request = schemas["CommandRequest"]
     assert command_request["properties"]["payload"] == {

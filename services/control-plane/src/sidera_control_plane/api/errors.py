@@ -56,7 +56,11 @@ def install_error_handlers(app: FastAPI) -> None:
     async def handle_domain_error(
         _request: Request, exc: DomainError
     ) -> JSONResponse:
-        status_code = 422 if exc.code == ValidationError.code else 409
+        status_code = (
+            422
+            if exc.code in {ValidationError.code, "adapter_workflow_requires_loopback"}
+            else 409
+        )
         return _error_response(status_code, exc.code, str(exc), exc.details)
 
 

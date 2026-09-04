@@ -701,6 +701,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Notification Delivery Attempts */
+        get: operations["list_notification_delivery_attempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-routes/{route_id}/threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Notification Route Threads */
+        get: operations["list_notification_route_threads"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Notification Summary */
+        get: operations["get_notification_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Notification Threads */
+        get: operations["list_notification_threads"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-threads/{thread_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Notification Thread */
+        get: operations["get_notification_thread"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/plan-transitions/{plan_transition_id}": {
         parameters: {
             query?: never;
@@ -1429,6 +1514,8 @@ export interface components {
              */
             transport: "web" | "main_agent";
         };
+        /** ArchiveNotificationThreadPayload */
+        ArchiveNotificationThreadPayload: Record<string, never>;
         /** ArchiveWorkContextPayload */
         ArchiveWorkContextPayload: {
             /** Current Content Hash */
@@ -3471,6 +3558,14 @@ export interface components {
              */
             worker_id: string;
         };
+        /** MarkNotificationThreadReadPayload */
+        MarkNotificationThreadReadPayload: {
+            /**
+             * Expected Latest Fact Id
+             * Format: uuid
+             */
+            expected_latest_fact_id: string;
+        };
         /** MaterializationAcceptedDecisionResponse */
         MaterializationAcceptedDecisionResponse: {
             /** Key */
@@ -3691,6 +3786,280 @@ export interface components {
             module_type: string;
             /** Provider */
             provider: string;
+        };
+        /** NotificationAttemptPageResponse */
+        NotificationAttemptPageResponse: {
+            /** Items */
+            items: components["schemas"]["NotificationAttemptResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** NotificationAttemptResponse */
+        NotificationAttemptResponse: {
+            /** Attempt Number */
+            attempt_number: number;
+            /**
+             * Delivery Id
+             * Format: uuid
+             */
+            delivery_id: string;
+            /** Error Code */
+            error_code: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Outcome */
+            outcome: string | null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+        };
+        /** NotificationDeliveryResponse */
+        NotificationDeliveryResponse: {
+            /** Attempts */
+            attempts: number;
+            /** Channel Type */
+            channel_type: string;
+            /** Contract Version */
+            contract_version: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Delivered At */
+            delivered_at: string | null;
+            /**
+             * Delivery Id
+             * Format: uuid
+             */
+            delivery_id: string;
+            /** Exhausted At */
+            exhausted_at: string | null;
+            /** Last Error Code */
+            last_error_code: string | null;
+            /**
+             * Next Attempt At
+             * Format: date-time
+             */
+            next_attempt_at: string;
+            /**
+             * Route Id
+             * Format: uuid
+             */
+            route_id: string;
+            /** Status */
+            status: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** NotificationFactPageResponse */
+        NotificationFactPageResponse: {
+            /** Items */
+            items: components["schemas"]["NotificationFactResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** NotificationFactResponse */
+        NotificationFactResponse: {
+            /** Action */
+            action: string;
+            /** Baseline Import */
+            baseline_import: boolean;
+            /** Correlation Id */
+            correlation_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Deep Link */
+            deep_link: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Policy Version */
+            policy_version: number;
+            /** Priority */
+            priority: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Source Projection Cursor */
+            source_projection_cursor: number;
+            /** Source Projection Type */
+            source_projection_type: string;
+            /**
+             * Source Resource Id
+             * Format: uuid
+             */
+            source_resource_id: string;
+            /** Source Resource Version */
+            source_resource_version: number;
+            /** Subtask Id */
+            subtask_id: string | null;
+            /** Summary */
+            summary: string;
+            /**
+             * Thread Id
+             * Format: uuid
+             */
+            thread_id: string;
+            /** Title */
+            title: string;
+            /** Topic */
+            topic: string;
+            /** Transition */
+            transition: string;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+        };
+        /** NotificationSummaryResponse */
+        NotificationSummaryResponse: {
+            /** Channel Issue Count */
+            channel_issue_count: number;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Open Count */
+            open_count: number;
+            /** Progress Count */
+            progress_count: number;
+            /** Recipient Id */
+            recipient_id: string;
+            /** Recipient Type */
+            recipient_type: string;
+            /** Unread Count */
+            unread_count: number;
+        };
+        /** NotificationThreadDetailResponse */
+        NotificationThreadDetailResponse: {
+            /** Available Commands */
+            available_commands: ("mark_read" | "archive")[];
+            /** Deep Link */
+            deep_link: string;
+            /** Deliveries */
+            deliveries: components["schemas"]["NotificationDeliveryResponse"][];
+            facts: components["schemas"]["NotificationFactPageResponse"];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Notification Ref */
+            notification_ref: string;
+            thread: components["schemas"]["NotificationThreadResponse"];
+        };
+        /** NotificationThreadPageResponse */
+        NotificationThreadPageResponse: {
+            /** Items */
+            items: components["schemas"]["NotificationThreadResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** NotificationThreadResponse */
+        NotificationThreadResponse: {
+            /** Action */
+            action: string;
+            /** Archived At */
+            archived_at: string | null;
+            /**
+             * Business Status
+             * @enum {string}
+             */
+            business_status: "open" | "resolved";
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "action" | "progress" | "archived";
+            /** Deep Link */
+            deep_link: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Last Read Fact Id */
+            last_read_fact_id: string | null;
+            /**
+             * Latest Fact Id
+             * Format: uuid
+             */
+            latest_fact_id: string;
+            /**
+             * Latest Fact Occurred At
+             * Format: date-time
+             */
+            latest_fact_occurred_at: string;
+            /** Notification Ref */
+            notification_ref: string;
+            /**
+             * Opened At
+             * Format: date-time
+             */
+            opened_at: string;
+            /**
+             * Organization Status
+             * @enum {string}
+             */
+            organization_status: "active" | "archived";
+            /** Priority */
+            priority: string;
+            /** Recipient Id */
+            recipient_id: string;
+            /** Recipient Type */
+            recipient_type: string;
+            /** Resolved At */
+            resolved_at: string | null;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Root Task Title */
+            root_task_title: string;
+            /** Subtask Id */
+            subtask_id: string | null;
+            /** Subtask Title */
+            subtask_title: string | null;
+            /** Summary */
+            summary: string;
+            /** Title */
+            title: string;
+            /** Topic */
+            topic: string;
+            /** Unread Count */
+            unread_count: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+            /** Worker Item Title */
+            worker_item_title: string | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** PauseCollaborationReleasePayload */
         PauseCollaborationReleasePayload: {
@@ -8560,6 +8929,180 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HandoffTransitionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_notification_delivery_attempts: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                delivery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationAttemptPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_notification_route_threads: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                route_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationThreadPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_notification_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationSummaryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_notification_threads: {
+        parameters: {
+            query?: {
+                category?: "action" | "progress" | "archived";
+                root_task_id?: string | null;
+                subtask_id?: string | null;
+                unread_only?: boolean;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationThreadPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_notification_thread: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                thread_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationThreadDetailResponse"];
                 };
             };
             /** @description Validation Error */

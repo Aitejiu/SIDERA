@@ -13,6 +13,7 @@ from sidera_control_plane.domain.errors import (
     DomainError,
     OperatorRequired,
     ValidationError,
+    VersionConflict,
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.modules import (
@@ -59,7 +60,13 @@ class NotificationRouteConflict(DomainError):
 
 
 class NotificationCommandHandler:
-    command_types = frozenset({"RegisterNotificationRoute"})
+    command_types = frozenset(
+        {
+            "RegisterNotificationRoute",
+            "MarkNotificationThreadRead",
+            "ArchiveNotificationThread",
+        }
+    )
 
     def __init__(
         self,
@@ -75,6 +82,11 @@ class NotificationCommandHandler:
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        if envelope.command_type in {
+            "MarkNotificationThreadRead",
+            "ArchiveNotificationThread",
+        }:
+            return self._handle_thread_command(uow, envelope)
         if envelope.command_type != "RegisterNotificationRoute":
             raise ValidationError(
                 f"unsupported notification command: {envelope.command_type}"
@@ -215,6 +227,102 @@ class NotificationCommandHandler:
                 "delivery_contract_version": _DELIVERY_CONTRACT_VERSION,
                 "request_bindings_created": request_bindings_created,
                 "root_bindings_created": root_bindings_created,
+            },
+        )
+
+    def _handle_thread_command(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        self._require_local_actor(envelope)
+        if envelope.target_type != "notification_thread":
+            raise ValidationError(
+                f"{envelope.command_type} requires target_type=notification_thread"
+            )
+        if envelope.target_id is None:
+            raise ValidationError(
+                f"{envelope.command_type} requires a notification thread target"
+            )
+        expected_version = _positive_int(
+            envelope.expected_version, "expected_version"
+        )
+        thread = uow.notifications.get_thread(
+            envelope.workspace_id, envelope.target_id, for_update=True
+        )
+        if thread is None:
+            raise ValidationError("notification thread is unavailable")
+        if (
+            thread.recipient_type != _WORKSPACE_OPERATOR_RECIPIENT
+            or thread.recipient_id != _LOCAL_RECIPIENT
+        ):
+            raise ValidationError("notification thread recipient is unsupported")
+
+        previous_version = thread.version
+        if envelope.command_type == "MarkNotificationThreadRead":
+            expected_latest_fact_id = _parse_thread_payload(
+                envelope.payload,
+                command_type=envelope.command_type,
+                required_fields={"expected_latest_fact_id"},
+            )
+            next_thread = thread.mark_read(
+                expected_version=expected_version,
+                expected_latest_fact_id=_uuid_value(
+                    expected_latest_fact_id, "expected_latest_fact_id"
+                ),
+                now=self._clock(),
+            )
+            event_type = "NotificationThreadRead"
+            change_type = "notification.thread_read"
+        else:
+            _parse_thread_payload(
+                envelope.payload,
+                command_type=envelope.command_type,
+                required_fields=set(),
+            )
+            if expected_version != thread.version:
+                raise VersionConflict(expected_version, thread.version)
+            next_thread = thread.archive(now=self._clock())
+            event_type = "NotificationThreadArchived"
+            change_type = "notification.thread_archived"
+
+        if next_thread != thread:
+            uow.notifications.save_thread(next_thread, previous_version)
+            event = _event(
+                envelope,
+                aggregate_id=next_thread.id,
+                aggregate_version=next_thread.version,
+                event_type=event_type,
+                aggregate_type="notification_thread",
+                payload={
+                    "notification_thread_id": str(next_thread.id),
+                    "latest_fact_id": str(next_thread.latest_fact_id),
+                    "business_status": next_thread.business_status.value,
+                    "organization_status": next_thread.organization_status.value,
+                },
+            )
+            uow.events.append_with_outbox(event)
+            uow.projection_changes.changed(
+                workspace_id=envelope.workspace_id,
+                projection_type="notification_thread",
+                resource_id=next_thread.id,
+                change_type=change_type,
+                resource_version=next_thread.version,
+                correlation_id=envelope.correlation_id,
+            )
+            event_ids = (event.id,)
+        else:
+            event_ids = ()
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=next_thread.id,
+            aggregate_version=next_thread.version,
+            event_ids=event_ids,
+            data={
+                "notification_thread_id": str(next_thread.id),
+                "thread_version": next_thread.version,
+                "latest_fact_id": str(next_thread.latest_fact_id),
+                "business_status": next_thread.business_status.value,
+                "organization_status": next_thread.organization_status.value,
+                "unread_count": next_thread.unread_count,
             },
         )
 
@@ -389,6 +497,25 @@ def _parse_route_payload(payload: Mapping[str, object]) -> Any:
     )
 
 
+def _parse_thread_payload(
+    payload: Mapping[str, object],
+    *,
+    command_type: str,
+    required_fields: set[str],
+) -> str | None:
+    if not isinstance(payload, Mapping):
+        raise ValidationError(f"{command_type} payload must be an object")
+    fields = set(payload)
+    if fields != required_fields:
+        raise ValidationError(f"{command_type} payload contains invalid fields")
+    if not required_fields:
+        return None
+    value = payload.get("expected_latest_fact_id")
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError("expected_latest_fact_id is required")
+    return value.strip()
+
+
 @dataclass(frozen=True, slots=True)
 class _RoutePayload:
     channel_module_instance_id: UUID
@@ -448,18 +575,36 @@ def _uuid(value: object) -> UUID:
         raise ValidationError("channel_module_instance_id must be a UUID") from exc
 
 
+def _uuid_value(value: object, name: str) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a UUID")
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be a UUID") from exc
+
+
+def _positive_int(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValidationError(f"{name} must be a positive integer")
+    return value
+
+
 def _event(
     envelope: CommandEnvelope,
     *,
     aggregate_id: UUID,
     aggregate_version: int,
     event_type: str,
+    aggregate_type: str = "notification_route",
     payload: dict[str, Any],
 ) -> EventData:
     return EventData(
         id=uuid4(),
         workspace_id=envelope.workspace_id,
-        aggregate_type="notification_route",
+        aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
         aggregate_version=aggregate_version,
         event_type=event_type,

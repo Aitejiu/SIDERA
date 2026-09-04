@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi.encoders import jsonable_encoder
@@ -25,6 +25,14 @@ from sidera_control_plane.application.context_package_queries import (
     KnowledgeSubmissionView,
 )
 from sidera_control_plane.application.module_queries import ModuleSummaryView
+from sidera_control_plane.application.notification_queries import (
+    NotificationAttemptView,
+    NotificationDeliveryView,
+    NotificationFactView,
+    NotificationSummaryView,
+    NotificationThreadDetailView,
+    NotificationThreadView,
+)
 from sidera_control_plane.application.plan_revision_queries import (
     AcceptedTransitionPolicyView,
     ActivePlanHeadView,
@@ -450,6 +458,16 @@ class AcknowledgeAttentionItemPayload(BaseModel):
     attention_key: NonEmptyString
     source_correlation_id: UUID
     source_resource_version: int = Field(ge=1)
+
+
+class MarkNotificationThreadReadPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_latest_fact_id: UUID
+
+
+class ArchiveNotificationThreadPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class ArtifactContentDescriptorResponse(BaseModel):
@@ -4868,3 +4886,193 @@ class TimelineItemResponse(BaseModel):
             correlation_id=item.correlation_id,
             created_at=item.created_at,
         )
+
+
+class NotificationSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recipient_type: str
+    recipient_id: str
+    open_count: int = Field(ge=0)
+    unread_count: int = Field(ge=0)
+    progress_count: int = Field(ge=0)
+    channel_issue_count: int = Field(ge=0)
+    last_change_cursor: int = Field(ge=0)
+
+    @classmethod
+    def from_view(cls, view: NotificationSummaryView) -> "NotificationSummaryResponse":
+        return cls(
+            recipient_type=view.recipient_type,
+            recipient_id=view.recipient_id,
+            open_count=view.open_count,
+            unread_count=view.unread_count,
+            progress_count=view.progress_count,
+            channel_issue_count=view.channel_issue_count,
+            last_change_cursor=view.last_change_cursor,
+        )
+
+
+class NotificationFactResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    thread_id: UUID
+    policy_version: int = Field(ge=1)
+    kind: str
+    priority: str
+    transition: str
+    topic: str
+    root_task_id: UUID
+    subtask_id: UUID | None
+    worker_item_id: UUID | None
+    source_projection_cursor: int = Field(ge=0)
+    source_projection_type: str
+    source_resource_id: UUID
+    source_resource_version: int = Field(ge=1)
+    title: str
+    summary: str
+    action: str
+    deep_link: str
+    correlation_id: str
+    baseline_import: bool
+    occurred_at: datetime
+    created_at: datetime
+
+    @classmethod
+    def from_view(cls, view: NotificationFactView) -> "NotificationFactResponse":
+        return cls.model_validate(view, from_attributes=True)
+
+
+class NotificationDeliveryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: UUID
+    route_id: UUID
+    channel_type: str
+    contract_version: int = Field(ge=1)
+    status: str
+    attempts: int = Field(ge=0)
+    next_attempt_at: datetime
+    last_error_code: str | None
+    delivered_at: datetime | None
+    exhausted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: NotificationDeliveryView
+    ) -> "NotificationDeliveryResponse":
+        return cls.model_validate(view, from_attributes=True)
+
+
+class NotificationAttemptResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: UUID
+    attempt_number: int = Field(ge=1)
+    outcome: str | None
+    error_code: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+    @classmethod
+    def from_view(cls, view: NotificationAttemptView) -> "NotificationAttemptResponse":
+        return cls.model_validate(view, from_attributes=True)
+
+
+class NotificationThreadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    workspace_id: UUID
+    recipient_type: str
+    recipient_id: str
+    category: Literal["action", "progress", "archived"]
+    priority: str
+    topic: str
+    root_task_id: UUID
+    root_task_title: str
+    subtask_id: UUID | None
+    subtask_title: str | None
+    worker_item_id: UUID | None
+    worker_item_title: str | None
+    latest_fact_id: UUID
+    latest_fact_occurred_at: datetime
+    title: str
+    summary: str
+    action: str
+    deep_link: str
+    notification_ref: str
+    business_status: Literal["open", "resolved"]
+    organization_status: Literal["active", "archived"]
+    last_read_fact_id: UUID | None
+    unread_count: int = Field(ge=0)
+    version: int = Field(ge=1)
+    opened_at: datetime
+    resolved_at: datetime | None
+    archived_at: datetime | None
+    updated_at: datetime
+
+    @classmethod
+    def from_view(cls, view: NotificationThreadView) -> "NotificationThreadResponse":
+        return cls.model_validate(view, from_attributes=True)
+
+
+class NotificationThreadPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: tuple[NotificationThreadResponse, ...]
+    next_cursor: str | None
+    last_change_cursor: int = Field(ge=0)
+
+
+class NotificationFactPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: tuple[NotificationFactResponse, ...]
+    next_cursor: str | None
+
+
+class NotificationThreadDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thread: NotificationThreadResponse
+    facts: NotificationFactPageResponse
+    deliveries: tuple[NotificationDeliveryResponse, ...]
+    notification_ref: str
+    available_commands: tuple[Literal["mark_read", "archive"], ...]
+    deep_link: str
+    last_change_cursor: int = Field(ge=0)
+
+    @classmethod
+    def from_view(
+        cls, view: NotificationThreadDetailView
+    ) -> "NotificationThreadDetailResponse":
+        return cls(
+            thread=NotificationThreadResponse.from_view(view.thread),
+            facts=NotificationFactPageResponse(
+                items=tuple(
+                    NotificationFactResponse.from_view(item) for item in view.facts.items
+                ),
+                next_cursor=view.facts.next_cursor,
+            ),
+            deliveries=tuple(
+                NotificationDeliveryResponse.from_view(item)
+                for item in view.deliveries
+            ),
+            notification_ref=view.thread.notification_ref,
+            available_commands=cast(
+                tuple[Literal["mark_read", "archive"], ...],
+                view.available_commands,
+            ),
+            deep_link=view.thread.deep_link,
+            last_change_cursor=view.last_change_cursor,
+        )
+
+
+class NotificationAttemptPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: tuple[NotificationAttemptResponse, ...]
+    next_cursor: str | None

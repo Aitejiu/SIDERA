@@ -27,6 +27,8 @@ PROJECTION_TYPES = frozenset(
         "knowledge_candidate_submission",
         "collaboration_runtime",
         "collaboration_governance",
+        "notification_thread",
+        "notification_delivery",
     }
 )
 
