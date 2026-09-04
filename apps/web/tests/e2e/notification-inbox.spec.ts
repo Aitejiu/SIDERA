@@ -333,6 +333,21 @@ test.describe("notification inbox", () => {
     await expect(page.getByRole("button", { name: "展开节点已恢复" })).toBeVisible();
   });
 
+  test("shows provider failure diagnostics before the delivery recovery action", async ({ page }) => {
+    const state = await openInbox(page);
+    await page.getByRole("button", { name: "展开渠道需要处理" }).click();
+    await page.getByRole("button", { name: "查看投递诊断" }).click();
+    await expect(page.getByText("第 10 次")).toBeVisible();
+    await expect(page.getByText("terminal_failure")).toBeVisible();
+    await expect(page.getByText("provider_unavailable")).toBeVisible();
+
+    await page.getByRole("button", { name: "重新投递" }).click();
+    await page.getByLabel("重新投递原因").fill("确认渠道已经恢复");
+    await page.getByRole("button", { name: "确认重新投递" }).click();
+    await expect.poll(() => state.deliveryStatus).toBe("delivered");
+    await expect(page.getByText("已送达")).toBeVisible();
+  });
+
   test("requeues an exhausted delivery and exposes the settings readiness surface", async ({ page }) => {
     const state = await openInbox(page);
     await page.getByRole("button", { name: "展开渠道需要处理" }).click();

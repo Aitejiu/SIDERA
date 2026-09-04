@@ -348,7 +348,7 @@ def test_notification_inbox_is_scoped_and_paginates_stably(
     assert summary.status_code == 200, summary.text
     assert summary.json()["recipient_type"] == "workspace_operator"
     assert summary.json()["recipient_id"] == "local"
-    assert summary.json()["open_count"] == 2
+    assert summary.json()["open_count"] == 3
     assert summary.json()["unread_count"] == 4
     assert summary.json()["progress_count"] == 1
     assert summary.json()["channel_issue_count"] == 1
@@ -368,6 +368,14 @@ def test_notification_inbox_is_scoped_and_paginates_stably(
     )
     assert second.status_code == 200, second.text
     assert second.json()["items"][0]["id"] == str(ids["action_a"])
+    cursor = second.json()["next_cursor"]
+    assert cursor
+    third = client.get(
+        f"/api/v1/workspaces/{workspace_id}/notification-threads",
+        params={"category": "action", "limit": 1, "cursor": cursor},
+    )
+    assert third.status_code == 200, third.text
+    assert third.json()["items"][0]["id"] == str(ids["operations"])
 
     archived = client.get(
         f"/api/v1/workspaces/{workspace_id}/notification-threads",
@@ -383,7 +391,7 @@ def test_notification_inbox_is_scoped_and_paginates_stably(
         params={"category": "action", "unread_only": "true"},
     )
     assert unread.status_code == 200, unread.text
-    assert len(unread.json()["items"]) == 2
+    assert len(unread.json()["items"]) == 3
 
 
 def test_notification_thread_detail_and_attempts_are_safe_and_route_scoped(

@@ -439,6 +439,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         )
         if root_task is None:
             return None
+        if subject.subject_type.value == "root_task":
+            source_resource_version = root_task.version
 
         subtask_path: tuple[str, ...] = ()
         if subtask_id is not None:

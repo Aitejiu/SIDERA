@@ -574,6 +574,10 @@ class SqlAlchemyNotificationQueryStore:
                 NotificationFactModel.topic == thread.topic,
             )
             .order_by(
+                case(
+                    (NotificationFactModel.id == thread.latest_fact_id, 0),
+                    else_=1,
+                ).asc(),
                 NotificationDeliveryIntentModel.created_at.desc(),
                 NotificationDeliveryIntentModel.id.desc(),
             )

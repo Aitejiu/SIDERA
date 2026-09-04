@@ -344,7 +344,6 @@ class NotificationCommandHandler:
                 correlation_id=envelope.correlation_id,
             )
             event_ids = (event.id,)
-        uow.flush()
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=next_intent.id,
