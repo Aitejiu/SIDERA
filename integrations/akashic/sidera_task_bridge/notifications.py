@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from .client import (
@@ -49,6 +49,14 @@ class NotificationQueryUnavailable(RuntimeError):
 
 class NotificationDeliveryPending(RuntimeError):
     """A pending notice could not settle, so its cursor must not advance."""
+
+
+class NotificationRunnerProtocol(Protocol):
+    """Shared lifecycle surface for legacy and gateway notification runners."""
+
+    def stop(self) -> None: ...
+
+    async def run(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +201,8 @@ class NotificationDelivery:
 class NotificationRunner:
     """Run the private notification stream and current-fact recovery loop."""
 
+    delivery_mode = "legacy"
+
     def __init__(
         self,
         config: TaskBridgeConfig,
@@ -231,9 +241,7 @@ class NotificationRunner:
                     if evaluation is None:
                         await self._state.advance_notification_cursor(change.cursor)
                     else:
-                        self._require_delivery(
-                            await self._delivery.deliver(evaluation)
-                        )
+                        self._require_delivery(await self._delivery.deliver(evaluation))
                     failures = 0
                 raise ProjectionStreamDisconnected(after)
             except ProjectionResyncRequired:
@@ -278,9 +286,7 @@ class NotificationRunner:
                 await self._delivery.deliver(evaluation, advance_cursor=False)
             )
 
-        resources = (
-            await self._state.snapshot()
-        ).resource_sources.values()
+        resources = (await self._state.snapshot()).resource_sources.values()
         task_bindings = sorted(
             (
                 binding
@@ -309,9 +315,7 @@ class NotificationRunner:
             list_transitions = getattr(self._client, "list_plan_transitions", None)
             if callable(list_transitions):
                 transitions = await cast(
-                    Callable[
-                        [UUID], Awaitable[tuple[dict[str, JsonValue], ...]]
-                    ],
+                    Callable[[UUID], Awaitable[tuple[dict[str, JsonValue], ...]]],
                     list_transitions,
                 )(binding.resource_id)
                 for transition in transitions:
@@ -398,8 +402,7 @@ class NotificationRunner:
 
     async def _has_private_binding(self) -> bool:
         return bool(await self._state.list_private_planning_bindings()) or any(
-            binding.source_type == "akashic_private"
-            and binding.resource_kind == "task"
+            binding.source_type == "akashic_private" and binding.resource_kind == "task"
             for binding in (await self._state.snapshot()).resource_sources.values()
         )
 
@@ -526,15 +529,16 @@ class NotificationEvaluator:
         cursor = _cursor_value(detail.get("last_change_cursor"), change.cursor)
         root_task_id = _revision_root_id(detail)
         is_revision = (
-            (_text(detail.get("kind")) or "").lower() == "revision"
-            or root_task_id is not None
-        )
+            _text(detail.get("kind")) or ""
+        ).lower() == "revision" or root_task_id is not None
         web_url = (
             self._revision_url(request_id, root_task_id)
             if is_revision
             else self._planning_url(request_id)
         )
-        previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
+        previous = (await self._state.snapshot()).notification_snapshots.get(
+            resource_key
+        )
         affected_branch_paths: tuple[str, ...] = ()
         if is_revision and status.lower() in {
             "proposal_ready",
@@ -599,7 +603,9 @@ class NotificationEvaluator:
         status = _text(transition.get("status")) or "unknown"
         version = _non_negative_int(transition.get("version"), change.resource_version)
         resource_key = f"plan_transition:{transition_id}"
-        previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
+        previous = (await self._state.snapshot()).notification_snapshots.get(
+            resource_key
+        )
         fact = _transition_fact(
             transition,
             status=status,
@@ -637,7 +643,9 @@ class NotificationEvaluator:
         overview = await self._read_task_overview(task_id)
         if overview is None:
             return None
-        previous = (await self._state.snapshot()).notification_snapshots.get(resource_key)
+        previous = (await self._state.snapshot()).notification_snapshots.get(
+            resource_key
+        )
         cursor = _cursor_value(overview.get("last_change_cursor"), change.cursor)
         fact = _task_fact(
             overview,
@@ -718,9 +726,7 @@ class NotificationEvaluator:
                 return {}
             raise
 
-    async def _read_plan_transition(
-        self, transition_id: UUID
-    ) -> dict[str, Any] | None:
+    async def _read_plan_transition(self, transition_id: UUID) -> dict[str, Any] | None:
         try:
             return await self._client.get_plan_transition(transition_id)
         except TransportUnavailable:
@@ -745,7 +751,9 @@ class NotificationEvaluator:
         if normalized in {"needs_clarification", "clarification_required"}:
             clarifications = detail.get("pending_clarifications")
             if not isinstance(clarifications, list):
-                clarifications = list(await self._client.list_clarifications(request_id))
+                clarifications = list(
+                    await self._client.list_clarifications(request_id)
+                )
             blocking = [
                 item
                 for item in clarifications
@@ -873,9 +881,7 @@ def _task_fact(
     previous: NotificationSnapshot | None,
 ) -> _Fact:
     title = _text(overview.get("title")) or "任务"
-    version = _non_negative_int(
-        overview.get("generation"), change.resource_version
-    )
+    version = _non_negative_int(overview.get("generation"), change.resource_version)
     attention_items = overview.get("attention_items")
     if not isinstance(attention_items, list):
         attention_items = []
@@ -981,9 +987,9 @@ def _notice_for_fact(
     del mode
     if fact.kind is None or fact.fact_text is None:
         return None
-    if previous is not None and _snapshot_fingerprint(previous) == _snapshot_fingerprint(
-        fact.snapshot
-    ):
+    if previous is not None and _snapshot_fingerprint(
+        previous
+    ) == _snapshot_fingerprint(fact.snapshot):
         return None
     fact_version = fact.version if fact.version is not None else 0
     notice_id = hashlib.sha256(
@@ -1042,8 +1048,7 @@ def _attention_kind(
     if any("block" in value for value in values):
         return "task_blocked"
     if any(
-        "wait" in value or "user" in value or "decision" in value
-        for value in values
+        "wait" in value or "user" in value or "decision" in value for value in values
     ) or any(bool(item.get("requires_operator")) for item in items):
         return "task_needs_user"
     return None
@@ -1066,7 +1071,9 @@ def _best_attention_item(
 
 
 def _root_completed(overview: Mapping[str, Any]) -> bool:
-    state = (_text(overview.get("status")) or _text(overview.get("state")) or "").lower()
+    state = (
+        _text(overview.get("status")) or _text(overview.get("state")) or ""
+    ).lower()
     if state in {"completed", "succeeded", "complete"}:
         return True
     total = _non_negative_int(overview.get("subtask_count"), 0) or 0
@@ -1075,9 +1082,7 @@ def _root_completed(overview: Mapping[str, Any]) -> bool:
     return total > 0 and completed >= total and failed == 0
 
 
-def _owner_matches(
-    detail: Mapping[str, Any], binding: ResourceSourceBinding
-) -> bool:
+def _owner_matches(detail: Mapping[str, Any], binding: ResourceSourceBinding) -> bool:
     source_type = detail.get("source_type")
     source_ref = detail.get("source_ref")
     if source_type == "plan_revision":
@@ -1116,9 +1121,7 @@ def _branch_paths(diff: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         return ()
     return tuple(
-        path
-        for path in values[:3]
-        if isinstance(path, str) and _safe_text(path, 240)
+        path for path in values[:3] if isinstance(path, str) and _safe_text(path, 240)
     )
 
 
@@ -1137,9 +1140,7 @@ def _transition_root_id(transition: Mapping[str, Any]) -> UUID | None:
     return _uuid_value(transition.get("root_task_id"))
 
 
-def _transition_path(
-    transition: Mapping[str, Any], *, degraded: bool
-) -> str | None:
+def _transition_path(transition: Mapping[str, Any], *, degraded: bool) -> str | None:
     workers = transition.get("workers")
     if not isinstance(workers, (list, tuple)):
         return None
@@ -1172,9 +1173,7 @@ def _transition_fact(
     normalized = status.lower()
     root = transition.get("root_task")
     title = (
-        _text(root.get("title"))
-        if isinstance(root, Mapping)
-        else None
+        _text(root.get("title")) if isinstance(root, Mapping) else None
     ) or "计划切换"
     path = _transition_path(transition, degraded=normalized == "degraded")
     worker_fingerprint = []
@@ -1218,7 +1217,9 @@ def _transition_fact(
 
 
 def _fingerprint(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 

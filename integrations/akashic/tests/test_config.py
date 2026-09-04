@@ -23,9 +23,7 @@ def make_config(**overrides: Any) -> TaskBridgeConfig:
 def test_config_accepts_loopback_urls_and_explicit_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(
-        "SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN", "knowledge-token-for-tests"
-    )
+    monkeypatch.setenv("SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN", "knowledge-token-for-tests")
     config = make_config(
         control_plane_url="http://localhost:8000",
         web_base_url="http://[::1]:4174/",
@@ -117,7 +115,9 @@ def test_config_rejects_non_loopback_or_unsafe_control_plane_urls(url: str) -> N
         make_config(control_plane_url=url)
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:4174/chat", "http://localhost:4174?tab=chat"])
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:4174/chat", "http://localhost:4174?tab=chat"]
+)
 def test_config_restricts_web_base_url_to_origin(url: str) -> None:
     with pytest.raises(ValidationError):
         make_config(web_base_url=url)
@@ -149,7 +149,9 @@ def test_config_requires_an_opt_in_governance_principal_pair() -> None:
         make_config(governance_actor_type="   ", governance_actor_id="main-agent")
 
 
-def test_config_can_verify_governance_principal_against_control_plane_identity() -> None:
+def test_config_can_verify_governance_principal_against_control_plane_identity() -> (
+    None
+):
     config = make_config(
         governance_actor_type="local",
         governance_actor_id="main-agent",
@@ -195,3 +197,61 @@ def test_config_accepts_optional_notification_channel_module_instance() -> None:
     config = make_config(notification_channel_module_instance_id=module_id)
 
     assert config.notification_channel_module_instance_id == module_id
+
+
+def test_config_selects_one_notification_delivery_mode_and_bounds_gateway_options() -> (
+    None
+):
+    module_id = UUID("00000000-0000-0000-0000-000000000070")
+
+    legacy = make_config()
+    assert legacy.notification_mode == "legacy"
+    assert legacy.notification_gateway_contract_versions == (1,)
+    assert legacy.notification_gateway_batch_size == 50
+    assert legacy.notification_gateway_lease_seconds == 30
+    assert legacy.notification_gateway_poll_seconds == 1.0
+
+    gateway = make_config(
+        notification_mode="gateway",
+        notification_channel_module_instance_id=module_id,
+        notification_gateway_contract_versions=(1,),
+        notification_gateway_batch_size=25,
+        notification_gateway_lease_seconds=45,
+        notification_gateway_poll_seconds=0.25,
+    )
+    assert gateway.notification_mode == "gateway"
+    assert gateway.notification_channel_module_instance_id == module_id
+    assert gateway.notification_gateway_batch_size == 25
+    assert gateway.notification_gateway_lease_seconds == 45
+    assert gateway.notification_gateway_poll_seconds == 0.25
+
+    with pytest.raises(ValidationError, match="module instance"):
+        make_config(notification_mode="gateway")
+    with pytest.raises(ValidationError, match="gateway mode"):
+        make_config(notification_gateway_batch_size=25)
+    with pytest.raises(ValidationError):
+        make_config(notification_mode="both")
+    with pytest.raises(ValidationError):
+        make_config(
+            notification_mode="gateway",
+            notification_channel_module_instance_id=module_id,
+            notification_gateway_contract_versions=(),
+        )
+    with pytest.raises(ValidationError):
+        make_config(
+            notification_mode="gateway",
+            notification_channel_module_instance_id=module_id,
+            notification_gateway_batch_size=201,
+        )
+    with pytest.raises(ValidationError):
+        make_config(
+            notification_mode="gateway",
+            notification_channel_module_instance_id=module_id,
+            notification_gateway_lease_seconds=4,
+        )
+    with pytest.raises(ValidationError):
+        make_config(
+            notification_mode="gateway",
+            notification_channel_module_instance_id=module_id,
+            notification_gateway_poll_seconds=0,
+        )

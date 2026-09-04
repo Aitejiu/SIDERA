@@ -50,7 +50,9 @@ class FakeContext:
         self.tasks: list[asyncio.Task[object]] = []
         self.task_names: list[str | None] = []
 
-    def create_task(self, coroutine: object, *, name: str | None = None) -> asyncio.Task[object]:
+    def create_task(
+        self, coroutine: object, *, name: str | None = None
+    ) -> asyncio.Task[object]:
         task = asyncio.create_task(coroutine)  # type: ignore[arg-type]
         self.tasks.append(task)
         self.task_names.append(name)
@@ -105,7 +107,9 @@ def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
         "sidera_get_knowledge_page",
     }
     for item in metadata:
-        assert item.tool_risk == ("read-only" if item.tool_name in read_only else "write")
+        assert item.tool_risk == (
+            "read-only" if item.tool_name in read_only else "write"
+        )
         assert item.tool_schema is not None
         assert "self" not in item.tool_schema["properties"]
         assert "event" not in item.tool_schema["properties"]
@@ -119,9 +123,7 @@ def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
     }
-    hints = {
-        item.tool_name for item in metadata if item.tool_search_hint is not None
-    }
+    hints = {item.tool_name for item in metadata if item.tool_search_hint is not None}
     assert hints == {
         "sidera_answer_clarifications",
         "sidera_request_proposal_revision",
@@ -245,7 +247,9 @@ def test_governance_tool_schemas_expose_only_bounded_business_fields() -> None:
 
     approve_schema = metadata["sidera_approve_collaboration_release"].tool_schema
     assert approve_schema is not None
-    assert approve_schema["properties"]["explicit_user_confirmation"]["type"] == "boolean"
+    assert (
+        approve_schema["properties"]["explicit_user_confirmation"]["type"] == "boolean"
+    )
     assert "explicit_user_confirmation" in approve_schema["required"]
 
 
@@ -262,7 +266,12 @@ def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:
     assert submit_schema is not None
     assert all(
         submit_schema["properties"][name]["type"] == "array"
-        for name in ("constraints", "acceptance_criteria", "context_refs", "requested_outputs")
+        for name in (
+            "constraints",
+            "acceptance_criteria",
+            "context_refs",
+            "requested_outputs",
+        )
     )
 
     clarification_schema = metadata["sidera_answer_clarifications"].tool_schema
@@ -302,7 +311,10 @@ def test_plugin_schema_preserves_write_argument_scalar_types() -> None:
     assert revision_confirmation is not None
     assert revision_confirmation["properties"]["request_version"]["type"] == "number"
     assert revision_confirmation["properties"]["proposal_revision"]["type"] == "number"
-    assert revision_confirmation["properties"]["explicit_user_confirmation"]["type"] == "boolean"
+    assert (
+        revision_confirmation["properties"]["explicit_user_confirmation"]["type"]
+        == "boolean"
+    )
 
 
 def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
@@ -321,7 +333,9 @@ def test_plugin_handlers_use_host_compatible_list_annotations() -> None:
         )
     )
     assert clarification.parameters["answers"].annotation is list
-    revision_create = inspect.signature(plugin.SideraTaskBridge.sidera_create_plan_revision)
+    revision_create = inspect.signature(
+        plugin.SideraTaskBridge.sidera_create_plan_revision
+    )
     assert revision_create.parameters["constraints"].annotation is list
     assert revision_create.parameters["acceptance_criteria"].annotation is list
 
@@ -382,20 +396,28 @@ def test_plugin_loads_with_akashic_installer_module_boundary() -> None:
         confirmation_schema = metadata["sidera_confirm_proposal"].tool_schema
         assert confirmation_schema is not None
         assert confirmation_schema["properties"]["request_version"]["type"] == "number"
-        assert confirmation_schema["properties"]["proposal_revision"]["type"] == "number"
+        assert (
+            confirmation_schema["properties"]["proposal_revision"]["type"] == "number"
+        )
         assert (
             confirmation_schema["properties"]["explicit_user_confirmation"]["type"]
             == "boolean"
         )
         revision_confirmation = metadata["sidera_confirm_plan_revision"].tool_schema
         assert revision_confirmation is not None
-        assert revision_confirmation["properties"]["request_version"]["type"] == "number"
-        assert revision_confirmation["properties"]["proposal_revision"]["type"] == "number"
+        assert (
+            revision_confirmation["properties"]["request_version"]["type"] == "number"
+        )
+        assert (
+            revision_confirmation["properties"]["proposal_revision"]["type"] == "number"
+        )
     finally:
         importer.unregister(module_name)
         plugin_registry.remove_module_tree(module_name)
         for imported_name in tuple(sys.modules):
-            if imported_name == module_name or imported_name.startswith(f"{module_name}."):
+            if imported_name == module_name or imported_name.startswith(
+                f"{module_name}."
+            ):
                 _ = sys.modules.pop(imported_name, None)
         for imported_name in tuple(sys.modules):
             if imported_name == "sidera_task_bridge" or imported_name.startswith(
@@ -427,6 +449,35 @@ def test_prepare_constructs_bridge_without_starting_recovery_or_network() -> Non
     asyncio.run(scenario())
 
 
+def test_prepare_constructs_only_gateway_runner_when_gateway_mode_is_selected() -> None:
+    async def scenario() -> None:
+        context = FakeContext()
+        context.config = TaskBridgeConfig.model_validate(
+            {
+                "workspace_id": WORKSPACE_ID,
+                "planning_profile_id": PROFILE_ID,
+                "planning_profile_version": 1,
+                "notification_mode": "gateway",
+                "notification_channel_module_instance_id": str(
+                    UUID("00000000-0000-0000-0000-000000000070")
+                ),
+            }
+        )
+        bridge = plugin.SideraTaskBridge()
+        cast(Any, bridge).context = context
+
+        await bridge.prepare()
+
+        from sidera_task_bridge.notification_gateway import GatewayNotificationRunner
+
+        assert isinstance(bridge._runner, GatewayNotificationRunner)
+        assert bridge._runner.__class__.__name__ != "NotificationRunner"
+        assert context.tasks == []
+        await bridge.terminate()
+
+    asyncio.run(scenario())
+
+
 def test_activate_starts_one_named_supervisor_and_retire_is_read_only() -> None:
     async def scenario() -> None:
         context = FakeContext()
@@ -453,11 +504,14 @@ def test_candidate_activation_defers_supervisor_until_promotion() -> None:
             state="activating",
         )
         context.generation_id = generation.generation_id
-        context._can_start_tasks = lambda: generation.state in {
-            "activating",
-            "active",
-            "candidate",
-        }
+        context._can_start_tasks = lambda: (
+            generation.state
+            in {
+                "activating",
+                "active",
+                "candidate",
+            }
+        )
         bridge = plugin.SideraTaskBridge()
         cast(Any, bridge).context = context
         await bridge.prepare()
@@ -482,11 +536,14 @@ def test_promoted_runtime_starts_deferred_supervisor_on_first_tool_access() -> N
             state="candidate",
         )
         context.generation_id = generation.generation_id
-        context._can_start_tasks = lambda: generation.state in {
-            "activating",
-            "active",
-            "candidate",
-        }
+        context._can_start_tasks = lambda: (
+            generation.state
+            in {
+                "activating",
+                "active",
+                "candidate",
+            }
+        )
         bridge = plugin.SideraTaskBridge()
         cast(Any, bridge).context = context
         await bridge.prepare()
@@ -533,7 +590,9 @@ def test_supervisor_recovers_commands_before_starting_notification_runner() -> N
     asyncio.run(scenario())
 
 
-def test_supervisor_does_not_start_notifications_when_command_recovery_is_unavailable() -> None:
+def test_supervisor_does_not_start_notifications_when_command_recovery_is_unavailable() -> (
+    None
+):
     async def scenario() -> None:
         context = FakeContext()
         bridge = plugin.SideraTaskBridge()

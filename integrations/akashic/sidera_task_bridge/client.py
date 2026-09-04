@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Collection, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, NoReturn, Protocol, cast
 from uuid import UUID, uuid4
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .config import TaskBridgeConfig
 from .contracts import (
@@ -46,6 +46,20 @@ _NOTIFICATION_COMMAND_TYPES = frozenset(
 )
 _SECRET_MARKER_PATTERN = re.compile(
     r"(?:api[_ -]?key|authorization|bearer|password|secret|token)", re.IGNORECASE
+)
+_DELIVERY_ERROR_CODES = frozenset(
+    {
+        "transport_unavailable",
+        "timeout",
+        "rate_limited",
+        "provider_unavailable",
+        "unknown_result",
+        "route_not_found",
+        "route_revoked",
+        "permission_denied",
+        "contract_unsupported",
+        "payload_rejected",
+    }
 )
 
 
@@ -110,6 +124,147 @@ class CommandStatus(BaseModel):
     error_code: str | None = None
 
 
+class NotificationDeliveryEnvelope(BaseModel):
+    """Strict provider-neutral payload claimed by a channel Adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: UUID
+    notification_id: UUID
+    thread_id: UUID
+    contract_version: int = Field(ge=1)
+    claim_token: UUID
+    fencing_token: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=512)
+    channel_type: str = Field(min_length=1, max_length=64)
+    source_ref: str = Field(min_length=1, max_length=128)
+    kind: str = Field(min_length=1, max_length=128)
+    priority: str = Field(min_length=1, max_length=64)
+    root_task_title: str = Field(min_length=1, max_length=300)
+    subtask_path: tuple[str, ...] = Field(max_length=32)
+    worker_item_title: str | None = Field(default=None, max_length=300)
+    title: str = Field(min_length=1, max_length=300)
+    summary: str = Field(min_length=1, max_length=4_000)
+    next_action: str = Field(min_length=1, max_length=500)
+    deep_link: str = Field(min_length=1, max_length=1_000)
+    correlation_id: str = Field(min_length=1, max_length=200)
+    notification_ref: str = Field(min_length=1, max_length=128)
+    created_at: datetime
+
+    @field_validator(
+        "idempotency_key",
+        "channel_type",
+        "source_ref",
+        "kind",
+        "priority",
+        "root_task_title",
+        "title",
+        "summary",
+        "next_action",
+        "deep_link",
+        "correlation_id",
+        "notification_ref",
+        "worker_item_title",
+    )
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("notification delivery text must not be empty")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("notification delivery text contains control characters")
+        return value.strip()
+
+    @field_validator("subtask_path")
+    @classmethod
+    def validate_subtask_path(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            if not item.strip() or len(item) > 300:
+                raise ValueError("subtask path item is outside supported bounds")
+            if any(ord(character) < 32 or ord(character) == 127 for character in item):
+                raise ValueError("subtask path contains control characters")
+        return tuple(item.strip() for item in value)
+
+
+NotificationDeliveryErrorCode = Literal[
+    "transport_unavailable",
+    "timeout",
+    "rate_limited",
+    "provider_unavailable",
+    "unknown_result",
+    "route_not_found",
+    "route_revoked",
+    "permission_denied",
+    "contract_unsupported",
+    "payload_rejected",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MalformedNotificationDelivery:
+    """Safe identity extracted from one invalid claim item for terminal nack."""
+
+    delivery_id: UUID | None
+    claim_token: UUID | None
+    fencing_token: int | None
+    error_code: NotificationDeliveryErrorCode = "payload_rejected"
+
+
+class NotificationDeliverySettlement(BaseModel):
+    """Strict response returned after one claim is settled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: UUID
+    status: Literal[
+        "pending",
+        "claimed",
+        "retry_wait",
+        "delivered",
+        "exhausted",
+        "suppressed",
+    ]
+    attempt_number: int = Field(ge=1)
+    outcome: Literal[
+        "delivered", "retryable_failure", "terminal_failure", "unknown_result"
+    ]
+    provider_message_ref: str | None = Field(default=None, max_length=512)
+    next_attempt_at: datetime | None
+    fencing_token: int = Field(ge=1)
+    error_code: str | None = Field(default=None, max_length=128)
+
+
+class NotificationReadinessCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    ready: bool
+    code: str = Field(min_length=1, max_length=128)
+    summary: str = Field(min_length=1, max_length=512)
+
+
+class NotificationReadiness(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: str = Field(min_length=1, max_length=128)
+    as_of: datetime
+    status: Literal["ready", "not_ready"]
+    checks: tuple[NotificationReadinessCheck, ...]
+
+
+class NotificationModuleSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    instance_name: str = Field(min_length=1, max_length=300)
+    provider: str = Field(min_length=1, max_length=128)
+    module_type: str = Field(min_length=1, max_length=128)
+    config_version: int = Field(ge=1)
+    definition_lifecycle: str = Field(min_length=1, max_length=64)
+    instance_lifecycle: str = Field(min_length=1, max_length=64)
+
+
 @dataclass(frozen=True, slots=True)
 class DispatchResult:
     """Safe local result of a persisted command dispatch."""
@@ -123,7 +278,9 @@ class DispatchResult:
 class CommandClient(Protocol):
     def build_request_json(self, envelope: CommandEnvelope) -> dict[str, JsonValue]: ...
 
-    def build_intent_request_json(self, intent: CommandIntent) -> dict[str, JsonValue]: ...
+    def build_intent_request_json(
+        self, intent: CommandIntent
+    ) -> dict[str, JsonValue]: ...
 
     async def execute_command_json(
         self, request_json: dict[str, JsonValue], command_id: UUID
@@ -207,9 +364,7 @@ class ControlPlaneClient:
         self._fix_governance_transport(body)
         return body
 
-    def build_intent_request_json(
-        self, intent: CommandIntent
-    ) -> dict[str, JsonValue]:
+    def build_intent_request_json(self, intent: CommandIntent) -> dict[str, JsonValue]:
         body = cast(dict[str, JsonValue], intent.model_dump(mode="json"))
         body["workspace_id"] = str(self._config.workspace_id)
         body["actor"] = self._actor_json(intent.command_type)
@@ -306,9 +461,7 @@ class ControlPlaneClient:
     ) -> NotificationThreadDetail:
         """Read one Thread and its bounded Fact/Delivery detail."""
 
-        params = _notification_pagination_params(
-            cursor=fact_cursor, limit=fact_limit
-        )
+        params = _notification_pagination_params(cursor=fact_cursor, limit=fact_limit)
         response = await self._request(
             "GET",
             f"/api/v1/workspaces/{self._config.workspace_id}/"
@@ -316,6 +469,169 @@ class ControlPlaneClient:
             params=params,
         )
         return self._parse_model(response, NotificationThreadDetail)
+
+    async def get_notification_readiness(self) -> NotificationReadiness:
+        """Read the Control Plane gates required before gateway delivery."""
+
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/notification-readiness",
+        )
+        return self._parse_model(response, NotificationReadiness)
+
+    async def list_notification_modules(
+        self,
+    ) -> tuple[NotificationModuleSummary, ...]:
+        """Read notification-channel module lifecycle metadata for this workspace."""
+
+        response = await self._request(
+            "GET",
+            "/api/v1/modules",
+            params={
+                "workspace_id": str(self._config.workspace_id),
+                "module_type": "notification_channel",
+            },
+        )
+        if response.status_code >= 400:
+            self._raise_rejected(response)
+        try:
+            body = response.json()
+            if not isinstance(body, list):
+                raise TypeError
+            return tuple(
+                NotificationModuleSummary.model_validate(item) for item in body
+            )
+        except (TypeError, ValueError, ValidationError):
+            raise ControlPlaneRejected("invalid_control_plane_response", {}) from None
+
+    async def claim_notification_deliveries(
+        self,
+        *,
+        module_instance_id: UUID | None = None,
+        supported_contract_versions: Sequence[int] | None = None,
+        batch_size: int | None = None,
+        lease_seconds: int | None = None,
+    ) -> tuple[NotificationDeliveryEnvelope | MalformedNotificationDelivery, ...]:
+        """Claim a bounded batch and preserve safe identities for malformed items."""
+
+        module_id = (
+            module_instance_id or self._config.notification_channel_module_instance_id
+        )
+        if module_id is None:
+            raise ControlPlaneRejected("notification_channel_module_unavailable", {})
+        versions = tuple(
+            supported_contract_versions
+            if supported_contract_versions is not None
+            else self._config.notification_gateway_contract_versions
+        )
+        requested_batch = (
+            self._config.notification_gateway_batch_size
+            if batch_size is None
+            else batch_size
+        )
+        requested_lease = (
+            self._config.notification_gateway_lease_seconds
+            if lease_seconds is None
+            else lease_seconds
+        )
+        _validate_delivery_claim_inputs(
+            module_id,
+            versions,
+            requested_batch,
+            requested_lease,
+        )
+        request_json = {
+            "module_instance_id": str(module_id),
+            "supported_contract_versions": list(versions),
+            "batch_size": requested_batch,
+            "lease_seconds": requested_lease,
+        }
+        response = await self._request(
+            "POST",
+            f"/api/v1/workspaces/{self._config.workspace_id}/notification-deliveries/claims",
+            json=request_json,
+        )
+        if response.status_code >= 400:
+            self._raise_rejected(response)
+        try:
+            body = response.json()
+        except ValueError:
+            raise ControlPlaneRejected("invalid_control_plane_response", {}) from None
+        if not isinstance(body, dict) or set(body) != {"deliveries"}:
+            raise ControlPlaneRejected("invalid_control_plane_response", {})
+        raw_deliveries = body.get("deliveries")
+        if not isinstance(raw_deliveries, list):
+            raise ControlPlaneRejected("invalid_control_plane_response", {})
+        parsed: list[NotificationDeliveryEnvelope | MalformedNotificationDelivery] = []
+        for raw in raw_deliveries:
+            if not isinstance(raw, dict):
+                parsed.append(MalformedNotificationDelivery(None, None, None))
+                continue
+            try:
+                parsed.append(NotificationDeliveryEnvelope.model_validate(raw))
+            except ValidationError:
+                parsed.append(_malformed_delivery(raw))
+        return tuple(parsed)
+
+    async def ack_notification_delivery(
+        self,
+        delivery_id: UUID,
+        *,
+        claim_token: UUID,
+        fencing_token: int,
+        completed_at: datetime,
+        provider_message_ref: str | None = None,
+    ) -> NotificationDeliverySettlement:
+        """Acknowledge one successful provider send with its current fence."""
+
+        _validate_delivery_identity(delivery_id, claim_token, fencing_token)
+        _validate_provider_message_ref(provider_message_ref)
+        response = await self._request(
+            "POST",
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"notification-deliveries/{delivery_id}/ack",
+            json={
+                "claim_token": str(claim_token),
+                "fencing_token": fencing_token,
+                "completed_at": completed_at.isoformat(),
+                "provider_message_ref": provider_message_ref,
+            },
+        )
+        return self._parse_model(response, NotificationDeliverySettlement)
+
+    async def nack_notification_delivery(
+        self,
+        delivery_id: UUID,
+        *,
+        claim_token: UUID,
+        fencing_token: int,
+        outcome: Literal["retryable_failure", "terminal_failure", "unknown_result"],
+        stable_error_code: NotificationDeliveryErrorCode,
+        retry_after_seconds: float | None = None,
+        provider_message_ref: str | None = None,
+    ) -> NotificationDeliverySettlement:
+        """Report one normalized provider result without sending raw error data."""
+
+        _validate_delivery_identity(delivery_id, claim_token, fencing_token)
+        if stable_error_code not in _DELIVERY_ERROR_CODES:
+            raise ValueError("stable_error_code is unsupported")
+        if retry_after_seconds is not None and not 0 <= retry_after_seconds <= 86_400:
+            raise ValueError("retry_after_seconds is outside supported bounds")
+        _validate_provider_message_ref(provider_message_ref)
+        response = await self._request(
+            "POST",
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"notification-deliveries/{delivery_id}/nack",
+            json={
+                "claim_token": str(claim_token),
+                "fencing_token": fencing_token,
+                "outcome": outcome,
+                "stable_error_code": stable_error_code,
+                "retry_after_seconds": retry_after_seconds,
+                "provider_message_ref": provider_message_ref,
+            },
+        )
+        return self._parse_model(response, NotificationDeliverySettlement)
 
     def build_mark_notification_thread_read(
         self,
@@ -427,7 +743,9 @@ class ControlPlaneClient:
             raise ControlPlaneRejected("invalid_control_plane_response", {}) from None
         if response.status_code >= 400:
             self._raise_rejected_body(body if isinstance(body, dict) else {})
-        if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+        if not isinstance(body, list) or not all(
+            isinstance(item, dict) for item in body
+        ):
             raise ControlPlaneRejected("invalid_control_plane_response", {})
         return tuple(cast(dict[str, JsonValue], item) for item in body)
 
@@ -440,7 +758,9 @@ class ControlPlaneClient:
             f"/api/v1/workspaces/{self._config.workspace_id}/planning-requests/{request_id}/clarifications"
         )
         items = body.get("items")
-        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        if not isinstance(items, list) or not all(
+            isinstance(item, dict) for item in items
+        ):
             raise ControlPlaneRejected("invalid_control_plane_response", {})
         return tuple(cast(dict[str, JsonValue], item) for item in items)
 
@@ -453,9 +773,7 @@ class ControlPlaneClient:
             f"/api/v1/workspaces/{self._config.workspace_id}/planning-requests/{request_id}/proposals/{revision}"
         )
 
-    async def get_materialization(
-        self, request_id: UUID
-    ) -> dict[str, JsonValue]:
+    async def get_materialization(self, request_id: UUID) -> dict[str, JsonValue]:
         """Read materialization, returning an empty object before confirmation."""
 
         response = await self._request(
@@ -519,9 +837,7 @@ class ControlPlaneClient:
                 getattr(self._config, "notification_event_limit_bytes", 262_144)
             )
         )
-        path = (
-            f"/api/v1/workspaces/{self._config.workspace_id}/projection-changes"
-        )
+        path = f"/api/v1/workspaces/{self._config.workspace_id}/projection-changes"
         try:
             async with self._client.stream(
                 "GET",
@@ -675,9 +991,7 @@ class CommandDispatcher:
         self._uuid_factory = uuid_factory
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owned_command_types = (
-            frozenset(owned_command_types)
-            if owned_command_types is not None
-            else None
+            frozenset(owned_command_types) if owned_command_types is not None else None
         )
 
     def new_envelope(self, intent: CommandIntent) -> CommandEnvelope:
@@ -765,8 +1079,7 @@ class CommandDispatcher:
             return True
         command_type = request_json.get("command_type")
         return (
-            isinstance(command_type, str)
-            and command_type in self._owned_command_types
+            isinstance(command_type, str) and command_type in self._owned_command_types
         )
 
     def _to_outbound(
@@ -932,6 +1245,86 @@ class CommandDispatcher:
         )
 
 
+def _validate_delivery_claim_inputs(
+    module_instance_id: UUID,
+    supported_contract_versions: Sequence[int],
+    batch_size: int,
+    lease_seconds: int,
+) -> None:
+    if not isinstance(module_instance_id, UUID):
+        raise TypeError("module_instance_id must be a UUID")
+    if not supported_contract_versions or len(supported_contract_versions) > 16:
+        raise ValueError("supported_contract_versions is outside supported bounds")
+    if any(
+        isinstance(version, bool) or not isinstance(version, int) or version < 1
+        for version in supported_contract_versions
+    ):
+        raise ValueError("supported contract versions must be positive integers")
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or not 1 <= batch_size <= 200
+    ):
+        raise ValueError("batch_size must be between 1 and 200")
+    if (
+        isinstance(lease_seconds, bool)
+        or not isinstance(lease_seconds, int)
+        or not 5 <= lease_seconds <= 300
+    ):
+        raise ValueError("lease_seconds must be between 5 and 300")
+
+
+def _validate_delivery_identity(
+    delivery_id: UUID, claim_token: UUID, fencing_token: int
+) -> None:
+    if not isinstance(delivery_id, UUID) or not isinstance(claim_token, UUID):
+        raise TypeError("delivery and claim identifiers must be UUIDs")
+    if (
+        isinstance(fencing_token, bool)
+        or not isinstance(fencing_token, int)
+        or fencing_token < 1
+    ):
+        raise ValueError("fencing_token must be positive")
+
+
+def _validate_provider_message_ref(value: str | None) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or len(value) > 512:
+        raise ValueError("provider_message_ref is outside supported bounds")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("provider_message_ref contains unsupported control characters")
+
+
+def _malformed_delivery(raw: dict[str, Any]) -> MalformedNotificationDelivery:
+    delivery_id = _parse_uuid_value(raw.get("delivery_id"))
+    claim_token = _parse_uuid_value(raw.get("claim_token"))
+    fencing_value = raw.get("fencing_token")
+    fencing_token = (
+        fencing_value
+        if isinstance(fencing_value, int)
+        and not isinstance(fencing_value, bool)
+        and fencing_value >= 1
+        else None
+    )
+    return MalformedNotificationDelivery(
+        delivery_id=delivery_id,
+        claim_token=claim_token,
+        fencing_token=fencing_token,
+    )
+
+
+def _parse_uuid_value(value: object) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
 def _notification_thread_params(
     *,
     category: NotificationCategory,
@@ -1008,7 +1401,10 @@ def _submitted_brief_binding(
     command: OutboundCommand,
     result: CommandResponse | None,
 ) -> tuple[UUID, SourceType, str] | None:
-    if result is None or command.request_json.get("command_type") != "SubmitPlanningRequest":
+    if (
+        result is None
+        or command.request_json.get("command_type") != "SubmitPlanningRequest"
+    ):
         return None
     payload = command.request_json.get("payload")
     if not isinstance(payload, dict):
@@ -1126,7 +1522,11 @@ class _ProjectionSSEParser:
 
 
 def _find_line_ending(buffer: bytearray) -> int | None:
-    positions = [position for position in (buffer.find(b"\n"), buffer.find(b"\r")) if position >= 0]
+    positions = [
+        position
+        for position in (buffer.find(b"\n"), buffer.find(b"\r"))
+        if position >= 0
+    ]
     return min(positions) if positions else None
 
 

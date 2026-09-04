@@ -115,7 +115,9 @@ class BridgeState(BaseModel):
     resource_sources: dict[str, ResourceSourceBinding] = Field(default_factory=dict)
     notification_cursor: int = Field(default=0, ge=0)
     pending_notifications: list[PendingNotification] = Field(default_factory=list)
-    notification_snapshots: dict[str, NotificationSnapshot] = Field(default_factory=dict)
+    notification_snapshots: dict[str, NotificationSnapshot] = Field(
+        default_factory=dict
+    )
     undeliverable_notifications: list[UndeliverableAudit] = Field(default_factory=list)
 
 
@@ -154,7 +156,9 @@ class BridgeStateStore:
                 )
             )
 
-    async def list_resource(self, resource_lock_key: str) -> tuple[OutboundCommand, ...]:
+    async def list_resource(
+        self, resource_lock_key: str
+    ) -> tuple[OutboundCommand, ...]:
         async with self._lock:
             state = self._load()
             return tuple(
@@ -319,6 +323,13 @@ class BridgeStateStore:
             state.source_routes[source_ref] = route
             self._save(state)
 
+    async def list_private_routes(self) -> tuple[tuple[str, PrivateRoute], ...]:
+        """Return opaque private routes in stable order for Adapter bootstrap."""
+
+        async with self._lock:
+            state = self._load()
+            return tuple(sorted(state.source_routes.items(), key=lambda item: item[0]))
+
     async def bind_resource_source(
         self,
         kind: ResourceKind,
@@ -436,7 +447,9 @@ class BridgeStateStore:
                     getattr(existing, field) != getattr(notice, field)
                     for field in immutable_fields
                 ):
-                    raise StateConflict("notification identity already has different state")
+                    raise StateConflict(
+                        "notification identity already has different state"
+                    )
                 return
             if notice.cursor < state.notification_cursor:
                 raise StateConflict("notification cursor already advanced")
@@ -470,7 +483,9 @@ class BridgeStateStore:
                 return updated
             raise StateConflict("pending notification does not exist")
 
-    async def settle_notification(self, notice_id: str, *, terminal: bool = True) -> None:
+    async def settle_notification(
+        self, notice_id: str, *, terminal: bool = True
+    ) -> None:
         del terminal
         async with self._lock:
             state = self._load()
@@ -491,9 +506,7 @@ class BridgeStateStore:
             state = self._load()
             if cursor < state.notification_cursor:
                 raise StateConflict("notification cursor cannot regress")
-            if any(
-                notice.cursor < cursor for notice in state.pending_notifications
-            ):
+            if any(notice.cursor < cursor for notice in state.pending_notifications):
                 raise StateConflict("notification cursor would cross pending notice")
             if cursor == state.notification_cursor:
                 return
@@ -563,6 +576,4 @@ def same_logical_request(
 
     return {
         key: value for key, value in left.items() if key not in IDENTITY_FIELDS
-    } == {
-        key: value for key, value in right.items() if key not in IDENTITY_FIELDS
-    }
+    } == {key: value for key, value in right.items() if key not in IDENTITY_FIELDS}

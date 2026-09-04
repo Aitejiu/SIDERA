@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from ipaddress import IPv6Address
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -18,6 +18,10 @@ from pydantic import (
 )
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_DEFAULT_NOTIFICATION_GATEWAY_CONTRACT_VERSIONS = (1,)
+_DEFAULT_NOTIFICATION_GATEWAY_BATCH_SIZE = 50
+_DEFAULT_NOTIFICATION_GATEWAY_LEASE_SECONDS = 30
+_DEFAULT_NOTIFICATION_GATEWAY_POLL_SECONDS = 1.0
 
 
 def _validate_http_url(
@@ -77,9 +81,7 @@ class TaskBridgeConfig(BaseModel):
     governance_actor_id: str | None = None
     planning_profile_id: UUID
     planning_profile_version: int = Field(ge=1)
-    web_base_url: AnyHttpUrl = Field(
-        default=cast(AnyHttpUrl, "http://127.0.0.1:4174")
-    )
+    web_base_url: AnyHttpUrl = Field(default=cast(AnyHttpUrl, "http://127.0.0.1:4174"))
     knowledge_base_url: AnyHttpUrl = Field(
         default=cast(AnyHttpUrl, "http://127.0.0.1:8020")
     )
@@ -92,9 +94,22 @@ class TaskBridgeConfig(BaseModel):
     notification_retry_max_seconds: float = Field(default=15.0, ge=0.5, le=300)
     notification_delivery_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     notification_channel_module_instance_id: UUID | None = None
-    notification_event_limit_bytes: int = Field(
-        default=262_144, ge=4096, le=1_048_576
+    notification_mode: Literal["legacy", "gateway"] = "legacy"
+    notification_gateway_contract_versions: tuple[int, ...] = Field(
+        default=_DEFAULT_NOTIFICATION_GATEWAY_CONTRACT_VERSIONS,
+        min_length=1,
+        max_length=16,
     )
+    notification_gateway_batch_size: int = Field(
+        default=_DEFAULT_NOTIFICATION_GATEWAY_BATCH_SIZE, ge=1, le=200
+    )
+    notification_gateway_lease_seconds: int = Field(
+        default=_DEFAULT_NOTIFICATION_GATEWAY_LEASE_SECONDS, ge=5, le=300
+    )
+    notification_gateway_poll_seconds: float = Field(
+        default=_DEFAULT_NOTIFICATION_GATEWAY_POLL_SECONDS, gt=0, le=60
+    )
+    notification_event_limit_bytes: int = Field(default=262_144, ge=4096, le=1_048_576)
 
     @model_validator(mode="before")
     @classmethod
@@ -167,11 +182,42 @@ class TaskBridgeConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_governance_actor_pair(self) -> Self:
-        if (self.governance_actor_type is None) != (
-            self.governance_actor_id is None
+        if (self.governance_actor_type is None) != (self.governance_actor_id is None):
+            raise ValueError("governance actor type and id must be provided together")
+        return self
+
+    @field_validator("notification_gateway_contract_versions")
+    @classmethod
+    def validate_notification_gateway_contract_versions(
+        cls, value: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        if any(isinstance(item, bool) or item < 1 for item in value):
+            raise ValueError(
+                "notification gateway contract versions must be positive integers"
+            )
+        return tuple(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def validate_notification_mode(self) -> Self:
+        if self.notification_mode == "gateway":
+            if self.notification_channel_module_instance_id is None:
+                raise ValueError(
+                    "notification gateway mode requires a channel module instance"
+                )
+            return self
+
+        if (
+            self.notification_gateway_contract_versions
+            != _DEFAULT_NOTIFICATION_GATEWAY_CONTRACT_VERSIONS
+            or self.notification_gateway_batch_size
+            != _DEFAULT_NOTIFICATION_GATEWAY_BATCH_SIZE
+            or self.notification_gateway_lease_seconds
+            != _DEFAULT_NOTIFICATION_GATEWAY_LEASE_SECONDS
+            or self.notification_gateway_poll_seconds
+            != _DEFAULT_NOTIFICATION_GATEWAY_POLL_SECONDS
         ):
             raise ValueError(
-                "governance actor type and id must be provided together"
+                "notification gateway runner settings require gateway mode"
             )
         return self
 

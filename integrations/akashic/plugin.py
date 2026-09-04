@@ -14,11 +14,13 @@ if __package__:
         KnowledgeCommandClient,
     )
     from .sidera_task_bridge.knowledge_tools import SideraKnowledgeTools
+    from .sidera_task_bridge.notification_gateway import GatewayNotificationRunner
     from .sidera_task_bridge.notification_tools import SideraNotificationTools
     from .sidera_task_bridge.notifications import (
         NotificationDelivery,
         NotificationEvaluator,
         NotificationRunner,
+        NotificationRunnerProtocol,
     )
     from .sidera_task_bridge.source_routes import SourceContextResolver
     from .sidera_task_bridge.state import BridgeStateStore
@@ -31,11 +33,13 @@ else:
         KnowledgeCommandClient,
     )
     from sidera_task_bridge.knowledge_tools import SideraKnowledgeTools
+    from sidera_task_bridge.notification_gateway import GatewayNotificationRunner
     from sidera_task_bridge.notification_tools import SideraNotificationTools
     from sidera_task_bridge.notifications import (
         NotificationDelivery,
         NotificationEvaluator,
         NotificationRunner,
+        NotificationRunnerProtocol,
     )
     from sidera_task_bridge.source_routes import SourceContextResolver
     from sidera_task_bridge.state import BridgeStateStore
@@ -84,7 +88,7 @@ class SideraTaskBridge(Plugin):
         self._notification_tools: SideraNotificationTools | None = None
         self._knowledge_tools: SideraKnowledgeTools | None = None
         self._state: BridgeStateStore | None = None
-        self._runner: NotificationRunner | None = None
+        self._runner: NotificationRunnerProtocol | None = None
         self._supervisor_task: asyncio.Task[object] | None = None
         self._supervisor_stop = asyncio.Event()
         self._bound_kv_store: object | None = None
@@ -114,19 +118,28 @@ class SideraTaskBridge(Plugin):
             state,
             owned_command_types=_KNOWLEDGE_COMMAND_TYPES,
         )
-        evaluator = NotificationEvaluator(config, client=client, state=state)
-        delivery = NotificationDelivery(
-            config,
-            state=state,
-            tool_registry=self.context.tool_registry,
-        )
-        runner = NotificationRunner(
-            config,
-            client=client,
-            state=state,
-            evaluator=evaluator,
-            delivery=delivery,
-        )
+        if config.notification_mode == "gateway":
+            runner: NotificationRunnerProtocol = GatewayNotificationRunner(
+                config,
+                client=client,
+                state=state,
+                dispatcher=dispatcher,
+                tool_registry=self.context.tool_registry,
+            )
+        else:
+            evaluator = NotificationEvaluator(config, client=client, state=state)
+            delivery = NotificationDelivery(
+                config,
+                state=state,
+                tool_registry=self.context.tool_registry,
+            )
+            runner = NotificationRunner(
+                config,
+                client=client,
+                state=state,
+                evaluator=evaluator,
+                delivery=delivery,
+            )
         self._client = client
         self._knowledge_client = knowledge_client
         self._dispatcher = dispatcher
@@ -217,7 +230,7 @@ class SideraTaskBridge(Plugin):
     async def _run_supervisor(
         self,
         dispatcher: CommandDispatcher,
-        runner: NotificationRunner,
+        runner: NotificationRunnerProtocol,
         knowledge_dispatcher: CommandDispatcher,
     ) -> None:
         config = self.context.config
@@ -229,8 +242,7 @@ class SideraTaskBridge(Plugin):
                 *await knowledge_dispatcher.recover_all(),
             )
             if any(
-                result.status in {"unavailable", "result_unknown"}
-                for result in results
+                result.status in {"unavailable", "result_unknown"} for result in results
             ):
                 try:
                     await asyncio.wait_for(
@@ -925,9 +937,7 @@ def _patch_host_tool_schemas() -> None:
             "target_plan_generation": {"minimum": 1},
         },
         "sidera_list_inbox": {"limit": {"minimum": 1, "maximum": 20}},
-        "sidera_get_notification_thread": {
-            "fact_limit": {"minimum": 1, "maximum": 50}
-        },
+        "sidera_get_notification_thread": {"fact_limit": {"minimum": 1, "maximum": 50}},
         "sidera_manage_notification": {
             "expected_version": {"minimum": 1},
             "expected_route_version": {"minimum": 1},
