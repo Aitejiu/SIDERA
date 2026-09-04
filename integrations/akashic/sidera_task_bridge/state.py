@@ -38,6 +38,7 @@ class PrivateRoute(BaseModel):
     channel: str
     chat_id: str
     session_key: str
+    control_plane_route_id: UUID | None = None
 
 
 class OutboundCommand(BaseModel):
@@ -298,8 +299,23 @@ class BridgeStateStore:
         async with self._lock:
             state = self._load()
             existing = state.source_routes.get(source_ref)
-            if existing is not None and existing != route:
-                raise StateConflict("source route already has different state")
+            if existing is not None:
+                if (
+                    existing.channel != route.channel
+                    or existing.chat_id != route.chat_id
+                    or existing.session_key != route.session_key
+                ):
+                    raise StateConflict("source route already has different state")
+                if (
+                    existing.control_plane_route_id is not None
+                    and existing.control_plane_route_id != route.control_plane_route_id
+                ):
+                    raise StateConflict("source route already has different state")
+                if existing.control_plane_route_id == route.control_plane_route_id:
+                    return
+                route = existing.model_copy(
+                    update={"control_plane_route_id": route.control_plane_route_id}
+                )
             state.source_routes[source_ref] = route
             self._save(state)
 

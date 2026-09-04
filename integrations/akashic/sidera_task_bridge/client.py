@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,14 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import TaskBridgeConfig
-from .contracts import JsonValue, ProjectionChange
+from .contracts import (
+    JsonValue,
+    NotificationCategory,
+    NotificationSummary,
+    NotificationThreadDetail,
+    NotificationThreadPage,
+    ProjectionChange,
+)
 from .state import (
     BridgeStateStore,
     OutboundCommand,
@@ -27,6 +35,17 @@ _GOVERNANCE_COMMAND_TYPES = frozenset(
         "RejectCollaborationReleaseProposal",
         "ResumeAutomaticCollaboration",
     }
+)
+_NOTIFICATION_COMMAND_TYPES = frozenset(
+    {
+        "RegisterNotificationRoute",
+        "MarkNotificationThreadRead",
+        "ArchiveNotificationThread",
+        "RequeueNotificationDelivery",
+    }
+)
+_SECRET_MARKER_PATTERN = re.compile(
+    r"(?:api[_ -]?key|authorization|bearer|password|secret|token)", re.IGNORECASE
 )
 
 
@@ -224,6 +243,135 @@ class ControlPlaneClient:
         )
         return self._parse_model(response, CommandStatus)
 
+    async def get_notification_summary(self) -> NotificationSummary:
+        """Read the current workspace operator notification counters."""
+
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/notification-summary",
+        )
+        return self._parse_model(response, NotificationSummary)
+
+    async def list_notification_threads(
+        self,
+        *,
+        category: NotificationCategory = "action",
+        root_task_id: UUID | None = None,
+        subtask_id: UUID | None = None,
+        unread_only: bool = False,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> NotificationThreadPage:
+        """Read recipient-scoped notification threads with opaque pagination."""
+
+        params = _notification_thread_params(
+            category=category,
+            root_task_id=root_task_id,
+            subtask_id=subtask_id,
+            unread_only=unread_only,
+            cursor=cursor,
+            limit=limit,
+        )
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/notification-threads",
+            params=params,
+        )
+        return self._parse_model(response, NotificationThreadPage)
+
+    async def list_notification_route_threads(
+        self,
+        route_id: UUID,
+        *,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> NotificationThreadPage:
+        """Read notification threads for one exact origin Route."""
+
+        params = _notification_pagination_params(cursor=cursor, limit=limit)
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"notification-routes/{route_id}/threads",
+            params=params,
+        )
+        return self._parse_model(response, NotificationThreadPage)
+
+    async def get_notification_thread(
+        self,
+        thread_id: UUID,
+        *,
+        fact_cursor: str | None = None,
+        fact_limit: int = 50,
+    ) -> NotificationThreadDetail:
+        """Read one Thread and its bounded Fact/Delivery detail."""
+
+        params = _notification_pagination_params(
+            cursor=fact_cursor, limit=fact_limit
+        )
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"notification-threads/{thread_id}",
+            params=params,
+        )
+        return self._parse_model(response, NotificationThreadDetail)
+
+    def build_mark_notification_thread_read(
+        self,
+        thread_id: UUID,
+        *,
+        expected_version: int,
+        expected_latest_fact_id: UUID,
+    ) -> CommandIntent:
+        """Build the exact optimistic read command without duplicate IDs."""
+
+        _require_positive_version(expected_version, "expected_version")
+        return CommandIntent(
+            command_type="MarkNotificationThreadRead",
+            target_type="notification_thread",
+            target_id=thread_id,
+            expected_version=expected_version,
+            payload={"expected_latest_fact_id": str(expected_latest_fact_id)},
+        )
+
+    def build_archive_notification_thread(
+        self, thread_id: UUID, *, expected_version: int
+    ) -> CommandIntent:
+        """Build the exact empty-payload Thread archive command."""
+
+        _require_positive_version(expected_version, "expected_version")
+        return CommandIntent(
+            command_type="ArchiveNotificationThread",
+            target_type="notification_thread",
+            target_id=thread_id,
+            expected_version=expected_version,
+            payload={},
+        )
+
+    def build_requeue_notification_delivery(
+        self,
+        delivery_id: UUID,
+        *,
+        expected_route_version: int,
+        reason: str,
+    ) -> CommandIntent:
+        """Build the exhausted-delivery requeue command with one target ID."""
+
+        _require_positive_version(expected_route_version, "expected_route_version")
+        normalized_reason = _validate_reason(reason)
+        return CommandIntent(
+            command_type="RequeueNotificationDelivery",
+            target_type="notification_delivery",
+            target_id=delivery_id,
+            expected_version=None,
+            payload={
+                "expected_status": "exhausted",
+                "expected_route_version": expected_route_version,
+                "reason": normalized_reason,
+            },
+        )
+
     async def get_planning_detail(self, request_id: UUID) -> dict[str, JsonValue]:
         """Read one PlanningRequest detail projection."""
 
@@ -416,12 +564,17 @@ class ControlPlaneClient:
         await self._client.aclose()
 
     def _actor_json(self, command_type: str) -> dict[str, JsonValue]:
-        if command_type in _GOVERNANCE_COMMAND_TYPES:
+        if command_type in _GOVERNANCE_COMMAND_TYPES | _NOTIFICATION_COMMAND_TYPES:
             actor_type = self._config.governance_actor_type
             actor_id = self._config.governance_actor_id
             if actor_type is None or actor_id is None:
                 raise ControlPlaneRejected(
-                    "governance_principal_unavailable", {}
+                    (
+                        "governance_principal_unavailable"
+                        if command_type in _GOVERNANCE_COMMAND_TYPES
+                        else "notification_principal_unavailable"
+                    ),
+                    {},
                 )
             return {"type": actor_type, "id": actor_id}
         return {
@@ -777,6 +930,78 @@ class CommandDispatcher:
             command_id=command_id,
             error_code="service_unavailable",
         )
+
+
+def _notification_thread_params(
+    *,
+    category: NotificationCategory,
+    root_task_id: UUID | None,
+    subtask_id: UUID | None,
+    unread_only: bool,
+    cursor: str | None,
+    limit: int,
+) -> dict[str, str]:
+    if category not in {"action", "progress", "archived"}:
+        raise ValueError("category is invalid")
+    params = _notification_pagination_params(cursor=cursor, limit=limit)
+    params["category"] = category
+    params["unread_only"] = "true" if unread_only else "false"
+    if root_task_id is not None:
+        params["root_task_id"] = str(root_task_id)
+    if subtask_id is not None:
+        params["subtask_id"] = str(subtask_id)
+    # Keep the query order deterministic for tests and request tracing.
+    return {
+        key: params[key]
+        for key in (
+            "category",
+            "root_task_id",
+            "subtask_id",
+            "unread_only",
+            "cursor",
+            "limit",
+        )
+        if key in params
+    }
+
+
+def _notification_pagination_params(
+    *, cursor: str | None, limit: int
+) -> dict[str, str]:
+    _validate_opaque_cursor(cursor)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("limit must be between 1 and 200")
+    params: dict[str, str] = {"limit": str(limit)}
+    if cursor is not None:
+        params["cursor"] = cursor
+    return params
+
+
+def _validate_opaque_cursor(cursor: str | None) -> None:
+    if cursor is None:
+        return
+    if not isinstance(cursor, str) or not cursor or len(cursor) > 512:
+        raise ValueError("cursor must be between 1 and 512 characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in cursor):
+        raise ValueError("cursor contains unsupported control characters")
+
+
+def _require_positive_version(value: int, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{field_name} must be positive")
+
+
+def _validate_reason(reason: str) -> str:
+    if not isinstance(reason, str):
+        raise TypeError("reason is required")
+    normalized = reason.strip()
+    if not normalized or len(normalized) > 256:
+        raise ValueError("reason length is outside the supported bounds")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError("reason contains unsupported control characters")
+    if _SECRET_MARKER_PATTERN.search(normalized) or "sk-" in normalized.lower():
+        raise ValueError("reason contains a forbidden secret-like marker")
+    return normalized
 
 
 def _submitted_brief_binding(

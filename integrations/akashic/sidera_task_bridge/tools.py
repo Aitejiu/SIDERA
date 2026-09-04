@@ -44,6 +44,32 @@ _UNAVAILABLE_CODES = {
 _GOVERNANCE_ACTIONS = {"pause", "approve", "reject", "resume_automatic"}
 
 
+async def resolve_source_context(
+    state: BridgeStateStore,
+    source_resolver: SourceContextResolver,
+    session_metadata_provider: Callable[[str], Mapping[str, object]] | None = None,
+) -> SourceResolution:
+    """Resolve host provenance once and persist only the local route mapping."""
+
+    context = get_current_tool_context()
+    if context is None:
+        raise MissingToolContext("tool context is missing")
+    metadata: Mapping[str, object] = {}
+    if session_metadata_provider is not None:
+        supplied = session_metadata_provider(context.origin_session_key)
+        if isinstance(supplied, Mapping):
+            metadata = supplied
+    snapshot = await state.snapshot()
+    result = source_resolver.resolve(
+        context,
+        metadata,
+        existing_routes=snapshot.source_routes,
+    )
+    if result.private_route is not None:
+        await state.save_route(result.source_ref, result.private_route)
+    return result
+
+
 class SideraTaskTools:
     """Akashic-facing tools backed by the neutral SIDERA bridge services."""
 
@@ -1634,21 +1660,11 @@ class SideraTaskTools:
         )
 
     async def _resolve_source(self) -> SourceResolution:
-        context = get_current_tool_context()
-        if context is None:
-            raise MissingToolContext("tool context is missing")
-        metadata: Mapping[str, object] = {}
-        if self._session_metadata_provider is not None:
-            metadata = self._session_metadata_provider(context.origin_session_key)
-        snapshot = await self._state.snapshot()
-        result = self._source_resolver.resolve(
-            context,
-            metadata,
-            existing_routes=snapshot.source_routes,
+        return await resolve_source_context(
+            self._state,
+            self._source_resolver,
+            self._session_metadata_provider,
         )
-        if result.private_route is not None:
-            await self._state.save_route(result.source_ref, result.private_route)
-        return result
 
     def _planning_url(self, request_id: UUID) -> str:
         return (

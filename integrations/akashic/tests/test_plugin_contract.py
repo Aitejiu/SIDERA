@@ -57,7 +57,7 @@ class FakeContext:
         return task
 
 
-def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
+def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 
     metadata = [
@@ -65,7 +65,7 @@ def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
         for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
-    assert len(metadata) == 22
+    assert len(metadata) == 25
     assert {item.tool_name for item in metadata} == {
         "sidera_submit_brief",
         "sidera_get_planning_status",
@@ -82,6 +82,9 @@ def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
         "sidera_get_plan_transition",
         "sidera_get_task_status",
         "sidera_get_collaboration_governance",
+        "sidera_list_inbox",
+        "sidera_get_notification_thread",
+        "sidera_manage_notification",
         "sidera_pause_collaboration_release",
         "sidera_approve_collaboration_release",
         "sidera_reject_collaboration_release",
@@ -96,6 +99,8 @@ def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
         "sidera_get_plan_revision",
         "sidera_get_plan_transition",
         "sidera_get_collaboration_governance",
+        "sidera_list_inbox",
+        "sidera_get_notification_thread",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
     }
@@ -110,6 +115,7 @@ def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
         "sidera_get_planning_status",
         "sidera_get_task_status",
         "sidera_get_collaboration_governance",
+        "sidera_list_inbox",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
     }
@@ -132,6 +138,8 @@ def test_plugin_declares_exact_twenty_two_tools_and_risks() -> None:
         "sidera_approve_collaboration_release",
         "sidera_reject_collaboration_release",
         "sidera_resume_automatic_collaboration",
+        "sidera_get_notification_thread",
+        "sidera_manage_notification",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
         "sidera_submit_knowledge_candidate",

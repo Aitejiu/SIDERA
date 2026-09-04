@@ -16,9 +16,18 @@ from sidera_task_bridge.client import (
     TransportUnavailable,
 )
 from sidera_task_bridge.config import TaskBridgeConfig
+from sidera_task_bridge.contracts import (
+    NotificationThreadDetail,
+    NotificationThreadPage,
+)
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
+TASK_ID = UUID("00000000-0000-0000-0000-000000000020")
+THREAD_ID = UUID("00000000-0000-0000-0000-000000000030")
+FACT_ID = UUID("00000000-0000-0000-0000-000000000031")
+DELIVERY_ID = UUID("00000000-0000-0000-0000-000000000032")
+ROUTE_ID = UUID("00000000-0000-0000-0000-000000000033")
 
 
 def make_config(**overrides: Any) -> TaskBridgeConfig:
@@ -44,6 +53,97 @@ def make_envelope(**overrides: Any) -> CommandEnvelope:
     }
     values.update(overrides)
     return CommandEnvelope.model_validate(values)
+
+
+def notification_thread_payload(
+    *, thread_id: UUID = THREAD_ID, notification_ref: str = "NTF-1234"
+) -> dict[str, Any]:
+    return {
+        "id": str(thread_id),
+        "workspace_id": str(WORKSPACE_ID),
+        "recipient_type": "workspace_operator",
+        "recipient_id": "local",
+        "category": "action",
+        "priority": "action",
+        "topic": "execution_attention",
+        "root_task_id": str(TASK_ID),
+        "root_task_title": "Build API",
+        "subtask_id": None,
+        "subtask_title": None,
+        "worker_item_id": None,
+        "worker_item_title": None,
+        "latest_fact_id": str(FACT_ID),
+        "latest_fact_occurred_at": "2026-09-04T00:00:00Z",
+        "title": "Execution needs attention",
+        "summary": "The execution is waiting for review.",
+        "action": "Open the task",
+        "deep_link": f"/workspaces/{WORKSPACE_ID}/tasks/{TASK_ID}",
+        "notification_ref": notification_ref,
+        "business_status": "open",
+        "organization_status": "active",
+        "last_read_fact_id": None,
+        "unread_count": 1,
+        "version": 2,
+        "opened_at": "2026-09-04T00:00:00Z",
+        "resolved_at": None,
+        "archived_at": None,
+        "updated_at": "2026-09-04T00:00:00Z",
+    }
+
+
+def notification_detail_payload() -> dict[str, Any]:
+    return {
+        "thread": notification_thread_payload(),
+        "facts": {
+            "items": [
+                {
+                    "id": str(FACT_ID),
+                    "thread_id": str(THREAD_ID),
+                    "policy_version": 1,
+                    "kind": "execution_attention",
+                    "priority": "action",
+                    "transition": "opened",
+                    "topic": "execution_attention",
+                    "root_task_id": str(TASK_ID),
+                    "subtask_id": None,
+                    "worker_item_id": None,
+                    "source_projection_cursor": 3,
+                    "source_projection_type": "task_overview",
+                    "source_resource_id": str(TASK_ID),
+                    "source_resource_version": 4,
+                    "title": "Execution needs attention",
+                    "summary": "The execution is waiting for review.",
+                    "action": "Open the task",
+                    "deep_link": f"/workspaces/{WORKSPACE_ID}/tasks/{TASK_ID}",
+                    "correlation_id": "notification-correlation",
+                    "baseline_import": False,
+                    "occurred_at": "2026-09-04T00:00:00Z",
+                    "created_at": "2026-09-04T00:00:00Z",
+                }
+            ],
+            "next_cursor": None,
+        },
+        "deliveries": [
+            {
+                "delivery_id": str(DELIVERY_ID),
+                "route_id": str(ROUTE_ID),
+                "channel_type": "akashic_private",
+                "contract_version": 1,
+                "status": "exhausted",
+                "attempts": 3,
+                "next_attempt_at": "2026-09-04T00:00:00Z",
+                "last_error_code": "provider_unavailable",
+                "delivered_at": None,
+                "exhausted_at": "2026-09-04T00:00:00Z",
+                "created_at": "2026-09-04T00:00:00Z",
+                "updated_at": "2026-09-04T00:00:00Z",
+            }
+        ],
+        "notification_ref": "NTF-1234",
+        "available_commands": ["mark_read", "archive"],
+        "deep_link": f"/workspaces/{WORKSPACE_ID}/tasks/{TASK_ID}",
+        "last_change_cursor": 3,
+    }
 
 
 def command_response(command_id: UUID) -> dict[str, Any]:
@@ -136,6 +236,144 @@ def test_client_reads_workspace_scoped_resources_and_task_query() -> None:
         assert request_params[-1] == {"workspace_id": str(WORKSPACE_ID)}
 
     asyncio.run(scenario())
+
+
+def test_client_reads_strict_notification_views_and_exact_route_scope() -> None:
+    async def scenario() -> None:
+        request_paths: list[str] = []
+        request_params: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            request_paths.append(request.url.path)
+            request_params.append(dict(request.url.params))
+            if request.url.path.endswith("/notification-summary"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "recipient_type": "workspace_operator",
+                        "recipient_id": "local",
+                        "open_count": 1,
+                        "unread_count": 1,
+                        "progress_count": 0,
+                        "channel_issue_count": 1,
+                        "last_change_cursor": 3,
+                    },
+                )
+            if request.url.path.endswith("/notification-threads"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [notification_thread_payload()],
+                        "next_cursor": "next-page",
+                        "last_change_cursor": 3,
+                    },
+                )
+            if request.url.path.endswith(f"/notification-threads/{THREAD_ID}"):
+                return httpx.Response(200, json=notification_detail_payload())
+            if request.url.path.endswith(f"/notification-routes/{ROUTE_ID}/threads"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [notification_thread_payload()],
+                        "next_cursor": None,
+                        "last_change_cursor": 3,
+                    },
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+        client = ControlPlaneClient(
+            make_config(), transport=httpx.MockTransport(handler)
+        )
+        summary = await client.get_notification_summary()
+        page = await client.list_notification_threads(
+            category="action", unread_only=True, cursor="opaque-cursor", limit=20
+        )
+        route_page = await client.list_notification_route_threads(
+            ROUTE_ID, cursor=None, limit=20
+        )
+        detail = await client.get_notification_thread(
+            THREAD_ID, fact_cursor="fact-cursor", fact_limit=50
+        )
+        await client.close()
+
+        assert summary.unread_count == 1
+        assert isinstance(page, NotificationThreadPage)
+        assert page.items[0].notification_ref == "NTF-1234"
+        assert route_page.items[0].id == THREAD_ID
+        assert isinstance(detail, NotificationThreadDetail)
+        assert detail.deliveries[0].delivery_id == DELIVERY_ID
+        assert request_params[1] == {
+            "category": "action",
+            "unread_only": "true",
+            "cursor": "opaque-cursor",
+            "limit": "20",
+        }
+        assert request_params[2] == {"limit": "20"}
+        assert request_params[3] == {"cursor": "fact-cursor", "limit": "50"}
+        assert request_paths[2].endswith(f"/notification-routes/{ROUTE_ID}/threads")
+
+    asyncio.run(scenario())
+
+
+def test_client_rejects_notification_unknown_fields_and_unbounded_cursor() -> None:
+    async def scenario() -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "recipient_type": "workspace_operator",
+                    "recipient_id": "local",
+                    "open_count": 0,
+                    "unread_count": 0,
+                    "progress_count": 0,
+                    "channel_issue_count": 0,
+                    "last_change_cursor": 0,
+                    "unexpected": "secret-body",
+                },
+            )
+
+        client = ControlPlaneClient(
+            make_config(), transport=httpx.MockTransport(handler)
+        )
+        with pytest.raises(ControlPlaneRejected) as error:
+            await client.get_notification_summary()
+        assert error.value.code == "invalid_control_plane_response"
+        with pytest.raises(ValueError):
+            await client.list_notification_threads(cursor="x" * 513)
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_client_builds_exact_notification_commands_without_duplicate_ids() -> None:
+    client = ControlPlaneClient(make_config())
+    read = client.build_mark_notification_thread_read(
+        THREAD_ID, expected_version=2, expected_latest_fact_id=FACT_ID
+    )
+    archive = client.build_archive_notification_thread(
+        THREAD_ID, expected_version=2
+    )
+    requeue = client.build_requeue_notification_delivery(
+        DELIVERY_ID, expected_route_version=4, reason="retry after operator review"
+    )
+    asyncio.run(client.close())
+
+    assert read.command_type == "MarkNotificationThreadRead"
+    assert read.target_type == "notification_thread"
+    assert read.target_id == THREAD_ID
+    assert read.expected_version == 2
+    assert read.payload == {"expected_latest_fact_id": str(FACT_ID)}
+    assert archive.command_type == "ArchiveNotificationThread"
+    assert archive.payload == {}
+    assert requeue.command_type == "RequeueNotificationDelivery"
+    assert requeue.target_type == "notification_delivery"
+    assert requeue.target_id == DELIVERY_ID
+    assert requeue.expected_version is None
+    assert requeue.payload == {
+        "expected_status": "exhausted",
+        "expected_route_version": 4,
+        "reason": "retry after operator review",
+    }
 
 
 def test_client_reads_revision_inputs_and_transition_query() -> None:

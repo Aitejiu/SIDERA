@@ -157,6 +157,7 @@ def test_private_route_is_plugin_data_and_does_not_accept_arbitrary_values() -> 
         "channel": "telegram",
         "chat_id": "chat-42",
         "session_key": "telegram:chat-42",
+        "control_plane_route_id": None,
     }
 
 

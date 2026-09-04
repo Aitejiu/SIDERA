@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from typing import cast
+from uuid import UUID
 
 import pytest
 from agent.tools.base import ToolExecutionContext
@@ -25,6 +26,7 @@ def private_context() -> ToolExecutionContext:
 def test_private_source_generates_opaque_ref_and_reuses_existing_route() -> None:
     resolver = SourceContextResolver(source_ref_factory=lambda: "src_deadbeef")
     context = private_context()
+    control_plane_route_id = UUID("00000000-0000-0000-0000-000000000070")
 
     first = resolver.resolve(context, {}, existing_routes={})
     second = resolver.resolve(
@@ -35,6 +37,7 @@ def test_private_source_generates_opaque_ref_and_reuses_existing_route() -> None
                 channel="telegram",
                 chat_id="chat-42",
                 session_key="telegram:chat-42",
+                control_plane_route_id=control_plane_route_id,
             )
         },
     )
@@ -42,8 +45,12 @@ def test_private_source_generates_opaque_ref_and_reuses_existing_route() -> None
     assert first.source_type == "akashic_private"
     assert first.source_ref == "src_deadbeef"
     assert first.private_route is not None
-    assert second.private_route == first.private_route
     assert second.source_ref == "src_existing"
+    assert second.private_route is not None
+    assert second.private_route.channel == first.private_route.channel
+    assert second.private_route.chat_id == first.private_route.chat_id
+    assert second.private_route.session_key == first.private_route.session_key
+    assert second.private_route.control_plane_route_id == control_plane_route_id
     assert "telegram" not in first.source_ref
     assert "chat-42" not in first.source_ref
 

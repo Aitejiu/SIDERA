@@ -188,3 +188,10 @@ def test_config_exposes_bounded_notification_retry_and_stream_limits() -> None:
         make_config(notification_delivery_timeout_seconds=121)
     with pytest.raises(ValidationError):
         make_config(notification_event_limit_bytes=4095)
+
+
+def test_config_accepts_optional_notification_channel_module_instance() -> None:
+    module_id = UUID("00000000-0000-0000-0000-000000000070")
+    config = make_config(notification_channel_module_instance_id=module_id)
+
+    assert config.notification_channel_module_instance_id == module_id

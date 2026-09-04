@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from agent.plugins import Plugin, tool
 from agent.plugins.registry import MetadataKind, plugin_registry
@@ -14,6 +14,7 @@ if __package__:
         KnowledgeCommandClient,
     )
     from .sidera_task_bridge.knowledge_tools import SideraKnowledgeTools
+    from .sidera_task_bridge.notification_tools import SideraNotificationTools
     from .sidera_task_bridge.notifications import (
         NotificationDelivery,
         NotificationEvaluator,
@@ -30,6 +31,7 @@ else:
         KnowledgeCommandClient,
     )
     from sidera_task_bridge.knowledge_tools import SideraKnowledgeTools
+    from sidera_task_bridge.notification_tools import SideraNotificationTools
     from sidera_task_bridge.notifications import (
         NotificationDelivery,
         NotificationEvaluator,
@@ -54,6 +56,10 @@ _CONTROL_PLANE_COMMAND_TYPES = frozenset(
         "ApproveCollaborationReleaseProposal",
         "RejectCollaborationReleaseProposal",
         "ResumeAutomaticCollaboration",
+        "RegisterNotificationRoute",
+        "MarkNotificationThreadRead",
+        "ArchiveNotificationThread",
+        "RequeueNotificationDelivery",
     }
 )
 _KNOWLEDGE_COMMAND_TYPES = frozenset({"SubmitKnowledgeCandidate"})
@@ -75,6 +81,7 @@ class SideraTaskBridge(Plugin):
         self._dispatcher: CommandDispatcher | None = None
         self._knowledge_dispatcher: CommandDispatcher | None = None
         self._tools: SideraTaskTools | None = None
+        self._notification_tools: SideraNotificationTools | None = None
         self._knowledge_tools: SideraKnowledgeTools | None = None
         self._state: BridgeStateStore | None = None
         self._runner: NotificationRunner | None = None
@@ -126,12 +133,21 @@ class SideraTaskBridge(Plugin):
         self._knowledge_dispatcher = knowledge_dispatcher
         self._state = state
         self._runner = runner
+        source_resolver = SourceContextResolver()
         self._tools = SideraTaskTools(
             config,
             client=client,
             dispatcher=dispatcher,
             state=state,
-            source_resolver=SourceContextResolver(),
+            source_resolver=source_resolver,
+            session_metadata_provider=self._session_metadata,
+        )
+        self._notification_tools = SideraNotificationTools(
+            config,
+            client=client,
+            dispatcher=dispatcher,
+            state=state,
+            source_resolver=source_resolver,
             session_metadata_provider=self._session_metadata,
         )
         self._knowledge_tools = SideraKnowledgeTools(
@@ -194,6 +210,7 @@ class SideraTaskBridge(Plugin):
         self._runner = None
         self._supervisor_task = None
         self._tools = None
+        self._notification_tools = None
         self._knowledge_tools = None
         self._bound_kv_store = None
 
@@ -248,6 +265,12 @@ class SideraTaskBridge(Plugin):
         if self._knowledge_tools is None:
             raise RuntimeError("SideraKnowledgeTools are not prepared")
         return self._knowledge_tools
+
+    def _notification_toolset(self) -> SideraNotificationTools:
+        self._ensure_runtime_started()
+        if self._notification_tools is None:
+            raise RuntimeError("SideraNotificationTools are not prepared")
+        return self._notification_tools
 
     def _is_validation_runtime(self) -> bool:
         data_dir = getattr(self.context, "data_dir", None)
@@ -578,6 +601,75 @@ class SideraTaskBridge(Plugin):
         )
 
     @tool(
+        name="sidera_list_inbox",
+        risk="read-only",
+        always_on=True,
+    )
+    async def sidera_list_inbox(
+        self,
+        event: object,
+        category: Literal["action", "progress", "archived"] = "action",
+        unread_only: bool = False,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> str:
+        """List the current operator inbox without changing read state."""
+
+        return await self._notification_toolset().sidera_list_inbox(
+            event, category, unread_only, cursor, limit
+        )
+
+    @tool(
+        name="sidera_get_notification_thread",
+        risk="read-only",
+        search_hint="SIDERA notification thread inbox task attention",
+    )
+    async def sidera_get_notification_thread(
+        self,
+        event: object,
+        notification_ref: str | None = None,
+        thread_id: str | None = None,
+        fact_cursor: str | None = None,
+        fact_limit: int = 50,
+    ) -> str:
+        """Read one exact notification thread and its current handoff."""
+
+        return await self._notification_toolset().sidera_get_notification_thread(
+            event, notification_ref, thread_id, fact_cursor, fact_limit
+        )
+
+    @tool(
+        name="sidera_manage_notification",
+        risk="write",
+        search_hint="SIDERA manage notification read archive requeue",
+    )
+    async def sidera_manage_notification(
+        self,
+        event: object,
+        action: Literal["read", "archive", "requeue"],
+        thread_id: str | None = None,
+        delivery_intent_id: str | None = None,
+        expected_version: int | None = None,
+        expected_status: str | None = None,
+        expected_route_version: int | None = None,
+        expected_latest_fact_id: str | None = None,
+        reason: str | None = None,
+    ) -> str:
+        """Apply one explicit notification lifecycle command."""
+
+        return await self._notification_toolset().sidera_manage_notification(
+            event,
+            action,
+            thread_id,
+            delivery_intent_id,
+            expected_version,
+            expected_status,
+            expected_route_version,
+            expected_latest_fact_id,
+            reason,
+        )
+
+    @tool(
         name="sidera_pause_collaboration_release",
         risk="write",
         search_hint="SIDERA pause automatic collaboration release WorkerItem",
@@ -814,6 +906,15 @@ def _patch_host_tool_schemas() -> None:
         "sidera_reject_collaboration_release": {"proposal_version": "number"},
         "sidera_resume_automatic_collaboration": {"hold_version": "number"},
         "sidera_search_knowledge": {"limit": "number"},
+        "sidera_list_inbox": {
+            "unread_only": "boolean",
+            "limit": "number",
+        },
+        "sidera_get_notification_thread": {"fact_limit": "number"},
+        "sidera_manage_notification": {
+            "expected_version": "number",
+            "expected_route_version": "number",
+        },
     }
     numeric_bounds = {
         "sidera_search_knowledge": {
@@ -822,6 +923,14 @@ def _patch_host_tool_schemas() -> None:
         "sidera_pause_collaboration_release": {
             "worker_item_version": {"minimum": 1},
             "target_plan_generation": {"minimum": 1},
+        },
+        "sidera_list_inbox": {"limit": {"minimum": 1, "maximum": 20}},
+        "sidera_get_notification_thread": {
+            "fact_limit": {"minimum": 1, "maximum": 50}
+        },
+        "sidera_manage_notification": {
+            "expected_version": {"minimum": 1},
+            "expected_route_version": {"minimum": 1},
         },
         "sidera_approve_collaboration_release": {
             "proposal_version": {"minimum": 1},
