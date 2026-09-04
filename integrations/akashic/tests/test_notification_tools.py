@@ -13,6 +13,7 @@ from sidera_task_bridge.client import (
 )
 from sidera_task_bridge.config import TaskBridgeConfig
 from sidera_task_bridge.contracts import (
+    NotificationCategory,
     NotificationDelivery,
     NotificationFact,
     NotificationFactPage,
@@ -131,7 +132,7 @@ def make_thread(
     notification_ref: str = "NTF-1234",
     subtask_id: UUID | None = None,
     subtask_title: str | None = None,
-    category: str = "action",
+    category: NotificationCategory = "action",
     unread_count: int = 1,
 ) -> NotificationThread:
     return NotificationThread(

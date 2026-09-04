@@ -775,7 +775,8 @@ class SqlAlchemyNotificationRepository:
             NotificationSourceBindingModel.resource_id == resource_id,
             NotificationSourceBindingModel.binding_kind == binding_kind,
         )
-        row = self._session.scalar(statement)
+        with self._session.no_autoflush:
+            row = self._session.scalar(statement)
         return _binding_to_domain(row) if row is not None else None
 
     def copy_origin_binding(
@@ -794,16 +795,17 @@ class SqlAlchemyNotificationRepository:
         )
         if source is None:
             return None
-        return self.add_binding_or_get_existing(
-            NotificationSourceBinding(
-                workspace_id=workspace_id,
-                resource_type=target_resource_type,
-                resource_id=target_resource_id,
-                notification_route_id=source.notification_route_id,
-                binding_kind=source.binding_kind,
-                bound_at=source.bound_at,
+        with self._session.no_autoflush:
+            return self.add_binding_or_get_existing(
+                NotificationSourceBinding(
+                    workspace_id=workspace_id,
+                    resource_type=target_resource_type,
+                    resource_id=target_resource_id,
+                    notification_route_id=source.notification_route_id,
+                    binding_kind=source.binding_kind,
+                    bound_at=source.bound_at,
+                )
             )
-        )
 
     def add_intent_or_get_existing(
         self, intent: NotificationDeliveryIntent

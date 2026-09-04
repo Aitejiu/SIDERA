@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from inspect import isawaitable
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -11,6 +13,7 @@ import pytest
 
 from sidera_task_bridge.client import (
     CommandExecution,
+    CommandIntent,
     CommandResponse,
     ControlPlaneClient,
     DispatchResult,
@@ -187,7 +190,10 @@ class FakeRegistry:
         if isinstance(self.result, BaseException):
             raise self.result
         if callable(self.result):
-            return await self.result()
+            result = cast(Callable[[], object], self.result)()
+            if isawaitable(result):
+                return await result
+            return result
         return self.result
 
 
@@ -260,6 +266,7 @@ def test_gateway_bootstrap_registers_missing_routes_idempotently_without_erasing
         assert client.claim_calls == []
         assert len(dispatcher.calls) == 1
         command = dispatcher.calls[0][1]
+        assert isinstance(command, CommandIntent)
         assert command.command_type == "RegisterNotificationRoute"
         assert command.payload["source_ref"] == source_ref
         after = await state.snapshot()
@@ -497,10 +504,10 @@ def test_gateway_success_then_settle_failure_leaves_claim_for_expiry_and_reuses_
         assert len(registry.calls) == 2
         assert registry.calls[0][1]["message"] == registry.calls[1][1]["message"]
         assert registry.calls[0][2] == registry.calls[1][2]
-        assert (
-            registry.calls[0][2]["_outbound_metadata"]["notification_ref"] == "NTF-7C21"
-        )
-        assert registry.calls[0][2]["_outbound_metadata"]["idempotency_key"] == (
+        outbound_metadata = registry.calls[0][2]["_outbound_metadata"]
+        assert isinstance(outbound_metadata, dict)
+        assert outbound_metadata["notification_ref"] == "NTF-7C21"
+        assert outbound_metadata["idempotency_key"] == (
             "sidera:notification-delivery:delivery-72"
         )
 

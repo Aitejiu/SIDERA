@@ -229,15 +229,21 @@ async def _run_loop(database_url: str, control_plane_url: str) -> None:
         worker_workspace = await client.get_worker_item_workspace(
             downstream_worker_item_id
         )
-        worker_version = int(worker_workspace["worker_item"]["version"])
+        worker_item = worker_workspace["worker_item"]
+        assert isinstance(worker_item, dict)
+        worker_version_value = worker_item["version"]
+        assert isinstance(worker_version_value, int)
+        worker_version = worker_version_value
         active_plan = await client.get_active_plan(root_task_id)
+        active_generation = active_plan["active_generation"]
+        assert isinstance(active_generation, int)
         with tool_execution_context_scope(source_context):
             paused = _decode(
                 await bridge.sidera_pause_collaboration_release(
                     None,
                     str(downstream_worker_item_id),
                     worker_version,
-                    int(active_plan["active_generation"]),
+                    active_generation,
                     "pause for Main Agent review",
                 )
             )
@@ -248,9 +254,14 @@ async def _run_loop(database_url: str, control_plane_url: str) -> None:
         exact_proposal = await client.get_collaboration_governance_worker_item(
             downstream_worker_item_id
         )
-        active_proposal = exact_proposal["governance"]["active_proposal"]
+        governance = exact_proposal["governance"]
+        assert isinstance(governance, dict)
+        active_proposal = governance["active_proposal"]
+        assert isinstance(active_proposal, dict)
         proposal_id = UUID(str(active_proposal["proposal_id"]))
-        proposal_version = int(active_proposal["resource_version"])
+        proposal_version_value = active_proposal["resource_version"]
+        assert isinstance(proposal_version_value, int)
+        proposal_version = proposal_version_value
 
         with tool_execution_context_scope(wrong_context):
             wrong_source = _decode(

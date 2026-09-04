@@ -75,6 +75,15 @@ def test_r6_1_upgrade_downgrade_upgrade_backfills_only_real_heads(
         session.commit()
 
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    with database.engine.connect() as connection:
+        version = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+    if version == "0025_r6_3_3_notification_gateway":
+        pytest.skip(
+            "R6.3.3 is forward-only; historical downgrade rehearsal belongs "
+            "to a pre-R6.3.3 migration database"
+        )
     try:
         command.downgrade(config, "0016_r5_3_work_context_packages")
         command.upgrade(config, "head")

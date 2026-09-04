@@ -463,7 +463,9 @@ def test_client_reads_governance_views_and_worker_version() -> None:
             "proposal_id"
         ] == str(proposal_id)
         workspace = await client.get_worker_item_workspace(worker_item_id)
-        assert workspace["worker_item"]["version"] == 7
+        worker_item = workspace["worker_item"]
+        assert isinstance(worker_item, dict)
+        assert worker_item["version"] == 7
         await client.close()
 
         assert request_paths == [
@@ -504,7 +506,9 @@ def test_client_uses_governance_principal_only_for_allowlisted_commands() -> Non
         asyncio.run(client.close())
 
     assert governance["actor"] == {"type": "local", "id": "main-agent"}
-    assert governance["payload"]["transport"] == "main_agent"
+    governance_payload = governance["payload"]
+    assert isinstance(governance_payload, dict)
+    assert governance_payload["transport"] == "main_agent"
     assert planning["actor"] == {
         "type": "integration",
         "id": "akashic-task-bridge",
