@@ -62,6 +62,16 @@ function planningNewTab(workspaceId = "ws-1"): WorkspaceTab {
   };
 }
 
+function inboxTab(workspaceId = "ws-1"): WorkspaceTab {
+  return {
+    id: "inbox",
+    kind: "inbox",
+    title: "信箱",
+    href: `/workspaces/${workspaceId}/inbox`,
+    closeable: false,
+  };
+}
+
 function planningTab(
   requestId: string,
   href = `/workspaces/ws-1/planning/${requestId}`,
@@ -163,6 +173,18 @@ describe("workspace tabs", () => {
   it("never closes task-index", () => {
     const state = initialTabs("ws-1");
     expect(reduceTabs(state, closeTab("task-index"))).toEqual(state);
+  });
+
+  it("keeps the inbox as a fixed semantic tab and returns to it from a task", () => {
+    let state = reduceTabs(taskIndex(), registerDirectRoute(inboxTab()));
+    state = reduceTabs(state, openTab(rootTaskTab("task-1")));
+
+    expect(state.tabs.find((tab) => tab.id === "root-task:task-1")?.returnTabId).toBe("inbox");
+    const closed = reduceTabs(state, closeTab("root-task:task-1"));
+
+    expect(closed.activeTabId).toBe("inbox");
+    expect(closed.navigationHref).toBe("/workspaces/ws-1/inbox");
+    expect(closed.tabs).not.toContainEqual(expect.objectContaining({ id: "root-task:task-1" }));
   });
 
   it("keeps different tasks and semantic child tabs separate", () => {
@@ -361,6 +383,13 @@ describe("workspace tabs", () => {
       pathname: "/workspaces/ws-1/tasks/task-1/collaboration",
       search: "",
     })).toEqual(collaborationTab("task-1"));
+  });
+
+  it("maps the inbox route to its fixed semantic tab", () => {
+    expect(semanticTabForLocation("ws-1", {
+      pathname: "/workspaces/ws-1/inbox",
+      search: "",
+    })).toEqual(inboxTab());
   });
 
   it("discards damaged or cross-workspace session data", () => {

@@ -2,6 +2,7 @@ export const WORKSPACE_TABS_SCHEMA_VERSION = 5;
 
 export type WorkspaceTabId =
   | "task-index"
+  | "inbox"
   | "planning-new"
   | `planning:${string}`
   | `root-task:${string}`
@@ -20,6 +21,13 @@ export type WorkspaceTab = {
       id: "task-index";
       kind: "task-index";
       title: "任务";
+      href: string;
+      closeable: false;
+    }
+  | {
+      id: "inbox";
+      kind: "inbox";
+      title: "信箱";
       href: string;
       closeable: false;
     }
@@ -190,7 +198,7 @@ export function reduceTabs(
       return { ...state, activeTabId: action.id, navigationHref: null };
     }
     case "close": {
-      if (action.id === "task-index") {
+      if (action.id === "task-index" || action.id === "inbox") {
         return state;
       }
       const index = state.tabs.findIndex((tab) => tab.id === action.id);
@@ -313,6 +321,12 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
       && value.closeable === false
       && value.href === `/workspaces/${workspaceId}/tasks`;
   }
+  if (value.id === "inbox") {
+    return value.kind === "inbox"
+      && value.title === "信箱"
+      && value.closeable === false
+      && value.href === `/workspaces/${workspaceId}/inbox`;
+  }
   if (value.id === "planning-new") {
     return value.kind === "planning-new"
       && value.title === "新建任务"
@@ -363,7 +377,8 @@ function isWorkspaceHref(href: string, workspaceId: string): boolean {
 function isTabId(value: unknown): value is WorkspaceTabId {
   return value === "task-index"
     || (typeof value === "string" && (
-      value === "planning-new"
+      value === "inbox"
+      || value === "planning-new"
       || value.startsWith("planning:")
       || value.startsWith("root-task:")
       || value.startsWith("collaboration:")

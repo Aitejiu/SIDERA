@@ -1,4 +1,5 @@
 import { BookOpen, Boxes, Clock3, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
@@ -7,6 +8,7 @@ import { WorkspaceTabs, WorkspaceTabsProvider } from "./WorkspaceTabs";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { NotificationCenter } from "@/features/attention/NotificationCenter";
+import { getNotificationSummary, notificationSummaryQueryKey } from "@/features/notifications/api";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -52,7 +54,12 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
           <nav className="navigation-list">
             <NavItem to={`/workspaces/${workspaceId}/tasks`} label="任务" icon={<ListTodo size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/knowledge`} label="知识" icon={<BookOpen size={17} />} />
-            <NavItem to={`/workspaces/${workspaceId}/inbox`} label="信箱" icon={<Mail size={17} />} />
+            <NavItem
+              to={`/workspaces/${workspaceId}/inbox`}
+              label="信箱"
+              icon={<Mail size={17} />}
+              badge={<NotificationNavBadge workspaceId={workspaceId} />}
+            />
             <NavItem to={`/workspaces/${workspaceId}/chat`} label="聊天" icon={<MessageCircle size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/history`} label="历史" icon={<Clock3 size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/capabilities`} label="能力" icon={<Boxes size={17} />} />
@@ -81,10 +88,12 @@ function NavItem({
   to,
   label,
   icon,
+  badge,
 }: {
   to: string;
   label: string;
   icon: ReactNode;
+  badge?: ReactNode;
 }) {
   return (
     <NavLink
@@ -94,7 +103,24 @@ function NavItem({
     >
       {icon}
       <span>{label}</span>
+      {badge}
     </NavLink>
+  );
+}
+
+function NotificationNavBadge({ workspaceId }: { workspaceId: string }) {
+  const query = useQuery({
+    queryKey: notificationSummaryQueryKey(workspaceId),
+    queryFn: ({ signal }) => getNotificationSummary(workspaceId, signal),
+    staleTime: 15_000,
+  });
+  if (query.data === undefined || query.data.open_count <= 0) {
+    return null;
+  }
+  return (
+    <span className="navigation-item__badge" aria-label={`需要处理 ${query.data.open_count}`}>
+      {query.data.open_count}
+    </span>
   );
 }
 

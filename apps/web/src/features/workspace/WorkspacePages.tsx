@@ -1,146 +1,23 @@
 import {
   Boxes,
-  Check,
-  CircleDashed,
   Clock3,
-  Mail,
   MessageCircle,
   PackageOpen,
   Radio,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import {
   listTaskOverviews,
   taskOverviewQueryKey,
   type TaskOverview,
 } from "@/features/tasks/api";
-import {
-  listPlanningRequests,
-  planningRequestsQueryKey,
-} from "@/features/planning/api";
-import {
-  planningNotificationFromRequest,
-  type WorkspaceNotification,
-} from "@/features/attention/notifications";
 import { AsyncState } from "@/shared/ui/AsyncState";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
-
-export function InboxPage() {
-  const stream = useWorkspaceStreamOptional();
-  const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
-  const planningAttentionQuery = useQuery({
-    queryKey: planningRequestsQueryKey(workspaceId, true),
-    queryFn: ({ signal }) => listPlanningRequests(workspaceId, { requiresAttention: true, signal }),
-    enabled: workspaceId.length > 0,
-  });
-  useEffect(() => {
-    const cursor = planningAttentionQuery.data?.last_change_cursor;
-    if (stream !== null && cursor !== undefined) {
-      stream.seedSnapshotCursor(cursor);
-    }
-  }, [planningAttentionQuery.data?.last_change_cursor, stream]);
-  const notices = useMemo(
-    () => mergeNotifications(
-      stream?.notices ?? [],
-      (planningAttentionQuery.data?.items ?? [])
-        .map((request) => planningNotificationFromRequest(request))
-        .filter((notice): notice is WorkspaceNotification => notice !== null),
-    ),
-    [planningAttentionQuery.data?.items, stream?.notices],
-  );
-  const [filter, setFilter] = useState<"action" | "progress" | "archived">("action");
-  const visibleNotices = useMemo(
-    () =>
-      notices.filter((notice) => {
-        if (filter === "action") {
-          return isActionNotice(notice);
-        }
-        if (filter === "progress") {
-          return !isActionNotice(notice);
-        }
-        return false;
-      }),
-    [filter, notices],
-  );
-
-  return (
-    <WorkspacePageShell
-      eyebrow="INBOX / PROJECTION"
-      title="信箱"
-      summary=""
-      icon={<Mail size={18} aria-hidden="true" />}
-    >
-      <div className="workspace-segmented" role="tablist" aria-label="信箱分类">
-        <InboxTab
-          active={filter === "action"}
-          onClick={() => setFilter("action")}
-          label="需要处理"
-          count={
-            notices.filter(isActionNotice).length
-          }
-        />
-        <InboxTab
-          active={filter === "progress"}
-          onClick={() => setFilter("progress")}
-          label="进度通报"
-          count={
-            notices.filter((notice) => !isActionNotice(notice)).length
-          }
-        />
-        <InboxTab
-          active={filter === "archived"}
-          onClick={() => setFilter("archived")}
-          label="已归档"
-        />
-      </div>
-      {filter === "archived" ? (
-        <EmptyWorkspaceState icon={<PackageOpen size={18} />} title="暂无已归档事项" />
-      ) : planningAttentionQuery.isError ? (
-        <div className="workspace-empty workspace-empty--error" role="alert">
-          <div className="workspace-empty__glyph"><Radio size={18} /></div>
-          <strong>无法恢复规划信箱</strong>
-          <span>控制面暂时没有返回待处理的 PlanningRequest。</span>
-          <button className="quiet-button" type="button" onClick={() => void planningAttentionQuery.refetch()}>
-            重试读取
-          </button>
-        </div>
-      ) : visibleNotices.length === 0 ? (
-        <EmptyWorkspaceState
-          icon={<CircleDashed size={18} />}
-          title={filter === "action" ? "当前没有需要处理的事项" : "当前没有新的进度通报"}
-        />
-      ) : (
-        <div className="inbox-list">
-          {visibleNotices.map((notice) => (
-            <article className="inbox-item" key={notice.id}>
-              <div className="inbox-item__marker">
-                <StatusIcon kind={notice.kind} />
-              </div>
-              <div className="inbox-item__body">
-                <strong>{notice.title}</strong>
-                <span>{notice.summary}</span>
-                <span className="mono-label">
-                  {notice.cursor === null ? `REQUEST V${notice.resourceVersion ?? "?"}` : `CURSOR ${notice.cursor}`}
-                </span>
-              </div>
-              <div className="inbox-item__actions">
-                <Link className="quiet-button" to={notice.href}>
-                  查看任务
-                </Link>
-              </div>
-            </article>
-          ))}
-        </div>
-      )}
-    </WorkspacePageShell>
-  );
-}
 
 export function HistoryPage() {
   const workspaceId =
@@ -220,9 +97,9 @@ function WorkspacePageShell({
 }: {
   eyebrow: string;
   title: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   summary?: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <section className="workspace-page" aria-labelledby="workspace-page-title">
@@ -240,88 +117,6 @@ function WorkspacePageShell({
       {children}
     </section>
   );
-}
-
-function InboxTab({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  count?: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={`workspace-segment${active ? " is-active" : ""}`}
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-    >
-      {label}
-      {count ? <span>{count}</span> : null}
-    </button>
-  );
-}
-
-function EmptyWorkspaceState({ icon, title }: { icon: React.ReactNode; title: string }) {
-  return (
-    <div className="workspace-empty" role="status">
-      <div className="workspace-empty__glyph">{icon}</div>
-      <strong>{title}</strong>
-    </div>
-  );
-}
-
-function StatusIcon({ kind }: { kind: string }) {
-  if (kind === "waiting_for_user" || kind === "planning_clarification") {
-    return <CircleDashed size={16} aria-hidden="true" />;
-  }
-  if (kind === "blocked" || kind === "planning_blocked" || kind === "planning_conflicted") {
-    return <Radio size={16} aria-hidden="true" />;
-  }
-  return <Check size={16} aria-hidden="true" />;
-}
-
-function isActionNotice(notice: WorkspaceNotification): boolean {
-  return notice.kind === "waiting_for_user"
-    || notice.kind === "blocked"
-    || notice.kind === "planning_clarification"
-    || notice.kind === "planning_proposal"
-    || notice.kind === "planning_conflicted"
-    || notice.kind === "planning_blocked";
-}
-
-function mergeNotifications(
-  streamNotices: readonly WorkspaceNotification[],
-  persistedNotices: readonly WorkspaceNotification[],
-): WorkspaceNotification[] {
-  const merged = new Map<string, WorkspaceNotification>();
-  const persistedPlanningResources = new Set(
-    persistedNotices
-      .filter((notice) => isPlanningNotice(notice) && notice.resourceId !== null)
-      .map((notice) => notice.resourceId),
-  );
-  const candidates = [
-    ...persistedNotices,
-    ...streamNotices.filter(
-      (notice) => !isPlanningNotice(notice) || !persistedPlanningResources.has(notice.resourceId),
-    ),
-  ];
-  for (const notice of candidates) {
-    const key = `${notice.kind}:${notice.resourceId ?? notice.id}`;
-    if (!merged.has(key)) {
-      merged.set(key, notice);
-    }
-  }
-  return [...merged.values()];
-}
-
-function isPlanningNotice(notice: WorkspaceNotification): boolean {
-  return notice.kind.startsWith("planning_");
 }
 
 function HistoryRow({
@@ -353,7 +148,7 @@ function CapabilityRow({
   value,
   status,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   title: string;
   value: string;
   status: string;

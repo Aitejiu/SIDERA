@@ -128,18 +128,19 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
     : graphQuery.data ?? queryClient.getQueryData<TaskGraph>(taskGraphQueryKey(workspaceId, rootTaskId));
 
   useEffect(() => {
-    if (currentRoute === null) {
+    if (currentRoute === null || state.navigationHref !== null) {
       return;
     }
     const title = graph?.overview.title;
     const route = currentRoute.kind === "task-index"
+      || currentRoute.kind === "inbox"
       || currentRoute.kind === "chat"
       || currentRoute.kind === "collaboration"
       || title === undefined
       ? currentRoute
       : { ...currentRoute, title };
     registerDirectRoute(route);
-  }, [currentRoute, graph?.overview.title, registerDirectRoute]);
+  }, [currentRoute, graph?.overview.title, registerDirectRoute, state.navigationHref]);
 
   return (
     <nav className="workspace-tabs" aria-label="已打开的任务">
@@ -199,6 +200,17 @@ export function semanticTabForLocation(
       id: "task-index",
       kind: "task-index",
       title: "任务",
+      href: `${location.pathname}${location.search}`,
+      closeable: false,
+    };
+  }
+
+  const inboxPath = `/workspaces/${workspaceId}/inbox`;
+  if (location.pathname === inboxPath) {
+    return {
+      id: "inbox",
+      kind: "inbox",
+      title: "信箱",
       href: `${location.pathname}${location.search}`,
       closeable: false,
     };
@@ -373,6 +385,8 @@ function tabDetail(tab: WorkspaceTab): string {
   switch (tab.kind) {
     case "task-index":
       return "总览";
+    case "inbox":
+      return "通知";
     case "planning-new":
       return "规划入口";
     case "planning":

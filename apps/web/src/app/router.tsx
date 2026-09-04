@@ -7,7 +7,6 @@ import {
 
 import {
   App,
-  TaskRoutePlaceholder,
 } from "./App";
 import { KnowledgeInboxPage } from "@/features/knowledge/KnowledgeInboxPage";
 import { KnowledgeImportPage } from "@/features/knowledge/KnowledgeImportPage";
@@ -26,7 +25,8 @@ import { WorkerItemPage } from "@/features/worker-items/WorkerItemPage";
 import { WorkerNodePage } from "@/features/workers/WorkerNodePage";
 import { WorkerNodesPage } from "@/features/workers/WorkerNodesPage";
 import { ChatPage } from "@/features/chat/ChatPage";
-import { CapabilitiesPage, HistoryPage, InboxPage } from "@/features/workspace/WorkspacePages";
+import { InboxPage, NotificationSettingsPage } from "@/features/notifications";
+import { CapabilitiesPage, HistoryPage } from "@/features/workspace/WorkspacePages";
 import { PlanningBriefForm } from "@/features/planning/PlanningBriefForm";
 import { PlanningPage } from "@/features/planning/PlanningPage";
 import { PlanRevisionPage } from "@/features/planning/PlanRevisionPage";
@@ -153,7 +153,7 @@ export const routes: RouteObject[] = [
       },
       {
         path: "/workspaces/:workspaceId/settings",
-        element: <TaskRoutePlaceholder />,
+        element: <NotificationSettingsPage />,
       },
     ],
   },
