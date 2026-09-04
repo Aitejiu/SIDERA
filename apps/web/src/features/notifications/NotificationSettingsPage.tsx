@@ -3,6 +3,7 @@ import { Activity, AlertCircle, CheckCircle2, Mail, RefreshCcw } from "lucide-re
 import { useParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
+import { NotificationBrowserGate } from "@/features/attention/NotificationCenter";
 
 import {
   getNotificationReadiness,
@@ -112,6 +113,7 @@ export function NotificationSettingsPage() {
           <span>投递失败不会暂停任务。打开信箱中的对应线程可查看诊断并在确认原因后重新投递。</span>
         </div>
       </div>
+      <NotificationBrowserGate />
     </section>
   );
 }

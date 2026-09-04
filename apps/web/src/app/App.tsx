@@ -64,6 +64,12 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
             <NavItem to={`/workspaces/${workspaceId}/history`} label="历史" icon={<Clock3 size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/capabilities`} label="能力" icon={<Boxes size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/workers`} label="执行节点" icon={<ServerCog size={17} />} />
+            <NavItem
+              to={`/workspaces/${workspaceId}/settings`}
+              label="设置"
+              icon={<Settings2 size={17} />}
+              className="navigation-item--compact-settings"
+            />
           </nav>
           <div className="rail-footer">
             <NavItem to={`/workspaces/${workspaceId}/settings`} label="设置" icon={<Settings2 size={17} />} />
@@ -89,15 +95,17 @@ function NavItem({
   label,
   icon,
   badge,
+  className,
 }: {
   to: string;
   label: string;
   icon: ReactNode;
   badge?: ReactNode;
+  className?: string;
 }) {
   return (
     <NavLink
-      className={({ isActive }) => `navigation-item${isActive ? " is-active" : ""}`}
+      className={({ isActive }) => `navigation-item${isActive ? " is-active" : ""}${className === undefined ? "" : ` ${className}`}`}
       to={to}
       aria-label={label}
     >

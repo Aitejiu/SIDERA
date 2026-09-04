@@ -1,8 +1,9 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, CheckCircle2, CircleDashed, Mail, PackageOpen, Radio } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
+import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
 
 import {
@@ -27,6 +28,7 @@ export function InboxPage() {
   const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const stream = useWorkspaceStreamOptional();
   const [category, setCategory] = useState<NotificationThreadCategory>("action");
   const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
   const [commandLabel, setCommandLabel] = useState<string | null>(null);
@@ -73,6 +75,15 @@ export function InboxPage() {
     [threadsQuery.data?.pages],
   );
   const summary = summaryQuery.data;
+  const snapshotCursor = summary?.last_change_cursor
+    ?? threadsQuery.data?.pages.at(-1)?.last_change_cursor;
+  useEffect(() => {
+    if (stream !== null && snapshotCursor !== undefined) {
+      stream.seedSnapshotCursor(snapshotCursor);
+    }
+  }, [snapshotCursor, stream]);
+
+  const streamStatus = stream?.streamState.status;
   const stale = threadsQuery.isRefetchError
     || (threadsQuery.isError && threadsQuery.data !== undefined);
 
@@ -159,6 +170,12 @@ export function InboxPage() {
           <button className="quiet-button" type="button" onClick={() => void threadsQuery.refetch()}>
             重试读取
           </button>
+        </div>
+      ) : null}
+      {streamStatus !== undefined && streamStatus !== "live" && streamStatus !== "connecting" ? (
+        <div className="notification-inbox__stream-state" role="status" aria-label="信箱实时状态">
+          <CircleDashed size={15} aria-hidden="true" />
+          <span>{notificationStreamStatusLabel(streamStatus)}</span>
         </div>
       ) : null}
 
@@ -305,4 +322,19 @@ function EmptyNotificationState({ category }: { category: NotificationThreadCate
       <strong>{copy.title}</strong>
     </div>
   );
+}
+
+function notificationStreamStatusLabel(
+  status: NonNullable<ReturnType<typeof useWorkspaceStreamOptional>>["streamState"]["status"],
+): string {
+  switch (status) {
+    case "offline":
+      return "实时连接已断开，当前仍显示最后一次成功快照";
+    case "resyncing":
+      return "正在重新同步服务端信箱快照";
+    case "stale":
+      return "实时连接暂时不可用，当前仍显示最后一次成功快照";
+    default:
+      return "正在建立实时连接";
+  }
 }

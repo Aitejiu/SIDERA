@@ -3,6 +3,7 @@ import {
   expect,
   ROOT_TASK_ID,
   R5_WORKSPACE_ID,
+  mockNotificationInbox,
   runPlanningWorkerOnce,
   WORKSPACE_ID,
 } from "./fixtures";
@@ -54,6 +55,22 @@ test.describe("responsive control room visuals", () => {
         page.locator(".planning-run-context__facts"),
         page.locator(".workspace-tab__label").filter({ hasText: "规划" }),
         page.locator(".planning-inspector__section").nth(1).locator("dd").nth(2),
+      ],
+    });
+  });
+
+  test("keeps the notification inbox stable across viewport projects", async ({ page }) => {
+    await mockNotificationInbox(page);
+    await page.goto(`/workspaces/${WORKSPACE_ID}/inbox`);
+    await expect(page.getByRole("heading", { name: "信箱", exact: true })).toBeVisible();
+    await expect(page.getByText("支付重构 / 通知网关 / 实现者")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await expect(page).toHaveScreenshot("notification-inbox.png", {
+      fullPage: true,
+      animations: "disabled",
+      mask: [
+        page.locator(".mono-label"),
+        page.locator(".notification-inbox__stream-state"),
       ],
     });
   });

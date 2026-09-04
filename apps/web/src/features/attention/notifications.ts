@@ -13,7 +13,8 @@ export interface WorkspaceNotification {
     | "planning_proposal"
     | "planning_conflicted"
     | "planning_blocked"
-    | "planning_materialized";
+    | "planning_materialized"
+    | "notification_fact";
   title: string;
   summary: string;
   resourceId: string | null;
@@ -26,6 +27,18 @@ const LAST_CURSOR_PREFIX = "sidera:last-notified-cursor:";
 const ENABLED_PREFIX = "sidera:browser-notifications:";
 const BROWSER_NOTIFICATION_IDS_PREFIX = "sidera:browser-notification-ids:";
 const MAX_BROWSER_NOTIFICATION_IDS = 128;
+
+export interface NotificationFactForBrowser {
+  id: string;
+  priority: string;
+  title: string;
+  summary: string;
+  deep_link: string;
+  baseline_import: boolean;
+  thread_id: string;
+  source_projection_cursor?: number;
+  source_resource_version?: number;
+}
 
 export function notificationFromChange(
   workspaceId: string,
@@ -49,6 +62,7 @@ export function notificationFromChange(
     planning_conflicted: "任务方案已冲突",
     planning_blocked: "任务规划已阻塞",
     planning_materialized: "任务已开始",
+    notification_fact: "通知需要处理",
   };
   const title = titleMap[kind];
   const resource = change.resource_id ? ` · ${change.resource_id.slice(0, 8)}` : "";
@@ -63,6 +77,32 @@ export function notificationFromChange(
     href: change.resource_id
       ? `/workspaces/${workspaceId}/tasks/${change.resource_id}`
       : `/workspaces/${workspaceId}/tasks`,
+  };
+}
+
+export function notificationFromFact(
+  workspaceId: string,
+  fact: NotificationFactForBrowser,
+): WorkspaceNotification | null {
+  if (
+    fact.priority !== "action"
+    || fact.baseline_import
+    || fact.id.length === 0
+    || fact.title.length === 0
+    || fact.summary.length === 0
+    || fact.deep_link.length === 0
+  ) {
+    return null;
+  }
+  return {
+    id: `notification-fact:${workspaceId}:${fact.id}`,
+    kind: "notification_fact",
+    title: fact.title,
+    summary: fact.summary,
+    resourceId: fact.thread_id,
+    resourceVersion: fact.source_resource_version ?? null,
+    cursor: fact.source_projection_cursor ?? null,
+    href: fact.deep_link,
   };
 }
 
@@ -214,7 +254,12 @@ export function readLastNotifiedCursor(
   workspaceId: string,
   storage: Storage | undefined = safeStorage(),
 ): number {
-  const raw = storage?.getItem(lastNotifiedCursorKey(workspaceId));
+  let raw: string | null;
+  try {
+    raw = storage?.getItem(lastNotifiedCursorKey(workspaceId)) ?? null;
+  } catch {
+    return 0;
+  }
   const cursor = raw === null || raw === undefined ? 0 : Number(raw);
   return Number.isFinite(cursor) ? cursor : 0;
 }
@@ -224,7 +269,11 @@ export function writeLastNotifiedCursor(
   cursor: number,
   storage: Storage | undefined = safeStorage(),
 ): void {
-  storage?.setItem(lastNotifiedCursorKey(workspaceId), String(cursor));
+  try {
+    storage?.setItem(lastNotifiedCursorKey(workspaceId), String(cursor));
+  } catch {
+    // Browser notification state must not affect the server-authoritative thread.
+  }
 }
 
 export function browserNotificationIdsKey(workspaceId: string): string {
@@ -235,7 +284,12 @@ export function readSentBrowserNotificationIds(
   workspaceId: string,
   storage: Storage | undefined = safeStorage(),
 ): string[] {
-  const raw = storage?.getItem(browserNotificationIdsKey(workspaceId));
+  let raw: string | null;
+  try {
+    raw = storage?.getItem(browserNotificationIdsKey(workspaceId)) ?? null;
+  } catch {
+    return [];
+  }
   if (raw === null || raw === undefined) {
     return [];
   }
@@ -286,7 +340,11 @@ export function browserNotificationsEnabled(
   workspaceId: string,
   storage: Storage | undefined = safeStorage(),
 ): boolean {
-  return storage?.getItem(`${ENABLED_PREFIX}${workspaceId}`) === "true";
+  try {
+    return storage?.getItem(`${ENABLED_PREFIX}${workspaceId}`) === "true";
+  } catch {
+    return false;
+  }
 }
 
 export function setBrowserNotificationsEnabled(
@@ -294,26 +352,45 @@ export function setBrowserNotificationsEnabled(
   enabled: boolean,
   storage: Storage | undefined = safeStorage(),
 ): void {
-  storage?.setItem(`${ENABLED_PREFIX}${workspaceId}`, String(enabled));
+  try {
+    storage?.setItem(`${ENABLED_PREFIX}${workspaceId}`, String(enabled));
+  } catch {
+    // Opt-in preference is best-effort and never changes Thread state.
+  }
 }
 
 export async function requestBrowserNotificationPermission(): Promise<NotificationPermission | "unsupported"> {
   if (typeof Notification === "undefined") {
     return "unsupported";
   }
-  return Notification.requestPermission();
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    return "unsupported";
+  }
 }
 
-export function sendBrowserNotification(notification: WorkspaceNotification): boolean {
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+export function sendBrowserNotification(
+  notification: WorkspaceNotification,
+  openDeepLink: (href: string) => void = (href) => window.location.assign(href),
+): boolean {
+  if (
+    typeof window === "undefined"
+    || typeof Notification === "undefined"
+    || Notification.permission !== "granted"
+  ) {
     return false;
   }
   try {
+    const target = new URL(notification.href, window.location.origin);
+    if (target.origin !== window.location.origin) {
+      return false;
+    }
     const browserNotice = new Notification(notification.title, {
       body: notification.summary,
     });
     browserNotice.onclick = () => {
-      window.location.assign(notification.href);
+      openDeepLink(`${target.pathname}${target.search}${target.hash}`);
     };
     return true;
   } catch {

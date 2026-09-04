@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
-import { test as base } from "@playwright/test";
+import { test as base, type Page } from "@playwright/test";
 
 export const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 export const R5_WORKSPACE_ID = "20000000-0000-0000-0000-000000000002";
@@ -31,6 +31,9 @@ export const KNOWLEDGE_REVISION_ONE_ID = "c0000000-0000-0000-0000-000000000003";
 export const KNOWLEDGE_REVISION_TWO_ID = "c0000000-0000-0000-0000-000000000004";
 export const KNOWLEDGE_PENDING_CANDIDATE_ID = "c0000000-0000-0000-0000-000000000005";
 export const KNOWLEDGE_STALE_CANDIDATE_ID = "c0000000-0000-0000-0000-000000000006";
+export const NOTIFICATION_THREAD_ID = "60000000-0000-0000-0000-000000000001";
+export const NOTIFICATION_FACT_ID = "70000000-0000-0000-0000-000000000001";
+export const NOTIFICATION_DELIVERY_ID = "80000000-0000-0000-0000-000000000001";
 
 export type SeedScenario = "task-first" | "scale" | "runtime-routing" | "context-knowledge";
 export type PlanningSeedScenario = "proposal" | "clarification" | "scale" | "real";
@@ -411,6 +414,103 @@ function e2eEnvironment(): NodeJS.ProcessEnv {
     SIDERA_CONTEXT_PACKAGE_CUTOVER_AT: process.env.SIDERA_CONTEXT_PACKAGE_CUTOVER_AT
       ?? defaultContextPackageCutoverAt,
   };
+}
+
+export async function mockNotificationInbox(page: Page): Promise<void> {
+  const deepLink = `/workspaces/${WORKSPACE_ID}/worker-items/${IMPLEMENTER_WORKER_ITEM_ID}?view=governance`;
+  const thread = {
+    id: NOTIFICATION_THREAD_ID,
+    workspace_id: WORKSPACE_ID,
+    recipient_type: "workspace_operator",
+    recipient_id: "aitejiu",
+    category: "action",
+    business_status: "open",
+    organization_status: "active",
+    priority: "action",
+    root_task_id: ROOT_TASK_ID,
+    root_task_title: "支付重构",
+    subtask_id: SUBTASK_TASK_ID,
+    subtask_title: "通知网关",
+    worker_item_id: IMPLEMENTER_WORKER_ITEM_ID,
+    worker_item_title: "实现者",
+    title: "需要确认执行分支",
+    summary: "当前 WorkerItem 等待你的确认。",
+    action: "确认恢复路径",
+    topic: "worker.attention",
+    notification_ref: "notification-ref-fixture",
+    latest_fact_id: NOTIFICATION_FACT_ID,
+    latest_fact_occurred_at: "2026-09-04T08:30:00Z",
+    last_read_fact_id: null,
+    unread_count: 1,
+    version: 1,
+    deep_link: deepLink,
+    opened_at: "2026-09-04T08:00:00Z",
+    resolved_at: null,
+    archived_at: null,
+    updated_at: "2026-09-04T08:30:00Z",
+  };
+  await page.route(`**/api/v1/workspaces/${WORKSPACE_ID}/notification-summary`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", json: {
+      open_count: 1,
+      unread_count: 1,
+      progress_count: 1,
+      channel_issue_count: 0,
+      last_change_cursor: 42,
+      recipient_type: "workspace_operator",
+      recipient_id: "aitejiu",
+    } });
+  });
+  await page.route(`**/api/v1/workspaces/${WORKSPACE_ID}/notification-threads/${NOTIFICATION_THREAD_ID}*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", json: {
+      thread,
+      facts: {
+        items: [{
+          id: NOTIFICATION_FACT_ID,
+          thread_id: NOTIFICATION_THREAD_ID,
+          policy_version: 1,
+          kind: "execution_attention",
+          priority: "action",
+          transition: "opened",
+          topic: "worker.attention",
+          root_task_id: ROOT_TASK_ID,
+          subtask_id: SUBTASK_TASK_ID,
+          worker_item_id: IMPLEMENTER_WORKER_ITEM_ID,
+          source_projection_cursor: 40,
+          source_projection_type: "worker_item_workspace",
+          source_resource_id: IMPLEMENTER_WORKER_ITEM_ID,
+          source_resource_version: 1,
+          title: thread.title,
+          summary: thread.summary,
+          action: thread.action,
+          deep_link: deepLink,
+          correlation_id: "90000000-0000-0000-0000-000000000001",
+          baseline_import: false,
+          occurred_at: thread.latest_fact_occurred_at,
+          created_at: thread.latest_fact_occurred_at,
+        }],
+        next_cursor: null,
+      },
+      deliveries: [],
+      notification_ref: thread.notification_ref,
+      available_commands: ["mark_read"],
+      deep_link: deepLink,
+      last_change_cursor: 42,
+    } });
+  });
+  await page.route(`**/api/v1/workspaces/${WORKSPACE_ID}/notification-threads*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", json: {
+      items: [thread],
+      next_cursor: null,
+      last_change_cursor: 42,
+    } });
+  });
+  await page.route(`**/api/v1/workspaces/${WORKSPACE_ID}/projection-changes*`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: ": fixture stream\n\n",
+    });
+  });
 }
 
 type Fixtures = {

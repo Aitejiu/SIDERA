@@ -1,9 +1,12 @@
+import type { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createInvalidationQueue,
   handleWorkspaceProjectionChange,
   matchesProjectionQuery,
 } from "./WorkspaceStreamProvider";
+import type { NotificationThreadDetail } from "@/features/notifications/api";
 import type { NotificationOwnershipApi } from "@/features/attention/notificationOwnership";
 import type { WorkspaceNotification } from "@/features/attention/notifications";
 import type { ProjectionChange } from "@/shared/api/projectionStream";
@@ -18,6 +21,8 @@ const CONTEXT_ID = "context-1";
 const PACKAGE_ID = "package-1";
 const CANDIDATE_ID = "candidate-1";
 const PROPOSAL_ID = "proposal-1";
+const THREAD_ID = "notification-thread-1";
+const DELIVERY_ID = "notification-delivery-1";
 
 function change(
   projection_type: string,
@@ -75,6 +80,43 @@ async function flushAsyncNotifications(): Promise<void> {
 }
 
 describe("WorkspaceStreamProvider projection matching", () => {
+  it("targets notification summary, lists, and only the changed thread detail", () => {
+    const threadChange = change("notification_thread", THREAD_ID);
+
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "summary"], WORKSPACE_ID, threadChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "threads", "action"], WORKSPACE_ID, threadChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "thread", THREAD_ID], WORKSPACE_ID, threadChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "thread", "other-thread"], WORKSPACE_ID, threadChange)).toBe(false);
+  });
+
+  it("targets delivery settings, attempts, and a cached detail containing that delivery", () => {
+    const deliveryChange = change("notification_delivery", DELIVERY_ID);
+    const detail = { deliveries: [{ delivery_id: DELIVERY_ID }] };
+
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "summary"], WORKSPACE_ID, deliveryChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "threads", "progress"], WORKSPACE_ID, deliveryChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "readiness"], WORKSPACE_ID, deliveryChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "modules"], WORKSPACE_ID, deliveryChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "delivery", DELIVERY_ID, "attempts"], WORKSPACE_ID, deliveryChange)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "delivery", "other-delivery", "attempts"], WORKSPACE_ID, deliveryChange)).toBe(false);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "thread", THREAD_ID], WORKSPACE_ID, deliveryChange, detail)).toBe(true);
+    expect(matchesProjectionQuery(["notifications", WORKSPACE_ID, "thread", THREAD_ID], WORKSPACE_ID, deliveryChange, { deliveries: [] })).toBe(false);
+  });
+
+  it("coalesces duplicate and replayed cursors into one invalidation", async () => {
+    const queryClient = { invalidateQueries: vi.fn() } as unknown as QueryClient;
+    const queue = createInvalidationQueue(queryClient, WORKSPACE_ID);
+    const current = change("notification_thread", THREAD_ID, { cursor: 21 });
+
+    queue.enqueue(current);
+    queue.enqueue(current);
+    queue.enqueue({ ...current, cursor: 20 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(1);
+    queue.close();
+  });
+
   it("invalidates only the affected resource for worker and subtask workspaces", () => {
     expect(
       matchesProjectionQuery(
@@ -372,7 +414,7 @@ describe("WorkspaceStreamProvider notification routing", () => {
     expect(sendBrowserNotification).not.toHaveBeenCalled();
   });
 
-  it("sends a Web-origin change once and ignores an unknown owner", async () => {
+  it("does not create a browser notification from projection metadata", async () => {
     const notices = collectNotices();
     const enqueue = vi.fn();
     const sendBrowserNotification = vi.fn(() => true);
@@ -387,7 +429,7 @@ describe("WorkspaceStreamProvider notification routing", () => {
       storage,
     });
     await flushAsyncNotifications();
-    expect(sendBrowserNotification).toHaveBeenCalledTimes(1);
+    expect(sendBrowserNotification).not.toHaveBeenCalled();
 
     handleWorkspaceProjectionChange(
       change("planning_request", "planning-request-unknown", { cursor: 2 }),
@@ -401,59 +443,103 @@ describe("WorkspaceStreamProvider notification routing", () => {
       },
     );
     await flushAsyncNotifications();
-    expect(sendBrowserNotification).toHaveBeenCalledTimes(1);
+    expect(sendBrowserNotification).not.toHaveBeenCalled();
   });
 
-  it("does not let out-of-order owner lookups swallow a slower Web notice", async () => {
+  it("fetches a new high-value Fact before sending a browser notification", async () => {
     const notices = collectNotices();
     const enqueue = vi.fn();
     const sendBrowserNotification = vi.fn(() => true);
     const storage = storageWithBrowserNotifications();
-    const deferreds: Array<{
-      resolve: (value: { source_type: string }) => void;
-      promise: Promise<{ source_type: string }>;
-    }> = [];
-    const api: NotificationOwnershipApi = {
-      getPlanningRequest: vi.fn(() => {
-        let resolve!: (value: { source_type: string }) => void;
-        const promise = new Promise<{ source_type: string }>((nextResolve) => {
-          resolve = nextResolve;
-        });
-        deferreds.push({ resolve, promise });
-        return promise;
-      }),
-      listPlanningRequests: vi.fn(async () => ({ items: [], next_cursor: null })),
-      getPlanningMaterialization: vi.fn(async () => ({ root_task_id: ROOT_TASK_ID })),
-    };
+    const fetchNotificationThread = vi.fn(async () => notificationDetail());
 
     handleWorkspaceProjectionChange(
-      change("planning_request", "planning-request-1", { cursor: 1 }),
+      change("notification_thread", THREAD_ID, { cursor: 3 }),
       {
         workspaceId: WORKSPACE_ID,
         invalidationQueue: { enqueue },
         setNotices: notices.set,
-        ownershipApi: api,
+        ownershipApi: ownershipApi("sidera_web_chat"),
         sendBrowserNotification,
         storage,
-      },
-    );
-    handleWorkspaceProjectionChange(
-      change("planning_request", "planning-request-2", { cursor: 2 }),
-      {
-        workspaceId: WORKSPACE_ID,
-        invalidationQueue: { enqueue },
-        setNotices: notices.set,
-        ownershipApi: api,
-        sendBrowserNotification,
-        storage,
+        fetchNotificationThread,
       },
     );
 
-    deferreds[1]?.resolve({ source_type: "sidera_web_chat" });
     await flushAsyncNotifications();
+    expect(fetchNotificationThread).toHaveBeenCalledWith(WORKSPACE_ID, THREAD_ID);
     expect(sendBrowserNotification).toHaveBeenCalledTimes(1);
-    deferreds[0]?.resolve({ source_type: "sidera_web_chat" });
+    expect(sendBrowserNotification).toHaveBeenCalledWith(expect.objectContaining({
+      id: `notification-fact:${WORKSPACE_ID}:fact-1`,
+      title: "服务端事实标题",
+      summary: "服务端事实摘要",
+      href: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}?view=governance`,
+    }));
+  });
+
+  it("does not send progress or private Facts and tolerates storage failures", async () => {
+    const notices = collectNotices();
+    const enqueue = vi.fn();
+    const sendBrowserNotification = vi.fn(() => true);
+    const storage = throwingStorage();
+    const fetchNotificationThread = vi.fn(async () => notificationDetail({
+      priority: "progress",
+    }));
+
+    expect(() => handleWorkspaceProjectionChange(
+      change("notification_thread", THREAD_ID, { cursor: 4 }),
+      {
+        workspaceId: WORKSPACE_ID,
+        invalidationQueue: { enqueue },
+        setNotices: notices.set,
+        ownershipApi: ownershipApi("akashic_private"),
+        sendBrowserNotification,
+        storage,
+        fetchNotificationThread,
+      },
+    )).not.toThrow();
     await flushAsyncNotifications();
-    expect(sendBrowserNotification).toHaveBeenCalledTimes(2);
+    expect(sendBrowserNotification).not.toHaveBeenCalled();
   });
 });
+
+function notificationDetail(
+  overrides: Partial<NotificationThreadDetail["facts"]["items"][number]> = {},
+): NotificationThreadDetail {
+  return {
+    thread: {
+      latest_fact_id: "fact-1",
+      deep_link: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}?view=governance`,
+    },
+    facts: {
+      items: [{
+        id: "fact-1",
+        priority: "action",
+        title: "服务端事实标题",
+        summary: "服务端事实摘要",
+        deep_link: `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}?view=governance`,
+        baseline_import: false,
+        thread_id: THREAD_ID,
+        source_projection_cursor: 3,
+        source_projection_type: "planning_request",
+        source_resource_id: "planning-request-1",
+        source_resource_version: 2,
+        correlation_id: "fact-correlation-1",
+        kind: "planning_clarification",
+        ...overrides,
+      }],
+      next_cursor: null,
+    },
+  } as unknown as NotificationThreadDetail;
+}
+
+function throwingStorage(): Storage {
+  return {
+    length: 0,
+    clear: () => { throw new Error("storage unavailable"); },
+    getItem: () => { throw new Error("storage unavailable"); },
+    key: () => { throw new Error("storage unavailable"); },
+    removeItem: () => { throw new Error("storage unavailable"); },
+    setItem: () => { throw new Error("storage unavailable"); },
+  } as Storage;
+}

@@ -66,6 +66,7 @@ describe("NotificationSettingsPage", () => {
     expect(await screen.findByText("akashic-private")).toBeVisible();
     expect(screen.getByText("已就绪")).toBeVisible();
     expect(screen.getByText("积压与耗尽投递")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "开启" })).toBeVisible();
     expect(screen.queryByText("60000000-0000-0000-0000-000000000001")).not.toBeInTheDocument();
     expect(screen.queryByText(/source_ref|route_id|token/i)).not.toBeInTheDocument();
   });

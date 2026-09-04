@@ -21,12 +21,17 @@ import {
   browserNotificationsEnabled,
   hasSentBrowserNotification,
   notificationFromChange,
+  notificationFromFact,
   recordSentBrowserNotification,
   readLastNotifiedCursor,
   sendBrowserNotification,
   writeLastNotifiedCursor,
   type WorkspaceNotification,
 } from "@/features/attention/notifications";
+import {
+  getNotificationThread,
+  type NotificationThreadDetail,
+} from "@/features/notifications/api";
 import {
   resolveNotificationOwner,
   type NotificationOwnershipApi,
@@ -48,6 +53,10 @@ interface WorkspaceStreamNotificationDependencies {
     updater: (current: WorkspaceNotification[]) => WorkspaceNotification[],
   ) => void;
   ownershipApi?: NotificationOwnershipApi;
+  fetchNotificationThread?: (
+    workspaceId: string,
+    threadId: string,
+  ) => Promise<NotificationThreadDetail>;
   sendBrowserNotification?: (notification: WorkspaceNotification) => boolean;
   storage?: Storage;
 }
@@ -59,6 +68,7 @@ export function handleWorkspaceProjectionChange(
   const {
     invalidationQueue,
     ownershipApi,
+    fetchNotificationThread,
     sendBrowserNotification: sendBrowserNotificationOverride,
     setNotices,
     storage,
@@ -66,36 +76,58 @@ export function handleWorkspaceProjectionChange(
   } = dependencies;
   invalidationQueue.enqueue(change);
   const notification = notificationFromChange(workspaceId, change);
-  if (notification === null) {
-    return;
-  }
   if (change.cursor <= readLastNotifiedCursor(workspaceId, storage)) {
     return;
   }
   writeLastNotifiedCursor(workspaceId, change.cursor, storage);
-  setNotices((current) => appendNotification(current, notification));
+  if (notification !== null) {
+    setNotices((current) => appendNotification(current, notification));
+  }
 
   if (!browserNotificationsEnabled(workspaceId, storage)) {
     return;
   }
-  void resolveNotificationOwner(workspaceId, change, ownershipApi).then((owner) => {
-    if (
-      owner !== "web"
-      || hasSentBrowserNotification(workspaceId, notification.id, storage)
-    ) {
-      return;
-    }
-    try {
-      const sent = (sendBrowserNotificationOverride ?? sendBrowserNotification)(notification);
-      if (sent) {
-        recordSentBrowserNotification(workspaceId, notification.id, storage);
+  if (change.projection_type !== "notification_thread" || change.resource_id === null) {
+    return;
+  }
+  const fetchThread = fetchNotificationThread ?? ((nextWorkspaceId: string, threadId: string) =>
+    getNotificationThread(nextWorkspaceId, threadId));
+  void fetchThread(workspaceId, change.resource_id)
+    .then((detail) => {
+      const fact = detail.facts.items.find((item) => item.id === detail.thread.latest_fact_id)
+        ?? detail.facts.items[0];
+      if (fact === undefined) {
+        return null;
       }
-    } catch {
-      // System notifications are best-effort and must not escape the stream callback.
-    }
-  }).catch(() => {
-    // Owner lookup failures leave the notice in the tray without guessing its source.
-  });
+      const freshNotification = notificationFromFact(workspaceId, fact);
+      if (
+        freshNotification === null
+        || hasSentBrowserNotification(workspaceId, freshNotification.id, storage)
+      ) {
+        return null;
+      }
+      return resolveNotificationOwner(
+        workspaceId,
+        projectionChangeFromFact(change, fact),
+        ownershipApi,
+      ).then((owner) => ({ owner, notification: freshNotification }));
+    })
+    .then((result) => {
+      if (result === null || result.owner !== "web") {
+        return;
+      }
+      try {
+        const sent = (sendBrowserNotificationOverride ?? sendBrowserNotification)(result.notification);
+        if (sent) {
+          recordSentBrowserNotification(workspaceId, result.notification.id, storage);
+        }
+      } catch {
+        // System notifications are best-effort and must not escape the stream callback.
+      }
+    })
+    .catch(() => {
+      // A failed detail or owner lookup leaves the server-authoritative Inbox untouched.
+    });
 }
 
 export function WorkspaceStreamProvider({
@@ -126,9 +158,7 @@ export function WorkspaceStreamProvider({
 
   const handleResync = useCallback(
     () => {
-      queryClient.invalidateQueries({
-        predicate: (query) => query.queryKey.includes(workspaceId),
-      });
+      invalidateWorkspaceSnapshot(queryClient, workspaceId);
     },
     [queryClient, workspaceId],
   );
@@ -189,6 +219,7 @@ export function matchesProjectionQuery(
   queryKey: readonly unknown[],
   workspaceId: string,
   change: ProjectionChange,
+  queryData?: unknown,
 ): boolean {
   if (!queryKey.includes(workspaceId)) {
     return false;
@@ -254,14 +285,52 @@ export function matchesProjectionQuery(
       // The CP projection is keyed by submission aggregate, while its task query
       // is a relation lookup. Keep this invalidation inside that query family.
       return queryType === "context-knowledge-submissions";
+    case "notification_thread":
+      return queryType === "notifications"
+        && (
+          queryKey[2] === "summary"
+          || queryKey[2] === "threads"
+          || (
+            queryKey[2] === "thread"
+            && (change.resource_id === null || queryKey[3] === change.resource_id)
+          )
+        );
+    case "notification_delivery":
+      return queryType === "notifications"
+        && (
+          queryKey[2] === "summary"
+          || queryKey[2] === "threads"
+          || queryKey[2] === "readiness"
+          || queryKey[2] === "modules"
+          || (
+            queryKey[2] === "delivery"
+            && queryKey[3] === change.resource_id
+            && queryKey[4] === "attempts"
+          )
+          || (
+            queryKey[2] === "thread"
+            && (change.resource_id === null || hasDelivery(queryData, change.resource_id))
+          )
+        );
     default:
       return false;
   }
 }
 
-function createInvalidationQueue(queryClient: QueryClient, workspaceId: string) {
+export function invalidateWorkspaceSnapshot(
+  queryClient: QueryClient,
+  workspaceId: string,
+): void {
+  void queryClient.invalidateQueries({
+    predicate: (query) => query.queryKey.includes(workspaceId),
+    refetchType: "active",
+  });
+}
+
+export function createInvalidationQueue(queryClient: QueryClient, workspaceId: string) {
   const pendingChanges = new Map<string, ProjectionChange>();
   let frameHandle: number | null = null;
+  let lastEnqueuedCursor = 0;
 
   const flush = () => {
     frameHandle = null;
@@ -269,13 +338,22 @@ function createInvalidationQueue(queryClient: QueryClient, workspaceId: string) 
     pendingChanges.clear();
     for (const change of changes) {
       queryClient.invalidateQueries({
-        predicate: (query) => matchesProjectionQuery(query.queryKey, workspaceId, change),
+        predicate: (query) => matchesProjectionQuery(
+          query.queryKey,
+          workspaceId,
+          change,
+          query.state.data,
+        ),
       });
     }
   };
 
   return {
     enqueue(change: ProjectionChange) {
+      if (change.cursor <= lastEnqueuedCursor) {
+        return;
+      }
+      lastEnqueuedCursor = change.cursor;
       const key = `${change.projection_type}:${change.resource_id ?? "workspace"}`;
       pendingChanges.set(key, change);
       if (frameHandle === null) {
@@ -290,6 +368,35 @@ function createInvalidationQueue(queryClient: QueryClient, workspaceId: string) 
       pendingChanges.clear();
     },
   };
+}
+
+function projectionChangeFromFact(
+  fallback: ProjectionChange,
+  fact: NotificationThreadDetail["facts"]["items"][number],
+): ProjectionChange {
+  return {
+    ...fallback,
+    cursor: fact.source_projection_cursor,
+    projection_type: fact.source_projection_type,
+    resource_id: fact.source_resource_id,
+    change_type: fact.kind,
+    resource_version: fact.source_resource_version,
+    occurred_at: fact.occurred_at,
+    correlation_id: fact.correlation_id,
+  };
+}
+
+function hasDelivery(data: unknown, deliveryId: string | null): boolean {
+  if (deliveryId === null || !isRecord(data) || !Array.isArray(data.deliveries)) {
+    return false;
+  }
+  return data.deliveries.some(
+    (delivery): boolean => isRecord(delivery) && delivery.delivery_id === deliveryId,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function requestAnimationFrameSafe(callback: () => void): number {

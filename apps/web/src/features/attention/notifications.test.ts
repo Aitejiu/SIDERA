@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ProjectionChange } from "@/shared/api/projectionStream";
 
@@ -10,10 +10,12 @@ import {
   planningNotificationFromChange,
   planningNotificationFromRequest,
   notificationFromChange,
+  notificationFromFact,
   readSentBrowserNotificationIds,
   readLastNotifiedCursor,
   recordSentBrowserNotification,
   setBrowserNotificationsEnabled,
+  sendBrowserNotification,
   writeLastNotifiedCursor,
 } from "./notifications";
 
@@ -101,6 +103,94 @@ describe("workspace notifications", () => {
     expect(ids.at(-1)).toBe("notice-129");
     expect(hasSentBrowserNotification(WORKSPACE_ID, "notice-1", fakeStorage)).toBe(false);
     expect(hasSentBrowserNotification(WORKSPACE_ID, "notice-129", fakeStorage)).toBe(true);
+  });
+
+  it("builds browser copy from a new high-value Fact and keeps its deep link", () => {
+    const fact = {
+      id: "fact-1",
+      priority: "action",
+      title: "服务端事实标题",
+      summary: "服务端事实摘要",
+      deep_link: `/workspaces/${WORKSPACE_ID}/tasks/task-1?view=governance`,
+      baseline_import: false,
+      kind: "execution_attention",
+      thread_id: "thread-1",
+    };
+
+    expect(notificationFromFact(WORKSPACE_ID, fact)).toEqual({
+      id: `notification-fact:${WORKSPACE_ID}:fact-1`,
+      kind: "notification_fact",
+      title: "服务端事实标题",
+      summary: "服务端事实摘要",
+      resourceId: "thread-1",
+      resourceVersion: null,
+      cursor: null,
+      href: `/workspaces/${WORKSPACE_ID}/tasks/task-1?view=governance`,
+    });
+  });
+
+  it("does not turn progress or baseline Facts into browser notifications", () => {
+    const baseFact = {
+      id: "fact-1",
+      priority: "progress",
+      title: "进度事实",
+      summary: "进度已完成",
+      deep_link: `/workspaces/${WORKSPACE_ID}/tasks/task-1`,
+      baseline_import: false,
+      thread_id: "thread-1",
+    };
+
+    expect(notificationFromFact(WORKSPACE_ID, baseFact)).toBeNull();
+    expect(notificationFromFact(WORKSPACE_ID, { ...baseFact, priority: "action", baseline_import: true })).toBeNull();
+  });
+
+  it("keeps notification storage helpers fail-closed when localStorage throws", () => {
+    const storage = {
+      getItem: () => { throw new Error("storage unavailable"); },
+      setItem: () => { throw new Error("storage unavailable"); },
+    } as unknown as Storage;
+
+    expect(() => readLastNotifiedCursor(WORKSPACE_ID, storage)).not.toThrow();
+    expect(() => writeLastNotifiedCursor(WORKSPACE_ID, 42, storage)).not.toThrow();
+    expect(() => setBrowserNotificationsEnabled(WORKSPACE_ID, true, storage)).not.toThrow();
+    expect(browserNotificationsEnabled(WORKSPACE_ID, storage)).toBe(false);
+    expect(readSentBrowserNotificationIds(WORKSPACE_ID, storage)).toEqual([]);
+  });
+
+  it("opens the exact same-origin Fact deep link when a browser notice is clicked", () => {
+    const instances: Array<{ onclick: (() => void) | null }> = [];
+    class FakeNotification {
+      static permission: NotificationPermission = "granted";
+      onclick: (() => void) | null = null;
+
+      constructor(
+        public readonly title: string,
+        public readonly options: { body: string },
+      ) {
+        instances.push(this);
+      }
+    }
+    vi.stubGlobal("Notification", FakeNotification);
+    const assign = vi.fn();
+
+    const sent = sendBrowserNotification({
+      id: "notification-fact-1",
+      kind: "notification_fact",
+      title: "需要处理",
+      summary: "服务端事实摘要",
+      resourceId: "thread-1",
+      resourceVersion: null,
+      cursor: null,
+      href: `/workspaces/${WORKSPACE_ID}/tasks/task-1?view=governance#fact-1`,
+    }, assign);
+
+    expect(sent).toBe(true);
+    expect(instances).toHaveLength(1);
+    instances[0]?.onclick?.();
+    expect(assign).toHaveBeenCalledWith(
+      `/workspaces/${WORKSPACE_ID}/tasks/task-1?view=governance#fact-1`,
+    );
+    vi.unstubAllGlobals();
   });
 
   it.each([

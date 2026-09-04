@@ -6,6 +6,7 @@ import {
   expect,
   IMPLEMENTER_WORKER_ITEM_ID,
   R5_WORKSPACE_ID,
+  mockNotificationInbox,
   runPlanningWorkerOnce,
   WORKSPACE_ID,
 } from "./fixtures";
@@ -110,6 +111,18 @@ test.describe("accessible R4 routes", () => {
     await page.getByRole("tab", { name: "变更", exact: true }).click();
     await expect(page.getByRole("heading", { name: "变更", exact: true })).toBeVisible();
     await audit(page, "planning diff");
+  });
+
+  test("has no axe violations on the persistent notification inbox", async ({ page }) => {
+    await mockNotificationInbox(page);
+    await page.goto(`/workspaces/${WORKSPACE_ID}/inbox`);
+    await expect(page.getByRole("heading", { name: "信箱", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "展开需要确认执行分支" })).toBeVisible();
+    await audit(page, "notification inbox");
+
+    await page.getByRole("button", { name: "展开需要确认执行分支" }).click();
+    await expect(page.getByRole("region", { name: "需要确认执行分支的线程历史" })).toBeVisible();
+    await audit(page, "notification thread history");
   });
 });
 

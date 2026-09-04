@@ -164,6 +164,10 @@ a {
   font-size: 13px;
 }
 
+.navigation-item--compact-settings {
+  display: none;
+}
+
 .navigation-item:hover,
 .navigation-item:focus-visible,
 .navigation-item.is-active {
@@ -1999,6 +2003,10 @@ h1 {
     padding: 0;
     border-left: 0;
     border-bottom: 2px solid transparent;
+  }
+
+  .navigation-item--compact-settings {
+    display: flex;
   }
 
   .navigation-item.is-active {
@@ -8387,6 +8395,7 @@ h1 {
 
 .notification-inbox__summary-warning,
 .notification-inbox__stale,
+.notification-inbox__stream-state,
 .notification-inbox__command-error,
 .notification-inbox__command-success {
   display: flex;
@@ -9024,6 +9033,11 @@ h1 {
   }
 
   .notification-inbox__stale {
+    align-items: start;
+    flex-wrap: wrap;
+  }
+
+  .notification-inbox__stream-state {
     align-items: start;
     flex-wrap: wrap;
   }

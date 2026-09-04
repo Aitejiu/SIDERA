@@ -3,12 +3,27 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
+import type { ProjectionStreamSnapshot } from "@/shared/api/projectionStream";
 
 import type { NotificationThread, NotificationThreadDetail } from "./api";
 import { InboxPage } from "./InboxPage";
+
+const { streamState, seedSnapshotCursor } = vi.hoisted(() => ({
+  streamState: {
+    status: "live" as ProjectionStreamSnapshot["status"],
+    cursor: 0,
+    lastEventAt: null,
+    error: null,
+  },
+  seedSnapshotCursor: vi.fn(),
+}));
+
+vi.mock("@/app/WorkspaceStreamProvider", () => ({
+  useWorkspaceStreamOptional: () => ({ streamState, seedSnapshotCursor }),
+}));
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
@@ -189,6 +204,20 @@ function renderPage() {
 describe("InboxPage", () => {
   beforeEach(() => {
     server.resetHandlers();
+    streamState.status = "live";
+    streamState.error = null;
+    seedSnapshotCursor.mockClear();
+  });
+
+  it("seeds the projection stream and keeps the last snapshot visible while offline", async () => {
+    streamState.status = "offline";
+    installHandlers();
+    renderPage();
+
+    expect(await screen.findByText("渠道需要处理")).toBeVisible();
+    await waitFor(() => expect(seedSnapshotCursor).toHaveBeenCalledWith(42));
+    expect(screen.getByRole("status", { name: "信箱实时状态" })).toHaveTextContent("实时连接已断开");
+    expect(screen.getByText("外部渠道连续失败，需要确认是否重新投递。")).toBeVisible();
   });
 
   it("shows counts and human task path before notification details", async () => {
