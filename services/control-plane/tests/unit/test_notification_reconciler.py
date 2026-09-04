@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -130,8 +130,13 @@ class _ProjectionChanges:
 
 
 class _ObservationStore(NotificationObservationSource):
-    def __init__(self, changes: tuple[ProjectionChange, ...]) -> None:
+    def __init__(
+        self,
+        changes: tuple[ProjectionChange, ...],
+        observations: dict[str, NotificationObservation] | None = None,
+    ) -> None:
         self.changes = changes
+        self.observations = observations or {}
         self.observed: list[ProjectionChange] = []
 
     def list_after(
@@ -142,10 +147,14 @@ class _ObservationStore(NotificationObservationSource):
 
     def observe(self, change: ProjectionChange) -> NotificationObservation:
         self.observed.append(change)
-        return _observation(change)
+        return self.observations.get(change.projection_type, _observation(change))
 
     def list_route_backfill_candidates(self, workspace_id, *, now, window):
         del workspace_id, now, window
+        return ()
+
+    def list_baseline_candidates(self, workspace_id, *, source_cursor, now):
+        del workspace_id, source_cursor, now
         return ()
 
 
@@ -195,6 +204,16 @@ class _Notifications:
 
     def get_policy_state(self, workspace_id, recipient_type, recipient_id, subject_type, subject_id, topic, *, for_update=False):
         return self.policy_states.get((workspace_id, recipient_type, recipient_id, subject_type, subject_id, topic))
+
+    def list_due_policy_states(self, workspace_id, now, limit, *, for_update_skip_locked=False):
+        del for_update_skip_locked
+        return tuple(
+            state
+            for state in self.policy_states.values()
+            if state.workspace_id == workspace_id
+            and state.not_before is not None
+            and state.not_before <= now
+        )[:limit]
 
     def add_policy_state(self, state):
         self.policy_states[_state_key(state)] = state
@@ -354,4 +373,293 @@ def test_reconciler_does_not_advance_cursor_when_observation_or_write_fails() ->
     assert result.diagnostic_code == "notification_reconciliation_write_failed"
     assert notifications.cursor.last_projection_cursor == 0
     assert notifications.policy_states == {}
+    assert notifications.facts == {}
+
+
+def _blocked_observation(
+    *,
+    fingerprint: str = "a" * 64,
+    status: str = "blocked",
+    transition: NotificationTransition | None = None,
+) -> NotificationObservation:
+    return replace(
+        _observation(ProjectionChange(
+            workspace_id=WORKSPACE_ID,
+            cursor=1,
+            schema_version=1,
+            projection_type="task_overview",
+            resource_id=ROOT_TASK_ID,
+            change_type="task_blocked",
+            resource_version=1,
+            occurred_at=NOW,
+            correlation_id=UUID("00000000000000000000000000000001"),
+        )),
+        kind="task_blocked",
+        topic="task_blocked",
+        observed_status=status,
+        authoritative_fingerprint=fingerprint,
+        automatic_recovery=True,
+        transition=transition,
+        source_type="sidera_web_chat",
+        origin_route_active=False,
+    )
+
+
+def _seed_policy_state(
+    notifications: _Notifications,
+    observation: NotificationObservation,
+    *,
+    now: datetime = NOW,
+) -> NotificationPolicyState:
+    state = NotificationPolicyV1().evaluate(observation, now=now).policy_state
+    notifications.add_policy_state(state)
+    return state
+
+
+def test_due_scan_requeries_unchanged_blocked_state_and_emits_once() -> None:
+    notifications = _Notifications(
+        NotificationRoute(
+            id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            recipient_type="workspace_operator",
+            recipient_id="local",
+            channel_type="akashic_private",
+            channel_module_instance_id=uuid4(),
+            source_ref="src_" + "d" * 32,
+            status=NotificationRouteStatus.DISABLED,
+            version=1,
+            registered_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    blocked = _blocked_observation()
+    state = _seed_policy_state(notifications, blocked)
+    source = _ObservationStore(
+        (),
+        {"task_overview": blocked},
+    )
+    uow = _Uow(notifications, source, _Modules(*_module_pair()), _ProjectionChanges([]))
+    service = NotificationReconciler(
+        lambda: uow,
+        clock=lambda: NOW + timedelta(seconds=300),
+        owner="due-test",
+    )
+
+    result = service.scan_due(
+        WORKSPACE_ID,
+        owner_id="due-test",
+        now=NOW + timedelta(seconds=300),
+        limit=10,
+    )
+
+    assert result.facts_created == 1
+    assert result.scanned == 1
+    assert notifications.get_policy_state(
+        state.workspace_id,
+        state.recipient_type,
+        state.recipient_id,
+        state.subject_type,
+        state.subject_id,
+        state.topic,
+    ).not_before is None
+
+
+def test_due_scan_changed_fingerprint_restarts_grace_without_fact() -> None:
+    notifications = _Notifications(
+        NotificationRoute(
+            id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            recipient_type="workspace_operator",
+            recipient_id="local",
+            channel_type="akashic_private",
+            channel_module_instance_id=uuid4(),
+            source_ref="src_" + "e" * 32,
+            status=NotificationRouteStatus.DISABLED,
+            version=1,
+            registered_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    initial = _blocked_observation()
+    state = _seed_policy_state(notifications, initial)
+    changed = _blocked_observation(fingerprint="b" * 64)
+    source = _ObservationStore((), {"task_overview": changed})
+    uow = _Uow(notifications, source, _Modules(*_module_pair()), _ProjectionChanges([]))
+
+    result = NotificationReconciler(
+        lambda: uow,
+        clock=lambda: NOW + timedelta(seconds=300),
+        owner="due-change-test",
+    ).scan_due(
+        WORKSPACE_ID,
+        owner_id="due-change-test",
+        now=NOW + timedelta(seconds=300),
+        limit=10,
+    )
+
+    current = notifications.get_policy_state(
+        state.workspace_id,
+        state.recipient_type,
+        state.recipient_id,
+        state.subject_type,
+        state.subject_id,
+        state.topic,
+    )
+    assert result.facts_created == 0
+    assert current is not None
+    assert current.observed_fingerprint == "b" * 64
+    assert current.not_before == NOW + timedelta(seconds=600)
+
+
+def test_due_scan_recovery_before_notification_clears_pending_state() -> None:
+    notifications = _Notifications(
+        NotificationRoute(
+            id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            recipient_type="workspace_operator",
+            recipient_id="local",
+            channel_type="akashic_private",
+            channel_module_instance_id=uuid4(),
+            source_ref="src_" + "f" * 32,
+            status=NotificationRouteStatus.DISABLED,
+            version=1,
+            registered_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    state = _seed_policy_state(notifications, _blocked_observation())
+    recovered = _blocked_observation(
+        fingerprint="c" * 64,
+        status="running",
+        transition=NotificationTransition.RECOVERED,
+    )
+    source = _ObservationStore((), {"task_overview": recovered})
+    uow = _Uow(notifications, source, _Modules(*_module_pair()), _ProjectionChanges([]))
+
+    result = NotificationReconciler(
+        lambda: uow,
+        clock=lambda: NOW + timedelta(seconds=300),
+        owner="due-recovery-before-test",
+    ).scan_due(
+        WORKSPACE_ID,
+        owner_id="due-recovery-before-test",
+        now=NOW + timedelta(seconds=300),
+        limit=10,
+    )
+
+    current = notifications.get_policy_state(
+        state.workspace_id,
+        state.recipient_type,
+        state.recipient_id,
+        state.subject_type,
+        state.subject_id,
+        state.topic,
+    )
+    assert result.facts_created == 0
+    assert current is not None
+    assert current.not_before is None
+    assert current.last_notified_fingerprint is None
+
+
+def test_due_scan_recovery_after_notification_creates_one_recovery_fact() -> None:
+    notifications = _Notifications(
+        NotificationRoute(
+            id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            recipient_type="workspace_operator",
+            recipient_id="local",
+            channel_type="akashic_private",
+            channel_module_instance_id=uuid4(),
+            source_ref="src_" + "g" * 32,
+            status=NotificationRouteStatus.DISABLED,
+            version=1,
+            registered_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    opened = replace(_blocked_observation(), automatic_recovery=False)
+    policy = NotificationPolicyV1()
+    mutation = policy.evaluate(opened, now=NOW)
+    assert mutation.fact is not None
+    notifications.add_fact_or_get_existing(mutation.fact)
+    pending_state = policy.evaluate(_blocked_observation(), now=NOW).policy_state
+    notifications.add_policy_state(
+        replace(
+            pending_state,
+            last_notified_fingerprint=opened.authoritative_fingerprint,
+        )
+    )
+    recovered = _blocked_observation(
+        fingerprint="d" * 64,
+        status="running",
+        transition=NotificationTransition.RECOVERED,
+    )
+    source = _ObservationStore((), {"task_overview": recovered})
+    uow = _Uow(notifications, source, _Modules(*_module_pair()), _ProjectionChanges([]))
+
+    result = NotificationReconciler(
+        lambda: uow,
+        clock=lambda: NOW + timedelta(seconds=300),
+        owner="due-recovery-after-test",
+    ).scan_due(
+        WORKSPACE_ID,
+        owner_id="due-recovery-after-test",
+        now=NOW + timedelta(seconds=300),
+        limit=10,
+    )
+
+    assert result.facts_created == 1
+    assert next(iter(notifications.facts.values())).transition is NotificationTransition.OPENED
+    assert any(
+        fact.transition is NotificationTransition.RECOVERED
+        for fact in notifications.facts.values()
+    )
+
+
+def test_due_scan_failure_keeps_pending_state_and_reports_stable_code() -> None:
+    notifications = _Notifications(
+        NotificationRoute(
+            id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            recipient_type="workspace_operator",
+            recipient_id="local",
+            channel_type="akashic_private",
+            channel_module_instance_id=uuid4(),
+            source_ref="src_" + "h" * 32,
+            status=NotificationRouteStatus.DISABLED,
+            version=1,
+            registered_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    state = _seed_policy_state(notifications, _blocked_observation())
+
+    class FailingStore(_ObservationStore):
+        def observe(self, change: ProjectionChange) -> NotificationObservation:
+            del change
+            raise TimeoutError("authoritative query timed out")
+
+    source = FailingStore(())
+    uow = _Uow(notifications, source, _Modules(*_module_pair()), _ProjectionChanges([]))
+    result = NotificationReconciler(
+        lambda: uow,
+        clock=lambda: NOW + timedelta(seconds=300),
+        owner="due-failure-test",
+    ).scan_due(
+        WORKSPACE_ID,
+        owner_id="due-failure-test",
+        now=NOW + timedelta(seconds=300),
+        limit=10,
+    )
+
+    current = notifications.get_policy_state(
+        state.workspace_id,
+        state.recipient_type,
+        state.recipient_id,
+        state.subject_type,
+        state.subject_id,
+        state.topic,
+    )
+    assert result.diagnostic_code == "notification_observation_invalid"
+    assert current == state
     assert notifications.facts == {}

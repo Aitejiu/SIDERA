@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -76,6 +77,12 @@ class NotificationObservationSubject:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationBaselineCandidate:
+    change: ProjectionChange
+    topic: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NotificationAuthoritativeRead:
     """Safe, typed state returned by one bounded authoritative DB read."""
 
@@ -109,6 +116,16 @@ class NotificationAuthoritativeRead:
 class NotificationObservationSource(Protocol):
     def observe(self, change: ProjectionChange) -> NotificationObservation | None:
         """Turn one invalidation into a validated observation, or skip it."""
+
+    def list_baseline_candidates(
+        self,
+        workspace_id: UUID,
+        *,
+        source_cursor: int,
+        now: datetime,
+    ) -> tuple[NotificationBaselineCandidate, ...]:
+        """Enumerate current subjects for an explicit baseline rebuild."""
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)

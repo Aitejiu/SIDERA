@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from typing import cast
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.notification_observations import (
     NotificationObservationSource,
@@ -32,6 +33,7 @@ from sidera_control_plane.domain.notifications import (
     NotificationRouteStatus,
     NotificationThreadBusinessStatus,
     NotificationThreadOrganizationStatus,
+    NotificationTransition,
     notification_delivery_intent_id,
     notification_thread_id,
     notification_thread_key,
@@ -59,6 +61,18 @@ class NotificationReconciliationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationDueScanResult:
+    workspace_id: UUID
+    acquired: bool = True
+    scanned: int = 0
+    observations: int = 0
+    facts_created: int = 0
+    threads_changed: int = 0
+    intents_created: int = 0
+    diagnostic_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _ReconciliationCounts:
     processed_changes: int = 0
     relevant_changes: int = 0
@@ -69,6 +83,10 @@ class _ReconciliationCounts:
 
 
 class _ObservationFailure(Exception):
+    pass
+
+
+class _CursorGap(Exception):
     pass
 
 
@@ -135,6 +153,8 @@ class NotificationReconciler:
                 acquired = True
                 cursor_value = cursor.last_projection_cursor
                 claimed_version = cursor.version
+                if self._cursor_has_gap(uow, workspace_id, cursor.last_projection_cursor):
+                    raise _CursorGap
                 observation_store = uow.notification_observations
                 changes = observation_store.list_after(
                     workspace_id,
@@ -206,6 +226,14 @@ class NotificationReconciler:
                 counts=counts,
                 diagnostic_code=str(exc),
             )
+        except _CursorGap:
+            return self._failure_result(
+                workspace_id,
+                acquired=acquired,
+                cursor=cursor_value,
+                counts=counts,
+                diagnostic_code="notification_resync_required",
+            )
         except (TimeoutError, TypeError, ValueError) as exc:
             return self._failure_result(
                 workspace_id,
@@ -236,6 +264,302 @@ class NotificationReconciler:
             intents_created=counts.intents_created,
             cursor=cursor_value,
         )
+
+    def scan_due(
+        self,
+        workspace_id: UUID,
+        owner_id: str,
+        now: datetime,
+        limit: int | None = None,
+    ) -> NotificationDueScanResult:
+        if not owner_id.strip():
+            raise ValueError("owner_id is required")
+        batch_size = self._batch_size if limit is None else limit
+        if batch_size < 1:
+            raise ValueError("limit must be positive")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        scanned = 0
+        observations = 0
+        facts_created = 0
+        threads_changed = 0
+        intents_created = 0
+        try:
+            with self._uow_factory() as uow:
+                states = uow.notifications.list_due_policy_states(
+                    workspace_id,
+                    now,
+                    batch_size,
+                    for_update_skip_locked=True,
+                )
+                source = self._observation_source or uow.notification_observations
+                for state in states:
+                    scanned += 1
+                    change = self._due_change(state, now=now)
+                    observation = self._observe_one(source, change, workspace_id)
+                    if observation is None:
+                        raise _ObservationFailure("notification_observation_invalid")
+                    observation = self._prepare_due_observation(observation, state)
+                    observations += 1
+                    created_facts, changed_threads, created_intents = (
+                        self._reconcile_observation(
+                            uow,
+                            change,
+                            observation,
+                            now=now,
+                            mode=NotificationEvaluationMode.LIVE,
+                        )
+                    )
+                    facts_created += created_facts
+                    threads_changed += changed_threads
+                    intents_created += created_intents
+                uow.flush()
+        except _ObservationFailure as exc:
+            return NotificationDueScanResult(
+                workspace_id=workspace_id,
+                scanned=scanned,
+                observations=observations,
+                diagnostic_code=str(exc),
+            )
+        except (TimeoutError, TypeError, ValueError) as exc:
+            del exc
+            return NotificationDueScanResult(
+                workspace_id=workspace_id,
+                scanned=scanned,
+                observations=observations,
+                diagnostic_code="notification_observation_invalid",
+            )
+        except Exception as exc:  # noqa: BLE001 - rollback and stable diagnostics
+            del exc
+            return NotificationDueScanResult(
+                workspace_id=workspace_id,
+                scanned=scanned,
+                observations=observations,
+                diagnostic_code="notification_due_scan_failed",
+            )
+        return NotificationDueScanResult(
+            workspace_id=workspace_id,
+            scanned=scanned,
+            observations=observations,
+            facts_created=facts_created,
+            threads_changed=threads_changed,
+            intents_created=intents_created,
+        )
+
+    def baseline_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner: str | None = None,
+    ) -> NotificationReconciliationResult:
+        lease_owner = owner or self._owner
+        counts = _ReconciliationCounts()
+        acquired = False
+        cursor_value = 0
+        try:
+            with self._uow_factory() as uow:
+                now = self._clock()
+                cursor = uow.notifications.claim_cursor(
+                    workspace_id,
+                    POLICY_VERSION,
+                    lease_owner,
+                    now,
+                    self._lease_seconds,
+                )
+                if cursor is None:
+                    return NotificationReconciliationResult(
+                        workspace_id=workspace_id,
+                        acquired=False,
+                        diagnostic_code="notification_cursor_busy",
+                    )
+                acquired = True
+                cursor_value = cursor.last_projection_cursor
+                claimed_version = cursor.version
+                captured_latest = uow.projection_changes.latest_cursor(workspace_id)
+                candidates = uow.notification_observations.list_baseline_candidates(
+                    workspace_id,
+                    source_cursor=captured_latest,
+                    now=now,
+                )
+                counts = replace(
+                    counts,
+                    processed_changes=len(candidates),
+                    relevant_changes=len(candidates),
+                )
+                source = self._observation_source or uow.notification_observations
+                baseline_observations = 0
+                for candidate in candidates:
+                    observation = self._observe_one(
+                        source, candidate.change, workspace_id
+                    )
+                    if observation is None:
+                        continue
+                    observation = replace(
+                        observation,
+                        baseline_import=True,
+                        source_type="sidera_web_chat",
+                        origin_route_active=False,
+                    )
+                    if candidate.topic is not None:
+                        observation = replace(observation, topic=candidate.topic)
+                    baseline_observations += 1
+                    facts_created, threads_changed, intents_created = (
+                        self._reconcile_observation(
+                            uow,
+                            candidate.change,
+                            observation,
+                            now=now,
+                            mode=NotificationEvaluationMode.RESYNC,
+                        )
+                    )
+                    counts = replace(
+                        counts,
+                        observations=baseline_observations,
+                        facts_created=counts.facts_created + facts_created,
+                        threads_changed=counts.threads_changed + threads_changed,
+                        intents_created=counts.intents_created + intents_created,
+                    )
+                uow.flush()
+                advanced = cursor.advance(cursor=captured_latest, now=now)
+                released = advanced.release(now=now)
+                uow.notifications.save_cursor(
+                    released,
+                    claimed_version,
+                    lease_owner,
+                )
+                uow.flush()
+                cursor_value = released.last_projection_cursor
+        except _ObservationFailure as exc:
+            return self._failure_result(
+                workspace_id,
+                acquired=acquired,
+                cursor=cursor_value,
+                counts=counts,
+                diagnostic_code=str(exc),
+            )
+        except (TimeoutError, TypeError, ValueError) as exc:
+            return self._failure_result(
+                workspace_id,
+                acquired=acquired,
+                cursor=cursor_value,
+                counts=counts,
+                diagnostic_code="notification_observation_invalid",
+                cause=exc,
+            )
+        except Exception as exc:  # noqa: BLE001 - rollback and stable diagnostics
+            return self._failure_result(
+                workspace_id,
+                acquired=acquired,
+                cursor=cursor_value,
+                counts=counts,
+                diagnostic_code="notification_baseline_failed",
+                cause=exc,
+            )
+        return NotificationReconciliationResult(
+            workspace_id=workspace_id,
+            acquired=acquired,
+            processed_changes=counts.processed_changes,
+            relevant_changes=counts.relevant_changes,
+            observations=counts.observations,
+            facts_created=counts.facts_created,
+            threads_changed=counts.threads_changed,
+            intents_created=counts.intents_created,
+            cursor=cursor_value,
+        )
+
+    @staticmethod
+    def _cursor_has_gap(
+        uow: ControlPlaneUnitOfWork, workspace_id: UUID, cursor: int
+    ) -> bool:
+        oldest_cursor = getattr(uow.projection_changes, "oldest_cursor", None)
+        if not callable(oldest_cursor):
+            return False
+        oldest = cast(Callable[[UUID], int | None], oldest_cursor)(workspace_id)
+        return oldest is not None and cursor < oldest - 1
+
+    @staticmethod
+    def _due_change(
+        state, *, now: datetime
+    ) -> ProjectionChange:
+        projection_type = {
+            "root_task": "task_overview",
+            "planning_request": "planning_request",
+            "worker_item": "worker_item_workspace",
+            "execution": "executions",
+        }.get(state.subject_type)
+        if projection_type is None:
+            raise _ObservationFailure("notification_observation_invalid")
+        try:
+            resource_id = UUID(state.subject_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise _ObservationFailure("notification_observation_invalid") from exc
+        correlation_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera:notification-due:{state.workspace_id}:{state.subject_type}:"
+            f"{state.subject_id}:{state.topic}",
+        )
+        return ProjectionChange(
+            workspace_id=state.workspace_id,
+            cursor=0,
+            schema_version=1,
+            projection_type=projection_type,
+            resource_id=resource_id,
+            change_type="notification_due_requery",
+            resource_version=state.resource_version,
+            occurred_at=now,
+            correlation_id=correlation_id,
+        )
+
+    @staticmethod
+    def _observe_one(
+        source: NotificationObservationSource,
+        change: ProjectionChange,
+        workspace_id: UUID,
+    ) -> NotificationObservation | None:
+        try:
+            observation = source.observe(change)
+        except (TimeoutError, TypeError, ValueError, ValidationError) as exc:
+            raise _ObservationFailure("notification_observation_invalid") from exc
+        if observation is not None and (
+            not isinstance(observation, NotificationObservation)
+            or observation.workspace_id != workspace_id
+        ):
+            raise _ObservationFailure("notification_observation_invalid")
+        return observation
+
+    @staticmethod
+    def _prepare_due_observation(
+        observation: NotificationObservation,
+        state,
+    ) -> NotificationObservation:
+        prepared = replace(
+            observation,
+            subject_type=state.subject_type,
+            subject_id=state.subject_id,
+            topic=state.topic,
+            baseline_import=False,
+        )
+        previous_kind = state.observed_payload.get("kind")
+        healthy_statuses = {
+            "running",
+            "ready",
+            "converged",
+            "completed",
+            "recovered",
+        }
+        recovery_kinds = {"task_blocked", "execution_failure"}
+        if (
+            isinstance(previous_kind, str)
+            and previous_kind in recovery_kinds
+            and state.observed_status.lower() in {"blocked", "failed", "degraded"}
+            and prepared.observed_status.lower() in healthy_statuses
+        ):
+            prepared = replace(
+                prepared,
+                kind=previous_kind,
+                transition=NotificationTransition.RECOVERED,
+            )
+        return prepared
 
     def _load_observations(
         self,

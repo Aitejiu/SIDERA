@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     reconciler_poll_interval_seconds: float = Field(default=2.0, gt=0)
     gateway_batch_size: int = Field(default=20, gt=0)
     gateway_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    notification_enabled: bool = False
+    notification_policy_version: int = Field(default=1, ge=1, le=1)
+    notification_blocked_grace_seconds: int = Field(
+        default=300, ge=60, le=86_400
+    )
+    notification_reconcile_batch_size: int = Field(default=50, ge=1, le=200)
+    notification_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    notification_cursor_lease_seconds: int = Field(default=30, gt=0, le=600)
+    notification_due_sweep_seconds: float = Field(default=15.0, gt=0, le=3_600)
+    notification_baseline_required: bool = True
     plan_transition_batch_size: int = Field(default=20, gt=0)
     plan_transition_poll_interval_seconds: float = Field(default=1.0, gt=0)
     plan_transition_lease_ttl_seconds: int = Field(default=60, gt=0)

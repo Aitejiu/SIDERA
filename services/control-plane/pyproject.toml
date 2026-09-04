@@ -17,6 +17,8 @@ sidera-plan-transition-worker = "sidera_control_plane.plan_transition_worker:mai
 sidera-handoff-worker = "sidera_control_plane.handoff_worker:main"
 sidera-collaboration-worker = "sidera_control_plane.collaboration_worker:main"
 sidera-collaboration-readiness = "sidera_control_plane.collaboration_readiness:main"
+sidera-notification-worker = "sidera_control_plane.notification_worker:main"
+sidera-notification-readiness = "sidera_control_plane.notification_readiness:main"
 
 [dependency-groups]
 dev = [

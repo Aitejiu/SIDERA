@@ -122,3 +122,42 @@ def test_collaboration_governance_rollout_switch_can_be_enabled():
     )
 
     assert settings.collaboration_governance_enabled is True
+
+
+def test_notification_settings_have_bounded_defaults_and_validation():
+    settings = Settings(database_url="postgresql+psycopg://test")
+
+    assert settings.notification_enabled is False
+    assert settings.notification_policy_version == 1
+    assert settings.notification_blocked_grace_seconds == 300
+    assert settings.notification_reconcile_batch_size == 50
+    assert settings.notification_poll_seconds == 1.0
+    assert settings.notification_cursor_lease_seconds == 30
+    assert settings.notification_due_sweep_seconds == 15.0
+    assert settings.notification_baseline_required is True
+
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_blocked_grace_seconds=59,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_blocked_grace_seconds=86_401,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_reconcile_batch_size=201,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_poll_seconds=0,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_policy_version=2,
+        )

@@ -347,20 +347,22 @@ class NotificationPolicyV1:
         should_emit = False
 
         if not is_silent:
-            if is_recovery:
+            if observation.baseline_import:
+                should_emit = (
+                    not is_recovery
+                    and self._is_actionable_kind(fact_kind, has_operator_attention)
+                    and not same_fingerprint
+                )
+                priority = NotificationPriority.ACTION
+                transition = NotificationTransition.OPENED
+                emit_reason = "baseline_open_action" if should_emit else "baseline_seen"
+            elif is_recovery:
                 should_emit = previous_notified is not None and not same_fingerprint
                 priority = NotificationPriority.PROGRESS
                 transition = NotificationTransition.RECOVERED
                 emit_reason = "recovery_after_notified_condition"
             elif evaluation_mode is NotificationEvaluationMode.RESYNC and not observation.baseline_import:
                 emit_reason = "resync_suppresses_historical_fact"
-            elif observation.baseline_import:
-                should_emit = self._is_actionable_kind(
-                    fact_kind, has_operator_attention
-                ) and not same_fingerprint
-                priority = NotificationPriority.ACTION
-                transition = NotificationTransition.OPENED
-                emit_reason = "baseline_open_action"
             elif is_blocked and observation.automatic_recovery:
                 should_emit = (
                     due.status is NotificationDueStatus.DUE

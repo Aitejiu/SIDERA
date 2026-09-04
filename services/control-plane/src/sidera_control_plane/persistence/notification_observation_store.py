@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.notification_observations import (
     NotificationAuthoritativeRead,
+    NotificationBaselineCandidate,
     NotificationObservationComposer,
     NotificationObservationSource,
     NotificationRouteBackfillCandidate,
@@ -24,6 +25,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionModel,
     NotificationDeliveryIntentModel,
     NotificationFactModel,
+    NotificationPolicyStateModel,
     NotificationRouteModel,
     NotificationSourceBindingModel,
     NotificationThreadModel,
@@ -66,6 +68,181 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         if authoritative_read is None:
             return None
         return self._composer.compose(change, authoritative_read)
+
+    def list_baseline_candidates(
+        self,
+        workspace_id: UUID,
+        *,
+        source_cursor: int,
+        now: datetime,
+    ) -> tuple[NotificationBaselineCandidate, ...]:
+        if source_cursor < 0:
+            raise ValueError("source_cursor must be nonnegative")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+
+        candidates: dict[
+            tuple[str, UUID, str | None], NotificationBaselineCandidate
+        ] = {}
+        active_tasks = self._session.execute(
+            select(TaskModel.id, TaskModel.version)
+            .where(
+                TaskModel.workspace_id == workspace_id,
+                TaskModel.status.not_in(("succeeded", "failed", "canceled")),
+            )
+            .order_by(TaskModel.id.asc())
+        ).all()
+        for task_id, version in active_tasks:
+            candidate = NotificationBaselineCandidate(
+                change=_baseline_change(
+                    workspace_id=workspace_id,
+                    projection_type="task_overview",
+                    resource_id=task_id,
+                    resource_version=version,
+                    source_cursor=source_cursor,
+                    now=now,
+                    topic=None,
+                )
+            )
+            candidates[("task_overview", task_id, None)] = candidate
+
+        active_requests = self._session.execute(
+            select(PlanningRequestModel.id, PlanningRequestModel.version)
+            .where(
+                PlanningRequestModel.workspace_id == workspace_id,
+                PlanningRequestModel.root_task_id.is_not(None),
+                PlanningRequestModel.status.in_(
+                    (
+                        "submitted",
+                        "planning",
+                        "waiting_for_user",
+                        "proposal_ready",
+                        "failed",
+                        "conflicted",
+                    )
+                ),
+            )
+            .order_by(PlanningRequestModel.id.asc())
+        ).all()
+        for request_id, version in active_requests:
+            candidate = NotificationBaselineCandidate(
+                change=_baseline_change(
+                    workspace_id=workspace_id,
+                    projection_type="planning_request",
+                    resource_id=request_id,
+                    resource_version=version,
+                    source_cursor=source_cursor,
+                    now=now,
+                    topic=None,
+                )
+            )
+            candidates[("planning_request", request_id, None)] = candidate
+
+        policy_states = self._session.execute(
+            select(
+                NotificationPolicyStateModel.subject_type,
+                NotificationPolicyStateModel.subject_id,
+                NotificationPolicyStateModel.topic,
+                NotificationPolicyStateModel.observed_payload,
+            )
+            .where(
+                NotificationPolicyStateModel.workspace_id == workspace_id,
+                NotificationPolicyStateModel.policy_version == 1,
+            )
+            .order_by(
+                NotificationPolicyStateModel.subject_type.asc(),
+                NotificationPolicyStateModel.subject_id.asc(),
+                NotificationPolicyStateModel.topic.asc(),
+            )
+        ).all()
+        projection_types = {
+            "root_task": "task_overview",
+            "planning_request": "planning_request",
+            "worker_item": "worker_item_workspace",
+            "execution": "executions",
+        }
+        for subject_type, subject_id, topic, observed_payload in policy_states:
+            projection_type = projection_types.get(subject_type)
+            if projection_type is None:
+                continue
+            try:
+                resource_id = UUID(subject_id)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            candidate = NotificationBaselineCandidate(
+                change=_baseline_change(
+                    workspace_id=workspace_id,
+                    projection_type=projection_type,
+                    resource_id=resource_id,
+                    resource_version=self._baseline_resource_version(
+                        workspace_id,
+                        subject_type,
+                        resource_id,
+                        observed_payload,
+                    ),
+                    source_cursor=source_cursor,
+                    now=now,
+                    topic=topic,
+                ),
+                topic=topic,
+            )
+            candidates[(projection_type, resource_id, topic)] = candidate
+        return tuple(
+            candidates[key]
+            for key in sorted(
+                candidates,
+                key=lambda item: (item[0], str(item[1]), item[2] or ""),
+            )
+        )
+
+    def _baseline_resource_version(
+        self,
+        workspace_id: UUID,
+        subject_type: str,
+        resource_id: UUID,
+        observed_payload: object,
+    ) -> int:
+        if subject_type == "root_task":
+            version = self._session.scalar(
+                select(TaskModel.version).where(
+                    TaskModel.workspace_id == workspace_id,
+                    TaskModel.id == resource_id,
+                )
+            )
+        elif subject_type == "planning_request":
+            version = self._session.scalar(
+                select(PlanningRequestModel.version).where(
+                    PlanningRequestModel.workspace_id == workspace_id,
+                    PlanningRequestModel.id == resource_id,
+                )
+            )
+        elif subject_type == "worker_item":
+            version = self._session.scalar(
+                select(WorkerItemModel.version).where(
+                    WorkerItemModel.workspace_id == workspace_id,
+                    WorkerItemModel.id == resource_id,
+                )
+            )
+        elif subject_type == "execution":
+            version = self._session.scalar(
+                select(ExecutionModel.version).where(
+                    ExecutionModel.workspace_id == workspace_id,
+                    ExecutionModel.id == resource_id,
+                )
+            )
+        else:
+            version = None
+        if version is not None:
+            return int(version)
+        if isinstance(observed_payload, Mapping):
+            raw_version = observed_payload.get("resource_version")
+            if (
+                isinstance(raw_version, int)
+                and not isinstance(raw_version, bool)
+                and raw_version >= 1
+            ):
+                return raw_version
+        return 1
 
     def list_route_backfill_candidates(
         self,
@@ -561,3 +738,31 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             if row is not None:
                 return "akashic_private", row == "active"
         return "sidera_web_chat", False
+
+
+def _baseline_change(
+    *,
+    workspace_id: UUID,
+    projection_type: str,
+    resource_id: UUID,
+    resource_version: int,
+    source_cursor: int,
+    now: datetime,
+    topic: str | None,
+) -> ProjectionChange:
+    correlation_id = uuid5(
+        NAMESPACE_URL,
+        f"sidera:notification-baseline:{workspace_id}:{projection_type}:"
+        f"{resource_id}:{topic or '-'}:{source_cursor}",
+    )
+    return ProjectionChange(
+        workspace_id=workspace_id,
+        cursor=source_cursor,
+        schema_version=1,
+        projection_type=projection_type,
+        resource_id=resource_id,
+        change_type="notification_baseline",
+        resource_version=resource_version,
+        occurred_at=now,
+        correlation_id=correlation_id,
+    )

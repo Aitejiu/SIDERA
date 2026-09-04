@@ -319,6 +319,35 @@ def test_baseline_is_web_only_and_operations_never_route_to_failing_channel() ->
     assert operations.route_eligibility is NotificationRouteEligibility.WEB_ONLY
 
 
+def test_baseline_does_not_replay_recovery_after_a_prior_notification() -> None:
+    policy = _policy()
+    blocked = policy.evaluate(
+        _observation(
+            kind=NotificationKind.TASK_BLOCKED,
+            status="blocked",
+            automatic_recovery=False,
+        ),
+        now=NOW,
+    )
+    assert blocked.fact is not None
+
+    baseline = policy.evaluate(
+        _observation(
+            kind=NotificationKind.TASK_BLOCKED,
+            status="running",
+            fingerprint="b" * 64,
+            transition=NotificationTransition.RECOVERED,
+            baseline_import=True,
+        ),
+        state=blocked.policy_state,
+        now=NOW + timedelta(minutes=1),
+        mode=NotificationEvaluationMode.RESYNC,
+    )
+
+    assert baseline.fact is None
+    assert baseline.policy_state.not_before is None
+
+
 @pytest.mark.parametrize(
     "kind",
     (

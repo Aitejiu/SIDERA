@@ -12,6 +12,7 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateSubmission,
 )
 from sidera_control_plane.application.notification_observations import (
+    NotificationBaselineCandidate,
     NotificationObservation,
     NotificationRouteBackfillCandidate,
 )
@@ -1468,6 +1469,15 @@ class NotificationObservationStore(Protocol):
     def list_route_backfill_candidates(
         self, workspace_id: UUID, *, now: datetime, window: timedelta
     ) -> tuple[NotificationRouteBackfillCandidate, ...]:
+        raise NotImplementedError
+
+    def list_baseline_candidates(
+        self,
+        workspace_id: UUID,
+        *,
+        source_cursor: int,
+        now: datetime,
+    ) -> tuple[NotificationBaselineCandidate, ...]:
         raise NotImplementedError
 
 
