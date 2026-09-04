@@ -25,6 +25,12 @@ from sidera_control_plane.application.context_package_queries import (
     KnowledgeSubmissionView,
 )
 from sidera_control_plane.application.module_queries import ModuleSummaryView
+from sidera_control_plane.application.notification_delivery import (
+    NotificationDeliveryEnvelope as NotificationDeliveryEnvelopeView,
+)
+from sidera_control_plane.application.notification_delivery import (
+    NotificationDeliverySettlement,
+)
 from sidera_control_plane.application.notification_queries import (
     NotificationAttemptView,
     NotificationDeliveryView,
@@ -5076,3 +5082,109 @@ class NotificationAttemptPageResponse(BaseModel):
 
     items: tuple[NotificationAttemptResponse, ...]
     next_cursor: str | None
+
+
+class NotificationDeliveryClaimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    module_instance_id: UUID
+    supported_contract_versions: tuple[int, ...] = Field(min_length=1, max_length=16)
+    batch_size: int = Field(ge=1, le=200)
+    lease_seconds: int = Field(ge=5, le=300)
+
+
+class NotificationDeliveryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: UUID
+    notification_id: UUID
+    thread_id: UUID
+    contract_version: int = Field(ge=1)
+    claim_token: UUID
+    fencing_token: int = Field(ge=1)
+    idempotency_key: str
+    channel_type: str
+    source_ref: str
+    kind: str
+    priority: str
+    root_task_title: str
+    subtask_path: tuple[str, ...]
+    worker_item_title: str | None
+    title: str
+    summary: str
+    next_action: str
+    deep_link: str
+    correlation_id: str
+    notification_ref: str
+    created_at: datetime
+
+    @classmethod
+    def from_view(
+        cls, view: NotificationDeliveryEnvelopeView
+    ) -> "NotificationDeliveryEnvelope":
+        return cls.model_validate(view, from_attributes=True)
+
+
+class NotificationDeliveryClaimResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deliveries: tuple[NotificationDeliveryEnvelope, ...]
+
+
+class NotificationDeliveryAckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_token: UUID
+    fencing_token: int = Field(ge=1)
+    completed_at: datetime
+    provider_message_ref: str | None = Field(default=None, max_length=512)
+
+
+class NotificationDeliveryNackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_token: UUID
+    fencing_token: int = Field(ge=1)
+    outcome: Literal["retryable_failure", "terminal_failure", "unknown_result"]
+    stable_error_code: Literal[
+        "transport_unavailable",
+        "timeout",
+        "rate_limited",
+        "provider_unavailable",
+        "unknown_result",
+        "route_not_found",
+        "route_revoked",
+        "permission_denied",
+        "contract_unsupported",
+        "payload_rejected",
+    ]
+    retry_after_seconds: float | None = Field(default=None, ge=0, le=86_400)
+    provider_message_ref: str | None = Field(default=None, max_length=512)
+
+
+class NotificationDeliverySettlementResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: UUID
+    status: str
+    attempt_number: int = Field(ge=1)
+    outcome: str
+    provider_message_ref: str | None
+    next_attempt_at: datetime | None
+    fencing_token: int = Field(ge=1)
+    error_code: str | None
+
+    @classmethod
+    def from_result(
+        cls, result: NotificationDeliverySettlement
+    ) -> "NotificationDeliverySettlementResponse":
+        return cls(
+            delivery_id=result.delivery_id,
+            status=result.status.value,
+            attempt_number=result.attempt_number,
+            outcome=result.outcome.value,
+            provider_message_ref=result.provider_message_ref,
+            next_attempt_at=result.next_attempt_at,
+            fencing_token=result.fencing_token,
+            error_code=result.error_code.value if result.error_code else None,
+        )

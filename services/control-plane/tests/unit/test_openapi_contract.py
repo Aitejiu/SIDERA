@@ -53,6 +53,9 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/notification-summary",
     "/api/v1/workspaces/{workspace_id}/notification-threads",
     "/api/v1/workspaces/{workspace_id}/notification-threads/{thread_id}",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/claims",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/ack",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/nack",
     "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/attempts",
     "/api/v1/workspaces/{workspace_id}/notification-routes/{route_id}/threads",
 }
@@ -94,6 +97,9 @@ EXPECTED_TYPED_POST_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/reconcile": "CommandResponse",
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/confirm-stopped": "CommandResponse",
     "/api/v1/workspaces/{workspace_id}/worker-transitions/{worker_transition_id}/recover": "CommandResponse",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/claims": "NotificationDeliveryClaimResponse",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/ack": "NotificationDeliverySettlementResponse",
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/nack": "NotificationDeliverySettlementResponse",
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
@@ -177,6 +183,15 @@ EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS = {
     "NotificationAttemptPageResponse",
 }
 
+EXPECTED_NOTIFICATION_WORKFLOW_SCHEMAS = {
+    "NotificationDeliveryClaimRequest",
+    "NotificationDeliveryClaimResponse",
+    "NotificationDeliveryEnvelope",
+    "NotificationDeliveryAckRequest",
+    "NotificationDeliveryNackRequest",
+    "NotificationDeliverySettlementResponse",
+}
+
 
 def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) -> None:
     output = tmp_path / "nested" / "openapi.json"
@@ -257,8 +272,40 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert EXPECTED_WORK_CONTEXT_RESPONSE_SCHEMAS <= schemas.keys()
     assert EXPECTED_CONTEXT_PACKAGE_RESPONSE_SCHEMAS <= schemas.keys()
     assert EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS <= schemas.keys()
+    assert EXPECTED_NOTIFICATION_WORKFLOW_SCHEMAS <= schemas.keys()
     for schema_name in EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS:
         assert schemas[schema_name]["additionalProperties"] is False
+    for schema_name in EXPECTED_NOTIFICATION_WORKFLOW_SCHEMAS:
+        assert schemas[schema_name]["additionalProperties"] is False
+    assert schemas["NotificationDeliveryClaimRequest"]["required"] == [
+        "module_instance_id",
+        "supported_contract_versions",
+        "batch_size",
+        "lease_seconds",
+    ]
+    assert schemas["NotificationDeliveryEnvelope"]["required"] == [
+        "delivery_id",
+        "notification_id",
+        "thread_id",
+        "contract_version",
+        "claim_token",
+        "fencing_token",
+        "idempotency_key",
+        "channel_type",
+        "source_ref",
+        "kind",
+        "priority",
+        "root_task_title",
+        "subtask_path",
+        "worker_item_title",
+        "title",
+        "summary",
+        "next_action",
+        "deep_link",
+        "correlation_id",
+        "notification_ref",
+        "created_at",
+    ]
     notification_schemas = " ".join(
         json.dumps(schemas[name], sort_keys=True)
         for name in EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS

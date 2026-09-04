@@ -12,6 +12,9 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from sidera_control_plane.application.notification_delivery import (
+    NotificationDeliveryService,
+)
 from sidera_control_plane.application.notification_policy import (
     POLICY_VERSION,
     NotificationEvaluationMode,
@@ -240,6 +243,7 @@ class NotificationWorker:
 class NotificationWorkerRuntime:
     worker: NotificationWorker
     reconciler: NotificationReconciler
+    delivery_service: NotificationDeliveryService
     database: Database
 
 
@@ -259,6 +263,23 @@ def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
         batch_size=settings.notification_reconcile_batch_size,
         lease_seconds=settings.notification_cursor_lease_seconds,
     )
+    delivery_service = NotificationDeliveryService(
+        uow_factory,
+        clock=lambda: datetime.now(UTC),
+        batch_size=settings.notification_delivery_batch_size,
+        claim_lease_seconds=settings.notification_claim_lease_seconds,
+        max_attempts=settings.notification_delivery_max_attempts,
+        max_window_seconds=settings.notification_delivery_max_window_seconds,
+        retry_base_seconds=settings.notification_retry_base_seconds,
+        retry_backoff_max_seconds=settings.notification_retry_backoff_max_seconds,
+    )
+
+    def expire_leases(workspace_id: UUID, now: datetime, limit: int) -> int:
+        return delivery_service.recover_expired_claims(
+            workspace_id,
+            now=now,
+            limit=limit,
+        )
 
     def workspace_provider() -> tuple[UUID, ...]:
         with database.session() as session:
@@ -294,6 +315,7 @@ def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
             baseline_complete=baseline_complete,
             enabled=settings.notification_enabled,
             due_sweep_seconds=settings.notification_due_sweep_seconds,
+            expire_leases=expire_leases,
         )
     except BaseException:
         database.dispose()
@@ -301,6 +323,7 @@ def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
     return NotificationWorkerRuntime(
         worker=worker,
         reconciler=reconciler,
+        delivery_service=delivery_service,
         database=database,
     )
 

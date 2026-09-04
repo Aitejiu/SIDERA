@@ -25,6 +25,12 @@ from sidera_control_plane.api.schemas import (
     ErrorResponse,
     ExecutionContextAddressPayload,
     MarkNotificationThreadReadPayload,
+    NotificationDeliveryAckRequest,
+    NotificationDeliveryClaimRequest,
+    NotificationDeliveryClaimResponse,
+    NotificationDeliveryEnvelope,
+    NotificationDeliveryNackRequest,
+    NotificationDeliverySettlementResponse,
     PauseCollaborationReleasePayload,
     PinExecutionWorkerPayload,
     PrepareWorkerHandoffPayload,
@@ -118,6 +124,15 @@ _COMMAND_PAYLOADS = (
     + _NOTIFICATION_COMMAND_PAYLOADS
 )
 
+_NOTIFICATION_WORKFLOW_SCHEMAS: tuple[type[BaseModel], ...] = (
+    NotificationDeliveryClaimRequest,
+    NotificationDeliveryClaimResponse,
+    NotificationDeliveryEnvelope,
+    NotificationDeliveryAckRequest,
+    NotificationDeliveryNackRequest,
+    NotificationDeliverySettlementResponse,
+)
+
 
 def export_openapi(output: Path) -> dict[str, Any]:
     settings = Settings(
@@ -130,6 +145,8 @@ def export_openapi(output: Path) -> dict[str, Any]:
     _add_component_schema(schemas, ErrorResponse)
     _add_component_schema(schemas, CollaborationMetricsResponse)
     for _command_name, model in _COMMAND_PAYLOADS:
+        _add_component_schema(schemas, model)
+    for model in _NOTIFICATION_WORKFLOW_SCHEMAS:
         _add_component_schema(schemas, model)
     document["x-sidera-command-payloads"] = {
         command_name: {

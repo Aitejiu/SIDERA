@@ -135,6 +135,12 @@ def test_notification_settings_have_bounded_defaults_and_validation():
     assert settings.notification_cursor_lease_seconds == 30
     assert settings.notification_due_sweep_seconds == 15.0
     assert settings.notification_baseline_required is True
+    assert settings.notification_delivery_batch_size == 50
+    assert settings.notification_claim_lease_seconds == 30
+    assert settings.notification_delivery_max_attempts == 10
+    assert settings.notification_delivery_max_window_seconds == 86_400
+    assert settings.notification_retry_base_seconds == 2
+    assert settings.notification_retry_backoff_max_seconds == 300
 
     with pytest.raises(ValueError):
         Settings(
@@ -160,4 +166,24 @@ def test_notification_settings_have_bounded_defaults_and_validation():
         Settings(
             database_url="postgresql+psycopg://test",
             notification_policy_version=2,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_delivery_batch_size=201,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_claim_lease_seconds=4,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_delivery_max_attempts=0,
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            database_url="postgresql+psycopg://test",
+            notification_delivery_max_window_seconds=0,
         )

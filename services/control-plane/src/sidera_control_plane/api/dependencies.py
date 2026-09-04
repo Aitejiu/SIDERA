@@ -47,6 +47,9 @@ from sidera_control_plane.application.module_queries import ModuleQueryService
 from sidera_control_plane.application.notification_commands import (
     NotificationCommandHandler,
 )
+from sidera_control_plane.application.notification_delivery import (
+    NotificationDeliveryService,
+)
 from sidera_control_plane.application.notification_queries import (
     NotificationQueryService,
 )
@@ -312,6 +315,26 @@ def get_notification_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> NotificationQueryService:
     return NotificationQueryService(SqlAlchemyNotificationQueryStore(database))
+
+
+def get_notification_delivery_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> NotificationDeliveryService:
+    factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
+        database,
+        projection_change_retention_seconds=settings.projection_change_retention_seconds,
+    )
+    return NotificationDeliveryService(
+        factory,
+        clock=lambda: datetime.now(UTC),
+        batch_size=settings.notification_delivery_batch_size,
+        claim_lease_seconds=settings.notification_claim_lease_seconds,
+        max_attempts=settings.notification_delivery_max_attempts,
+        max_window_seconds=settings.notification_delivery_max_window_seconds,
+        retry_base_seconds=settings.notification_retry_base_seconds,
+        retry_backoff_max_seconds=settings.notification_retry_backoff_max_seconds,
+    )
 
 
 def get_plan_revision_query_service(

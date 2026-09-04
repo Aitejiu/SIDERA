@@ -701,6 +701,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/claims": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Claim Notification Deliveries
+         * @description trusted loopback Adapter workflow; claim fencing is not authentication.
+         */
+        post: operations["claim_notification_deliveries"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ack Notification Delivery
+         * @description trusted loopback Adapter workflow; claim fencing is not authentication.
+         */
+        post: operations["ack_notification_delivery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/attempts": {
         parameters: {
             query?: never;
@@ -712,6 +752,26 @@ export interface paths {
         get: operations["list_notification_delivery_attempts"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-deliveries/{delivery_id}/nack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Nack Notification Delivery
+         * @description trusted loopback Adapter workflow; claim fencing is not authentication.
+         */
+        post: operations["nack_notification_delivery"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3815,6 +3875,135 @@ export interface components {
              */
             started_at: string;
         };
+        /** NotificationDeliveryAckRequest */
+        NotificationDeliveryAckRequest: {
+            /**
+             * Claim Token
+             * Format: uuid
+             */
+            claim_token: string;
+            /**
+             * Completed At
+             * Format: date-time
+             */
+            completed_at: string;
+            /** Fencing Token */
+            fencing_token: number;
+            /**
+             * Provider Message Ref
+             * @default null
+             */
+            provider_message_ref: string | null;
+        };
+        /** NotificationDeliveryClaimRequest */
+        NotificationDeliveryClaimRequest: {
+            /** Batch Size */
+            batch_size: number;
+            /** Lease Seconds */
+            lease_seconds: number;
+            /**
+             * Module Instance Id
+             * Format: uuid
+             */
+            module_instance_id: string;
+            /** Supported Contract Versions */
+            supported_contract_versions: number[];
+        };
+        /** NotificationDeliveryClaimResponse */
+        NotificationDeliveryClaimResponse: {
+            /** Deliveries */
+            deliveries: components["schemas"]["NotificationDeliveryEnvelope"][];
+        };
+        /** NotificationDeliveryEnvelope */
+        NotificationDeliveryEnvelope: {
+            /** Channel Type */
+            channel_type: string;
+            /**
+             * Claim Token
+             * Format: uuid
+             */
+            claim_token: string;
+            /** Contract Version */
+            contract_version: number;
+            /** Correlation Id */
+            correlation_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Deep Link */
+            deep_link: string;
+            /**
+             * Delivery Id
+             * Format: uuid
+             */
+            delivery_id: string;
+            /** Fencing Token */
+            fencing_token: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Kind */
+            kind: string;
+            /** Next Action */
+            next_action: string;
+            /**
+             * Notification Id
+             * Format: uuid
+             */
+            notification_id: string;
+            /** Notification Ref */
+            notification_ref: string;
+            /** Priority */
+            priority: string;
+            /** Root Task Title */
+            root_task_title: string;
+            /** Source Ref */
+            source_ref: string;
+            /** Subtask Path */
+            subtask_path: string[];
+            /** Summary */
+            summary: string;
+            /**
+             * Thread Id
+             * Format: uuid
+             */
+            thread_id: string;
+            /** Title */
+            title: string;
+            /** Worker Item Title */
+            worker_item_title: string | null;
+        };
+        /** NotificationDeliveryNackRequest */
+        NotificationDeliveryNackRequest: {
+            /**
+             * Claim Token
+             * Format: uuid
+             */
+            claim_token: string;
+            /** Fencing Token */
+            fencing_token: number;
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "retryable_failure" | "terminal_failure" | "unknown_result";
+            /**
+             * Provider Message Ref
+             * @default null
+             */
+            provider_message_ref: string | null;
+            /**
+             * Retry After Seconds
+             * @default null
+             */
+            retry_after_seconds: number | null;
+            /**
+             * Stable Error Code
+             * @enum {string}
+             */
+            stable_error_code: "transport_unavailable" | "timeout" | "rate_limited" | "provider_unavailable" | "unknown_result" | "route_not_found" | "route_revoked" | "permission_denied" | "contract_unsupported" | "payload_rejected";
+        };
         /** NotificationDeliveryResponse */
         NotificationDeliveryResponse: {
             /** Attempts */
@@ -3856,6 +4045,28 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /** NotificationDeliverySettlementResponse */
+        NotificationDeliverySettlementResponse: {
+            /** Attempt Number */
+            attempt_number: number;
+            /**
+             * Delivery Id
+             * Format: uuid
+             */
+            delivery_id: string;
+            /** Error Code */
+            error_code: string | null;
+            /** Fencing Token */
+            fencing_token: number;
+            /** Next Attempt At */
+            next_attempt_at: string | null;
+            /** Outcome */
+            outcome: string;
+            /** Provider Message Ref */
+            provider_message_ref: string | null;
+            /** Status */
+            status: string;
         };
         /** NotificationFactPageResponse */
         NotificationFactPageResponse: {
@@ -8942,6 +9153,77 @@ export interface operations {
             };
         };
     };
+    claim_notification_deliveries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationDeliveryClaimRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliveryClaimResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ack_notification_delivery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                delivery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationDeliveryAckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliverySettlementResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_notification_delivery_attempts: {
         parameters: {
             query?: {
@@ -8964,6 +9246,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NotificationAttemptPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    nack_notification_delivery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                delivery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationDeliveryNackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliverySettlementResponse"];
                 };
             };
             /** @description Validation Error */

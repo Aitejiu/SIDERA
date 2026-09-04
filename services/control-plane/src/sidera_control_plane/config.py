@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     notification_cursor_lease_seconds: int = Field(default=30, gt=0, le=600)
     notification_due_sweep_seconds: float = Field(default=15.0, gt=0, le=3_600)
     notification_baseline_required: bool = True
+    notification_delivery_batch_size: int = Field(default=50, ge=1, le=200)
+    notification_claim_lease_seconds: int = Field(default=30, ge=5, le=300)
+    notification_delivery_max_attempts: int = Field(default=10, ge=1, le=100)
+    notification_delivery_max_window_seconds: int = Field(default=86_400, gt=0)
+    notification_retry_base_seconds: int = Field(default=2, gt=0)
+    notification_retry_backoff_max_seconds: int = Field(default=300, gt=0)
     plan_transition_batch_size: int = Field(default=20, gt=0)
     plan_transition_poll_interval_seconds: float = Field(default=1.0, gt=0)
     plan_transition_lease_ttl_seconds: int = Field(default=60, gt=0)
