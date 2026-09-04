@@ -104,10 +104,42 @@ class _Notifications:
         fact = self.facts.get(fact_id)
         return fact if fact is not None and fact.workspace_id == workspace_id else None
 
+    def add_fact_or_get_existing(self, fact: NotificationFact) -> NotificationFact:
+        existing = self.facts.get(fact.id)
+        if existing is not None and existing != fact:
+            raise AssertionError("fact identity conflict")
+        self.facts[fact.id] = fact
+        return fact
+
     def get_thread(self, workspace_id: UUID, thread_id: UUID, *, for_update: bool = False):
         del for_update
         thread = self.threads.get(thread_id)
         return thread if thread is not None and thread.workspace_id == workspace_id else None
+
+    def get_thread_by_key(
+        self,
+        workspace_id: UUID,
+        recipient_type: str,
+        recipient_id: str,
+        thread_key: str,
+        *,
+        for_update: bool = False,
+    ):
+        del for_update
+        return next(
+            (
+                thread
+                for thread in self.threads.values()
+                if thread.workspace_id == workspace_id
+                and thread.recipient_type == recipient_type
+                and thread.recipient_id == recipient_id
+                and thread.thread_key == thread_key
+            ),
+            None,
+        )
+
+    def add_thread(self, thread: InboxThread) -> None:
+        self.threads[thread.id] = thread
 
     def get_route(self, workspace_id: UUID, route_id: UUID, *, for_update: bool = False):
         del for_update
@@ -195,6 +227,16 @@ class _Notifications:
         current = self.attempts[key]
         assert current.outcome is None
         self.attempts[key] = attempt
+
+    def next_delivery_round(
+        self, intent: NotificationDeliveryIntent, *, now: datetime
+    ) -> NotificationDeliveryIntent:
+        next_intent = intent.next_delivery_round(now=now)
+        existing = self.intents.get(next_intent.id)
+        if existing is not None:
+            return existing
+        self.intents[next_intent.id] = next_intent
+        return next_intent
 
 
 class _Uow(AbstractContextManager["_Uow"]):
@@ -524,6 +566,71 @@ def test_retryable_nack_exhausts_when_attempt_limit_is_reached() -> None:
     assert result.status is NotificationDeliveryStatus.EXHAUSTED
     assert result.outcome is NotificationAttemptOutcome.RETRYABLE_FAILURE
     assert fixture.uow.notifications.intents[fixture.intent.id].exhausted_at == NOW + timedelta(seconds=1)
+
+
+def test_terminal_failure_creates_one_web_only_channel_health_thread() -> None:
+    fixture = _fixture()
+    service = _service(fixture)
+    envelope = service.claim(
+        WORKSPACE_ID,
+        fixture.module.id,
+        supported_contract_versions=(1,),
+        now=NOW,
+    )[0]
+
+    result = service.nack(
+        WORKSPACE_ID,
+        fixture.intent.id,
+        claim_token=envelope.claim_token,
+        fencing_token=envelope.fencing_token,
+        outcome=NotificationAttemptOutcome.TERMINAL_FAILURE,
+        error_code=NotificationAttemptErrorCode.PAYLOAD_REJECTED,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert result.status is NotificationDeliveryStatus.EXHAUSTED
+    operation_facts = [
+        fact
+        for fact in fixture.uow.notifications.facts.values()
+        if fact.priority is NotificationPriority.OPERATIONS
+    ]
+    assert len(operation_facts) == 1
+    operation_fact = operation_facts[0]
+    assert operation_fact.kind == "notification_channel_health"
+    assert operation_fact.transition is NotificationTransition.DEGRADED
+    assert operation_fact.topic == f"notification_channel_health:{fixture.route.id}"
+    assert len(fixture.uow.notifications.intents) == 1
+    operation_threads = [
+        thread
+        for thread in fixture.uow.notifications.threads.values()
+        if thread.topic == operation_fact.topic
+    ]
+    assert len(operation_threads) == 1
+    assert operation_threads[0].business_status.value == "open"
+
+
+def test_expired_claim_exhaustion_creates_the_same_web_only_operations_path() -> None:
+    fixture = _fixture()
+    service = _service(fixture, max_attempts=1)
+    service.claim(
+        WORKSPACE_ID,
+        fixture.module.id,
+        supported_contract_versions=(1,),
+        now=NOW,
+    )
+
+    assert service.recover_expired_claims(
+        WORKSPACE_ID, now=NOW + timedelta(seconds=31)
+    ) == 1
+
+    current = fixture.uow.notifications.intents[fixture.intent.id]
+    assert current.status is NotificationDeliveryStatus.EXHAUSTED
+    operation_facts = [
+        fact
+        for fact in fixture.uow.notifications.facts.values()
+        if fact.priority is NotificationPriority.OPERATIONS
+    ]
+    assert len(operation_facts) == 1
 
 
 def test_expired_claim_settles_unknown_result_and_allows_reclaim_with_new_fence() -> None:

@@ -4,6 +4,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from sidera_control_plane.api.dependencies import (
+    get_database,
+    get_notification_metrics_service,
     get_notification_query_service,
     get_settings,
     require_loopback_adapter_workflow,
@@ -11,15 +13,22 @@ from sidera_control_plane.api.dependencies import (
 from sidera_control_plane.api.schemas import (
     NotificationAttemptPageResponse,
     NotificationAttemptResponse,
+    NotificationMetricsResponse,
+    NotificationReadinessResponse,
     NotificationSummaryResponse,
     NotificationThreadDetailResponse,
     NotificationThreadPageResponse,
     NotificationThreadResponse,
 )
+from sidera_control_plane.application.notification_metrics import (
+    NotificationMetricsService,
+)
 from sidera_control_plane.application.notification_queries import (
     NotificationQueryService,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.notification_readiness import build_notification_readiness
+from sidera_control_plane.persistence.database import Database
 
 router = APIRouter(prefix="/api/v1/workspaces")
 
@@ -36,6 +45,35 @@ def get_notification_summary(
     ],
 ) -> NotificationSummaryResponse:
     return NotificationSummaryResponse.from_view(service.get_summary(workspace_id))
+
+
+@router.get(
+    "/{workspace_id}/notification-metrics",
+    response_model=NotificationMetricsResponse,
+    operation_id="get_notification_metrics",
+)
+def get_notification_metrics(
+    workspace_id: UUID,
+    service: Annotated[
+        NotificationMetricsService, Depends(get_notification_metrics_service)
+    ],
+) -> NotificationMetricsResponse:
+    return NotificationMetricsResponse.from_view(service.get_metrics(workspace_id))
+
+
+@router.get(
+    "/{workspace_id}/notification-readiness",
+    response_model=NotificationReadinessResponse,
+    operation_id="get_notification_readiness",
+)
+def get_notification_readiness(
+    workspace_id: UUID,
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> NotificationReadinessResponse:
+    return NotificationReadinessResponse.from_report(
+        build_notification_readiness(settings, database, workspace_id=workspace_id)
+    )
 
 
 @router.get(

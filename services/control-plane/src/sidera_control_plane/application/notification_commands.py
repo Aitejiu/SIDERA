@@ -7,10 +7,14 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.notification_delivery import (
+    record_notification_channel_health,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     DomainError,
+    InvalidTransition,
     OperatorRequired,
     ValidationError,
     VersionConflict,
@@ -22,10 +26,13 @@ from sidera_control_plane.domain.modules import (
     NotificationChannelCapabilityProfile,
 )
 from sidera_control_plane.domain.notifications import (
+    NotificationAttemptErrorCode,
     NotificationBindingKind,
+    NotificationDeliveryStatus,
     NotificationRoute,
     NotificationRouteStatus,
     NotificationSourceBinding,
+    NotificationTransition,
 )
 from sidera_control_plane.domain.planning import (
     PlanningRequestKind,
@@ -39,6 +46,13 @@ _DELIVERY_CONTRACT_VERSION = 1
 _MIN_SOURCE_REF_LENGTH = 32
 _MAX_SOURCE_REF_LENGTH = 512
 _SOURCE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~:/+\-]*$")
+_SECRET_MARKER_PATTERN = re.compile(
+    r"(?:api[_ -]?key|authorization|bearer|password|secret|token)", re.IGNORECASE
+)
+_REQUEUE_FIELDS = frozenset(
+    {"expected_status", "expected_route_version", "reason"}
+)
+_MAX_REQUEUE_REASON_LENGTH = 256
 _ROUTE_FIELDS = frozenset(
     {
         "channel_module_instance_id",
@@ -65,6 +79,7 @@ class NotificationCommandHandler:
             "RegisterNotificationRoute",
             "MarkNotificationThreadRead",
             "ArchiveNotificationThread",
+            "RequeueNotificationDelivery",
         }
     )
 
@@ -82,6 +97,8 @@ class NotificationCommandHandler:
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        if envelope.command_type == "RequeueNotificationDelivery":
+            return self._handle_requeue(uow, envelope)
         if envelope.command_type in {
             "MarkNotificationThreadRead",
             "ArchiveNotificationThread",
@@ -230,6 +247,120 @@ class NotificationCommandHandler:
             },
         )
 
+    def _handle_requeue(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        self._require_local_actor(envelope)
+        if envelope.target_type != "notification_delivery":
+            raise ValidationError(
+                "RequeueNotificationDelivery requires "
+                "target_type=notification_delivery"
+            )
+        if envelope.target_id is None:
+            raise ValidationError(
+                "RequeueNotificationDelivery requires a delivery target"
+            )
+        if envelope.expected_version is not None:
+            raise ValidationError(
+                "RequeueNotificationDelivery requires expected_version=null"
+            )
+        payload = _parse_requeue_payload(envelope.payload)
+        intent = uow.notifications.get_intent(
+            envelope.workspace_id, envelope.target_id, for_update=True
+        )
+        if intent is None:
+            raise ValidationError("notification delivery is unavailable")
+        if intent.status is not NotificationDeliveryStatus.EXHAUSTED:
+            raise InvalidTransition(
+                "only an exhausted notification delivery can be requeued"
+            )
+
+        route = uow.notifications.get_route(
+            envelope.workspace_id, intent.notification_route_id, for_update=True
+        )
+        if route is None or route.workspace_id != envelope.workspace_id:
+            raise ValidationError("notification route is unavailable")
+        if payload.expected_route_version != route.version:
+            raise VersionConflict(payload.expected_route_version, route.version)
+        if route.status is not NotificationRouteStatus.ACTIVE:
+            raise InvalidTransition("notification route is not active")
+        if route.channel_module_instance_id != intent.channel_module_instance_id:
+            raise InvalidTransition("notification delivery route binding is stale")
+
+        source_fact = uow.notifications.get_fact(
+            envelope.workspace_id, intent.notification_fact_id
+        )
+        if source_fact is None:
+            raise ValidationError("notification fact is unavailable")
+
+        now = self._clock()
+        candidate = intent.next_delivery_round(now=now)
+        existing = uow.notifications.get_intent(
+            envelope.workspace_id, candidate.id, for_update=True
+        )
+        if existing is None:
+            next_intent = uow.notifications.add_intent_or_get_existing(candidate)
+            created = True
+        else:
+            if existing != candidate:
+                raise ValidationError("notification delivery round conflicts")
+            next_intent = existing
+            created = False
+
+        recovered_fact = record_notification_channel_health(
+            uow,
+            source_fact,
+            route_id=route.id,
+            delivery_round=intent.delivery_round,
+            error_code=(
+                intent.last_error_code or NotificationAttemptErrorCode.UNKNOWN_RESULT
+            ),
+            transition=NotificationTransition.RECOVERED,
+            now=now,
+        )
+        event_ids: tuple[UUID, ...] = ()
+        if created:
+            event = _event(
+                envelope,
+                aggregate_id=next_intent.id,
+                aggregate_version=next_intent.fencing_token,
+                event_type="NotificationDeliveryRequeued",
+                aggregate_type="notification_delivery",
+                payload={
+                    "notification_delivery_id": str(next_intent.id),
+                    "previous_delivery_id": str(intent.id),
+                    "delivery_round": next_intent.delivery_round,
+                    "route_version": route.version,
+                    "reason": payload.reason,
+                },
+            )
+            uow.events.append_with_outbox(event)
+            uow.projection_changes.changed(
+                workspace_id=next_intent.workspace_id,
+                projection_type="notification_delivery",
+                resource_id=next_intent.id,
+                change_type="notification.delivery_requeued",
+                resource_version=next_intent.fencing_token,
+                correlation_id=envelope.correlation_id,
+            )
+            event_ids = (event.id,)
+        uow.flush()
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=next_intent.id,
+            aggregate_version=next_intent.fencing_token,
+            event_ids=event_ids,
+            data={
+                "notification_delivery_id": str(next_intent.id),
+                "previous_delivery_id": str(intent.id),
+                "delivery_round": next_intent.delivery_round,
+                "delivery_status": next_intent.status.value,
+                "fencing_token": next_intent.fencing_token,
+                "route_version": route.version,
+                "operation_fact_id": str(recovered_fact.id),
+            },
+        )
+
     def _handle_thread_command(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
@@ -332,7 +463,7 @@ class NotificationCommandHandler:
             or envelope.actor_id != self._local_actor_id
         ):
             raise OperatorRequired(
-                "notification route registration requires the configured local actor"
+                "notification command requires the configured local actor"
             )
 
 
@@ -516,6 +647,34 @@ def _parse_thread_payload(
     return value.strip()
 
 
+def _parse_requeue_payload(payload: Mapping[str, object]) -> _RequeuePayload:
+    if not isinstance(payload, Mapping):
+        raise ValidationError("RequeueNotificationDelivery payload must be an object")
+    if set(payload) != _REQUEUE_FIELDS:
+        raise ValidationError(
+            "RequeueNotificationDelivery payload contains invalid fields"
+        )
+    if payload.get("expected_status") != NotificationDeliveryStatus.EXHAUSTED.value:
+        raise ValidationError("expected_status must be exhausted")
+    expected_route_version = _positive_int(
+        payload.get("expected_route_version"), "expected_route_version"
+    )
+    reason = payload.get("reason")
+    if not isinstance(reason, str):
+        raise ValidationError("reason is required")
+    reason = reason.strip()
+    if not reason or len(reason) > _MAX_REQUEUE_REASON_LENGTH:
+        raise ValidationError("reason length is outside the supported bounds")
+    if any(ord(character) < 32 or ord(character) == 127 for character in reason):
+        raise ValidationError("reason contains unsupported control characters")
+    if _SECRET_MARKER_PATTERN.search(reason):
+        raise ValidationError("reason contains a forbidden secret-like marker")
+    return _RequeuePayload(
+        expected_route_version=expected_route_version,
+        reason=reason,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _RoutePayload:
     channel_module_instance_id: UUID
@@ -523,6 +682,12 @@ class _RoutePayload:
     recipient_type: str
     recipient_id: str
     source_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RequeuePayload:
+    expected_route_version: int
+    reason: str
 
 
 def _find_existing_route(

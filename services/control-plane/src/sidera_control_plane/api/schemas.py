@@ -31,6 +31,9 @@ from sidera_control_plane.application.notification_delivery import (
 from sidera_control_plane.application.notification_delivery import (
     NotificationDeliverySettlement,
 )
+from sidera_control_plane.application.notification_metrics import (
+    NotificationMetricsView,
+)
 from sidera_control_plane.application.notification_queries import (
     NotificationAttemptView,
     NotificationDeliveryView,
@@ -100,6 +103,7 @@ from sidera_control_plane.collaboration_readiness import ReadinessReport
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
+from sidera_control_plane.notification_readiness import NotificationReadinessReport
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 InputText = Annotated[str, StringConstraints(min_length=1)]
@@ -124,6 +128,9 @@ AggregateType = Literal[
     "handoff_transition",
     "collaboration_governance_hold",
     "collaboration_release_proposal",
+    "notification_delivery",
+    "notification_route",
+    "notification_thread",
 ]
 
 
@@ -474,6 +481,14 @@ class MarkNotificationThreadReadPayload(BaseModel):
 
 class ArchiveNotificationThreadPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class RequeueNotificationDeliveryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_status: Literal["exhausted"]
+    expected_route_version: int = Field(ge=1)
+    reason: NonEmptyString = Field(max_length=256)
 
 
 class ArtifactContentDescriptorResponse(BaseModel):
@@ -2290,6 +2305,9 @@ class CommandRequest(BaseModel):
         elif self.command_type == "AcknowledgeAttentionItem":
             self._require_mutation_target("task")
             parsed = AcknowledgeAttentionItemPayload.model_validate(self.payload)
+        elif self.command_type == "RequeueNotificationDelivery":
+            self._require_requeue_target()
+            parsed = RequeueNotificationDeliveryPayload.model_validate(self.payload)
         elif self.command_type == "SetTaskPriority":
             self._require_mutation_target()
             parsed = SetTaskPriorityPayload.model_validate(self.payload)
@@ -2459,6 +2477,19 @@ class CommandRequest(BaseModel):
             raise ValueError("ConfigureWorkerRuntime requires target_id")
         if self.expected_version is not None and self.expected_version < 1:
             raise ValueError("expected_version must be positive")
+
+    def _require_requeue_target(self) -> None:
+        if self.target_type != "notification_delivery":
+            raise ValueError(
+                "RequeueNotificationDelivery requires "
+                "target_type=notification_delivery"
+            )
+        if self.target_id is None:
+            raise ValueError("RequeueNotificationDelivery requires target_id")
+        if self.expected_version is not None:
+            raise ValueError(
+                "RequeueNotificationDelivery does not accept expected_version"
+            )
 
     def to_envelope(self) -> CommandEnvelope:
         return CommandEnvelope(
@@ -4819,6 +4850,74 @@ class CollaborationReadinessResponse(BaseModel):
             status="ready" if report.ready else "not_ready",
             checks=tuple(
                 CollaborationReadinessCheckResponse(
+                    name=check.name,
+                    ready=check.ready,
+                    code=check.code,
+                    summary=check.summary,
+                )
+                for check in report.checks
+            ),
+        )
+
+
+class NotificationMetricSampleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    labels: dict[str, str]
+    value: float
+
+
+class NotificationMetricsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    as_of: datetime
+    samples: tuple[NotificationMetricSampleResponse, ...]
+
+    @classmethod
+    def from_view(cls, view: NotificationMetricsView) -> "NotificationMetricsResponse":
+        return cls(
+            workspace_id=view.workspace_id,
+            as_of=view.as_of,
+            samples=tuple(
+                NotificationMetricSampleResponse(
+                    name=sample.name,
+                    labels=dict(sample.labels),
+                    value=sample.value,
+                )
+                for sample in view.samples
+            ),
+        )
+
+
+class NotificationReadinessCheckResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    ready: bool
+    code: str
+    summary: str
+
+
+class NotificationReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: str
+    as_of: datetime
+    status: Literal["ready", "not_ready"]
+    checks: tuple[NotificationReadinessCheckResponse, ...]
+
+    @classmethod
+    def from_report(
+        cls, report: NotificationReadinessReport
+    ) -> "NotificationReadinessResponse":
+        return cls(
+            component="sidera-notification-worker",
+            as_of=report.as_of,
+            status="ready" if report.ready else "not_ready",
+            checks=tuple(
+                NotificationReadinessCheckResponse(
                     name=check.name,
                     ready=check.ready,
                     code=check.code,

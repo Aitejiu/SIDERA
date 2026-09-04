@@ -50,6 +50,9 @@ from sidera_control_plane.application.notification_commands import (
 from sidera_control_plane.application.notification_delivery import (
     NotificationDeliveryService,
 )
+from sidera_control_plane.application.notification_metrics import (
+    NotificationMetricsService,
+)
 from sidera_control_plane.application.notification_queries import (
     NotificationQueryService,
 )
@@ -113,6 +116,9 @@ from sidera_control_plane.persistence.context_package_query_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.handoff_query_store import (
     SqlAlchemyHandoffQueryStore,
+)
+from sidera_control_plane.persistence.notification_metrics_store import (
+    SqlAlchemyNotificationMetricsStore,
 )
 from sidera_control_plane.persistence.notification_query_store import (
     SqlAlchemyNotificationQueryStore,
@@ -315,6 +321,12 @@ def get_notification_query_service(
     database: Annotated[Database, Depends(get_database)],
 ) -> NotificationQueryService:
     return NotificationQueryService(SqlAlchemyNotificationQueryStore(database))
+
+
+def get_notification_metrics_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> NotificationMetricsService:
+    return NotificationMetricsService(SqlAlchemyNotificationMetricsStore(database))
 
 
 def get_notification_delivery_service(

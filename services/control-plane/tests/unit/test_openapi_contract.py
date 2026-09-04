@@ -50,6 +50,8 @@ EXPECTED_PATHS = {
     "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}",
     "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}",
     "/api/v1/workspaces/{workspace_id}/collaboration-metrics",
+    "/api/v1/workspaces/{workspace_id}/notification-metrics",
+    "/api/v1/workspaces/{workspace_id}/notification-readiness",
     "/api/v1/workspaces/{workspace_id}/notification-summary",
     "/api/v1/workspaces/{workspace_id}/notification-threads",
     "/api/v1/workspaces/{workspace_id}/notification-threads/{thread_id}",
@@ -90,6 +92,8 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/workspaces/{workspace_id}/collaboration-governance/worker-items/{worker_item_id}": "CollaborationGovernanceWorkerItemResponse",
     "/api/v1/workspaces/{workspace_id}/collaboration-governance/proposals/{proposal_id}": "CollaborationGovernanceProposalResponse",
     "/api/v1/workspaces/{workspace_id}/collaboration-metrics": "CollaborationMetricsResponse",
+    "/api/v1/workspaces/{workspace_id}/notification-metrics": "NotificationMetricsResponse",
+    "/api/v1/workspaces/{workspace_id}/notification-readiness": "NotificationReadinessResponse",
 }
 
 EXPECTED_TYPED_POST_RESPONSES = {
@@ -137,6 +141,7 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "ResumeAutomaticCollaboration": "ResumeAutomaticCollaborationPayload",
     "MarkNotificationThreadRead": "MarkNotificationThreadReadPayload",
     "ArchiveNotificationThread": "ArchiveNotificationThreadPayload",
+    "RequeueNotificationDelivery": "RequeueNotificationDeliveryPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {
@@ -181,6 +186,10 @@ EXPECTED_NOTIFICATION_RESPONSE_SCHEMAS = {
     "NotificationDeliveryResponse",
     "NotificationAttemptResponse",
     "NotificationAttemptPageResponse",
+    "NotificationMetricSampleResponse",
+    "NotificationMetricsResponse",
+    "NotificationReadinessCheckResponse",
+    "NotificationReadinessResponse",
 }
 
 EXPECTED_NOTIFICATION_WORKFLOW_SCHEMAS = {
@@ -320,6 +329,11 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         "title": "Payload",
         "type": "object",
     }
+    assert {
+        "notification_delivery",
+        "notification_route",
+        "notification_thread",
+    } <= set(command_request["properties"]["target_type"]["enum"])
     command_response = schemas["CommandResponse"]
     assert "data" in command_response["properties"]
     assert command_response["properties"]["data"]["type"] == "object"

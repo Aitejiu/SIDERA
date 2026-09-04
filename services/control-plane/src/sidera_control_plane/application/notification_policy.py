@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from uuid import UUID
 
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.notifications import (
+    NotificationAttemptErrorCode,
     NotificationFact,
     NotificationKind,
     NotificationPolicyState,
@@ -702,6 +704,81 @@ class NotificationPolicyV1:
         )
 
 
+def build_notification_channel_health_fact(
+    source_fact: NotificationFact,
+    *,
+    route_id: UUID,
+    delivery_round: int,
+    error_code: NotificationAttemptErrorCode | str,
+    transition: NotificationTransition | str,
+    now: datetime,
+) -> NotificationFact:
+    """Build the Web-only operational fact for a delivery channel condition."""
+
+    if not isinstance(source_fact, NotificationFact):
+        raise ValidationError("channel health requires a source notification fact")
+    if not isinstance(route_id, UUID):
+        raise ValidationError("channel health route_id must be a UUID")
+    if not isinstance(delivery_round, int) or isinstance(delivery_round, bool) or delivery_round < 1:
+        raise ValidationError("channel health delivery_round must be positive")
+    try:
+        parsed_error = (
+            error_code
+            if isinstance(error_code, NotificationAttemptErrorCode)
+            else NotificationAttemptErrorCode(error_code)
+        )
+        parsed_transition = (
+            transition
+            if isinstance(transition, NotificationTransition)
+            else NotificationTransition(transition)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("channel health identity is invalid") from exc
+    if parsed_transition not in {
+        NotificationTransition.DEGRADED,
+        NotificationTransition.RECOVERED,
+    }:
+        raise ValidationError("channel health transition is invalid")
+
+    identity = (
+        f"notification-channel-health:{source_fact.id}:{route_id}:"
+        f"{delivery_round}:{parsed_error.value}:{parsed_transition.value}"
+    )
+    authoritative_fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    if parsed_transition is NotificationTransition.RECOVERED:
+        summary = "通知渠道已恢复。"
+        action = "查看通知运维状态"
+    else:
+        summary = "通知渠道状态需要检查。"
+        action = "查看通知运维状态"
+    return NotificationFact.create(
+        workspace_id=source_fact.workspace_id,
+        policy_version=source_fact.policy_version,
+        recipient_type=source_fact.recipient_type,
+        recipient_id=source_fact.recipient_id,
+        kind=NotificationKind.NOTIFICATION_CHANNEL_HEALTH.value,
+        priority=NotificationPriority.OPERATIONS,
+        transition=parsed_transition,
+        topic=f"notification_channel_health:{route_id}",
+        root_task_id=source_fact.root_task_id,
+        subtask_id=source_fact.subtask_id,
+        worker_item_id=source_fact.worker_item_id,
+        source_projection_cursor=source_fact.source_projection_cursor,
+        source_projection_type="notification_delivery",
+        source_resource_id=source_fact.source_resource_id,
+        source_resource_version=delivery_round,
+        authoritative_fingerprint=authoritative_fingerprint,
+        title=source_fact.title,
+        summary=summary,
+        action=action,
+        deep_link=source_fact.deep_link,
+        correlation_id=source_fact.correlation_id,
+        baseline_import=False,
+        occurred_at=now,
+        created_at=now,
+    )
+
+
 def _kind_value(kind: NotificationKind | str) -> str:
     return kind.value if isinstance(kind, NotificationKind) else kind
 
@@ -711,7 +788,10 @@ def _thread_business_status_for_fact(
 ) -> NotificationThreadBusinessStatus | None:
     if fact is None:
         return None
-    if fact.priority is NotificationPriority.ACTION and (
+    if fact.priority in {
+        NotificationPriority.ACTION,
+        NotificationPriority.OPERATIONS,
+    } and (
         fact.transition is not NotificationTransition.RECOVERED
     ):
         return NotificationThreadBusinessStatus.OPEN

@@ -778,6 +778,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/notification-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Notification Metrics */
+        get: operations["get_notification_metrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/notification-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Notification Readiness */
+        get: operations["get_notification_readiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/notification-routes/{route_id}/threads": {
         parameters: {
             query?: never;
@@ -2157,7 +2191,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition" | "collaboration_governance_hold" | "collaboration_release_proposal";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition" | "collaboration_governance_hold" | "collaboration_release_proposal" | "notification_delivery" | "notification_route" | "notification_thread";
             /**
              * Workspace Id
              * Format: uuid
@@ -4140,6 +4174,60 @@ export interface components {
             /** Worker Item Id */
             worker_item_id: string | null;
         };
+        /** NotificationMetricSampleResponse */
+        NotificationMetricSampleResponse: {
+            /** Labels */
+            labels: {
+                [key: string]: string;
+            };
+            /** Name */
+            name: string;
+            /** Value */
+            value: number;
+        };
+        /** NotificationMetricsResponse */
+        NotificationMetricsResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Samples */
+            samples: components["schemas"]["NotificationMetricSampleResponse"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** NotificationReadinessCheckResponse */
+        NotificationReadinessCheckResponse: {
+            /** Code */
+            code: string;
+            /** Name */
+            name: string;
+            /** Ready */
+            ready: boolean;
+            /** Summary */
+            summary: string;
+        };
+        /** NotificationReadinessResponse */
+        NotificationReadinessResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Checks */
+            checks: components["schemas"]["NotificationReadinessCheckResponse"][];
+            /** Component */
+            component: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "not_ready";
+        };
         /** NotificationSummaryResponse */
         NotificationSummaryResponse: {
             /** Channel Issue Count */
@@ -5397,6 +5485,18 @@ export interface components {
             current_proposal_revision: number;
             /** Feedback */
             feedback: string;
+        };
+        /** RequeueNotificationDeliveryPayload */
+        RequeueNotificationDeliveryPayload: {
+            /** Expected Route Version */
+            expected_route_version: number;
+            /**
+             * Expected Status
+             * @constant
+             */
+            expected_status: "exhausted";
+            /** Reason */
+            reason: string;
         };
         /** ResumeAutomaticCollaborationPayload */
         ResumeAutomaticCollaborationPayload: {
@@ -9282,6 +9382,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NotificationDeliverySettlementResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_notification_metrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationMetricsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_notification_readiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationReadinessResponse"];
                 };
             };
             /** @description Validation Error */

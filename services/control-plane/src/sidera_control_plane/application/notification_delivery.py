@@ -6,6 +6,9 @@ from datetime import UTC, datetime, timedelta
 from random import random
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.notification_policy import (
+    build_notification_channel_health_fact,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
@@ -23,6 +26,7 @@ from sidera_control_plane.domain.notifications import (
     NotificationFact,
     NotificationRoute,
     NotificationRouteStatus,
+    NotificationTransition,
     notification_thread_id,
     notification_thread_key,
 )
@@ -113,6 +117,71 @@ class NotificationDeliverySettlement:
         }
 
 
+def record_notification_channel_health(
+    uow: ControlPlaneUnitOfWork,
+    source_fact: NotificationFact,
+    *,
+    route_id: UUID,
+    delivery_round: int,
+    error_code: NotificationAttemptErrorCode | str,
+    transition: NotificationTransition | str,
+    now: datetime,
+) -> NotificationFact:
+    """Persist one deterministic Web-only channel health Fact and Thread."""
+
+    fact = build_notification_channel_health_fact(
+        source_fact,
+        route_id=route_id,
+        delivery_round=delivery_round,
+        error_code=error_code,
+        transition=transition,
+        now=now,
+    )
+    persisted_fact = uow.notifications.add_fact_or_get_existing(fact)
+    thread_key = notification_thread_key(
+        recipient_type=persisted_fact.recipient_type,
+        recipient_id=persisted_fact.recipient_id,
+        root_task_id=persisted_fact.root_task_id,
+        subtask_id=persisted_fact.subtask_id,
+        worker_item_id=persisted_fact.worker_item_id,
+        topic=persisted_fact.topic,
+    )
+    thread = uow.notifications.get_thread_by_key(
+        persisted_fact.workspace_id,
+        persisted_fact.recipient_type,
+        persisted_fact.recipient_id,
+        thread_key,
+        for_update=True,
+    )
+    thread_change_type: str | None = None
+    if thread is None:
+        thread = InboxThread.open_from_fact(
+            persisted_fact,
+            thread_id=notification_thread_id(thread_key),
+            now=now,
+        )
+        uow.notifications.add_thread(thread)
+        thread_change_type = "notification.channel_health_opened"
+    else:
+        next_thread = thread.apply_fact(persisted_fact, now=now)
+        if next_thread != thread:
+            uow.notifications.save_thread(next_thread, thread.version)
+            thread = next_thread
+            thread_change_type = "notification.channel_health_updated"
+
+    projection_changes = getattr(uow, "projection_changes", None)
+    if thread_change_type is not None and projection_changes is not None:
+        projection_changes.changed(
+            workspace_id=thread.workspace_id,
+            projection_type="notification_thread",
+            resource_id=thread.id,
+            change_type=thread_change_type,
+            resource_version=thread.version,
+            correlation_id=source_fact.source_resource_id,
+        )
+    return persisted_fact
+
+
 class NotificationDeliveryService:
     """Claim and settle notification deliveries through the control-plane ledger."""
 
@@ -150,6 +219,46 @@ class NotificationDeliveryService:
         self._retry_backoff_max_seconds = _positive_int(
             retry_backoff_max_seconds, "retry_backoff_max_seconds"
         )
+
+    def record_channel_health(
+        self,
+        workspace_id: UUID,
+        delivery_id: UUID,
+        *,
+        transition: NotificationTransition | str,
+        error_code: NotificationAttemptErrorCode | str = NotificationAttemptErrorCode.UNKNOWN_RESULT,
+        delivery_round: int | None = None,
+        now: datetime | None = None,
+    ) -> NotificationFact:
+        """Expose the same deterministic operations path for adapters and commands."""
+
+        recorded_at = _aware(now or self._clock(), "channel health time")
+        with self._uow_factory() as uow:
+            intent = uow.notifications.get_intent(
+                workspace_id, delivery_id, for_update=True
+            )
+            if intent is None:
+                raise ValidationError("notification delivery is unavailable")
+            source_fact = uow.notifications.get_fact(
+                workspace_id, intent.notification_fact_id
+            )
+            if source_fact is None:
+                raise ValidationError("notification fact is unavailable")
+            fact = record_notification_channel_health(
+                uow,
+                source_fact,
+                route_id=intent.notification_route_id,
+                delivery_round=(
+                    intent.delivery_round
+                    if delivery_round is None
+                    else delivery_round
+                ),
+                error_code=error_code,
+                transition=transition,
+                now=recorded_at,
+            )
+            uow.flush()
+            return fact
 
     def claim(
         self,
@@ -373,6 +482,11 @@ class NotificationDeliveryService:
                 intent.fencing_token,
                 intent.status,
             )
+            if next_intent.status in {
+                NotificationDeliveryStatus.EXHAUSTED,
+                NotificationDeliveryStatus.SUPPRESSED,
+            }:
+                self._record_terminal_operations(uow, next_intent, now=settled_at)
             uow.flush()
             return self._settlement(next_intent, settled_attempt)
 
@@ -418,6 +532,10 @@ class NotificationDeliveryService:
                     intent.fencing_token,
                     intent.status,
                 )
+                if next_intent.status is NotificationDeliveryStatus.EXHAUSTED:
+                    self._record_terminal_operations(
+                        uow, next_intent, now=recovered_at
+                    )
                 recovered += 1
             uow.flush()
         return recovered
@@ -576,8 +694,32 @@ class NotificationDeliveryService:
     ) -> bool:
         return now >= intent.created_at + timedelta(seconds=self._max_window_seconds)
 
-    @staticmethod
+    def _record_terminal_operations(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        intent: NotificationDeliveryIntent,
+        *,
+        now: datetime,
+    ) -> NotificationFact:
+        source_fact = uow.notifications.get_fact(
+            intent.workspace_id, intent.notification_fact_id
+        )
+        if source_fact is None:
+            raise ValidationError("notification fact is unavailable")
+        return record_notification_channel_health(
+            uow,
+            source_fact,
+            route_id=intent.notification_route_id,
+            delivery_round=intent.delivery_round,
+            error_code=(
+                intent.last_error_code or NotificationAttemptErrorCode.UNKNOWN_RESULT
+            ),
+            transition=NotificationTransition.DEGRADED,
+            now=now,
+        )
+
     def _exhaust_due_intent(
+        self,
         uow: ControlPlaneUnitOfWork,
         intent: NotificationDeliveryIntent,
         now: datetime,
@@ -597,6 +739,7 @@ class NotificationDeliveryService:
             intent.fencing_token,
             intent.status,
         )
+        self._record_terminal_operations(uow, next_intent, now=now)
 
     @staticmethod
     def _settlement(

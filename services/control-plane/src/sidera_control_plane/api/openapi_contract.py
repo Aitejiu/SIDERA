@@ -31,6 +31,10 @@ from sidera_control_plane.api.schemas import (
     NotificationDeliveryEnvelope,
     NotificationDeliveryNackRequest,
     NotificationDeliverySettlementResponse,
+    NotificationMetricSampleResponse,
+    NotificationMetricsResponse,
+    NotificationReadinessCheckResponse,
+    NotificationReadinessResponse,
     PauseCollaborationReleasePayload,
     PinExecutionWorkerPayload,
     PrepareWorkerHandoffPayload,
@@ -43,6 +47,7 @@ from sidera_control_plane.api.schemas import (
     RejectCollaborationReleaseProposalPayload,
     RejectPlanningProposalPayload,
     RequestProposalRevisionPayload,
+    RequeueNotificationDeliveryPayload,
     ResumeAutomaticCollaborationPayload,
     RetryBlockedPlanningRunPayload,
     RetryContextAssemblyPayload,
@@ -113,6 +118,7 @@ _GOVERNANCE_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 _NOTIFICATION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("MarkNotificationThreadRead", MarkNotificationThreadReadPayload),
     ("ArchiveNotificationThread", ArchiveNotificationThreadPayload),
+    ("RequeueNotificationDelivery", RequeueNotificationDeliveryPayload),
 )
 
 _COMMAND_PAYLOADS = (
@@ -131,6 +137,10 @@ _NOTIFICATION_WORKFLOW_SCHEMAS: tuple[type[BaseModel], ...] = (
     NotificationDeliveryAckRequest,
     NotificationDeliveryNackRequest,
     NotificationDeliverySettlementResponse,
+    NotificationMetricSampleResponse,
+    NotificationMetricsResponse,
+    NotificationReadinessCheckResponse,
+    NotificationReadinessResponse,
 )
 
 

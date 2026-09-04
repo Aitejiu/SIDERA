@@ -316,6 +316,7 @@ def test_baseline_is_web_only_and_operations_never_route_to_failing_channel() ->
     )
     assert operations.fact is not None
     assert operations.fact.priority is NotificationPriority.OPERATIONS
+    assert operations.thread_business_status is NotificationThreadBusinessStatus.OPEN
     assert operations.route_eligibility is NotificationRouteEligibility.WEB_ONLY
 
 

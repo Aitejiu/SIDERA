@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.api.schemas import CommandRequest
 from sidera_control_plane.application.notification_commands import (
     NotificationCommandHandler,
     NotificationRouteConflict,
@@ -28,7 +29,10 @@ from sidera_control_plane.domain.modules import (
 )
 from sidera_control_plane.domain.notifications import (
     InboxThread,
+    NotificationAttemptErrorCode,
     NotificationBindingKind,
+    NotificationDeliveryIntent,
+    NotificationDeliveryStatus,
     NotificationFact,
     NotificationPriority,
     NotificationRoute,
@@ -137,11 +141,13 @@ class NotificationRepository:
         routes: tuple[NotificationRoute, ...] = (),
         threads: tuple[InboxThread, ...] = (),
         facts: tuple[NotificationFact, ...] = (),
+        intents: tuple[NotificationDeliveryIntent, ...] = (),
     ) -> None:
         self.routes = list(routes)
         self.bindings: dict[tuple[UUID, str, UUID, str], NotificationSourceBinding] = {}
         self.threads = {item.id: item for item in threads}
         self.facts = {item.id: item for item in facts}
+        self.intents = {item.id: item for item in intents}
 
     def get_route_by_source_ref(
         self,
@@ -176,6 +182,19 @@ class NotificationRepository:
     def add_route(self, item: NotificationRoute) -> None:
         self.routes.append(item)
 
+    def get_route(
+        self, workspace_id: UUID, route_id: UUID, *, for_update: bool = False
+    ) -> NotificationRoute | None:
+        del for_update
+        return next(
+            (
+                item
+                for item in self.routes
+                if item.id == route_id and item.workspace_id == workspace_id
+            ),
+            None,
+        )
+
     def get_thread(
         self, workspace_id: UUID, thread_id: UUID, *, for_update: bool = False
     ) -> InboxThread | None:
@@ -187,6 +206,13 @@ class NotificationRepository:
         item = self.facts.get(fact_id)
         return item if item is not None and item.workspace_id == workspace_id else None
 
+    def add_fact_or_get_existing(self, fact: NotificationFact) -> NotificationFact:
+        existing = self.facts.get(fact.id)
+        if existing is not None and existing != fact:
+            raise AssertionError("fact identity conflict")
+        self.facts[fact.id] = fact
+        return fact
+
     def save_thread(self, item: InboxThread, previous_version: int) -> None:
         current = self.threads.get(item.id)
         if current is None:
@@ -194,6 +220,53 @@ class NotificationRepository:
         if current.version != previous_version:
             raise VersionConflict(previous_version, current.version)
         self.threads[item.id] = item
+
+    def get_thread_by_key(
+        self,
+        workspace_id: UUID,
+        recipient_type: str,
+        recipient_id: str,
+        thread_key: str,
+        *,
+        for_update: bool = False,
+    ) -> InboxThread | None:
+        del for_update
+        return next(
+            (
+                item
+                for item in self.threads.values()
+                if item.workspace_id == workspace_id
+                and item.recipient_type == recipient_type
+                and item.recipient_id == recipient_id
+                and item.thread_key == thread_key
+            ),
+            None,
+        )
+
+    def add_thread(self, item: InboxThread) -> None:
+        self.threads[item.id] = item
+
+    def get_intent(
+        self, workspace_id: UUID, intent_id: UUID, *, for_update: bool = False
+    ) -> NotificationDeliveryIntent | None:
+        del for_update
+        item = self.intents.get(intent_id)
+        return item if item is not None and item.workspace_id == workspace_id else None
+
+    def add_intent_or_get_existing(
+        self, item: NotificationDeliveryIntent
+    ) -> NotificationDeliveryIntent:
+        existing = self.intents.get(item.id)
+        if existing is not None and existing != item:
+            raise AssertionError("intent identity conflict")
+        self.intents[item.id] = item
+        return item
+
+    def next_delivery_round(
+        self, item: NotificationDeliveryIntent, *, now: datetime
+    ) -> NotificationDeliveryIntent:
+        next_item = item.next_delivery_round(now=now)
+        return self.add_intent_or_get_existing(next_item)
 
     def get_binding(
         self,
@@ -275,6 +348,7 @@ def make_uow(
     routes: tuple[NotificationRoute, ...] = (),
     threads: tuple[InboxThread, ...] = (),
     facts: tuple[NotificationFact, ...] = (),
+    intents: tuple[NotificationDeliveryIntent, ...] = (),
     extra_modules: tuple[tuple[ModuleDefinition, ModuleInstance], ...] = (),
     requests: tuple[object, ...] = (),
 ) -> SimpleNamespace:
@@ -284,7 +358,9 @@ def make_uow(
     )
     return SimpleNamespace(
         modules=modules,
-        notifications=NotificationRepository(routes, threads=threads, facts=facts),
+        notifications=NotificationRepository(
+            routes, threads=threads, facts=facts, intents=intents
+        ),
         planning_requests=SimpleNamespace(
             list_by_source_ref=lambda workspace_id, source_type, source_ref: tuple(
                 item
@@ -397,6 +473,145 @@ def notification_fact(
     )
 
 
+def notification_intent(
+    fact: NotificationFact,
+    route_value: NotificationRoute,
+    *,
+    status: NotificationDeliveryStatus = NotificationDeliveryStatus.EXHAUSTED,
+    delivery_round: int = 1,
+) -> NotificationDeliveryIntent:
+    return NotificationDeliveryIntent(
+        id=uuid4(),
+        workspace_id=fact.workspace_id,
+        notification_fact_id=fact.id,
+        notification_route_id=route_value.id,
+        channel_module_instance_id=route_value.channel_module_instance_id,
+        delivery_round=delivery_round,
+        contract_version=1,
+        status=status,
+        attempts=1,
+        next_attempt_at=NOW,
+        claimed_until=None,
+        claim_token=None,
+        fencing_token=1,
+        provider_message_ref=None,
+        last_error_code=NotificationAttemptErrorCode.PAYLOAD_REJECTED,
+        delivered_at=None,
+        exhausted_at=NOW
+        if status is NotificationDeliveryStatus.EXHAUSTED
+        else None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def requeue_command(
+    intent: NotificationDeliveryIntent,
+    route_value: NotificationRoute,
+    **overrides: object,
+) -> CommandEnvelope:
+    values: dict[str, object] = {
+        "id": uuid4(),
+        "workspace_id": intent.workspace_id,
+        "command_type": "RequeueNotificationDelivery",
+        "target_type": "notification_delivery",
+        "actor_type": "local",
+        "actor_id": "operator",
+        "target_id": intent.id,
+        "payload": {
+            "expected_status": "exhausted",
+            "expected_route_version": route_value.version,
+            "reason": "provider configuration was repaired",
+        },
+        "expected_version": None,
+        "idempotency_key": uuid4().hex,
+        "correlation_id": uuid4(),
+    }
+    values.update(overrides)
+    return CommandEnvelope(**values)  # type: ignore[arg-type]
+
+
+def test_requeue_notification_delivery_api_request_is_explicitly_scoped() -> None:
+    delivery_id = uuid4()
+    workspace_id = uuid4()
+    request = CommandRequest.model_validate(
+        {
+            "command_id": str(uuid4()),
+            "workspace_id": str(workspace_id),
+            "command_type": "RequeueNotificationDelivery",
+            "target_type": "notification_delivery",
+            "actor": {"type": "local", "id": "operator"},
+            "target_id": str(delivery_id),
+            "expected_version": None,
+            "idempotency_key": "requeue-command-1",
+            "correlation_id": str(uuid4()),
+            "payload": {
+                "expected_status": "exhausted",
+                "expected_route_version": 3,
+                "reason": "route configuration repaired",
+            },
+        }
+    )
+
+    assert request.target_type == "notification_delivery"
+    assert request.target_id == delivery_id
+    assert request.expected_version is None
+    assert request.payload["expected_status"] == "exhausted"
+    assert request.payload["expected_route_version"] == 3
+
+    with pytest.raises(ValueError):
+        CommandRequest.model_validate(
+            {
+                "command_id": str(uuid4()),
+                "workspace_id": str(workspace_id),
+                "command_type": "RequeueNotificationDelivery",
+                "target_type": "task",
+                "actor": {"type": "local", "id": "operator"},
+                "target_id": str(delivery_id),
+                "expected_version": None,
+                "idempotency_key": "requeue-command-2",
+                "correlation_id": str(uuid4()),
+                "payload": {
+                    "expected_status": "exhausted",
+                    "expected_route_version": 3,
+                    "reason": "route configuration repaired",
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("command_type", "target_type", "target_id", "expected_version", "payload"),
+    (
+        ("RegisterNotificationRoute", "notification_route", None, None, {}),
+        ("MarkNotificationThreadRead", "notification_thread", uuid4(), 1, {}),
+    ),
+)
+def test_existing_notification_commands_have_public_target_types(
+    command_type: str,
+    target_type: str,
+    target_id: UUID | None,
+    expected_version: int | None,
+    payload: dict[str, object],
+) -> None:
+    request = CommandRequest.model_validate(
+        {
+            "command_id": str(uuid4()),
+            "workspace_id": str(uuid4()),
+            "command_type": command_type,
+            "target_type": target_type,
+            "actor": {"type": "local", "id": "operator"},
+            "target_id": str(target_id) if target_id else None,
+            "expected_version": expected_version,
+            "idempotency_key": f"{command_type}-1",
+            "correlation_id": str(uuid4()),
+            "payload": payload,
+        }
+    )
+
+    assert request.target_type == target_type
+
+
 def test_register_notification_route_is_idempotent_and_repairs_exact_requests() -> None:
     definition, instance = module_pair()
     root_task_id = uuid4()
@@ -503,6 +718,110 @@ def test_notification_thread_read_and_archive_commands_are_scoped_and_versioned(
     assert archived.organization_status.value == "archived"
     assert archived.business_status.value == "resolved"
     assert archived.version == resolved.version + 1
+
+
+def test_requeue_notification_delivery_creates_one_new_round_and_recovers_operations_thread() -> None:
+    definition, instance = module_pair()
+    fact = notification_fact()
+    thread = InboxThread.open_from_fact(fact, thread_id=uuid4(), now=NOW)
+    route_value = route(instance.id)
+    intent = notification_intent(fact, route_value)
+    uow = make_uow(
+        definition,
+        instance,
+        routes=(route_value,),
+        threads=(thread,),
+        facts=(fact,),
+        intents=(intent,),
+    )
+    handler = NotificationCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    first = handler.handle(uow, requeue_command(intent, route_value))
+
+    next_intent = next(
+        item for item in uow.notifications.intents.values() if item.id != intent.id
+    )
+    assert next_intent.delivery_round == 2
+    assert next_intent.status is NotificationDeliveryStatus.PENDING
+    assert uow.notifications.intents[intent.id] == intent
+    assert first.data["delivery_round"] == 2
+    assert first.data["previous_delivery_id"] == str(intent.id)
+    assert first.aggregate_id == next_intent.id
+
+    operation_facts = [
+        item
+        for item in uow.notifications.facts.values()
+        if item.priority.value == "operations"
+    ]
+    assert len(operation_facts) == 1
+    assert operation_facts[0].transition is NotificationTransition.RECOVERED
+    assert len(uow.notifications.intents) == 2
+
+    second = handler.handle(uow, requeue_command(intent, route_value))
+    assert second.data == first.data
+    assert len(uow.notifications.intents) == 2
+    assert len(
+        [
+            item
+            for item in uow.notifications.facts.values()
+            if item.priority.value == "operations"
+        ]
+    ) == 1
+    operation_thread = next(
+        item
+        for item in uow.notifications.threads.values()
+        if item.topic.startswith("notification_channel_health:")
+    )
+    assert operation_thread.business_status.value == "resolved"
+
+
+def test_requeue_notification_delivery_requires_current_active_route_and_local_actor() -> None:
+    definition, instance = module_pair()
+    fact = notification_fact()
+    thread = InboxThread.open_from_fact(fact, thread_id=uuid4(), now=NOW)
+    route_value = route(instance.id)
+    intent = notification_intent(fact, route_value)
+    handler = NotificationCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    foreign_actor_uow = make_uow(
+        definition, instance, routes=(route_value,), threads=(thread,), facts=(fact,), intents=(intent,)
+    )
+    with pytest.raises(OperatorRequired):
+        handler.handle(
+            foreign_actor_uow,
+            requeue_command(intent, route_value, actor_type="remote"),
+        )
+
+    stale_route_uow = make_uow(
+        definition, instance, routes=(route_value,), threads=(thread,), facts=(fact,), intents=(intent,)
+    )
+    with pytest.raises(VersionConflict):
+        handler.handle(
+            stale_route_uow,
+            requeue_command(
+                intent,
+                route_value,
+                payload={
+                    "expected_status": "exhausted",
+                    "expected_route_version": route_value.version + 1,
+                    "reason": "provider configuration was repaired",
+                },
+            ),
+        )
+
+    inactive_route = route_value.with_status("disabled", now=NOW)
+    inactive_uow = make_uow(
+        definition, instance, routes=(inactive_route,), threads=(thread,), facts=(fact,), intents=(intent,)
+    )
+    with pytest.raises(InvalidTransition):
+        handler.handle(
+            inactive_uow,
+            requeue_command(intent, inactive_route),
+        )
 
 
 @pytest.mark.parametrize(

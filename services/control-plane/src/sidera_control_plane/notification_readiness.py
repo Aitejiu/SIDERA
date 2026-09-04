@@ -11,12 +11,15 @@ from uuid import UUID
 
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text
 
 from sidera_control_plane.application.notification_policy import POLICY_VERSION
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ModuleDefinitionModel,
+    ModuleInstanceModel,
+    NotificationDeliveryIntentModel,
     NotificationReconciliationCursorModel,
     NotificationRouteModel,
     ProjectionChangeModel,
@@ -70,6 +73,11 @@ def evaluate_notification_readiness(
     baseline_complete: bool,
     cursor_lag: int,
     active_external_routes: int,
+    cursor_last_error: str | None = None,
+    unavailable_channels: int = 0,
+    incompatible_channels: int = 0,
+    delivery_backlog: int = 0,
+    exhausted_deliveries: int = 0,
     as_of: datetime | None = None,
 ) -> NotificationReadinessReport:
     """Evaluate the notification worker's operational gates.
@@ -81,6 +89,15 @@ def evaluate_notification_readiness(
         raise ValueError("cursor_lag must be non-negative")
     if active_external_routes < 0:
         raise ValueError("active_external_routes must be non-negative")
+    for name, value in (
+        ("unavailable_channels", unavailable_channels),
+        ("incompatible_channels", incompatible_channels),
+        ("delivery_backlog", delivery_backlog),
+        ("exhausted_deliveries", exhausted_deliveries),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    stable_cursor_error = _stable_readiness_error(cursor_last_error)
     checks = (
         NotificationReadinessCheck(
             name="migration",
@@ -138,30 +155,69 @@ def evaluate_notification_readiness(
         ),
         NotificationReadinessCheck(
             name="cursor",
-            ready=cursor_lag == 0,
+            ready=cursor_lag == 0 and cursor_last_error is None,
             code=(
-                "notification_cursor_caught_up"
-                if cursor_lag == 0
-                else "notification_cursor_lagging"
+                "notification_cursor_error"
+                if stable_cursor_error is not None
+                else (
+                    "notification_cursor_caught_up"
+                    if cursor_lag == 0
+                    else "notification_cursor_lagging"
+                )
             ),
             summary=(
-                "notification reconciliation cursor is caught up"
-                if cursor_lag == 0
-                else "notification reconciliation cursor is behind"
+                f"notification reconciliation reported a stable error: "
+                f"{stable_cursor_error}"
+                if stable_cursor_error is not None
+                else (
+                    "notification reconciliation cursor is caught up"
+                    if cursor_lag == 0
+                    else "notification reconciliation cursor is behind"
+                )
+            ),
+        ),
+        NotificationReadinessCheck(
+            name="channel",
+            ready=unavailable_channels == 0 and incompatible_channels == 0,
+            code=(
+                "notification_channel_ready"
+                if unavailable_channels == 0 and incompatible_channels == 0
+                else "notification_channel_degraded"
+            ),
+            summary=(
+                "notification channel module lifecycle and capabilities are ready"
+                if unavailable_channels == 0 and incompatible_channels == 0
+                else "one or more notification channel modules are unavailable"
             ),
         ),
         NotificationReadinessCheck(
             name="delivery",
-            ready=True,
+            ready=exhausted_deliveries == 0,
             code=(
-                "web_only_ready"
-                if active_external_routes == 0
-                else "notification_external_route_configured"
+                "notification_delivery_exhausted"
+                if exhausted_deliveries > 0
+                else (
+                    "notification_delivery_backlog"
+                    if delivery_backlog > 0
+                    else (
+                        "web_only_ready"
+                        if active_external_routes == 0
+                        else "notification_external_route_configured"
+                    )
+                )
             ),
             summary=(
-                "web-only notification operation is available"
-                if active_external_routes == 0
-                else "external notification channel configuration is present"
+                "notification delivery has exhausted items"
+                if exhausted_deliveries > 0
+                else (
+                    "notification delivery backlog is present"
+                    if delivery_backlog > 0
+                    else (
+                        "web-only notification operation is available"
+                        if active_external_routes == 0
+                        else "external notification channel configuration is present"
+                    )
+                )
             ),
         ),
     )
@@ -182,6 +238,10 @@ def build_notification_readiness(
     baseline_complete = _baseline_complete(database, workspace_id)
     cursor_lag = _cursor_lag(database, workspace_id)
     active_external_routes = _active_external_routes(database, workspace_id)
+    unavailable_channels, incompatible_channels = _channel_health(
+        database, workspace_id
+    )
+    delivery_backlog, exhausted_deliveries = _delivery_state(database, workspace_id)
     return evaluate_notification_readiness(
         migration_ready=migration_ready,
         notification_enabled=settings.notification_enabled,
@@ -190,6 +250,10 @@ def build_notification_readiness(
         baseline_complete=baseline_complete,
         cursor_lag=cursor_lag,
         active_external_routes=active_external_routes,
+        unavailable_channels=unavailable_channels,
+        incompatible_channels=incompatible_channels,
+        delivery_backlog=delivery_backlog,
+        exhausted_deliveries=exhausted_deliveries,
         as_of=now,
     )
 
@@ -285,6 +349,114 @@ def _active_external_routes(database: Database, workspace_id: UUID | None) -> in
             )
     except Exception:  # noqa: BLE001 - readiness fails closed
         return 1
+
+
+def _channel_health(database: Database, workspace_id: UUID | None) -> tuple[int, int]:
+    if workspace_id is None:
+        return 0, 0
+    unavailable = 0
+    incompatible = 0
+    try:
+        with database.session() as session:
+            rows = session.execute(
+                select(
+                    NotificationRouteModel.channel_type,
+                    NotificationRouteModel.status,
+                    ModuleDefinitionModel.lifecycle,
+                    ModuleInstanceModel.lifecycle,
+                    ModuleDefinitionModel.capabilities,
+                )
+                .join(
+                    ModuleInstanceModel,
+                    and_(
+                        ModuleInstanceModel.id
+                        == NotificationRouteModel.channel_module_instance_id,
+                        ModuleInstanceModel.workspace_id
+                        == NotificationRouteModel.workspace_id,
+                    ),
+                )
+                .join(
+                    ModuleDefinitionModel,
+                    and_(
+                        ModuleDefinitionModel.id == ModuleInstanceModel.definition_id,
+                        ModuleDefinitionModel.workspace_id
+                        == ModuleInstanceModel.workspace_id,
+                    ),
+                )
+                .where(
+                    NotificationRouteModel.workspace_id == workspace_id,
+                    NotificationRouteModel.status.in_(_EXTERNAL_ROUTE_STATUSES),
+                    NotificationRouteModel.channel_type != "web",
+                )
+            ).all()
+        for channel_type, _route_status, definition_lifecycle, instance_lifecycle, capabilities in rows:
+            if definition_lifecycle != "active" or instance_lifecycle != "active":
+                unavailable += 1
+                continue
+            if not isinstance(capabilities, dict):
+                incompatible += 1
+                continue
+            channel_types = capabilities.get("channel_types")
+            contract_versions = capabilities.get("delivery_contract_versions")
+            if (
+                not isinstance(channel_types, list)
+                or channel_type not in channel_types
+                or not isinstance(contract_versions, list)
+                or 1 not in contract_versions
+            ):
+                incompatible += 1
+        return unavailable, incompatible
+    except Exception:  # noqa: BLE001 - readiness fails closed
+        return 1, 0
+
+
+def _delivery_state(database: Database, workspace_id: UUID | None) -> tuple[int, int]:
+    if workspace_id is None:
+        return 0, 0
+    try:
+        with database.session() as session:
+            backlog = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(NotificationDeliveryIntentModel)
+                    .where(
+                        NotificationDeliveryIntentModel.workspace_id == workspace_id,
+                        NotificationDeliveryIntentModel.status.in_(
+                            ("pending", "claimed", "retry_wait")
+                        ),
+                    )
+                )
+                or 0
+            )
+            exhausted = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(NotificationDeliveryIntentModel)
+                    .where(
+                        NotificationDeliveryIntentModel.workspace_id == workspace_id,
+                        NotificationDeliveryIntentModel.status == "exhausted",
+                    )
+                )
+                or 0
+            )
+        return backlog, exhausted
+    except Exception:  # noqa: BLE001 - readiness fails closed
+        return 1, 1
+
+
+def _stable_readiness_error(value: str | None) -> str | None:
+    if value is None:
+        return None
+    lowered = value.lower() if isinstance(value, str) else ""
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(marker in lowered for marker in ("token", "secret", "password"))
+        or any(not (character.isalnum() or character in "_.:-") for character in value)
+        or not value[0].isalpha()
+    ):
+        return "unknown"
+    return value
 
 
 def main(argv: Sequence[str] | None = None) -> int:

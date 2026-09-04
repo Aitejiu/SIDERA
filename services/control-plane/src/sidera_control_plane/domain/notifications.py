@@ -1368,7 +1368,10 @@ class NotificationDeliveryClaim:
 def _business_status_for_fact(
     fact: NotificationFact,
 ) -> NotificationThreadBusinessStatus:
-    if fact.priority is NotificationPriority.ACTION and (
+    if fact.priority in {
+        NotificationPriority.ACTION,
+        NotificationPriority.OPERATIONS,
+    } and (
         fact.transition is not NotificationTransition.RECOVERED
     ):
         return NotificationThreadBusinessStatus.OPEN
