@@ -15,7 +15,9 @@ from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionOutcome,
     RuntimeProjection,
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
 )
+from tests.unit.result_input_fixtures import projection_v2
 
 WORKSPACE_ID = UUID("21000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("31000000-0000-0000-0000-000000000001")
@@ -134,7 +136,54 @@ def assert_runtime_identity_echoes(
     assert decision.projection_hash == projection.content_hash
 
 
+def assert_collaboration_runtime_v2_conforms(
+    factory: Callable[[], CollaborationRuntime],
+) -> None:
+    """Exercise deterministic result selection through the public V2 contract."""
+
+    projection = projection_v2(ready_keys=("b", "c"))
+    runtime = factory()
+    first = runtime.evaluate(
+        projection,
+        operation_id=OPERATION_ID,
+        deadline=projection.created_at + timedelta(seconds=5),
+    )
+    repeated = runtime.evaluate(
+        projection,
+        operation_id=OPERATION_ID,
+        deadline=projection.created_at + timedelta(seconds=5),
+    )
+
+    assert isinstance(projection, RuntimeProjectionV2)
+    assert first == repeated
+    assert first.schema_version == 2
+    assert_runtime_identity_echoes(
+        decision=first,
+        projection=projection,
+        operation_id=OPERATION_ID,
+    )
+    assert len(first.intents) == 1
+    selections = first.intents[0].input_group_selections
+    assert len(selections) == 1
+    assert tuple(source.worker_item_key for source in selections[0].sources) == (
+        "b",
+        "c",
+    )
+    ready = {
+        source.worker_item_key: source
+        for source in projection.result_input_evaluations[0].evaluation.ready_sources
+    }
+    assert selections[0].sources[0].source_basis_hash == ready["b"].source_basis_hash
+
+
 def test_reference_runtime_conforms() -> None:
     assert_collaboration_runtime_conforms(
         lambda: ReferenceCollaborationRuntime(clock=lambda: NOW)
+    )
+
+
+def test_reference_runtime_v2_conforms() -> None:
+    projection = projection_v2(ready_keys=("b", "c"))
+    assert_collaboration_runtime_v2_conforms(
+        lambda: ReferenceCollaborationRuntime(clock=lambda: projection.created_at)
     )
