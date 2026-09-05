@@ -40,6 +40,9 @@ from sidera_control_plane.domain.execution_requests import (
     ExecutionRequestStatus,
     UpstreamActivationFact,
 )
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+)
 from sidera_control_plane.domain.plan_revisions import WorkerTransitionAction
 from sidera_control_plane.domain.plan_transitions import WorkerTransitionStatus
 from sidera_control_plane.domain.planning import (
@@ -606,7 +609,13 @@ class ActivationReconciler:
         dependencies = uow.execution_requests.list_dependencies(
             request.id, request.workspace_id
         )
-        facts = self._upstream_facts(uow, request, dependencies)
+        selection = self._committed_input_selection(uow, request)
+        facts = self._upstream_facts(
+            uow,
+            request,
+            dependencies,
+            selection=selection,
+        )
         static_decision = ActivationGate.evaluate(
             dependencies=dependencies,
             upstream_facts=facts,
@@ -614,13 +623,19 @@ class ActivationReconciler:
         return ComposedActivationGate.evaluate(
             plan_transition_allows=True,
             static_decision=static_decision,
-            collaboration=self._collaboration_gate(uow, request),
+            collaboration=self._collaboration_gate(
+                uow,
+                request,
+                selection=selection,
+            ),
         )
 
     @staticmethod
     def _collaboration_gate(
         uow: ControlPlaneUnitOfWork,
         request: ExecutionRequest,
+        *,
+        selection: CollaborationInputSelectionV1 | None,
     ) -> CollaborationGateFact:
         if request.collaboration_gate_mode is CollaborationGateMode.UNMANAGED:
             return CollaborationGateFact.unmanaged()
@@ -644,19 +659,42 @@ class ActivationReconciler:
             run=run,
             release=release,
             plan_head=head,
+            selection=selection,
         )
+
+    @staticmethod
+    def _committed_input_selection(
+        uow: ControlPlaneUnitOfWork,
+        request: ExecutionRequest,
+    ) -> CollaborationInputSelectionV1 | None:
+        if request.input_selection_id is None:
+            return None
+        selections = getattr(uow, "input_selections", None)
+        if selections is None:
+            return None
+        return selections.get(request.workspace_id, request.input_selection_id)
 
     def _upstream_facts(
         self,
         uow: ControlPlaneUnitOfWork,
         request: ExecutionRequest,
         dependencies: Iterable[ExecutionRequestDependency],
+        *,
+        selection: CollaborationInputSelectionV1 | None,
     ) -> Mapping[UUID, UpstreamActivationFact]:
+        dependency_values = tuple(dependencies)
+        if request.input_selection_id is not None:
+            if selection is None:
+                return {}
+            return self._selected_hard_input_facts(
+                dependencies=dependency_values,
+                selection=selection,
+            )
         facts: dict[UUID, UpstreamActivationFact] = {}
         upstream_ids = tuple(
             dict.fromkeys(
                 dependency.upstream_request_id
-                for dependency in dependencies
+                for dependency in dependency_values
                 if dependency.enforcement is DependencyEnforcement.HARD
             )
         )
@@ -665,6 +703,48 @@ class ActivationReconciler:
             if upstream is None:
                 continue
             facts[upstream_id] = self._fact_for_upstream(uow, upstream)
+        return facts
+
+    @staticmethod
+    def _selected_hard_input_facts(
+        *,
+        dependencies: Iterable[ExecutionRequestDependency],
+        selection: CollaborationInputSelectionV1,
+    ) -> Mapping[UUID, UpstreamActivationFact]:
+        selected_by_dependency = {
+            item.dependency_key: item for item in selection.hard_inputs
+        }
+        facts: dict[UUID, UpstreamActivationFact] = {}
+        for dependency in dependencies:
+            if dependency.enforcement is not DependencyEnforcement.HARD:
+                continue
+            selected = selected_by_dependency.get(
+                f"request:{dependency.upstream_request_id}"
+            )
+            if (
+                selected is None
+                or selected.source.effective_request_id
+                != dependency.upstream_request_id
+            ):
+                continue
+            source = selected.source
+            facts[dependency.upstream_request_id] = UpstreamActivationFact(
+                request_id=dependency.upstream_request_id,
+                execution_status=ExecutionStatus.SUCCEEDED,
+                execution_lineage_id=source.effective_lineage_id,
+                artifact_refs=tuple(
+                    dict.fromkeys(
+                        f"artifact_type:{artifact.artifact_type.value}"
+                        for artifact in source.artifacts
+                    )
+                ),
+                evidence_refs=tuple(
+                    dict.fromkeys(
+                        _normalized_evidence_ref(evidence.acceptance_criterion_ref)
+                        for evidence in source.evidence
+                    )
+                ),
+            )
         return facts
 
     def _fact_for_upstream(

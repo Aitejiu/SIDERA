@@ -18,6 +18,7 @@ from sidera_control_plane.application.collaboration_projection import (
 from sidera_control_plane.application.collaboration_release_validation import (
     CollaborationReleaseEligibilityValidator,
     ReleaseEligibilityAssessment,
+    release_input_selection_matches,
 )
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.ports import (
@@ -125,6 +126,7 @@ class CollaborationGateFact:
         run: CollaborationRun | None,
         release: RuntimeRelease | None,
         plan_head: RootTaskPlanHead | None,
+        selection: CollaborationInputSelectionV1 | None = None,
     ) -> CollaborationGateFact:
         if request.collaboration_gate_mode is CollaborationGateMode.UNMANAGED:
             return cls.unmanaged()
@@ -139,6 +141,7 @@ class CollaborationGateFact:
             run=run,
             release=release,
             plan_head=plan_head,
+            selection=selection,
         ):
             return cls.release_pending(run_id=run.id)
         return cls.released(run_id=run.id)
@@ -215,11 +218,13 @@ def update_collaboration_request_gates(
         entry = entries.get(request.id)
         static_decision = _static_decision(entry)
         release = new_by_request.get(request.id) or releases.get(request.id)
+        selection = _input_selection_for_release(uow, release)
         collaboration = CollaborationGateFact.for_request(
             request,
             run=run,
             release=release,
             plan_head=head,
+            selection=selection,
         )
         decision = ComposedActivationGate.evaluate(
             plan_transition_allows=plan_transition_allows(uow, request),
@@ -349,6 +354,10 @@ class CollaborationDecisionService:
                 )
                 for request_id in target_ids
             }
+            release_selections = {
+                request_id: _input_selection_for_release(uow, release)
+                for request_id, release in releases.items()
+            }
             if any(requests[request_id] is None for request_id in target_ids):
                 raise CollaborationDecisionConflict(
                     "Runtime Decision targets an unknown request in this workspace"
@@ -399,6 +408,7 @@ class CollaborationDecisionService:
                     intents,
                     requests=requests,
                     releases=releases,
+                    release_selections=release_selections,
                     run=run,
                     head=head,
                     current_projection=current_projection,
@@ -781,6 +791,9 @@ class CollaborationDecisionService:
         *,
         requests: Mapping[UUID, ExecutionRequest | None],
         releases: Mapping[UUID, RuntimeRelease | None],
+        release_selections: Mapping[
+            UUID, CollaborationInputSelectionV1 | None
+        ],
         run: CollaborationRun,
         head: RootTaskPlanHead | None,
         current_projection: RuntimeProjectionV1 | RuntimeProjectionV2 | None,
@@ -823,6 +836,7 @@ class CollaborationDecisionService:
                     plan_head=head,
                     current_projection=current_projection,
                     existing_release=existing,
+                    existing_selection=release_selections.get(request_id),
                     current_facts=current_facts,
                 )
             )
@@ -1211,6 +1225,7 @@ def _release_matches(
     run: CollaborationRun | None,
     release: RuntimeRelease | None,
     plan_head: RootTaskPlanHead | None,
+    selection: CollaborationInputSelectionV1 | None,
 ) -> bool:
     if run is None or release is None or plan_head is None:
         return False
@@ -1223,9 +1238,27 @@ def _release_matches(
         and release.execution_request_id == request.id
         and release.input_selection_id == request.input_selection_id
         and release.input_selection_hash == request.input_selection_hash
+        and release_input_selection_matches(
+            request,
+            run=run,
+            release=release,
+            selection=selection,
+        )
         and _head_matches_run(plan_head, run)
         and release.request_version_at_release <= request.version
     )
+
+
+def _input_selection_for_release(
+    uow: ControlPlaneUnitOfWork,
+    release: RuntimeRelease | None,
+) -> CollaborationInputSelectionV1 | None:
+    if release is None or release.input_selection_id is None:
+        return None
+    selections = getattr(uow, "input_selections", None)
+    if selections is None:
+        return None
+    return selections.get(release.workspace_id, release.input_selection_id)
 
 
 def _run_details(run_id: UUID | None) -> Mapping[str, object]:

@@ -443,6 +443,38 @@ class ResultInputScenario:
                 return
         raise AssertionError("collaboration reconciliation did not converge")
 
+    def activate(self) -> None:
+        ActivationReconciler(
+            uow_factory=self.uow_factory,
+            owner_id="result-input-activation",
+            clock=self.clock,
+        ).run_once(limit=20)
+
+    def execution_count(self, key: str) -> int:
+        with self.database.session() as session:
+            return int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(ExecutionModel)
+                    .where(
+                        ExecutionModel.workspace_id == self.workspace_id,
+                        ExecutionModel.worker_item_id == self.worker_item_ids[key],
+                    )
+                )
+                or 0
+            )
+
+    def request_state(self, key: str) -> str:
+        with self.database.session() as session:
+            value = session.scalar(
+                select(ExecutionRequestModel.status).where(
+                    ExecutionRequestModel.workspace_id == self.workspace_id,
+                    ExecutionRequestModel.id == self.request_ids[key],
+                )
+            )
+        assert value is not None
+        return str(value)
+
     def release_count(self, key: str) -> int:
         with self.database.session() as session:
             return int(

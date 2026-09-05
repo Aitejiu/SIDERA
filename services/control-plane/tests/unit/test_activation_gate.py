@@ -3,6 +3,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.application.collaboration_decisions import (
+    CollaborationGateFact,
+    ComposedActivationGate,
+)
 from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.execution import ExecutionStatus
@@ -108,6 +112,24 @@ def test_fan_in_stays_blocked_until_all_hard_upstreams_succeed() -> None:
         upstream_facts={first_id: fact(first_id), second_id: fact(second_id)},
     )
     assert ready.ready
+
+
+def test_release_does_not_override_an_unsatisfied_hard_dependency() -> None:
+    upstream_id = UUID("2d000000-0000-0000-0000-000000000003")
+    static_decision = ActivationGate.evaluate(
+        dependencies=(dependency(upstream_id),),
+        upstream_facts={},
+    )
+
+    decision = ComposedActivationGate.evaluate(
+        plan_transition_allows=True,
+        static_decision=static_decision,
+        collaboration=CollaborationGateFact.released(run_id=uuid4()),
+    )
+
+    assert not decision.ready
+    assert decision.reason == "dependencies_blocked"
+    assert decision.missing_upstream_request_ids == (upstream_id,)
 
 
 @pytest.mark.parametrize(

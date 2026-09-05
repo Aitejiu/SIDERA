@@ -33,6 +33,7 @@ from sidera_control_plane.domain.execution_requests import (
     ExecutionRequestStatus,
 )
 from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
     InputSelectionGroupV1,
     InputSelectionHardInputV1,
     InputSelectionSourceV1,
@@ -73,6 +74,7 @@ class CollaborationReleaseEligibilityValidator:
         plan_head: RootTaskPlanHead | None,
         current_projection: RuntimeProjectionV1 | RuntimeProjectionV2 | None,
         existing_release: RuntimeRelease | None,
+        existing_selection: CollaborationInputSelectionV1 | None = None,
         current_facts: CollaborationFacts | None = None,
     ) -> ReleaseEligibilityAssessment:
         if request is None:
@@ -91,7 +93,11 @@ class CollaborationReleaseEligibilityValidator:
         if existing_release is not None:
             if (
                 _release_matches(
-                    request, run=run, release=existing_release, plan_head=plan_head
+                    request,
+                    run=run,
+                    release=existing_release,
+                    plan_head=plan_head,
+                    selection=existing_selection,
                 )
                 and existing_release.request_version_at_release
                 == intent.target_request_version
@@ -225,6 +231,7 @@ def _release_matches(
     run: CollaborationRun,
     release: RuntimeRelease,
     plan_head: RootTaskPlanHead | None,
+    selection: CollaborationInputSelectionV1 | None,
 ) -> bool:
     return (
         run.status is CollaborationRunStatus.ACTIVE
@@ -237,8 +244,66 @@ def _release_matches(
         and release.execution_request_id == request.id
         and release.input_selection_id == request.input_selection_id
         and release.input_selection_hash == request.input_selection_hash
+        and release_input_selection_matches(
+            request,
+            run=run,
+            release=release,
+            selection=selection,
+        )
         and _head_matches_run(plan_head, run)
         and release.request_version_at_release <= request.version
+    )
+
+
+def release_input_selection_matches(
+    request: ExecutionRequest,
+    *,
+    run: CollaborationRun,
+    release: RuntimeRelease,
+    selection: CollaborationInputSelectionV1 | None,
+) -> bool:
+    """Verify a committed Selection identity without reselecting current inputs."""
+
+    if request.input_selection_id is None and request.input_selection_hash is None:
+        return (
+            release.input_selection_id is None
+            and release.input_selection_hash is None
+        )
+    if (
+        request.input_selection_id is None
+        or request.input_selection_hash is None
+        or release.input_selection_id is None
+        or release.input_selection_hash is None
+        or selection is None
+    ):
+        return False
+    return (
+        selection.id == request.input_selection_id == release.input_selection_id
+        and selection.selection_hash
+        == request.input_selection_hash
+        == release.input_selection_hash
+        and selection.selection_hash == selection.compute_selection_hash()
+        and selection.workspace_id == request.workspace_id == run.workspace_id
+        and selection.root_task_id == request.root_task_id == run.root_task_id
+        and selection.run_id == run.id == release.run_id
+        and selection.plan_snapshot_id
+        == request.plan_snapshot_id
+        == run.plan_snapshot_id
+        == release.plan_snapshot_id
+        and selection.plan_generation
+        == request.plan_generation
+        == run.plan_generation
+        == release.plan_generation
+        and selection.plan_content_hash
+        == run.plan_content_hash
+        == release.plan_content_hash
+        and selection.target_worker_item_id == request.worker_item_id
+        and selection.target_execution_request_id
+        == request.id
+        == release.execution_request_id
+        and selection.target_request_version == release.request_version_at_release
+        and selection.decision_id == release.decision_id
+        and selection.intent_id == release.intent_id
     )
 
 
