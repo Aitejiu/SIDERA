@@ -42,6 +42,7 @@ from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionOutcome,
     RuntimeEnvelopeError,
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import ValidationError
@@ -276,9 +277,9 @@ class CollaborationDecisionService:
         self._validate_result(prepared, result)
 
         with self._uow_factory() as uow:
-            evaluation = uow.collaboration_evaluations.get(
+            head = uow.plans.get_head(
+                prepared.run.root_task_id,
                 prepared.run.workspace_id,
-                prepared.evaluation.id,
                 for_update=True,
             )
             run = uow.collaboration_runs.get(
@@ -286,9 +287,14 @@ class CollaborationDecisionService:
                 prepared.run.id,
                 for_update=True,
             )
-            if evaluation is None or run is None:
+            evaluation = uow.collaboration_evaluations.get(
+                prepared.run.workspace_id,
+                prepared.evaluation.id,
+                for_update=True,
+            )
+            if head is None or run is None or evaluation is None:
                 raise CollaborationDecisionConflict(
-                    "collaboration evaluation or run no longer exists"
+                    "collaboration Plan Head, Run, or Evaluation no longer exists"
                 )
             self._validate_evaluation_lease(prepared, evaluation, now=now)
             if (
@@ -299,26 +305,37 @@ class CollaborationDecisionService:
                     "Runtime response differs from the recorded evaluation response"
                 )
 
-            head = uow.plans.get_head(
-                run.root_task_id,
-                run.workspace_id,
-                for_update=True,
-            )
             target_ids = tuple(
                 sorted(
                     {
                         item.target_execution_request_id
                         for item in result.decision.intents
-                    }
+                    },
+                    key=str,
                 )
             )
-            requests = {
-                request_id: uow.execution_requests.get(
-                    request_id,
+            worker_item_ids, request_ids = _related_lock_ids(
+                prepared.projection,
+                target_ids=target_ids,
+            )
+            for worker_item_id in worker_item_ids:
+                worker_item = uow.worker_items.get(
+                    worker_item_id,
                     run.workspace_id,
                     for_update=True,
                 )
-                for request_id in target_ids
+                if worker_item is None or worker_item.root_task_id != run.root_task_id:
+                    raise CollaborationDecisionConflict(
+                        "Runtime Decision references an unknown WorkerItem"
+                    )
+            locked_requests = uow.execution_requests.get_many(
+                request_ids,
+                run.workspace_id,
+                for_update=True,
+            )
+            requests_by_id = {item.id: item for item in locked_requests}
+            requests = {
+                request_id: requests_by_id.get(request_id) for request_id in target_ids
             }
             releases = {
                 request_id: uow.collaboration_ledger.get_release_for_request(
@@ -1084,6 +1101,50 @@ def _projection_requests(
             except ValueError:
                 continue
     return result
+
+
+def _related_lock_ids(
+    projection: RuntimeProjectionV1 | RuntimeProjectionV2,
+    *,
+    target_ids: tuple[UUID, ...],
+) -> tuple[tuple[UUID, ...], tuple[UUID, ...]]:
+    """Collect target and source fences without reading mutable database state."""
+    request_ids = set(target_ids)
+    worker_item_ids: set[UUID] = set()
+    target_id_strings = {str(item) for item in target_ids}
+    for request in projection.execution_requests:
+        if request.get("id") not in target_id_strings:
+            continue
+        worker_item_id = _optional_mapping_uuid(request.get("worker_item_id"))
+        if worker_item_id is not None:
+            worker_item_ids.add(worker_item_id)
+
+    if isinstance(projection, RuntimeProjectionV2):
+        for item in projection.result_input_evaluations:
+            if item.consumer_execution_request_id not in request_ids:
+                continue
+            for state in item.evaluation.candidate_states:
+                source = state.source
+                if source is None:
+                    continue
+                if source.worker_item_id is not None:
+                    worker_item_ids.add(source.worker_item_id)
+                if source.effective_request_id is not None:
+                    request_ids.add(source.effective_request_id)
+
+    return (
+        tuple(sorted(worker_item_ids, key=str)),
+        tuple(sorted(request_ids, key=str)),
+    )
+
+
+def _optional_mapping_uuid(value: object) -> UUID | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
 
 
 def _static_decision(

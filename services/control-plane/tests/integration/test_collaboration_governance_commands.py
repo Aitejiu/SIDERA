@@ -33,7 +33,11 @@ from sidera_control_plane.persistence.models import (
 )
 
 from .test_collaboration_decision_application import _service
-from .test_collaboration_evaluation_recovery import _invoker, _prepare
+from .test_collaboration_evaluation_recovery import (
+    _invoker,
+    _prepare,
+    _prepare_fixture,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -99,8 +103,15 @@ def _add_current_placement(
 
 
 def _prepare_held_proposal(database, workspace_id: UUID, uow_factory):
-    ids, snapshot, _reconciler, prepared = _prepare(database, workspace_id, uow_factory)
+    ids, snapshot, reconciler = _prepare_fixture(database, workspace_id, uow_factory)
     _add_current_placement(database, workspace_id, ids, snapshot)
+    prepared = reconciler.prepare_next(
+        owner_id="collaboration-integration",
+        now=NOW,
+        workspace_id=workspace_id,
+        root_task_id=snapshot.root_task_id,
+    )
+    assert prepared is not None
     hold = CollaborationGovernanceHold.create(
         id=uuid4(),
         workspace_id=workspace_id,

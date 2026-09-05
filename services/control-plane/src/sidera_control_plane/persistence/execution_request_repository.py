@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -107,6 +107,45 @@ class ExecutionRequestRepository:
             statement = statement.with_for_update()
         row = self._session.scalar(statement)
         return _to_request(row) if row is not None else None
+
+    def get_effective_by_execution_lineage(
+        self,
+        execution_lineage_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        statement = select(ExecutionRequestModel).where(
+            ExecutionRequestModel.execution_lineage_id == execution_lineage_id,
+            ExecutionRequestModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_request(row) if row is not None else None
+
+    def get_many(
+        self,
+        request_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ExecutionRequest, ...]:
+        ordered_ids = tuple(sorted(set(request_ids), key=str))
+        if not ordered_ids:
+            return ()
+        statement = (
+            select(ExecutionRequestModel)
+            .where(
+                ExecutionRequestModel.id.in_(ordered_ids),
+                ExecutionRequestModel.workspace_id == workspace_id,
+            )
+            .order_by(ExecutionRequestModel.id.asc())
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        return tuple(_to_request(row) for row in rows)
 
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         result = self._session.execute(

@@ -962,6 +962,26 @@ class ExecutionRequestRepositoryPort(Protocol):
         """Load the normal request that owns a source execution lineage."""
         raise NotImplementedError
 
+    def get_effective_by_execution_lineage(
+        self,
+        execution_lineage_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionRequest | None:
+        """Load any current request, including handoff targets, for a lineage."""
+        raise NotImplementedError
+
+    def get_many(
+        self,
+        request_ids: Collection[UUID],
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ExecutionRequest, ...]:
+        """Load requests in stable identity order for deterministic locking."""
+        raise NotImplementedError
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         raise NotImplementedError
 
@@ -2194,9 +2214,7 @@ class NotificationLedger(Protocol):
     def add_fact_or_get_existing(self, fact: NotificationFact) -> NotificationFact:
         raise NotImplementedError
 
-    def get_fact(
-        self, workspace_id: UUID, fact_id: UUID
-    ) -> NotificationFact | None:
+    def get_fact(self, workspace_id: UUID, fact_id: UUID) -> NotificationFact | None:
         raise NotImplementedError
 
     def list_thread_facts(

@@ -8,6 +8,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_source_fence import (
+    discover_result_source_fence,
+    lock_result_source_fence,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -204,7 +208,10 @@ class SessionEventIngestor:
         lease_id: UUID,
         fencing_token: int,
     ) -> None:
-        if session.execution_id != execution.id or session.workspace_id != execution.workspace_id:
+        if (
+            session.execution_id != execution.id
+            or session.workspace_id != execution.workspace_id
+        ):
             raise EventIngestionError("session does not belong to the execution")
         execution.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
         lease.assert_owner(session.worker_id, fencing_token, self._clock())
@@ -238,10 +245,26 @@ class ArtifactRegistry:
         artifacts: list[Artifact] = []
         claims: list[EvidenceClaim] = []
         with self._uow_factory() as uow:
+            execution_probe = uow.executions.get(execution_id, workspace_id)
+            if execution_probe is None:
+                raise ArtifactRegistrationError("artifact execution was not found")
+            if execution_probe.task_id != task_id:
+                raise ArtifactRegistrationError(
+                    "artifact task does not match its execution"
+                )
+            source_fence = discover_result_source_fence(uow, execution_probe)
+            lock_result_source_fence(uow, source_fence)
+            execution = uow.executions.get(execution_id, workspace_id, for_update=True)
+            if execution is None or execution.version != execution_probe.version:
+                raise ArtifactRegistrationError(
+                    "artifact execution changed during registration"
+                )
             existing_artifacts = list(
                 uow.artifacts.list_for_execution(execution_id, workspace_id)
             )
-            existing_claims = list(uow.evidence_claims.list_for_task(task_id, workspace_id))
+            existing_claims = list(
+                uow.evidence_claims.list_for_task(task_id, workspace_id)
+            )
             for candidate in candidates:
                 artifact = _find_artifact(existing_artifacts, candidate)
                 if artifact is None:
@@ -368,7 +391,9 @@ def _criterion_refs(provenance: Mapping[str, Any]) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value.strip(),) if value.strip() else ()
     if isinstance(value, (list, tuple)):
-        return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+        return tuple(
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        )
     if value is not None:
         raise ArtifactRegistrationError(
             "acceptance_criterion_ref(s) must be text or a list of text"
@@ -376,9 +401,7 @@ def _criterion_refs(provenance: Mapping[str, Any]) -> tuple[str, ...]:
     return ()
 
 
-def _provenance_text(
-    provenance: Mapping[str, Any], name: str, default: str
-) -> str:
+def _provenance_text(provenance: Mapping[str, Any], name: str, default: str) -> str:
     value = provenance.get(name)
     return value.strip() if isinstance(value, str) and value.strip() else default
 
@@ -420,7 +443,10 @@ def _redact_value(value: Any, *, key: str | None = None) -> object:
     if key is not None and _SECRET_KEY.search(key):
         return "[redacted]"
     if isinstance(value, Mapping):
-        return {str(item_key): _redact_value(item, key=str(item_key)) for item_key, item in value.items()}
+        return {
+            str(item_key): _redact_value(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_redact_value(item) for item in value]
     if isinstance(value, str):

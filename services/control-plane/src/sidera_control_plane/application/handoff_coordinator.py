@@ -22,6 +22,10 @@ from sidera_control_plane.application.handoff_target import (
     HandoffTargetService,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_source_fence import (
+    ResultSourceFence,
+    discover_result_source_fence,
+)
 from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.worker_gateway import (
     GatewayMessageError,
@@ -640,6 +644,11 @@ class HandoffCoordinator:
     def _converge(self, transition: HandoffTransition) -> None:
         now = self._clock()
         with self._uow_factory() as uow:
+            self._lock_effective_result_mapping(
+                uow,
+                transition,
+                require_target=True,
+            )
             current = self._locked_transition(uow, transition)
             self._assert_claim(current, now)
             self._validate_activation_facts(uow, current, now=now)
@@ -652,6 +661,69 @@ class HandoffCoordinator:
                 event_type="HandoffConverged",
                 payload={},
             )
+
+    @staticmethod
+    def _lock_effective_result_mapping(
+        uow: ControlPlaneUnitOfWork,
+        transition: HandoffTransition,
+        *,
+        require_target: bool,
+    ) -> None:
+        """Fence the source-to-target switch before marking a handoff converged."""
+        source_execution = uow.executions.get(
+            transition.source_execution_id,
+            transition.workspace_id,
+        )
+        if source_execution is None:
+            raise HandoffCoordinatorError("handoff source Execution was not found")
+        source_fence = discover_result_source_fence(uow, source_execution)
+        if source_fence is None:
+            raise HandoffCoordinatorError(
+                "handoff source ExecutionRequest was not found"
+            )
+        target_probe = uow.execution_requests.get_by_handoff_transition(
+            transition.id,
+            transition.workspace_id,
+        )
+        if target_probe is None and require_target:
+            raise HandoffCoordinatorError(
+                "handoff target ExecutionRequest was not found"
+            )
+
+        worker_item = uow.worker_items.get(
+            transition.worker_item_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        if worker_item is None:
+            raise HandoffCoordinatorError("handoff WorkerItem was not found")
+        request_ids = [source_fence.request_id]
+        if target_probe is not None:
+            request_ids.append(target_probe.id)
+        requests = {
+            item.id: item
+            for item in uow.execution_requests.get_many(
+                request_ids,
+                transition.workspace_id,
+                for_update=True,
+            )
+        }
+        source_request = requests.get(source_fence.request_id)
+        if not _source_fence_matches(source_fence, source_request):
+            raise HandoffCoordinatorError(
+                "handoff source ExecutionRequest changed before convergence"
+            )
+        if target_probe is not None:
+            target_request = requests.get(target_probe.id)
+            if (
+                target_request is None
+                or target_request.version != target_probe.version
+                or target_request.worker_item_id != transition.worker_item_id
+                or target_request.handoff_transition_id != transition.id
+            ):
+                raise HandoffCoordinatorError(
+                    "handoff target ExecutionRequest changed before convergence"
+                )
 
     def _defer(self, transition: HandoffTransition) -> None:
         now = self._clock()
@@ -673,6 +745,12 @@ class HandoffCoordinator:
         now = self._clock()
         try:
             with self._uow_factory() as uow:
+                if status is HandoffTransitionStatus.BLOCKED_UNKNOWN:
+                    self._lock_effective_result_mapping(
+                        uow,
+                        claimed,
+                        require_target=False,
+                    )
                 current = self._locked_transition(uow, claimed)
                 self._assert_claim(current, now)
                 if status is HandoffTransitionStatus.BLOCKED_UNKNOWN and (
@@ -1157,6 +1235,20 @@ def _snapshot_int(snapshot: Mapping[str, object], key: str) -> int:
 
 def _string_uuid(value: UUID | None) -> str | None:
     return str(value) if value is not None else None
+
+
+def _source_fence_matches(
+    fence: ResultSourceFence,
+    request: ExecutionRequest | None,
+) -> bool:
+    return (
+        request is not None
+        and request.workspace_id == fence.workspace_id
+        and request.id == fence.request_id
+        and request.version == fence.request_version
+        and request.worker_item_id == fence.worker_item_id
+        and request.execution_lineage_id == fence.request_lineage_id
+    )
 
 
 def _bounded_event_value(value: object) -> object:

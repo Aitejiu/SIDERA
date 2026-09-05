@@ -167,6 +167,12 @@ class _State:
 
 
 class _ScriptedCoordinator(HandoffCoordinator):
+    @staticmethod
+    def _lock_effective_result_mapping(
+        _uow, _transition, *, require_target: bool
+    ) -> None:
+        del require_target
+
     def _validate_activation_facts(self, _uow, _transition, *, now) -> None:
         del now
 

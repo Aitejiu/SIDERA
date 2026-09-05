@@ -16,6 +16,10 @@ from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     WorkerItemPlacement,
 )
+from sidera_control_plane.application.result_source_fence import (
+    discover_result_source_fence,
+    lock_result_source_fence,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     ExecutionContextChanged,
@@ -164,16 +168,17 @@ class ExecutionCommandHandler:
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
         }:
-            raise InvalidTransition(f"task cannot receive an execution from {task.status}")
+            raise InvalidTransition(
+                f"task cannot receive an execution from {task.status}"
+            )
 
         pinned_worker_id = _optional_uuid(envelope.payload, "pinned_worker_id")
-        if pinned_worker_id is not None and uow.workers.get(
-            pinned_worker_id, envelope.workspace_id
-        ) is None:
+        if (
+            pinned_worker_id is not None
+            and uow.workers.get(pinned_worker_id, envelope.workspace_id) is None
+        ):
             raise NotFound("worker not found")
-        worker_item_id = _validate_execution_worker_item(
-            uow, envelope, task.id
-        )
+        worker_item_id = _validate_execution_worker_item(uow, envelope, task.id)
 
         execution_id = uuid4()
         execution = Execution.create(
@@ -283,6 +288,15 @@ class ExecutionCommandHandler:
     def _continue_session(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        session_probe = _get_target_session(uow, envelope, for_update=False)
+        execution_probe = uow.executions.get(
+            session_probe.execution_id, envelope.workspace_id
+        )
+        if execution_probe is None:
+            raise NotFound("source execution not found")
+        source_fence = discover_result_source_fence(uow, execution_probe)
+        lock_result_source_fence(uow, source_fence)
+
         session = _get_target_session(uow, envelope, for_update=True)
         if session.status is ExecutionSessionStatus.ACTIVE:
             raise InvalidTransition("only a terminal Session can be continued")
@@ -303,9 +317,7 @@ class ExecutionCommandHandler:
             raise InvalidTransition("source execution still has an active lease")
         if execution.stop_requested:
             stop_operation = uow.gateway_operations.get_by_operation_id(
-                gateway_operation_id(
-                    execution.id, GatewayOperationType.STOP_SESSION
-                ),
+                gateway_operation_id(execution.id, GatewayOperationType.STOP_SESSION),
                 envelope.workspace_id,
             )
             if (
@@ -324,7 +336,9 @@ class ExecutionCommandHandler:
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
         }:
-            raise InvalidTransition(f"task cannot receive a continuation from {task.status}")
+            raise InvalidTransition(
+                f"task cannot receive a continuation from {task.status}"
+            )
 
         _require_worker_item_transition_gate(
             uow,
@@ -378,10 +392,11 @@ class ExecutionCommandHandler:
             aggregate_version=continuation.version,
             event_ids=tuple(event.id for event in events),
         )
+
     def _retry(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
-        source = _get_target_execution(uow, envelope, for_update=True)
+        source = _get_fenced_target_execution(uow, envelope)
         _require_handoff_operation(
             uow,
             source.worker_item_id,
@@ -574,9 +589,10 @@ class ExecutionCommandHandler:
                     },
                 )
             )
-        if task.status in {TaskStatus.READY, TaskStatus.RUNNING} and not uow.executions.has_live_for_task(
-            task.id
-        ):
+        if task.status in {
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+        } and not uow.executions.has_live_for_task(task.id):
             previous_task_status = task.status.value
             previous_task_version = task.version
             task.wait_for_decision()
@@ -664,7 +680,10 @@ class ExecutionCommandHandler:
         task = uow.tasks.get(execution.task_id, envelope.workspace_id)
         if task is None:
             raise NotFound("task not found")
-        if uow.sessions.get_active_for_execution(execution.id, for_update=True) is not None:
+        if (
+            uow.sessions.get_active_for_execution(execution.id, for_update=True)
+            is not None
+        ):
             raise InvalidTransition("execution already has an active session")
 
         previous_execution_version = execution.version
@@ -681,9 +700,7 @@ class ExecutionCommandHandler:
             workspace_id=execution.workspace_id,
             execution_id=execution.id,
             worker_id=worker.id,
-            adapter_session_id=_required_str(
-                envelope.payload, "adapter_session_id"
-            ),
+            adapter_session_id=_required_str(envelope.payload, "adapter_session_id"),
             now=now,
         )
         task_changed = task.status is TaskStatus.READY
@@ -768,7 +785,7 @@ class ExecutionCommandHandler:
         *,
         succeeded: bool,
     ) -> CommandResult:
-        execution = _get_target_execution(uow, envelope, for_update=True)
+        execution = _get_fenced_target_execution(uow, envelope)
         worker_id = _required_uuid(envelope.payload, "worker_id")
         lease_id = _required_uuid(envelope.payload, "lease_id")
         fencing_token = _required_int(envelope.payload, "fencing_token")
@@ -1066,9 +1083,12 @@ class ExecutionInputCommandHandler:
                 aggregate_version=existing.version,
                 event_ids=(),
             )
-        if uow.execution_inputs.get_pending_for_session(
-            session.id, envelope.workspace_id, for_update=True
-        ) is not None:
+        if (
+            uow.execution_inputs.get_pending_for_session(
+                session.id, envelope.workspace_id, for_update=True
+            )
+            is not None
+        ):
             raise InvalidTransition("the Session already has a pending input")
         item = ExecutionInput.accept(
             id=uuid4(),
@@ -1154,15 +1174,26 @@ def _get_target_execution(
     return execution
 
 
+def _get_fenced_target_execution(
+    uow: ControlPlaneUnitOfWork,
+    envelope: CommandEnvelope,
+) -> Execution:
+    probe = _get_target_execution(uow, envelope, for_update=False)
+    source_fence = discover_result_source_fence(uow, probe)
+    lock_result_source_fence(uow, source_fence)
+    return _get_target_execution(uow, envelope, for_update=True)
+
+
 def _validate_execution_worker_item(
     uow: ControlPlaneUnitOfWork,
     envelope: CommandEnvelope,
     task_id: UUID,
 ) -> UUID | None:
     worker_item_id = _optional_uuid(envelope.payload, "worker_item_id")
-    if worker_item_id is not None and uow.worker_items.get(
-        worker_item_id, envelope.workspace_id
-    ) is None:
+    if (
+        worker_item_id is not None
+        and uow.worker_items.get(worker_item_id, envelope.workspace_id) is None
+    ):
         raise NotFound("worker item not found")
 
     # Legacy executions may not have a materialized placement, but an active
@@ -1181,9 +1212,7 @@ def _validate_execution_worker_item(
     if not any(subtask.task_id == task_id for subtask in canonical.subtasks):
         return worker_item_id
     if worker_item_id is None:
-        raise ValidationError(
-            "worker_item_id is required for a Task First v2 Subtask"
-        )
+        raise ValidationError("worker_item_id is required for a Task First v2 Subtask")
     worker_item = uow.worker_items.get(
         worker_item_id, envelope.workspace_id, for_update=True
     )
@@ -1243,9 +1272,7 @@ def _require_worker_item_transition_gate(
         operation=PlanTransitionGateOperation.MUTATE,
     )
     if not result.allowed:
-        raise InvalidTransition(
-            f"execution mutation is blocked by {result.reason}"
-        )
+        raise InvalidTransition(f"execution mutation is blocked by {result.reason}")
 
 
 def _require_handoff_operation(
@@ -1484,30 +1511,23 @@ def _execution_context_mismatches(
             if execution.worker_item_id is not None
             else None
         ),
-        "plan_generation": placement.plan_generation if placement is not None else (
-            snapshot.generation if snapshot is not None else None
-        ),
-        "context_version": worker_item.context_version if worker_item is not None else None,
+        "plan_generation": placement.plan_generation
+        if placement is not None
+        else (snapshot.generation if snapshot is not None else None),
+        "context_version": worker_item.context_version
+        if worker_item is not None
+        else None,
         "worker_id": str(current_worker_id) if current_worker_id is not None else None,
         "execution_id": str(execution.id),
         "session_id": str(session.id),
         "session_version": session.version,
     }
     changed: set[str] = set()
-    if (
-        worker_item is None
-        or execution.worker_item_id != context["worker_item_id"]
-    ):
+    if worker_item is None or execution.worker_item_id != context["worker_item_id"]:
         changed.add("worker_item_id")
-    if (
-        placement is None
-        or context["plan_generation"] != placement.plan_generation
-    ):
+    if placement is None or context["plan_generation"] != placement.plan_generation:
         changed.add("plan_generation")
-    if (
-        worker_item is None
-        or context["context_version"] != worker_item.context_version
-    ):
+    if worker_item is None or context["context_version"] != worker_item.context_version:
         changed.add("context_version")
     if (
         len(worker_ids) != 1
