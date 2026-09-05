@@ -12,6 +12,7 @@ from sidera_control_plane.application.collaboration_governance_disposition impor
     CollaborationGovernanceDispositionService,
 )
 from sidera_control_plane.application.collaboration_projection import (
+    CollaborationFacts,
     CollaborationProjectionAssembler,
 )
 from sidera_control_plane.application.collaboration_release_validation import (
@@ -40,7 +41,6 @@ from sidera_control_plane.domain.collaboration_governance import (
 )
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionOutcome,
-    RuntimeEnvelopeError,
     RuntimeProjectionV1,
     RuntimeProjectionV2,
 )
@@ -51,6 +51,9 @@ from sidera_control_plane.domain.execution_requests import (
     ActivationDecision,
     ExecutionRequest,
     ExecutionRequestStatus,
+)
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
 )
 from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
 
@@ -172,6 +175,7 @@ class CollaborationDecisionApplicationResult:
     releases: tuple[RuntimeRelease, ...]
     proposals: tuple[CollaborationReleaseProposal, ...]
     status: str
+    selections: tuple[CollaborationInputSelectionV1, ...] = ()
 
     @property
     def release_ids(self) -> tuple[UUID, ...]:
@@ -189,7 +193,7 @@ def update_collaboration_request_gates(
     new_releases: tuple[RuntimeRelease, ...],
     run: CollaborationRun,
     head: RootTaskPlanHead | None,
-    current_projection: RuntimeProjectionV1 | None,
+    current_projection: RuntimeProjectionV1 | RuntimeProjectionV2 | None,
     now: datetime,
     plan_transition_allows: PlanTransitionCheck,
 ) -> None:
@@ -357,8 +361,9 @@ class CollaborationDecisionService:
                 head=head,
             )
             current_projection = None
+            current_facts = None
             if stale_reason is None:
-                current_projection = self._current_projection(
+                current_projection, current_facts = self._current_projection(
                     uow,
                     prepared=prepared,
                     run=run,
@@ -387,6 +392,7 @@ class CollaborationDecisionService:
                 applications: tuple[RuntimeIntentApplication, ...] = ()
                 new_releases: tuple[RuntimeRelease, ...] = ()
                 proposals: tuple[CollaborationReleaseProposal, ...] = ()
+                selections: tuple[CollaborationInputSelectionV1, ...] = ()
                 status = "stale" if stale_reason is not None else "no_change"
             else:
                 assessments = self._assess_intents(
@@ -396,6 +402,7 @@ class CollaborationDecisionService:
                     run=run,
                     head=head,
                     current_projection=current_projection,
+                    current_facts=current_facts,
                     stale_reason=stale_reason,
                 )
                 proposals = ()
@@ -461,11 +468,27 @@ class CollaborationDecisionService:
                 else:
                     status = "applied"
 
+                selections = self._new_selections(
+                    intents,
+                    assessments,
+                    run=run,
+                    decision=decision,
+                    projection=prepared.projection,
+                    now=now,
+                )
+                stored_selections = tuple(
+                    uow.input_selections.add(item) for item in selections
+                )
+                selection_by_intent = {
+                    item.intent_id: item for item in stored_selections
+                }
+                selections = stored_selections
                 new_releases = self._new_releases(
                     intents,
                     assessments,
                     run=run,
                     decision=decision,
+                    selections=selection_by_intent,
                     now=now,
                 )
                 if new_releases:
@@ -483,6 +506,20 @@ class CollaborationDecisionService:
                     now=now,
                 )
                 uow.collaboration_ledger.add_applications(applications)
+                for selection in selections:
+                    request = requests[selection.target_execution_request_id]
+                    if request is None:
+                        raise CollaborationDecisionConflict(
+                            "input selection target request disappeared"
+                        )
+                    previous_version = request.version
+                    changed = request.bind_input_selection(
+                        selection_id=selection.id,
+                        selection_hash=selection.selection_hash,
+                        now=now,
+                    )
+                    if changed:
+                        uow.execution_requests.save(request, previous_version)
                 self._update_request_gates(
                     uow,
                     assessments,
@@ -520,6 +557,8 @@ class CollaborationDecisionService:
                         run=run,
                         intent=intent,
                     )
+            for selection in selections:
+                self._emit_input_selection_recorded(uow, selection, run=run)
             for proposal in proposals:
                 self._emit_proposal_created(uow, proposal, run=run)
             if stale_reason is not None:
@@ -556,6 +595,7 @@ class CollaborationDecisionService:
                 releases=new_releases,
                 proposals=proposals,
                 status=status,
+                selections=selections,
             )
 
     def _validate_result(
@@ -635,7 +675,7 @@ class CollaborationDecisionService:
         *,
         prepared: PreparedCollaborationEvaluation,
         run: CollaborationRun,
-    ) -> RuntimeProjectionV1:
+    ) -> tuple[RuntimeProjectionV1 | RuntimeProjectionV2, CollaborationFacts]:
         facts = self._fact_store_factory(uow).load(
             run.workspace_id,
             run,
@@ -659,11 +699,7 @@ class CollaborationDecisionService:
             fact_cursor=prepared.projection.fact_cursor,
             projection_id=prepared.projection.projection_id,
         )
-        if not isinstance(projection, RuntimeProjectionV1):
-            raise RuntimeEnvelopeError(
-                "Decision v2 application is not enabled in this transaction path"
-            )
-        return projection
+        return projection, facts
 
     @staticmethod
     def _decision_record(
@@ -734,7 +770,8 @@ class CollaborationDecisionService:
         releases: Mapping[UUID, RuntimeRelease | None],
         run: CollaborationRun,
         head: RootTaskPlanHead | None,
-        current_projection: RuntimeProjectionV1 | None,
+        current_projection: RuntimeProjectionV1 | RuntimeProjectionV2 | None,
+        current_facts: CollaborationFacts | None,
         stale_reason: str | None,
     ) -> tuple[_IntentAssessment, ...]:
         if stale_reason is not None:
@@ -773,6 +810,7 @@ class CollaborationDecisionService:
                     plan_head=head,
                     current_projection=current_projection,
                     existing_release=existing,
+                    current_facts=current_facts,
                 )
             )
         return tuple(assessments)
@@ -830,6 +868,7 @@ class CollaborationDecisionService:
         *,
         run: CollaborationRun,
         decision: RuntimeDecision,
+        selections: Mapping[UUID, CollaborationInputSelectionV1],
         now: datetime,
     ) -> tuple[RuntimeRelease, ...]:
         return tuple(
@@ -845,10 +884,64 @@ class CollaborationDecisionService:
                 execution_request_id=intent.target_execution_request_id,
                 request_version_at_release=intent.target_request_version,
                 issued_at=now,
+                input_selection_id=(
+                    selections[intent.id].id if intent.id in selections else None
+                ),
+                input_selection_hash=(
+                    selections[intent.id].selection_hash
+                    if intent.id in selections
+                    else None
+                ),
             )
             for intent, assessment in zip(intents, assessments, strict=True)
             if assessment.status is RuntimeIntentApplicationStatus.APPLIED
         )
+
+    @staticmethod
+    def _new_selections(
+        intents: tuple[RuntimeIntent, ...],
+        assessments: tuple[_IntentAssessment, ...],
+        *,
+        run: CollaborationRun,
+        decision: RuntimeDecision,
+        projection: RuntimeProjectionV1 | RuntimeProjectionV2,
+        now: datetime,
+    ) -> tuple[CollaborationInputSelectionV1, ...]:
+        values: list[CollaborationInputSelectionV1] = []
+        for intent, assessment in zip(intents, assessments, strict=True):
+            request = assessment.request
+            if (
+                assessment.status is not RuntimeIntentApplicationStatus.APPLIED
+                or request is None
+                or not (assessment.input_groups or assessment.hard_inputs)
+            ):
+                continue
+            draft = CollaborationInputSelectionV1(
+                id=uuid5(
+                    NAMESPACE_URL,
+                    f"sidera:collaboration-input-selection:{intent.id}",
+                ),
+                schema_version=1,
+                workspace_id=run.workspace_id,
+                root_task_id=run.root_task_id,
+                run_id=run.id,
+                plan_snapshot_id=run.plan_snapshot_id,
+                plan_generation=run.plan_generation,
+                plan_content_hash=run.plan_content_hash,
+                target_worker_item_id=request.worker_item_id,
+                target_execution_request_id=request.id,
+                target_request_version=intent.target_request_version,
+                projection_snapshot_id=projection.projection_id,
+                projection_hash=projection.content_hash,
+                decision_id=decision.id,
+                intent_id=intent.id,
+                groups=assessment.input_groups,
+                hard_inputs=assessment.hard_inputs,
+                selection_hash="0" * 64,
+                created_at=now,
+            )
+            values.append(replace(draft, selection_hash=draft.compute_selection_hash()))
+        return tuple(values)
 
     def _update_request_gates(
         self,
@@ -859,7 +952,7 @@ class CollaborationDecisionService:
         new_releases: tuple[RuntimeRelease, ...],
         run: CollaborationRun,
         head: RootTaskPlanHead | None,
-        current_projection: RuntimeProjectionV1 | None,
+        current_projection: RuntimeProjectionV1 | RuntimeProjectionV2 | None,
         now: datetime,
     ) -> None:
         update_collaboration_request_gates(
@@ -946,8 +1039,39 @@ class CollaborationDecisionService:
                 "intent_id": str(intent.id),
                 "execution_request_id": str(request.id),
                 "request_version_at_release": release.request_version_at_release,
+                "input_selection_id": (
+                    str(release.input_selection_id)
+                    if release.input_selection_id is not None
+                    else None
+                ),
+                "input_selection_hash": release.input_selection_hash,
                 "status": request.status.value,
                 "gate_reason": request.gate_reason,
+            },
+        )
+
+    def _emit_input_selection_recorded(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        selection: CollaborationInputSelectionV1,
+        *,
+        run: CollaborationRun,
+    ) -> None:
+        self._emit_event(
+            uow,
+            event_type="CollaborationInputSelectionRecorded",
+            aggregate_type="collaboration_input_selection",
+            aggregate_id=selection.id,
+            aggregate_version=1,
+            run=run,
+            payload={
+                "input_selection_id": str(selection.id),
+                "input_selection_hash": selection.selection_hash,
+                "target_execution_request_id": str(
+                    selection.target_execution_request_id
+                ),
+                "decision_id": str(selection.decision_id),
+                "intent_id": str(selection.intent_id),
             },
         )
 
@@ -1078,6 +1202,8 @@ def _release_matches(
         and release.plan_generation == request.plan_generation == run.plan_generation
         and release.plan_content_hash == run.plan_content_hash
         and release.execution_request_id == request.id
+        and release.input_selection_id == request.input_selection_id
+        and release.input_selection_hash == request.input_selection_hash
         and _head_matches_run(plan_head, run)
         and release.request_version_at_release <= request.version
     )
@@ -1088,7 +1214,7 @@ def _run_details(run_id: UUID | None) -> Mapping[str, object]:
 
 
 def _projection_requests(
-    projection: RuntimeProjectionV1 | None,
+    projection: RuntimeProjectionV1 | RuntimeProjectionV2 | None,
 ) -> dict[UUID, Mapping[str, object]]:
     if projection is None:
         return {}
@@ -1120,6 +1246,16 @@ def _related_lock_ids(
             worker_item_ids.add(worker_item_id)
 
     if isinstance(projection, RuntimeProjectionV2):
+        for dependency in projection.dependencies:
+            if (
+                dependency.get("dependency_type") != "execution_request"
+                or dependency.get("enforcement") != "hard"
+                or dependency.get("downstream_request_id") not in target_id_strings
+            ):
+                continue
+            upstream_id = _optional_mapping_uuid(dependency.get("upstream_request_id"))
+            if upstream_id is not None:
+                request_ids.add(upstream_id)
         for item in projection.result_input_evaluations:
             if item.consumer_execution_request_id not in request_ids:
                 continue
@@ -1131,6 +1267,13 @@ def _related_lock_ids(
                     worker_item_ids.add(source.worker_item_id)
                 if source.effective_request_id is not None:
                     request_ids.add(source.effective_request_id)
+        request_id_strings = {str(item) for item in request_ids}
+        for request in projection.execution_requests:
+            if request.get("id") not in request_id_strings:
+                continue
+            worker_item_id = _optional_mapping_uuid(request.get("worker_item_id"))
+            if worker_item_id is not None:
+                worker_item_ids.add(worker_item_id)
 
     return (
         tuple(sorted(worker_item_ids, key=str)),

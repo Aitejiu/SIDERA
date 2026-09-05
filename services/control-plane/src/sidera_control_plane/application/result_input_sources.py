@@ -287,7 +287,9 @@ def _resolved(
     evidence = tuple(
         ResultInputEvidence(
             evidence_id=item.id,
-            acceptance_criterion_ref=item.acceptance_criterion_ref,
+            acceptance_criterion_ref=_normalized_evidence_ref(
+                item.acceptance_criterion_ref
+            ),
             artifact_ids=item.artifact_ids,
         )
         for item in facts.evidence
@@ -315,6 +317,10 @@ def _resolved(
         outcome_unknown=outcome_unknown,
         reason_code=reason_code,
     )
+
+
+def _normalized_evidence_ref(value: str) -> str:
+    return value if value.startswith("acceptance:") else f"acceptance:{value}"
 
 
 def _for_request(

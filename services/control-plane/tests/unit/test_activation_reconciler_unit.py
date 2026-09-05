@@ -230,6 +230,8 @@ def test_exact_collaboration_release_allows_activation_after_static_gate() -> No
         plan_content_hash=plan_hash,
         execution_request_id=request.id,
         request_version_at_release=request.version,
+        input_selection_id=None,
+        input_selection_hash=None,
     )
     uow = FakeUnitOfWork(request)
     uow.collaboration_runs = SimpleNamespace(

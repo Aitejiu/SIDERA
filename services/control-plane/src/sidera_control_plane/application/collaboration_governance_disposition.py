@@ -19,7 +19,10 @@ from sidera_control_plane.domain.collaboration import (
 from sidera_control_plane.domain.collaboration_governance import (
     CollaborationReleaseProposal,
 )
-from sidera_control_plane.domain.collaboration_runtime import RuntimeProjectionV1
+from sidera_control_plane.domain.collaboration_runtime import (
+    RuntimeProjectionV1,
+    RuntimeProjectionV2,
+)
 
 if TYPE_CHECKING:
     from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
@@ -39,7 +42,7 @@ class CollaborationGovernanceDispositionService:
         intents: tuple[RuntimeIntent, ...],
         assessments: tuple[ReleaseEligibilityAssessment, ...],
         run: CollaborationRun,
-        current_projection: RuntimeProjectionV1,
+        current_projection: RuntimeProjectionV1 | RuntimeProjectionV2,
         now: datetime,
     ) -> GovernanceDispositionResult:
         eligible = tuple(

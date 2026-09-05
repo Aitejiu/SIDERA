@@ -8,6 +8,7 @@ from uuid import UUID
 from sidera_control_plane.domain.collaboration import RuntimeIntent
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
     canonical_json_bytes,
 )
 from sidera_control_plane.domain.errors import ValidationError
@@ -41,7 +42,7 @@ class ReleaseProposalFingerprint:
 
 
 def build_release_proposal_fingerprint(
-    projection: RuntimeProjectionV1,
+    projection: RuntimeProjectionV1 | RuntimeProjectionV2,
     intent: RuntimeIntent,
     *,
     worker_item_id: UUID,

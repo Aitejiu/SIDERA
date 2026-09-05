@@ -97,6 +97,33 @@ def test_input_selection_reference_is_optional_but_must_be_complete() -> None:
         make_request(input_selection_hash="a" * 64)
 
 
+def test_input_selection_can_be_bound_once_and_replayed() -> None:
+    request = make_request()
+    selection_id = uuid4()
+    original_version = request.version
+
+    assert request.bind_input_selection(
+        selection_id=selection_id,
+        selection_hash="a" * 64,
+        now=NOW,
+    )
+    assert request.input_selection_id == selection_id
+    assert request.input_selection_hash == "a" * 64
+    assert request.version == original_version + 1
+    assert not request.bind_input_selection(
+        selection_id=selection_id,
+        selection_hash="a" * 64,
+        now=NOW,
+    )
+
+    with pytest.raises(InvalidTransition, match="already bound"):
+        request.bind_input_selection(
+            selection_id=uuid4(),
+            selection_hash="b" * 64,
+            now=NOW,
+        )
+
+
 def test_execution_request_starts_blocked_and_materializes_once() -> None:
     request = make_request()
 

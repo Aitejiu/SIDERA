@@ -22,7 +22,7 @@ from sidera_control_plane.domain.result_inputs import InputGroupInvalid, InputGr
 
 _MAX_TEXT_LENGTH = 16_384
 _MAX_MAP_ENTRIES = 128
-_MAX_MAP_DEPTH = 8
+_MAX_MAP_DEPTH = 12
 _MAX_MAP_BYTES = 128 * 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 

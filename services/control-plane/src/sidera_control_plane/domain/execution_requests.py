@@ -312,9 +312,7 @@ class ExecutionRequest:
             raise ValidationError(
                 "handoff target requires source execution and session lineage"
             )
-        _validate_input_selection_reference(
-            input_selection_id, input_selection_hash
-        )
+        _validate_input_selection_reference(input_selection_id, input_selection_hash)
         if plan_generation < 1:
             raise ValidationError("plan_generation must be positive")
         clean_key = _required_text(worker_item_key, "worker_item_key")
@@ -405,6 +403,34 @@ class ExecutionRequest:
         self.status = ExecutionRequestStatus.READY
         self._record_gate(decision=decision, now=now)
 
+    def bind_input_selection(
+        self,
+        *,
+        selection_id: UUID,
+        selection_hash: str,
+        now: datetime,
+    ) -> bool:
+        if self.status not in {
+            ExecutionRequestStatus.BLOCKED,
+            ExecutionRequestStatus.READY,
+        }:
+            raise InvalidTransition(
+                f"request cannot bind input selection from {self.status}"
+            )
+        _validate_input_selection_reference(selection_id, selection_hash)
+        _aware(now, "now")
+        current = (self.input_selection_id, self.input_selection_hash)
+        requested = (selection_id, selection_hash)
+        if current == requested:
+            return False
+        if current != (None, None):
+            raise InvalidTransition("request input selection is already bound")
+        self.input_selection_id = selection_id
+        self.input_selection_hash = selection_hash
+        self.updated_at = now
+        self.version += 1
+        return True
+
     def refresh_gate(self, *, decision: ActivationDecision, now: datetime) -> None:
         if self.status in {
             ExecutionRequestStatus.MATERIALIZED,
@@ -460,7 +486,9 @@ class ExecutionRequest:
         """Clone immutable plan facts into a new materialized handoff request."""
 
         if self.status is not ExecutionRequestStatus.MATERIALIZED:
-            raise InvalidTransition("only a materialized request can create a handoff target")
+            raise InvalidTransition(
+                "only a materialized request can create a handoff target"
+            )
         if self.execution_lineage_id is None or self.first_execution_id is None:
             raise ValidationError("materialized request lineage is incomplete")
         return _materialized_handoff_target(
@@ -501,7 +529,9 @@ class ExecutionRequest:
                 f"only a materialized handoff target can be retired, got {self.status}"
             )
         if self.handoff_transition_id is None:
-            raise ValidationError("handoff target transition is required for retirement")
+            raise ValidationError(
+                "handoff target transition is required for retirement"
+            )
         _aware(now, "now")
         clean_reason = _required_text(reason, "reason")
         self.status = ExecutionRequestStatus.OBSOLETE
@@ -731,7 +761,10 @@ def _validate_input_selection_reference(
         raise ValidationError("input selection id and hash must be provided together")
     if selection_id is not None and not isinstance(selection_id, UUID):
         raise ValidationError("input selection id must be a UUID")
-    if selection_hash is not None and re.fullmatch(r"[0-9a-f]{64}", selection_hash) is None:
+    if (
+        selection_hash is not None
+        and re.fullmatch(r"[0-9a-f]{64}", selection_hash) is None
+    ):
         raise ValidationError("input selection hash must be a lowercase SHA-256 hash")
 
 

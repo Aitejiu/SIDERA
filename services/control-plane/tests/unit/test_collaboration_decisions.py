@@ -63,6 +63,8 @@ def test_release_is_allowed_only_for_the_exact_active_run_and_plan_head() -> Non
         plan_generation=3,
         version=2,
         collaboration_gate_mode=CollaborationGateMode.RELEASE_REQUIRED,
+        input_selection_id=None,
+        input_selection_hash=None,
     )
     run = SimpleNamespace(
         id=run_id,
@@ -88,6 +90,8 @@ def test_release_is_allowed_only_for_the_exact_active_run_and_plan_head() -> Non
         plan_content_hash=plan_hash,
         execution_request_id=request_id,
         request_version_at_release=1,
+        input_selection_id=None,
+        input_selection_hash=None,
     )
 
     fact = CollaborationGateFact.for_request(

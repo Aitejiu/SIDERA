@@ -30,6 +30,22 @@ def test_current_source_uses_exact_plan_placement_and_attempt_facts() -> None:
         source.reason_code = "changed"  # type: ignore[misc]
 
 
+def test_persisted_acceptance_key_is_normalized_to_selector() -> None:
+    facts = effective_source_facts(request_case="current")
+    raw_evidence = replace(
+        facts.evidence[0], acceptance_criterion_ref="research-complete"
+    )
+
+    source = resolve_result_input_source(
+        worker_item_key="a",
+        facts=replace(facts, evidence=(raw_evidence,)),
+    )
+
+    assert source.evidence[0].acceptance_criterion_ref == (
+        "acceptance:research-complete"
+    )
+
+
 def test_newer_unrelated_request_does_not_replace_effective_source() -> None:
     facts = effective_source_facts(request_case="unrelated_newer_request")
     source = resolve_result_input_source(worker_item_key="a", facts=facts)
