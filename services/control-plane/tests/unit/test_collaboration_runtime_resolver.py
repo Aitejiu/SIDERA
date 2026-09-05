@@ -17,6 +17,7 @@ from sidera_control_plane.application.collaboration_runtime_resolver import (
 )
 from sidera_control_plane.domain.collaboration import CollaborationRun
 from sidera_control_plane.domain.modules import (
+    COLLABORATION_INPUT_GROUPS_STRATEGY_ID,
     COLLABORATION_RUNTIME_MODULE_TYPE,
     CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
@@ -47,6 +48,15 @@ def _capability() -> CollaborationRuntimeCapabilityProfile:
         max_intents_per_decision=128,
         max_strategy_state_bytes=16_384,
         stability=StabilityLevel.STABLE,
+    )
+
+
+def _v2_capability() -> CollaborationRuntimeCapabilityProfile:
+    return replace(
+        _capability(),
+        projection_schema_versions=(1, 2),
+        decision_schema_versions=(1, 2),
+        strategy_ids=("all_required", COLLABORATION_INPUT_GROUPS_STRATEGY_ID),
     )
 
 
@@ -110,6 +120,21 @@ def _run(
     )
 
 
+def _v2_run(
+    *, capability: CollaborationRuntimeCapabilityProfile | None = None
+) -> CollaborationRun:
+    selected = capability or _v2_capability()
+    return replace(
+        _run(capability=selected),
+        policy_snapshot={
+            "schema_version": 2,
+            "default_policy": {"enabled": True, "strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [],
+        },
+    )
+
+
 class InMemoryModuleRepository:
     def __init__(
         self,
@@ -148,8 +173,7 @@ def _resolver(
         definition or _definition(), instance or _instance()
     )
     factory = RegistryCollaborationRuntimeFactory(
-        builders
-        or {"reference": lambda _: ReferenceCollaborationRuntime()}
+        builders or {"reference": lambda _: ReferenceCollaborationRuntime()}
     )
     return CollaborationRuntimeResolver(repository, factory)
 
@@ -242,3 +266,32 @@ def test_resolver_does_not_fallback_to_another_provider() -> None:
 
     assert error.value.code == "runtime_provider_unsupported"
     assert alternative_called is False
+
+
+def test_resolver_accepts_an_exact_v2_runtime_capability() -> None:
+    capability = _v2_capability()
+
+    resolved = _resolver(definition=_definition(capability=capability)).resolve(
+        _v2_run(capability=capability)
+    )
+
+    assert isinstance(resolved.runtime, ReferenceCollaborationRuntime)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("projection_schema_versions", (1,)),
+        ("decision_schema_versions", (1,)),
+        ("strategy_ids", ("all_required",)),
+    ),
+)
+def test_resolver_rejects_incomplete_v2_capability(field: str, value: Any) -> None:
+    capability = replace(_v2_capability(), **{field: value})
+
+    with pytest.raises(RuntimeResolutionError) as error:
+        _resolver(definition=_definition(capability=capability)).resolve(
+            _v2_run(capability=capability)
+        )
+
+    assert error.value.code == "runtime_capability_unsupported"

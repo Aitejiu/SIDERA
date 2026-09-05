@@ -169,6 +169,75 @@ class ResultInputSource:
     reason_code: str | None
     source_basis_hash: str | None = None
 
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputSource:
+        mapping = _descriptor_mapping(
+            value,
+            "result input source",
+            {
+                "worker_item_key",
+                "worker_item_id",
+                "subtask_path",
+                "effective_request_id",
+                "allowed_lineage_ids",
+                "effective_execution_id",
+                "attempt",
+                "execution_status",
+                "inheritance_refs",
+                "artifacts",
+                "evidence",
+                "retry_possible",
+                "outcome_unknown",
+                "reason_code",
+                "source_basis_hash",
+            },
+        )
+        raw_status = mapping.get("execution_status")
+        raw_attempt = mapping.get("attempt")
+        return cls(
+            worker_item_key=_key(mapping.get("worker_item_key"), "worker_item_key"),
+            worker_item_id=_optional_descriptor_uuid(
+                mapping.get("worker_item_id"), "worker_item_id"
+            ),
+            subtask_path=_source_text_array(
+                mapping.get("subtask_path"), "subtask_path"
+            ),
+            effective_request_id=_optional_descriptor_uuid(
+                mapping.get("effective_request_id"), "effective_request_id"
+            ),
+            allowed_lineage_ids=_source_uuid_array(
+                mapping.get("allowed_lineage_ids"), "allowed_lineage_ids"
+            ),
+            effective_execution_id=_optional_descriptor_uuid(
+                mapping.get("effective_execution_id"), "effective_execution_id"
+            ),
+            attempt=(
+                None if raw_attempt is None else _positive_int(raw_attempt, "attempt")
+            ),
+            execution_status=(
+                None
+                if raw_status is None
+                else _enum(raw_status, ExecutionStatus, "execution_status")
+            ),
+            inheritance_refs=_source_text_array(
+                mapping.get("inheritance_refs"), "inheritance_refs"
+            ),
+            artifacts=_source_artifacts(mapping.get("artifacts")),
+            evidence=_source_evidence(mapping.get("evidence")),
+            retry_possible=_descriptor_bool(
+                mapping.get("retry_possible"), "retry_possible"
+            ),
+            outcome_unknown=_descriptor_bool(
+                mapping.get("outcome_unknown"), "outcome_unknown"
+            ),
+            reason_code=_optional_descriptor_text(
+                mapping.get("reason_code"), "reason_code"
+            ),
+            source_basis_hash=_optional_descriptor_hash(
+                mapping.get("source_basis_hash"), "source_basis_hash"
+            ),
+        )
+
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "worker_item_key", _key(self.worker_item_key, "worker_item_key")
@@ -218,7 +287,10 @@ class ResultInputSource:
             "evidence",
             tuple(sorted(self.evidence, key=lambda item: str(item.evidence_id))),
         )
-        if type(self.retry_possible) is not bool or type(self.outcome_unknown) is not bool:
+        if (
+            type(self.retry_possible) is not bool
+            or type(self.outcome_unknown) is not bool
+        ):
             raise ValidationError("result source possibility flags must be booleans")
         if self.reason_code is not None:
             object.__setattr__(
@@ -230,6 +302,39 @@ class ResultInputSource:
                 "source_basis_hash",
                 _descriptor_hash(self.source_basis_hash, "source_basis_hash"),
             )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "worker_item_key": self.worker_item_key,
+            "worker_item_id": (
+                str(self.worker_item_id) if self.worker_item_id is not None else None
+            ),
+            "subtask_path": list(self.subtask_path),
+            "effective_request_id": (
+                str(self.effective_request_id)
+                if self.effective_request_id is not None
+                else None
+            ),
+            "allowed_lineage_ids": [str(item) for item in self.allowed_lineage_ids],
+            "effective_execution_id": (
+                str(self.effective_execution_id)
+                if self.effective_execution_id is not None
+                else None
+            ),
+            "attempt": self.attempt,
+            "execution_status": (
+                self.execution_status.value
+                if self.execution_status is not None
+                else None
+            ),
+            "inheritance_refs": list(self.inheritance_refs),
+            "artifacts": [item.to_mapping() for item in self.artifacts],
+            "evidence": [item.to_mapping() for item in self.evidence],
+            "retry_possible": self.retry_possible,
+            "outcome_unknown": self.outcome_unknown,
+            "reason_code": self.reason_code,
+            "source_basis_hash": self.source_basis_hash,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +350,52 @@ class InputCandidateState:
     outcome_unknown: bool
     source_basis_hash: str | None
     reason_code: str | None
+
+    @classmethod
+    def from_mapping(cls, value: object) -> InputCandidateState:
+        mapping = _descriptor_mapping(
+            value,
+            "input candidate state",
+            {
+                "worker_item_key",
+                "source",
+                "ready",
+                "missing_artifact_refs",
+                "missing_evidence_refs",
+                "retry_possible",
+                "outcome_unknown",
+                "source_basis_hash",
+                "reason_code",
+            },
+        )
+        raw_source = mapping.get("source")
+        return cls(
+            worker_item_key=_key(mapping.get("worker_item_key"), "worker_item_key"),
+            source=(
+                None
+                if raw_source is None
+                else ResultInputSource.from_mapping(raw_source)
+            ),
+            ready=_descriptor_bool(mapping.get("ready"), "ready"),
+            missing_artifact_refs=_source_text_array(
+                mapping.get("missing_artifact_refs"), "missing_artifact_refs"
+            ),
+            missing_evidence_refs=_source_text_array(
+                mapping.get("missing_evidence_refs"), "missing_evidence_refs"
+            ),
+            retry_possible=_descriptor_bool(
+                mapping.get("retry_possible"), "retry_possible"
+            ),
+            outcome_unknown=_descriptor_bool(
+                mapping.get("outcome_unknown"), "outcome_unknown"
+            ),
+            source_basis_hash=_optional_descriptor_hash(
+                mapping.get("source_basis_hash"), "source_basis_hash"
+            ),
+            reason_code=_optional_descriptor_text(
+                mapping.get("reason_code"), "reason_code"
+            ),
+        )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -285,13 +436,28 @@ class InputCandidateState:
             or self.missing_evidence_refs
             or self.outcome_unknown
         ):
-            raise ValidationError("ready candidate state has an incomplete source basis")
+            raise ValidationError(
+                "ready candidate state has an incomplete source basis"
+            )
         if self.ready and self.reason_code is not None:
             raise ValidationError("ready candidate state cannot have a reason code")
         if self.source is not None and (
             self.source.source_basis_hash != self.source_basis_hash
         ):
             raise ValidationError("candidate state source basis hash does not match")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "worker_item_key": self.worker_item_key,
+            "source": self.source.to_mapping() if self.source is not None else None,
+            "ready": self.ready,
+            "missing_artifact_refs": list(self.missing_artifact_refs),
+            "missing_evidence_refs": list(self.missing_evidence_refs),
+            "retry_possible": self.retry_possible,
+            "outcome_unknown": self.outcome_unknown,
+            "source_basis_hash": self.source_basis_hash,
+            "reason_code": self.reason_code,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +472,47 @@ class InputGroupEvaluation:
     satisfied: bool
     reason_code: str | None
 
+    @classmethod
+    def from_mapping(cls, value: object) -> InputGroupEvaluation:
+        mapping = _descriptor_mapping(
+            value,
+            "input group evaluation",
+            {
+                "group_key",
+                "required_count",
+                "ready_count",
+                "ready_sources",
+                "candidate_states",
+                "satisfied",
+                "reason_code",
+            },
+        )
+        raw_ready = mapping.get("ready_sources")
+        raw_states = mapping.get("candidate_states")
+        if not isinstance(raw_ready, (list, tuple)):
+            raise ValidationError("ready_sources must be an array")
+        if not isinstance(raw_states, (list, tuple)):
+            raise ValidationError("candidate_states must be an array")
+        return cls(
+            group_key=_key(mapping.get("group_key"), "group_key"),
+            required_count=_positive_int(
+                mapping.get("required_count"), "required_count"
+            ),
+            ready_count=_descriptor_non_negative_int(
+                mapping.get("ready_count"), "ready_count"
+            ),
+            ready_sources=tuple(
+                ResultInputSource.from_mapping(item) for item in raw_ready
+            ),
+            candidate_states=tuple(
+                InputCandidateState.from_mapping(item) for item in raw_states
+            ),
+            satisfied=_descriptor_bool(mapping.get("satisfied"), "satisfied"),
+            reason_code=_optional_descriptor_text(
+                mapping.get("reason_code"), "reason_code"
+            ),
+        )
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "group_key", _key(self.group_key, "group_key"))
         _positive_int(self.required_count, "required_count")
@@ -313,13 +520,14 @@ class InputGroupEvaluation:
         if any(not isinstance(item, ResultInputSource) for item in self.ready_sources):
             raise ValidationError("ready_sources must contain typed result sources")
         if any(
-            not isinstance(item, InputCandidateState)
-            for item in self.candidate_states
+            not isinstance(item, InputCandidateState) for item in self.candidate_states
         ):
             raise ValidationError("candidate_states must contain typed states")
         candidate_keys = tuple(item.worker_item_key for item in self.candidate_states)
         if not candidate_keys:
             raise ValidationError("input group evaluation requires candidate states")
+        if len(candidate_keys) > MAX_INPUT_GROUP_CANDIDATES:
+            raise ValidationError("input group evaluation contains too many candidates")
         if len(candidate_keys) != len(set(candidate_keys)):
             raise ValidationError("candidate state WorkerItems must be unique")
         if self.required_count > len(candidate_keys):
@@ -328,11 +536,15 @@ class InputGroupEvaluation:
         state_ready_keys = tuple(
             item.worker_item_key for item in self.candidate_states if item.ready
         )
-        if self.ready_count != len(self.ready_sources) or ready_keys != state_ready_keys:
+        if (
+            self.ready_count != len(self.ready_sources)
+            or ready_keys != state_ready_keys
+        ):
             raise ValidationError("input group ready source counts are inconsistent")
-        if tuple(
-            item.source for item in self.candidate_states if item.ready
-        ) != self.ready_sources:
+        if (
+            tuple(item.source for item in self.candidate_states if item.ready)
+            != self.ready_sources
+        ):
             raise ValidationError("input group ready source facts are inconsistent")
         if type(self.satisfied) is not bool:
             raise ValidationError("input group satisfied must be a boolean")
@@ -344,6 +556,17 @@ class InputGroupEvaluation:
             )
         if self.satisfied and self.reason_code is not None:
             raise ValidationError("satisfied input group cannot have a reason code")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "group_key": self.group_key,
+            "required_count": self.required_count,
+            "ready_count": self.ready_count,
+            "ready_sources": [item.to_mapping() for item in self.ready_sources],
+            "candidate_states": [item.to_mapping() for item in self.candidate_states],
+            "satisfied": self.satisfied,
+            "reason_code": self.reason_code,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,15 +986,29 @@ def _descriptor_uuid(value: object, name: str) -> UUID:
         raise ValidationError(f"{name} must be a UUID") from exc
 
 
+def _optional_descriptor_uuid(value: object, name: str) -> UUID | None:
+    return None if value is None else _descriptor_uuid(value, name)
+
+
 def _descriptor_hash(value: object, name: str) -> str:
     if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
         raise ValidationError(f"{name} must be a lowercase SHA-256 hash")
     return value
 
 
+def _optional_descriptor_hash(value: object, name: str) -> str | None:
+    return None if value is None else _descriptor_hash(value, name)
+
+
 def _descriptor_non_negative_int(value: object, name: str) -> int:
     if type(value) is not int or value < 0:
         raise ValidationError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _descriptor_bool(value: object, name: str) -> bool:
+    if type(value) is not bool:
+        raise ValidationError(f"{name} must be a boolean")
     return value
 
 
@@ -782,6 +1019,10 @@ def _descriptor_text(value: object, name: str) -> str:
     if len(normalized) > _MAX_TEXT_LENGTH:
         raise ValidationError(f"{name} is too long")
     return normalized
+
+
+def _optional_descriptor_text(value: object, name: str) -> str | None:
+    return None if value is None else _descriptor_text(value, name)
 
 
 def _descriptor_artifact_type(value: object) -> ArtifactType:
@@ -819,4 +1060,22 @@ def _source_uuid_array(value: object, name: str) -> tuple[UUID, ...]:
     items = tuple(_descriptor_uuid(item, name) for item in value)
     if len(items) != len(set(items)):
         raise ValidationError(f"{name} must be unique")
+    return items
+
+
+def _source_artifacts(value: object) -> tuple[ResultInputArtifact, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result source artifacts must be an array")
+    items = tuple(ResultInputArtifact.from_mapping(item) for item in value)
+    if len({item.artifact_id for item in items}) != len(items):
+        raise ValidationError("result source artifact IDs must be unique")
+    return items
+
+
+def _source_evidence(value: object) -> tuple[ResultInputEvidence, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result source evidence must be an array")
+    items = tuple(ResultInputEvidence.from_mapping(item) for item in value)
+    if len({item.evidence_id for item in items}) != len(items):
+        raise ValidationError("result source Evidence IDs must be unique")
     return items

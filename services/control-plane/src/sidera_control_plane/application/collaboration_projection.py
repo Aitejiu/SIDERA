@@ -10,7 +10,10 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
 from sidera_control_plane.domain.collaboration import RuntimeRelease
 from sidera_control_plane.domain.collaboration_runtime import (
+    RuntimeProjection,
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
+    RuntimeResultInputEvaluation,
     canonical_json_bytes,
 )
 from sidera_control_plane.domain.errors import ValidationError
@@ -22,6 +25,7 @@ from sidera_control_plane.domain.execution_requests import (
 )
 from sidera_control_plane.domain.modules import CollaborationRuntimeCapabilityProfile
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.result_inputs import InputGroupV1
 
 GLOBAL_MAX_PROJECTION_BYTES = 1_048_576
 _PRIVATE_FACT_KEYS = frozenset(
@@ -194,16 +198,24 @@ class CollaborationProjectionAssembler:
         fact_cursor: int,
         projection_id: UUID | None = None,
         now: datetime | None = None,
-    ) -> RuntimeProjectionV1:
+    ) -> RuntimeProjection:
         self._validate_identity(facts, fact_cursor)
         head = facts.plan_head
         capability = head.runtime_capability_snapshot
-        if 1 not in capability.projection_schema_versions:
+        policy = self._policy_mapping(facts)
+        projection_schema_version = _projection_schema_version(policy)
+        if (
+            projection_schema_version == 1
+            and 1 not in capability.projection_schema_versions
+        ):
             raise ValidationError(
                 "pinned collaboration runtime does not support projection schema 1"
             )
+        if projection_schema_version == 2 and not capability.supports_input_groups_v1():
+            raise ValidationError(
+                "pinned collaboration runtime is not input-group capable"
+            )
 
-        policy = self._policy_mapping(facts)
         tasks = self._task_mappings(facts.plan_snapshot, head)
         subtasks = self._subtask_mappings(facts.plan_snapshot)
         worker_items = self._worker_item_mappings(facts.plan_snapshot)
@@ -227,6 +239,25 @@ class CollaborationProjectionAssembler:
         release_facts = _stable_unique(
             facts.releases, key=lambda item: item.id, name="releases"
         )
+        placement_facts = _stable_unique(
+            facts.worker_placements,
+            key=lambda item: (
+                item.worker_item_key,
+                item.worker_item_id,
+                item.subtask_task_id,
+            ),
+            name="worker placements",
+        )
+        binding_facts = _stable_unique(
+            facts.execution_bindings,
+            key=lambda item: item.id,
+            name="execution bindings",
+        )
+        handoff_facts = _stable_unique(
+            facts.handoff_transitions,
+            key=lambda item: item.id,
+            name="handoff transitions",
+        )
         facts_for_dependencies = CollaborationFacts(
             plan_head=facts.plan_head,
             plan_snapshot=facts.plan_snapshot,
@@ -237,6 +268,9 @@ class CollaborationProjectionAssembler:
             evidence=evidence_facts,
             releases=release_facts,
             previous_strategy_state=facts.previous_strategy_state,
+            worker_placements=placement_facts,
+            execution_bindings=binding_facts,
+            handoff_transitions=handoff_facts,
         )
         dependencies = self._dependency_mappings(facts_for_dependencies)
         eligibility = self._eligibility_by_request(
@@ -265,8 +299,16 @@ class CollaborationProjectionAssembler:
                 size_bytes=state_size,
                 limit_bytes=capability.max_strategy_state_bytes,
             )
+        result_input_evaluations = (
+            self._result_input_evaluations(
+                facts_for_dependencies,
+                policy=policy,
+            )
+            if projection_schema_version == 2
+            else ()
+        )
 
-        semantic_payload = {
+        semantic_payload: dict[str, object] = {
             "policy": policy,
             "tasks": tasks,
             "subtasks": subtasks,
@@ -279,6 +321,11 @@ class CollaborationProjectionAssembler:
             "releases": releases,
             "previous_strategy_state": previous_strategy_state,
         }
+        evaluation_mappings = tuple(
+            item.to_mapping() for item in result_input_evaluations
+        )
+        if projection_schema_version == 2:
+            semantic_payload["result_input_evaluations"] = evaluation_mappings
         fingerprints = self._fingerprints(
             semantic_payload,
             requests=requests,
@@ -287,6 +334,11 @@ class CollaborationProjectionAssembler:
             evidence=evidence,
             releases=releases,
         )
+        if projection_schema_version == 2:
+            fingerprints = {
+                **fingerprints,
+                "result_inputs": _hash_value(evaluation_mappings),
+            }
         if projection_id is None:
             projection_id = uuid5(
                 NAMESPACE_URL,
@@ -294,31 +346,60 @@ class CollaborationProjectionAssembler:
                 f"{head.run_id}:{fact_cursor}:{head.run_resource_version}:"
                 f"{fingerprints['semantic_change_hash']}",
             )
-        projection = RuntimeProjectionV1(
-            schema_version=1,
-            projection_id=projection_id,
-            workspace_id=head.workspace_id,
-            root_task_id=head.root_task_id,
-            run_id=head.run_id,
-            plan_snapshot_id=head.plan_snapshot_id,
-            plan_generation=head.plan_generation,
-            plan_content_hash=head.plan_content_hash,
-            run_resource_version=head.run_resource_version,
-            fact_cursor=fact_cursor,
-            policy=policy,
-            tasks=tasks,
-            subtasks=subtasks,
-            worker_items=worker_items,
-            dependencies=dependencies,
-            execution_requests=requests,
-            executions=executions,
-            artifacts=artifacts,
-            evidence=evidence,
-            releases=releases,
-            previous_strategy_state=previous_strategy_state,
-            fingerprints=fingerprints,
-            created_at=now or datetime.now(UTC),
-        )
+        created_at = now or datetime.now(UTC)
+        if projection_schema_version == 1:
+            projection: RuntimeProjection = RuntimeProjectionV1(
+                schema_version=1,
+                projection_id=projection_id,
+                workspace_id=head.workspace_id,
+                root_task_id=head.root_task_id,
+                run_id=head.run_id,
+                plan_snapshot_id=head.plan_snapshot_id,
+                plan_generation=head.plan_generation,
+                plan_content_hash=head.plan_content_hash,
+                run_resource_version=head.run_resource_version,
+                fact_cursor=fact_cursor,
+                policy=policy,
+                tasks=tasks,
+                subtasks=subtasks,
+                worker_items=worker_items,
+                dependencies=dependencies,
+                execution_requests=requests,
+                executions=executions,
+                artifacts=artifacts,
+                evidence=evidence,
+                releases=releases,
+                previous_strategy_state=previous_strategy_state,
+                fingerprints=fingerprints,
+                created_at=created_at,
+            )
+        else:
+            projection = RuntimeProjectionV2(
+                schema_version=2,
+                projection_id=projection_id,
+                workspace_id=head.workspace_id,
+                root_task_id=head.root_task_id,
+                run_id=head.run_id,
+                plan_snapshot_id=head.plan_snapshot_id,
+                plan_generation=head.plan_generation,
+                plan_content_hash=head.plan_content_hash,
+                run_resource_version=head.run_resource_version,
+                fact_cursor=fact_cursor,
+                policy=policy,
+                tasks=tasks,
+                subtasks=subtasks,
+                worker_items=worker_items,
+                dependencies=dependencies,
+                execution_requests=requests,
+                executions=executions,
+                artifacts=artifacts,
+                evidence=evidence,
+                releases=releases,
+                previous_strategy_state=previous_strategy_state,
+                result_input_evaluations=result_input_evaluations,
+                fingerprints=fingerprints,
+                created_at=created_at,
+            )
         size_bytes = len(projection.canonical_bytes())
         limit_bytes = min(self._max_projection_bytes, capability.max_projection_bytes)
         if size_bytes > limit_bytes:
@@ -327,6 +408,46 @@ class CollaborationProjectionAssembler:
                 limit_bytes=limit_bytes,
             )
         return projection
+
+    @staticmethod
+    def _result_input_evaluations(
+        facts: CollaborationFacts,
+        *,
+        policy: Mapping[str, object],
+    ) -> tuple[RuntimeResultInputEvaluation, ...]:
+        from sidera_control_plane.application.result_input_evaluation import (
+            ResultInputEvaluator,
+        )
+        from sidera_control_plane.application.result_input_sources import (
+            resolve_result_input_source,
+        )
+
+        raw_groups = policy.get("input_groups")
+        if not isinstance(raw_groups, (list, tuple)):
+            raise ValidationError("Projection v2 policy input_groups must be an array")
+        groups = tuple(InputGroupV1.from_mapping(item) for item in raw_groups)
+        evaluator = ResultInputEvaluator()
+        result: list[RuntimeResultInputEvaluation] = []
+        for group in groups:
+            consumer_request_id = _current_consumer_request_id(group, facts=facts)
+            sources = tuple(
+                resolve_result_input_source(
+                    worker_item_key=candidate.worker_item_key,
+                    facts=facts,
+                )
+                for candidate in group.candidates
+            )
+            result.append(
+                RuntimeResultInputEvaluation(
+                    consumer_execution_request_id=consumer_request_id,
+                    group_key=group.group_key,
+                    evaluation=evaluator.evaluate_group(
+                        group=group,
+                        sources=sources,
+                    ),
+                )
+            )
+        return tuple(result)
 
     @staticmethod
     def _validate_identity(facts: CollaborationFacts, fact_cursor: int) -> None:
@@ -417,7 +538,9 @@ class CollaborationProjectionAssembler:
 
         artifacts_by_execution: dict[UUID, list[CollaborationArtifactFact]] = {}
         for artifact in facts.artifacts:
-            artifacts_by_execution.setdefault(artifact.execution_id, []).append(artifact)
+            artifacts_by_execution.setdefault(artifact.execution_id, []).append(
+                artifact
+            )
 
         evidence_by_execution: dict[UUID, list[CollaborationEvidenceFact]] = {}
         for evidence in facts.evidence:
@@ -448,16 +571,12 @@ class CollaborationProjectionAssembler:
             evidence_refs = tuple(
                 sorted(
                     {
-                        _normalized_evidence_ref(
-                            evidence.acceptance_criterion_ref
-                        )
+                        _normalized_evidence_ref(evidence.acceptance_criterion_ref)
                         for execution_id in execution_ids
                         for evidence in evidence_by_execution.get(execution_id, ())
                         if evidence.status == EvidenceClaimStatus.CANDIDATE.value
                         and _valid_evidence_ref(
-                            _normalized_evidence_ref(
-                                evidence.acceptance_criterion_ref
-                            )
+                            _normalized_evidence_ref(evidence.acceptance_criterion_ref)
                         )
                     }
                 )
@@ -713,6 +832,45 @@ def _effective_policy(
     return enabled, strategy if isinstance(strategy, str) else None
 
 
+def _projection_schema_version(policy: Mapping[str, object]) -> int:
+    value = policy.get("schema_version")
+    if value is None:
+        return 1
+    if type(value) is not int or value not in {1, 2}:
+        raise ValidationError("unsupported collaboration policy schema version")
+    return value
+
+
+def _current_consumer_request_id(
+    group: InputGroupV1,
+    *,
+    facts: CollaborationFacts,
+) -> UUID:
+    placements = tuple(
+        item
+        for item in facts.worker_placements
+        if item.worker_item_key == group.consumer_worker_item_key
+    )
+    if len(placements) != 1:
+        raise ValidationError(
+            "input group consumer must have one current WorkerItem placement"
+        )
+    placement = placements[0]
+    requests = tuple(
+        item
+        for item in facts.requests
+        if item.worker_item_key == group.consumer_worker_item_key
+        and item.worker_item_id == placement.worker_item_id
+        and item.subtask_task_id == placement.subtask_task_id
+        and item.handoff_transition_id is None
+    )
+    if len(requests) != 1:
+        raise ValidationError(
+            "input group consumer must have one current execution request"
+        )
+    return requests[0].id
+
+
 def _execution_status(value: str) -> ExecutionStatus | None:
     try:
         return ExecutionStatus(value)
@@ -721,8 +879,10 @@ def _execution_status(value: str) -> ExecutionStatus | None:
 
 
 def _valid_evidence_ref(value: str) -> bool:
-    return value.startswith("acceptance:") and len(value) > len("acceptance:") and not any(
-        character.isspace() for character in value
+    return (
+        value.startswith("acceptance:")
+        and len(value) > len("acceptance:")
+        and not any(character.isspace() for character in value)
     )
 
 

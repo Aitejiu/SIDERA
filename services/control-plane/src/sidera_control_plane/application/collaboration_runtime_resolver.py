@@ -125,9 +125,7 @@ class CollaborationRuntimeResolver:
         definition = self._modules.get_definition(
             run.runtime_definition_id, run.workspace_id
         )
-        instance = self._modules.get_instance(
-            run.runtime_instance_id, run.workspace_id
-        )
+        instance = self._modules.get_instance(run.runtime_instance_id, run.workspace_id)
         if definition is None or instance is None:
             raise RuntimeResolutionError(
                 "runtime_binding_missing",
@@ -141,7 +139,10 @@ class CollaborationRuntimeResolver:
         definition: ModuleDefinition,
         instance: ModuleInstance,
     ) -> None:
-        if definition.workspace_id != run.workspace_id or instance.workspace_id != run.workspace_id:
+        if (
+            definition.workspace_id != run.workspace_id
+            or instance.workspace_id != run.workspace_id
+        ):
             raise RuntimeResolutionError(
                 "runtime_binding_scope_mismatch",
                 "the pinned collaboration runtime belongs to another workspace",
@@ -205,15 +206,24 @@ class CollaborationRuntimeResolver:
                 "the runtime capability interface does not match the Run",
             )
         _verify_service_limits(capability)
-        if 1 not in capability.projection_schema_versions:
+        policy_schema_version = _policy_schema_version(run.policy_snapshot)
+        if (
+            policy_schema_version == 1
+            and 1 not in capability.projection_schema_versions
+        ):
             raise RuntimeResolutionError(
                 "runtime_capability_unsupported",
                 "the runtime does not support Projection v1",
             )
-        if 1 not in capability.decision_schema_versions:
+        if policy_schema_version == 1 and 1 not in capability.decision_schema_versions:
             raise RuntimeResolutionError(
                 "runtime_capability_unsupported",
                 "the runtime does not support Decision v1",
+            )
+        if policy_schema_version == 2 and not capability.supports_input_groups_v1():
+            raise RuntimeResolutionError(
+                "runtime_capability_unsupported",
+                "the runtime does not support the pinned V2 input-group contract",
             )
         if CollaborationStrategy.ALL_REQUIRED.value not in capability.strategy_ids:
             raise RuntimeResolutionError(
@@ -225,6 +235,16 @@ class CollaborationRuntimeResolver:
                 "runtime_capability_unsupported",
                 "the runtime does not support operation-id idempotency",
             )
+
+
+def _policy_schema_version(policy: Mapping[str, object]) -> int:
+    value = policy.get("schema_version")
+    if type(value) is not int or value not in {1, 2}:
+        raise RuntimeResolutionError(
+            "runtime_capability_unsupported",
+            "the Run pins an unsupported collaboration policy schema",
+        )
+    return value
 
 
 def _verify_service_limits(capability: CollaborationRuntimeCapabilityProfile) -> None:

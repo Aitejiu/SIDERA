@@ -7,9 +7,11 @@ from uuid import UUID
 from sidera_control_plane.domain.collaboration import CollaborationStrategy
 from sidera_control_plane.domain.collaboration_runtime import (
     ReleaseExecutionRequestIntentV1,
+    RuntimeDecision,
     RuntimeDecisionOutcome,
     RuntimeDecisionV1,
     RuntimeEnvelopeError,
+    RuntimeProjection,
     RuntimeProjectionV1,
     canonical_json_bytes,
 )
@@ -31,11 +33,15 @@ class ReferenceCollaborationRuntime:
 
     def evaluate(
         self,
-        projection: RuntimeProjectionV1,
+        projection: RuntimeProjection,
         *,
         operation_id: UUID,
         deadline: datetime,
-    ) -> RuntimeDecisionV1:
+    ) -> RuntimeDecision:
+        if not isinstance(projection, RuntimeProjectionV1):
+            raise RuntimeEnvelopeError(
+                "reference Runtime does not yet implement Projection v2"
+            )
         self._verify_deadline(deadline)
         strategy_state = dict(projection.previous_strategy_state)
         if len(canonical_json_bytes(strategy_state)) > _limit(
@@ -78,9 +84,7 @@ class ReferenceCollaborationRuntime:
                 if intents
                 else RuntimeDecisionOutcome.NO_CHANGE
             ),
-            reason_code=(
-                "eligible_requests" if intents else "no_eligible_requests"
-            ),
+            reason_code=("eligible_requests" if intents else "no_eligible_requests"),
             summary=(
                 f"release {len(intents)} eligible execution request(s)"
                 if intents
@@ -120,7 +124,9 @@ def _eligible_requests(
         if request_id is None:
             continue
         if request_id in found:
-            raise RuntimeEnvelopeError("projection contains duplicate execution request")
+            raise RuntimeEnvelopeError(
+                "projection contains duplicate execution request"
+            )
         if str(request_id) in released:
             continue
         if raw_request.get("eligible") is not True:

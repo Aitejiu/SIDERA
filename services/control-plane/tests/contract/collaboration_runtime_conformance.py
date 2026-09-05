@@ -11,7 +11,9 @@ from sidera_control_plane.adapters.reference_collaboration_runtime import (
 )
 from sidera_control_plane.domain.collaboration_runtime import (
     CollaborationRuntime,
+    RuntimeDecision,
     RuntimeDecisionOutcome,
+    RuntimeProjection,
     RuntimeProjectionV1,
 )
 
@@ -94,15 +96,19 @@ def assert_collaboration_runtime_conforms(
     )
 
     assert first == repeated
-    assert first.run_id == RUN_ID
-    assert first.projection_id == PROJECTION_ID
-    assert first.projection_hash == projection.content_hash
+    assert_runtime_identity_echoes(
+        decision=first,
+        projection=projection,
+        operation_id=OPERATION_ID,
+    )
     assert [intent.target_execution_request_id for intent in first.intents] == [
         REQUEST_A,
         REQUEST_B,
     ]
     assert [intent.ordinal for intent in first.intents] == [0, 1]
-    assert all(intent.target_execution_request_id != REQUEST_C for intent in first.intents)
+    assert all(
+        intent.target_execution_request_id != REQUEST_C for intent in first.intents
+    )
     assert all(intent.idempotency_key for intent in first.intents)
 
     no_change = factory().evaluate(
@@ -112,6 +118,20 @@ def assert_collaboration_runtime_conforms(
     )
     assert no_change.outcome is RuntimeDecisionOutcome.NO_CHANGE
     assert no_change.intents == ()
+
+
+def assert_runtime_identity_echoes(
+    *,
+    decision: RuntimeDecision,
+    projection: RuntimeProjection,
+    operation_id: UUID,
+) -> None:
+    """Apply the same immutable identity checks to every contract version."""
+
+    assert decision.operation_id == operation_id
+    assert decision.run_id == projection.run_id
+    assert decision.projection_id == projection.projection_id
+    assert decision.projection_hash == projection.content_hash
 
 
 def test_reference_runtime_conforms() -> None:

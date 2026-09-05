@@ -22,11 +22,17 @@ from sidera_control_plane.application.ports import (
 from sidera_control_plane.domain.collaboration import CollaborationRun
 from sidera_control_plane.domain.collaboration_runtime import (
     CollaborationRuntime,
+    RuntimeDecision,
     RuntimeDecisionV1,
+    RuntimeDecisionV2,
     RuntimeEnvelopeError,
+    RuntimeProjectionV2,
     canonical_json_bytes,
     parse_runtime_decision_v1,
+    parse_runtime_decision_v2,
 )
+from sidera_control_plane.domain.input_selections import InputSelectionSourceV1
+from sidera_control_plane.domain.result_inputs import InputGroupV1, ResultInputSource
 
 _DEFAULT_MAX_PROJECTION_BYTES = 1_048_576
 _DEFAULT_MAX_DECISION_BYTES = 65_536
@@ -65,7 +71,7 @@ MonotonicClock = Callable[[], float]
 class RuntimeInvocationResult:
     response_bytes: bytes
     response_hash: str
-    decision: RuntimeDecisionV1
+    decision: RuntimeDecision
     duration_ms: int
 
 
@@ -143,6 +149,12 @@ class CollaborationRuntimeInvoker:
         elapsed: float | None = None
         try:
             capability = prepared.run.runtime_capability_snapshot
+            runtime_schema_version = _runtime_schema_version(prepared.run)
+            if prepared.projection.schema_version != runtime_schema_version:
+                raise RuntimeEnvelopeError(
+                    "prepared projection schema does not match the Run policy"
+                )
+            _verify_projection_identity(prepared)
             response_bytes = prepared.projection.canonical_bytes()
             projection_limit = min(
                 self._max_projection_bytes,
@@ -199,7 +211,12 @@ class CollaborationRuntimeInvoker:
                     diagnostic="Runtime response exceeds the configured byte limit",
                     elapsed=elapsed,
                 )
-            decision = parse_runtime_decision_v1(
+            parser = (
+                parse_runtime_decision_v1
+                if runtime_schema_version == 1
+                else parse_runtime_decision_v2
+            )
+            decision = parser(
                 response_bytes,
                 max_bytes=decision_limit,
                 max_intents=min(
@@ -212,6 +229,7 @@ class CollaborationRuntimeInvoker:
                 ),
             )
             _verify_decision_identity(prepared, decision)
+            _verify_decision_source_membership(prepared, decision)
             return RuntimeInvocationResult(
                 response_bytes=response_bytes,
                 response_hash=response_hash,
@@ -344,7 +362,7 @@ class CollaborationRuntimeInvoker:
 
 
 def _canonical_response_bytes(value: object) -> bytes:
-    if isinstance(value, RuntimeDecisionV1):
+    if isinstance(value, (RuntimeDecisionV1, RuntimeDecisionV2)):
         return value.canonical_bytes()
     if isinstance(value, bytes):
         return value
@@ -359,7 +377,7 @@ def _canonical_response_bytes(value: object) -> bytes:
 
 def _verify_decision_identity(
     prepared: PreparedCollaborationEvaluation,
-    decision: RuntimeDecisionV1,
+    decision: RuntimeDecision,
 ) -> None:
     if decision.operation_id != prepared.operation_id:
         raise RuntimeEnvelopeError("Runtime response operation_id does not match")
@@ -369,6 +387,130 @@ def _verify_decision_identity(
         raise RuntimeEnvelopeError("Runtime response projection_id does not match")
     if decision.projection_hash != prepared.projection.content_hash:
         raise RuntimeEnvelopeError("Runtime response projection_hash does not match")
+
+
+def _verify_projection_identity(
+    prepared: PreparedCollaborationEvaluation,
+) -> None:
+    run = prepared.run
+    projection = prepared.projection
+    if projection.workspace_id != run.workspace_id:
+        raise RuntimeEnvelopeError("projection workspace_id does not match the Run")
+    if projection.root_task_id != run.root_task_id:
+        raise RuntimeEnvelopeError("projection root_task_id does not match the Run")
+    if projection.run_id != run.id:
+        raise RuntimeEnvelopeError("projection run_id does not match the Run")
+    if projection.plan_snapshot_id != run.plan_snapshot_id:
+        raise RuntimeEnvelopeError("projection plan_snapshot_id does not match the Run")
+    if projection.plan_generation != run.plan_generation:
+        raise RuntimeEnvelopeError("projection plan_generation does not match the Run")
+    if projection.plan_content_hash != run.plan_content_hash:
+        raise RuntimeEnvelopeError(
+            "projection plan_content_hash does not match the Run"
+        )
+
+
+def _verify_decision_source_membership(
+    prepared: PreparedCollaborationEvaluation,
+    decision: RuntimeDecision,
+) -> None:
+    if not isinstance(decision, RuntimeDecisionV2):
+        return
+    projection = prepared.projection
+    if not isinstance(projection, RuntimeProjectionV2):
+        raise RuntimeEnvelopeError("Decision v2 requires Projection v2")
+    raw_groups = projection.policy.get("input_groups")
+    if not isinstance(raw_groups, (list, tuple)):
+        raise RuntimeEnvelopeError("Projection v2 input_groups are invalid")
+    groups = {
+        group.group_key: group
+        for group in (InputGroupV1.from_mapping(item) for item in raw_groups)
+    }
+    evaluations = {item.group_key: item for item in projection.result_input_evaluations}
+    for intent in decision.intents:
+        for selection in intent.input_group_selections:
+            group = groups.get(selection.group_key)
+            evaluation = evaluations.get(selection.group_key)
+            if group is None or evaluation is None:
+                raise RuntimeEnvelopeError(
+                    "Decision v2 references an unknown input group"
+                )
+            if (
+                evaluation.consumer_execution_request_id
+                != intent.target_execution_request_id
+            ):
+                raise RuntimeEnvelopeError(
+                    "Decision v2 input group belongs to another execution request"
+                )
+            rule_hash = sha256(canonical_json_bytes(group.to_mapping())).hexdigest()
+            if selection.rule_hash != rule_hash:
+                raise RuntimeEnvelopeError(
+                    "Decision v2 input group rule hash does not match Projection"
+                )
+            priorities = {
+                item.worker_item_key: item.priority for item in group.candidates
+            }
+            ready_sources = {
+                item.worker_item_key: item
+                for item in evaluation.evaluation.ready_sources
+            }
+            for selected_source in selection.sources:
+                source = ready_sources.get(selected_source.worker_item_key)
+                priority = priorities.get(selected_source.worker_item_key)
+                if source is None or priority is None:
+                    raise RuntimeEnvelopeError(
+                        "Decision v2 source is not a ready Projection candidate"
+                    )
+                expected = _selection_source_from_projection(
+                    source,
+                    priority=priority,
+                )
+                if selected_source != expected:
+                    raise RuntimeEnvelopeError(
+                        "Decision v2 source does not match its Projection candidate"
+                    )
+
+
+def _selection_source_from_projection(
+    source: ResultInputSource,
+    *,
+    priority: int,
+) -> InputSelectionSourceV1:
+    if (
+        source.worker_item_id is None
+        or source.effective_request_id is None
+        or not source.allowed_lineage_ids
+        or source.effective_execution_id is None
+        or source.attempt is None
+        or source.source_basis_hash is None
+    ):
+        raise RuntimeEnvelopeError(
+            "ready Projection candidate has incomplete source identity"
+        )
+    return InputSelectionSourceV1(
+        worker_item_key=source.worker_item_key,
+        worker_item_id=source.worker_item_id,
+        subtask_path=source.subtask_path,
+        effective_request_id=source.effective_request_id,
+        allowed_lineage_ids=source.allowed_lineage_ids,
+        effective_lineage_id=source.allowed_lineage_ids[-1],
+        effective_execution_id=source.effective_execution_id,
+        attempt=source.attempt,
+        inheritance_refs=source.inheritance_refs,
+        priority=priority,
+        source_basis_hash=source.source_basis_hash,
+        artifacts=source.artifacts,
+        evidence=source.evidence,
+    )
+
+
+def _runtime_schema_version(run: CollaborationRun) -> int:
+    value = run.policy_snapshot.get("schema_version")
+    if value is None:
+        return 1
+    if type(value) is not int or value not in {1, 2}:
+        raise RuntimeEnvelopeError("Run pins an unsupported policy schema_version")
+    return value
 
 
 def _classify_resolution_error(code: str) -> tuple[str, bool]:

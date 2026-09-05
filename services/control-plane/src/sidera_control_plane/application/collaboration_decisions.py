@@ -40,6 +40,7 @@ from sidera_control_plane.domain.collaboration_governance import (
 )
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionOutcome,
+    RuntimeEnvelopeError,
     RuntimeProjectionV1,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
@@ -636,11 +637,16 @@ class CollaborationDecisionService:
                     run_resource_version=prepared.projection.run_resource_version,
                 ),
             )
-        return self._projection_assembler.assemble(
+        projection = self._projection_assembler.assemble(
             facts,
             fact_cursor=prepared.projection.fact_cursor,
             projection_id=prepared.projection.projection_id,
         )
+        if not isinstance(projection, RuntimeProjectionV1):
+            raise RuntimeEnvelopeError(
+                "Decision v2 application is not enabled in this transaction path"
+            )
+        return projection
 
     @staticmethod
     def _decision_record(

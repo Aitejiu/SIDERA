@@ -28,7 +28,9 @@ from sidera_control_plane.domain.collaboration import (
 )
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeEnvelopeError,
+    RuntimeProjection,
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import DomainError
@@ -72,7 +74,7 @@ RuntimeResolverFactory = Callable[
 class PreparedCollaborationEvaluation:
     run: CollaborationRun
     evaluation: CollaborationEvaluation
-    projection: RuntimeProjectionV1
+    projection: RuntimeProjection
     operation_id: UUID
     lease_owner: str
     lease_expires_at: datetime
@@ -501,10 +503,20 @@ class CollaborationReconciler:
                 "claimable collaboration evaluation has no projection snapshot",
             )
         try:
-            projection = RuntimeProjectionV1.from_mapping(
-                stored_projection.payload,
-                created_at=stored_projection.created_at,
-            )
+            if stored_projection.schema_version == 1:
+                projection: RuntimeProjection = RuntimeProjectionV1.from_mapping(
+                    stored_projection.payload,
+                    created_at=stored_projection.created_at,
+                )
+            elif stored_projection.schema_version == 2:
+                projection = RuntimeProjectionV2.from_mapping(
+                    stored_projection.payload,
+                    created_at=stored_projection.created_at,
+                )
+            else:
+                raise RuntimeEnvelopeError(
+                    "stored projection has an unsupported schema_version"
+                )
         except RuntimeEnvelopeError as exc:
             raise RuntimeResolutionError(
                 "projection_snapshot_invalid",
@@ -558,7 +570,7 @@ class CollaborationReconciler:
         uow: ControlPlaneUnitOfWork,
         *,
         run: CollaborationRun,
-        projection: RuntimeProjectionV1,
+        projection: RuntimeProjection,
         owner_id: str,
         now: datetime,
     ) -> PreparedCollaborationEvaluation | None:
@@ -897,7 +909,7 @@ def _run_matches_head(run: CollaborationRun, head: RootTaskPlanHead) -> bool:
     )
 
 
-def _projection_snapshot(projection: RuntimeProjectionV1) -> RuntimeProjectionSnapshot:
+def _projection_snapshot(projection: RuntimeProjection) -> RuntimeProjectionSnapshot:
     payload = projection.to_mapping()
     return RuntimeProjectionSnapshot(
         id=projection.projection_id,

@@ -606,11 +606,16 @@ class CollaborationGovernanceReleaseApplier:
                     run_resource_version=run.resource_version,
                 ),
             )
-        return self._projection_assembler.assemble(
+        projection = self._projection_assembler.assemble(
             facts,
             fact_cursor=cursor,
             now=now,
         )
+        if not isinstance(projection, RuntimeProjectionV1):
+            raise RuntimeEnvelopeError(
+                "Decision v2 governance release is not enabled in this path"
+            )
+        return projection
 
     def _can_form_current_recommendation(
         self,

@@ -457,6 +457,93 @@ def result_source(
     )
 
 
+def projection_v2(*, ready_keys: tuple[str, ...]):
+    """Build a V2 projection from evaluated sources, never preset eligibility."""
+
+    from sidera_control_plane.application.result_input_evaluation import (
+        ResultInputEvaluator,
+    )
+    from sidera_control_plane.domain.collaboration_runtime import (
+        RuntimeProjectionV2,
+        RuntimeResultInputEvaluation,
+    )
+    from sidera_control_plane.domain.result_inputs import InputGroupV1
+
+    from .test_collaboration_runtime_contracts import projection_fixture
+
+    unknown = sorted(set(ready_keys) - {"a", "b", "c"})
+    if unknown:
+        raise ValueError(f"unsupported ready source keys: {', '.join(unknown)}")
+    group = InputGroupV1.from_mapping(group_mapping())
+    evaluation = ResultInputEvaluator().evaluate_group(
+        group=group,
+        sources=tuple(
+            result_source(
+                key,
+                execution_status="succeeded" if key in ready_keys else "running",
+            )
+            for key in ("a", "b", "c")
+        ),
+    )
+    base = projection_fixture()
+    consumer_request_id = uuid5(
+        NAMESPACE_URL, "sidera:r6.3.4:projection-v2:summary-request"
+    )
+    requests = (
+        *base.execution_requests,
+        {
+            "id": str(consumer_request_id),
+            "subtask_key": "summary",
+            "worker_item_key": "summary",
+            "version": 1,
+            "status": "blocked",
+            "collaboration_gate_mode": "release_required",
+            "eligible": True,
+            "eligibility_reason": "eligible",
+        },
+    )
+    return RuntimeProjectionV2(
+        schema_version=2,
+        projection_id=base.projection_id,
+        workspace_id=base.workspace_id,
+        root_task_id=base.root_task_id,
+        run_id=base.run_id,
+        plan_snapshot_id=base.plan_snapshot_id,
+        plan_generation=base.plan_generation,
+        plan_content_hash=base.plan_content_hash,
+        run_resource_version=base.run_resource_version,
+        fact_cursor=base.fact_cursor,
+        policy={
+            "schema_version": 2,
+            "default_policy": {"enabled": True, "strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [group.to_mapping()],
+        },
+        tasks=base.tasks,
+        subtasks=(*base.subtasks, {"key": "summary", "title": "Summary"}),
+        worker_items=(
+            *base.worker_items,
+            {"key": "summary", "subtask_key": "summary", "title": "Summary"},
+        ),
+        dependencies=base.dependencies,
+        execution_requests=requests,
+        executions=base.executions,
+        artifacts=base.artifacts,
+        evidence=base.evidence,
+        releases=base.releases,
+        previous_strategy_state=base.previous_strategy_state,
+        result_input_evaluations=(
+            RuntimeResultInputEvaluation(
+                consumer_execution_request_id=consumer_request_id,
+                group_key=group.group_key,
+                evaluation=evaluation,
+            ),
+        ),
+        fingerprints=base.fingerprints,
+        created_at=base.created_at,
+    )
+
+
 def proposal_v5_mapping() -> dict[str, object]:
     """Return a complete initial proposal using the input-group policy contract."""
 

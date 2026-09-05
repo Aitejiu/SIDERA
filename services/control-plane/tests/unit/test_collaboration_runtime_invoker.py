@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -28,13 +30,19 @@ from sidera_control_plane.domain.collaboration import (
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionOutcome,
     RuntimeDecisionV1,
+    RuntimeDecisionV2,
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
 )
 from sidera_control_plane.domain.modules import (
+    COLLABORATION_INPUT_GROUPS_STRATEGY_ID,
     CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     StabilityLevel,
 )
+
+from .result_input_fixtures import projection_v2
+from .test_collaboration_runtime_v2 import _decision as _selection_decision_v2
 
 WORKSPACE_ID = UUID("21000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("31000000-0000-0000-0000-000000000001")
@@ -151,6 +159,47 @@ def _prepared(
     )
 
 
+def _prepared_v2() -> PreparedCollaborationEvaluation:
+    projection = projection_v2(ready_keys=("a", "b"))
+    capability = replace(
+        _capability(),
+        projection_schema_versions=(1, 2),
+        decision_schema_versions=(1, 2),
+        strategy_ids=("all_required", COLLABORATION_INPUT_GROUPS_STRATEGY_ID),
+    )
+    run = replace(
+        _run(capability=capability),
+        id=projection.run_id,
+        workspace_id=projection.workspace_id,
+        root_task_id=projection.root_task_id,
+        plan_snapshot_id=projection.plan_snapshot_id,
+        plan_generation=projection.plan_generation,
+        plan_content_hash=projection.plan_content_hash,
+        policy_snapshot=projection.policy,
+    )
+    evaluation = CollaborationEvaluation.create(
+        evaluation_id=EVALUATION_ID,
+        workspace_id=run.workspace_id,
+        run_id=run.id,
+        projection_snapshot_id=projection.projection_id,
+        operation_id=OPERATION_ID,
+        now=NOW,
+    )
+    evaluation.claim(
+        owner_id="collaboration-worker-a",
+        lease_expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+    return PreparedCollaborationEvaluation(
+        run=run,
+        evaluation=evaluation,
+        projection=projection,
+        operation_id=OPERATION_ID,
+        lease_owner="collaboration-worker-a",
+        lease_expires_at=NOW + timedelta(minutes=5),
+    )
+
+
 def _decision(
     prepared: PreparedCollaborationEvaluation, **changes: Any
 ) -> RuntimeDecisionV1:
@@ -168,6 +217,25 @@ def _decision(
     }
     values.update(changes)
     return RuntimeDecisionV1(**values)
+
+
+def _decision_v2(
+    prepared: PreparedCollaborationEvaluation, **changes: Any
+) -> RuntimeDecisionV2:
+    values: dict[str, object] = {
+        "schema_version": 2,
+        "operation_id": prepared.operation_id,
+        "run_id": prepared.run.id,
+        "projection_id": prepared.projection.projection_id,
+        "projection_hash": prepared.projection.content_hash,
+        "outcome": RuntimeDecisionOutcome.NO_CHANGE,
+        "reason_code": "no_eligible_requests",
+        "summary": "no release-required request is eligible",
+        "strategy_state": {},
+        "intents": (),
+    }
+    values.update(changes)
+    return RuntimeDecisionV2(**values)
 
 
 class StaticResolver:
@@ -381,3 +449,108 @@ def test_diagnostic_is_bounded_and_control_characters_are_removed() -> None:
     assert len(result.diagnostic_summary.encode("utf-8")) <= 24
     assert "\x00" not in result.diagnostic_summary
     assert "sk-1234567890" not in result.diagnostic_summary
+
+
+@pytest.mark.parametrize("wire_response", (False, True))
+def test_v2_run_parses_only_a_v2_decision(wire_response: bool) -> None:
+    prepared = _prepared_v2()
+    decision = _decision_v2(prepared)
+    returned: object = decision.canonical_bytes() if wire_response else decision
+
+    result = _invoker(StaticResolver(ReturningRuntime(returned))).invoke(
+        prepared, now=NOW
+    )
+
+    assert isinstance(result, RuntimeInvocationResult)
+    assert isinstance(result.decision, RuntimeDecisionV2)
+    assert result.decision == decision
+
+
+def test_v2_run_rejects_a_v1_decision_without_version_guessing() -> None:
+    prepared = _prepared_v2()
+    returned = _decision(prepared)
+
+    result = _invoker(StaticResolver(ReturningRuntime(returned))).invoke(
+        prepared, now=NOW
+    )
+
+    assert isinstance(result, RuntimeInvocationFailure)
+    assert result.code == "runtime_output_invalid"
+
+
+def test_v2_run_rejects_a_v1_projection_before_runtime_invocation() -> None:
+    prepared = _prepared_v2()
+    mismatched = replace(prepared, projection=_projection(prepared.run))
+    runtime = ReturningRuntime(_decision_v2(prepared))
+
+    result = _invoker(StaticResolver(runtime)).invoke(mismatched, now=NOW)
+
+    assert isinstance(result, RuntimeInvocationFailure)
+    assert result.code == "runtime_output_invalid"
+    assert runtime.operation_ids == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("operation_id", UUID("73000000-0000-0000-0000-000000000001")),
+        ("run_id", UUID("73000000-0000-0000-0000-000000000002")),
+        ("projection_id", UUID("73000000-0000-0000-0000-000000000003")),
+        ("projection_hash", "f" * 64),
+    ),
+)
+def test_v2_decision_identity_mismatch_is_rejected(field: str, value: object) -> None:
+    prepared = _prepared_v2()
+    returned = _decision_v2(prepared, **{field: value})
+
+    result = _invoker(StaticResolver(ReturningRuntime(returned))).invoke(
+        prepared, now=NOW
+    )
+
+    assert isinstance(result, RuntimeInvocationFailure)
+    assert result.code == "runtime_output_invalid"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("workspace_id", "root_task_id", "run_id", "plan_snapshot_id"),
+)
+def test_v2_projection_identity_mismatch_is_rejected_before_invocation(
+    field: str,
+) -> None:
+    prepared = _prepared_v2()
+    projection = replace(
+        prepared.projection,
+        **{field: UUID("72000000-0000-0000-0000-000000000001")},
+    )
+    runtime = ReturningRuntime(_decision_v2(prepared))
+
+    result = _invoker(StaticResolver(runtime)).invoke(
+        replace(prepared, projection=projection), now=NOW
+    )
+
+    assert isinstance(result, RuntimeInvocationFailure)
+    assert result.code == "runtime_output_invalid"
+    assert runtime.operation_ids == []
+
+
+def test_v2_decision_cannot_invent_a_source_outside_its_projection() -> None:
+    prepared = _prepared_v2()
+    assert isinstance(prepared.projection, RuntimeProjectionV2)
+    decision = replace(
+        _selection_decision_v2(prepared.projection),
+        operation_id=prepared.operation_id,
+    )
+    raw = deepcopy(decision.to_mapping())
+    intents = raw["intents"]
+    assert isinstance(intents, list)
+    groups = intents[0]["input_group_selections"]  # type: ignore[index]
+    assert isinstance(groups, list)
+    sources = groups[0]["sources"]  # type: ignore[index]
+    assert isinstance(sources, list)
+    sources[0]["source_basis_hash"] = "f" * 64  # type: ignore[index]
+
+    result = _invoker(StaticResolver(ReturningRuntime(raw))).invoke(prepared, now=NOW)
+
+    assert isinstance(result, RuntimeInvocationFailure)
+    assert result.code == "runtime_output_invalid"
