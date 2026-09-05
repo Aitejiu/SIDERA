@@ -1,6 +1,150 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from hashlib import sha256
+
+
+def _selection_hash_payload(value: dict[str, object]) -> dict[str, object]:
+    """Build the fixture's independent semantic selection payload."""
+
+    ignored = {
+        "created_at",
+        "decision_id",
+        "id",
+        "intent_id",
+        "projection_hash",
+        "projection_snapshot_id",
+        "selection_hash",
+    }
+
+    def normalize(item: object) -> object:
+        if isinstance(item, dict):
+            return {
+                key: normalize(item[key]) for key in sorted(item) if key not in ignored
+            }
+        if isinstance(item, list):
+            return [normalize(entry) for entry in item]
+        return item
+
+    normalized = normalize(value)
+    assert isinstance(normalized, dict)
+    return normalized
+
+
+def _build_selection_mapping() -> dict[str, object]:
+
+    report_a = b"report-a\n"
+    report_b = b"report-b\n"
+    raw: dict[str, object] = {
+        "schema_version": 1,
+        "id": "61000000-0000-0000-0000-000000000001",
+        "workspace_id": "61000000-0000-0000-0000-000000000002",
+        "root_task_id": "61000000-0000-0000-0000-000000000003",
+        "run_id": "61000000-0000-0000-0000-000000000004",
+        "plan_snapshot_id": "61000000-0000-0000-0000-000000000005",
+        "plan_generation": 4,
+        "plan_content_hash": "a" * 64,
+        "target_worker_item_id": "61000000-0000-0000-0000-000000000006",
+        "target_execution_request_id": "61000000-0000-0000-0000-000000000007",
+        "target_request_version": 3,
+        "projection_snapshot_id": "61000000-0000-0000-0000-000000000008",
+        "projection_hash": "b" * 64,
+        "decision_id": "61000000-0000-0000-0000-000000000009",
+        "intent_id": "61000000-0000-0000-0000-000000000010",
+        "groups": [
+            {
+                "group_key": "research",
+                "rule_hash": "c" * 64,
+                "sources": [
+                    {
+                        "worker_item_key": "a",
+                        "worker_item_id": "61000000-0000-0000-0000-000000000011",
+                        "subtask_path": ["research"],
+                        "effective_request_id": "61000000-0000-0000-0000-000000000012",
+                        "allowed_lineage_ids": ["61000000-0000-0000-0000-000000000013"],
+                        "effective_lineage_id": "61000000-0000-0000-0000-000000000013",
+                        "effective_execution_id": "61000000-0000-0000-0000-000000000014",
+                        "attempt": 1,
+                        "inheritance_refs": [],
+                        "priority": 1,
+                        "source_basis_hash": "d" * 64,
+                        "artifacts": [
+                            {
+                                "artifact_id": "61000000-0000-0000-0000-000000000015",
+                                "artifact_type": "report",
+                                "content_hash": sha256(report_a).hexdigest(),
+                                "size_bytes": len(report_a),
+                                "media_type": "text/plain",
+                            }
+                        ],
+                        "evidence": [
+                            {
+                                "evidence_id": "61000000-0000-0000-0000-000000000016",
+                                "acceptance_criterion_ref": "acceptance:research-complete",
+                                "artifact_ids": [
+                                    "61000000-0000-0000-0000-000000000015"
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "worker_item_key": "b",
+                        "worker_item_id": "61000000-0000-0000-0000-000000000017",
+                        "subtask_path": ["research"],
+                        "effective_request_id": "61000000-0000-0000-0000-000000000018",
+                        "allowed_lineage_ids": ["61000000-0000-0000-0000-000000000019"],
+                        "effective_lineage_id": "61000000-0000-0000-0000-000000000019",
+                        "effective_execution_id": "61000000-0000-0000-0000-000000000020",
+                        "attempt": 1,
+                        "inheritance_refs": [],
+                        "priority": 2,
+                        "source_basis_hash": "e" * 64,
+                        "artifacts": [
+                            {
+                                "artifact_id": "61000000-0000-0000-0000-000000000021",
+                                "artifact_type": "report",
+                                "content_hash": sha256(report_b).hexdigest(),
+                                "size_bytes": len(report_b),
+                                "media_type": "text/plain",
+                            }
+                        ],
+                        "evidence": [
+                            {
+                                "evidence_id": "61000000-0000-0000-0000-000000000022",
+                                "acceptance_criterion_ref": "acceptance:research-complete",
+                                "artifact_ids": [
+                                    "61000000-0000-0000-0000-000000000021"
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+        "hard_inputs": [],
+        "created_at": "2026-08-25T12:00:00+00:00",
+    }
+    payload = _selection_hash_payload(raw)
+    raw["selection_hash"] = sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return raw
+
+
+_SELECTION_MAPPING = _build_selection_mapping()
+
+
+def selection_mapping() -> dict[str, object]:
+    """Return an independent, valid immutable-selection fixture."""
+
+    return deepcopy(_SELECTION_MAPPING)
 
 
 def proposal_v5_mapping() -> dict[str, object]:
@@ -80,9 +224,7 @@ def proposal_v5_mapping() -> dict[str, object]:
                 "group_key": "implementation",
                 "title": "Implementation result",
                 "consumer_worker_item_key": "review-worker",
-                "candidates": [
-                    {"worker_item_key": "build-worker", "priority": 1}
-                ],
+                "candidates": [{"worker_item_key": "build-worker", "priority": 1}],
                 "requirements": {
                     "execution_status": "succeeded",
                     "required_artifact_refs": ["artifact_type:build"],
@@ -117,7 +259,11 @@ def revision_v5_mapping() -> dict[str, object]:
     intents[0]["worker_item_key"] = "a"
     worker_decisions[0]["target_worker_item_key"] = "a"
 
-    for key, title in (("b", "Worker B"), ("c", "Worker C"), ("summary", "Summary worker")):
+    for key, title in (
+        ("b", "Worker B"),
+        ("c", "Worker C"),
+        ("summary", "Summary worker"),
+    ):
         worker = deepcopy(workers[0])
         worker["key"] = key
         worker["title"] = title

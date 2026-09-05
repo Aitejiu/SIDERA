@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
+from uuid import UUID
 
 from sidera_control_plane.domain.artifacts import ArtifactType, EvidenceClaimStatus
 from sidera_control_plane.domain.errors import ValidationError
@@ -14,6 +15,7 @@ MAX_INPUT_GROUP_CANDIDATES = 32
 MAX_INPUT_GROUP_ARTIFACT_SELECTORS = 8
 MAX_INPUT_GROUP_EVIDENCE_SELECTORS = 8
 _MAX_TEXT_LENGTH = 16_384
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class InputGroupInvalid(ValidationError):
@@ -40,6 +42,111 @@ class InputGroupMode(StrEnum):
 
 class InputSelectionStrategy(StrEnum):
     PLAN_ORDER = "plan_order"
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputArtifact:
+    """Storage-independent identity for one exact result artifact."""
+
+    artifact_id: UUID
+    artifact_type: ArtifactType
+    content_hash: str
+    size_bytes: int
+    media_type: str
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputArtifact:
+        mapping = _descriptor_mapping(
+            value,
+            "result input artifact",
+            {
+                "artifact_id",
+                "artifact_type",
+                "content_hash",
+                "size_bytes",
+                "media_type",
+            },
+        )
+        return cls(
+            artifact_id=_descriptor_uuid(mapping.get("artifact_id"), "artifact_id"),
+            artifact_type=_descriptor_artifact_type(mapping.get("artifact_type")),
+            content_hash=_descriptor_hash(mapping.get("content_hash"), "content_hash"),
+            size_bytes=_descriptor_non_negative_int(
+                mapping.get("size_bytes"), "size_bytes"
+            ),
+            media_type=_descriptor_text(mapping.get("media_type"), "media_type"),
+        )
+
+    def __post_init__(self) -> None:
+        _descriptor_uuid(self.artifact_id, "artifact_id")
+        object.__setattr__(
+            self, "artifact_type", _descriptor_artifact_type(self.artifact_type)
+        )
+        object.__setattr__(
+            self,
+            "content_hash",
+            _descriptor_hash(self.content_hash, "content_hash"),
+        )
+        _descriptor_non_negative_int(self.size_bytes, "size_bytes")
+        object.__setattr__(
+            self, "media_type", _descriptor_text(self.media_type, "media_type")
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "artifact_id": str(self.artifact_id),
+            "artifact_type": self.artifact_type.value,
+            "content_hash": self.content_hash,
+            "size_bytes": self.size_bytes,
+            "media_type": self.media_type,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputEvidence:
+    """Exact Evidence identity and the Artifact closure it authorizes."""
+
+    evidence_id: UUID
+    acceptance_criterion_ref: str
+    artifact_ids: tuple[UUID, ...]
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputEvidence:
+        mapping = _descriptor_mapping(
+            value,
+            "result input evidence",
+            {"evidence_id", "acceptance_criterion_ref", "artifact_ids"},
+        )
+        return cls(
+            evidence_id=_descriptor_uuid(mapping.get("evidence_id"), "evidence_id"),
+            acceptance_criterion_ref=_descriptor_text(
+                mapping.get("acceptance_criterion_ref"),
+                "acceptance_criterion_ref",
+            ),
+            artifact_ids=_descriptor_uuid_array(
+                mapping.get("artifact_ids"), "artifact_ids"
+            ),
+        )
+
+    def __post_init__(self) -> None:
+        _descriptor_uuid(self.evidence_id, "evidence_id")
+        object.__setattr__(
+            self,
+            "acceptance_criterion_ref",
+            _descriptor_text(self.acceptance_criterion_ref, "acceptance_criterion_ref"),
+        )
+        object.__setattr__(
+            self,
+            "artifact_ids",
+            _descriptor_uuid_array(self.artifact_ids, "artifact_ids"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "evidence_id": str(self.evidence_id),
+            "acceptance_criterion_ref": self.acceptance_criterion_ref,
+            "artifact_ids": [str(item) for item in self.artifact_ids],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +206,7 @@ class InputGroupRequirementsV1:
             "execution_status",
         )
         if execution_status is not ExecutionStatus.SUCCEEDED:
-            raise InputGroupInvalid(
-                "input group execution_status must be succeeded"
-            )
+            raise InputGroupInvalid("input group execution_status must be succeeded")
         evidence_status = _enum(
             mapping.get("evidence_status"),
             EvidenceClaimStatus,
@@ -127,9 +232,7 @@ class InputGroupRequirementsV1:
             _enum(self.execution_status, ExecutionStatus, "execution_status"),
         )
         if self.execution_status is not ExecutionStatus.SUCCEEDED:
-            raise InputGroupInvalid(
-                "input group execution_status must be succeeded"
-            )
+            raise InputGroupInvalid("input group execution_status must be succeeded")
         object.__setattr__(
             self,
             "required_artifact_refs",
@@ -294,22 +397,16 @@ def validate_input_wait_graph(
 
     for upstream, downstream in hard_edges:
         if upstream not in known_workers or downstream not in known_workers:
-            raise InputGroupInvalid(
-                "hard edge references an unknown WorkerItem"
-            )
+            raise InputGroupInvalid("hard edge references an unknown WorkerItem")
         if upstream == downstream:
-            raise InputWaitCycle(
-                "hard edge cannot point to itself", nodes=(upstream,)
-            )
+            raise InputWaitCycle("hard edge cannot point to itself", nodes=(upstream,))
         edges.add((upstream, downstream))
 
     for group in input_groups:
         if not isinstance(group, InputGroupV1):
             raise InputGroupInvalid("input groups must be typed")
         if group.group_key in group_keys:
-            raise InputGroupInvalid(
-                f"duplicate input group key: {group.group_key}"
-            )
+            raise InputGroupInvalid(f"duplicate input group key: {group.group_key}")
         group_keys.add(group.group_key)
         if group.consumer_worker_item_key not in known_workers:
             raise InputGroupInvalid(
@@ -325,9 +422,7 @@ def validate_input_wait_graph(
     _assert_acyclic(known_workers, edges)
 
 
-def _assert_acyclic(
-    worker_keys: set[str], edges: set[tuple[str, str]]
-) -> None:
+def _assert_acyclic(worker_keys: set[str], edges: set[tuple[str, str]]) -> None:
     indegree = {key: 0 for key in worker_keys}
     adjacency: dict[str, set[str]] = {key: set() for key in worker_keys}
     for upstream, downstream in edges:
@@ -428,7 +523,9 @@ def _artifact_refs(value: object, name: str) -> tuple[str, ...]:
         try:
             ArtifactType(match.group(1))
         except ValueError as exc:
-            raise InputGroupInvalid(f"unsupported artifact type in {name}: {ref}") from exc
+            raise InputGroupInvalid(
+                f"unsupported artifact type in {name}: {ref}"
+            ) from exc
     return refs
 
 
@@ -442,3 +539,69 @@ def _evidence_refs(value: object, name: str) -> tuple[str, ...]:
         if re.fullmatch(r"acceptance:\S+", ref) is None:
             raise InputGroupInvalid(f"{name} must use acceptance:<criterion-ref>")
     return refs
+
+
+def _descriptor_mapping(
+    value: object, name: str, allowed: set[str]
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValidationError(f"{name} must be a mapping")
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise ValidationError(f"unknown {name} fields: {', '.join(unknown)}")
+    missing = sorted(key for key in allowed if key not in value)
+    if missing:
+        raise ValidationError(f"missing {name} fields: {', '.join(missing)}")
+    return cast(Mapping[str, object], value)
+
+
+def _descriptor_uuid(value: object, name: str) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a UUID")
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be a UUID") from exc
+
+
+def _descriptor_hash(value: object, name: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise ValidationError(f"{name} must be a lowercase SHA-256 hash")
+    return value
+
+
+def _descriptor_non_negative_int(value: object, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValidationError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _descriptor_text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} is required")
+    normalized = value.strip()
+    if len(normalized) > _MAX_TEXT_LENGTH:
+        raise ValidationError(f"{name} is too long")
+    return normalized
+
+
+def _descriptor_artifact_type(value: object) -> ArtifactType:
+    if isinstance(value, ArtifactType):
+        return value
+    try:
+        return ArtifactType(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"unsupported artifact_type: {value!r}") from exc
+
+
+def _descriptor_uuid_array(value: object, name: str) -> tuple[UUID, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be an array")
+    items = tuple(sorted((_descriptor_uuid(item, name) for item in value), key=str))
+    if not items:
+        raise ValidationError(f"{name} must not be empty")
+    if len(items) != len(set(items)):
+        raise ValidationError(f"{name} must be unique")
+    return items
