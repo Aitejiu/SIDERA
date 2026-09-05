@@ -1615,9 +1615,9 @@ def _resolve_collaboration_runtime_binding(
         raise ValidationError(
             "collaboration runtime references must be supplied together"
         )
-    if _positive_int(payload, "proposal_schema_version") != 4:
+    if _positive_int(payload, "proposal_schema_version") not in {4, 5}:
         raise ValidationError(
-            "collaboration runtime binding requires proposal schema version 4"
+            "collaboration runtime binding requires proposal schema version 4 or 5"
         )
 
     definition_id = _uuid_value(definition_value, "collaboration_runtime_definition_id")

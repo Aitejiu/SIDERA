@@ -7,6 +7,7 @@ from sidera_control_plane.domain.artifacts import ArtifactType
 from sidera_control_plane.domain.collaboration import (
     CollaborationMode,
     CollaborationPolicyRequestV1,
+    CollaborationPolicyRequestV2,
 )
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import PlannerAdapterCapabilityProfile
@@ -15,6 +16,7 @@ from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapsho
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
+    PlanningProposalPayloadV5,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
@@ -31,6 +33,7 @@ from sidera_control_plane.domain.result_inputs import (
 ProposalPayload = (
     PlanningProposalPayload
     | PlanningProposalPayloadV4
+    | PlanningProposalPayloadV5
     | PlanningRevisionProposalPayloadV3
     | PlanningRevisionProposalPayloadV4
 )
@@ -86,13 +89,17 @@ def validate_proposal(
                 base_snapshot=base_snapshot,
             )
             return typed_payload
-    if not isinstance(typed_payload, (PlanningProposalPayload, PlanningProposalPayloadV4)):
+    if not isinstance(
+        typed_payload,
+        (PlanningProposalPayload, PlanningProposalPayloadV4, PlanningProposalPayloadV5),
+    ):
         _fail(
             "proposal_schema_invalid",
             "create proposal schema v2 is required",
         )
     is_v4 = isinstance(typed_payload, PlanningProposalPayloadV4)
-    expected_schema_version = 4 if is_v4 else 2
+    is_v5 = isinstance(typed_payload, PlanningProposalPayloadV5)
+    expected_schema_version = 5 if is_v5 else 4 if is_v4 else 2
     if typed_payload.schema_version != expected_schema_version:
         _fail(
             "proposal_schema_invalid",
@@ -104,22 +111,33 @@ def validate_proposal(
         _fail("proposal_schema_invalid", "brief revision must be positive")
     if typed_payload.kind is not PlanningRequestKind.CREATE:
         _fail("proposal_revision_operation_forbidden", "R5.1 accepts create proposals only")
-    if not is_v4 and typed_payload.base_descriptor is not None:
+    if not is_v4 and not is_v5 and typed_payload.base_descriptor is not None:
         _fail("proposal_revision_operation_forbidden", "base descriptor is reserved for revision proposals")
     if typed_payload.impact_policy.revision_operation is not None:
         _fail("proposal_revision_operation_forbidden", "revision operation is not supported")
     if typed_payload.impact_policy.manual_gate:
         _fail("proposal_manual_gate_unsupported", "manual approval gates are not supported in R5.1")
 
-    validation_payload = typed_payload.to_legacy() if is_v4 else typed_payload
+    validation_payload = (
+        typed_payload.to_legacy() if is_v4 or is_v5 else typed_payload
+    )
     _validate_unique_keys(validation_payload)
     _validate_references(validation_payload)
-    _validate_cycles(validation_payload)
+    _validate_cycles(
+        validation_payload,
+        input_groups=(
+            typed_payload.collaboration_policy_request.input_groups
+            if is_v5
+            else None
+        ),
+    )
     _validate_capabilities(validation_payload, profile_snapshot)
     _validate_budget(validation_payload, profile_snapshot)
     _validate_intents(validation_payload)
     if is_v4:
         _validate_collaboration_request(typed_payload, profile_snapshot)
+    elif is_v5:
+        _validate_collaboration_request_v2(typed_payload, profile_snapshot)
     return typed_payload
 
 
@@ -131,6 +149,7 @@ def _typed_payload(
         (
             PlanningProposalPayload,
             PlanningProposalPayloadV4,
+            PlanningProposalPayloadV5,
             PlanningRevisionProposalPayloadV3,
             PlanningRevisionProposalPayloadV4,
         ),
@@ -143,6 +162,11 @@ def _typed_payload(
     if schema_version == 4 and kind == PlanningRequestKind.CREATE.value:
         try:
             return PlanningProposalPayloadV4.from_mapping(payload)
+        except ValidationError as exc:
+            _fail("proposal_schema_invalid", str(exc))
+    if schema_version == 5 and kind == PlanningRequestKind.CREATE.value:
+        try:
+            return PlanningProposalPayloadV5.from_mapping(payload)
         except ValidationError as exc:
             _fail("proposal_schema_invalid", str(exc))
     if schema_version == 4 or schema_version == 3 or kind == PlanningRequestKind.REVISION.value:
@@ -248,6 +272,53 @@ def _validate_collaboration_request(
         )
 
 
+def _validate_collaboration_request_v2(
+    payload: PlanningProposalPayloadV5,
+    profile_snapshot: PlanningProfileSnapshot,
+) -> None:
+    request = payload.collaboration_policy_request
+    if not isinstance(request, CollaborationPolicyRequestV2):
+        _fail(
+            "proposal_schema_invalid",
+            "collaboration policy request v2 is invalid",
+        )
+    request.validate_for_subtasks(frozenset(item.key for item in payload.subtasks))
+    if request.mode is CollaborationMode.DISABLED:
+        return
+    binding = profile_snapshot.collaboration_runtime_binding
+    if binding is None:
+        _fail(
+            "proposal_collaboration_binding_missing",
+            "enabled collaboration policy requires a pinned runtime binding",
+        )
+    if not binding.runtime_capability_snapshot.supports_input_groups_v1():
+        _fail(
+            "proposal_collaboration_capability_unsupported",
+            "runtime does not support input_groups_v1 with projection and decision schema v2",
+        )
+    supported = set(binding.runtime_capability_snapshot.strategy_ids)
+    requested = {request.default_policy.strategy_id.value}
+    requested.update(item.strategy_id.value for item in request.subtask_overrides)
+    unsupported = sorted(requested - supported)
+    if unsupported:
+        _fail(
+            "proposal_collaboration_strategy_unsupported",
+            f"runtime does not support collaboration strategy: {', '.join(unsupported)}",
+        )
+    workers_by_key = {item.key: item for item in payload.worker_items}
+    overrides = {item.subtask_key: item for item in request.subtask_overrides}
+    for group in request.input_groups:
+        consumer = workers_by_key[group.consumer_worker_item_key]
+        policy = overrides.get(consumer.subtask_key)
+        enabled = request.default_policy.enabled if policy is None else policy.enabled
+        if not enabled:
+            _fail(
+                "proposal_collaboration_strategy_unsupported",
+                "input group consumer requires an enabled collaboration subtask",
+                (consumer.key,),
+            )
+
+
 def _validate_unique_keys(payload: PlanningProposalPayload) -> None:
     _unique(tuple(item.key for item in payload.subtasks), "subtask")
     _unique(tuple(item.key for item in payload.worker_items), "worker item")
@@ -335,7 +406,11 @@ def _validate_references(payload: PlanningProposalPayload) -> None:
                 _validate_artifact_ref(ref, dependency.downstream_worker_item_key)
 
 
-def _validate_cycles(payload: PlanningProposalPayload) -> None:
+def _validate_cycles(
+    payload: PlanningProposalPayload,
+    *,
+    input_groups: tuple[InputGroupV1, ...] | None = None,
+) -> None:
     _assert_acyclic(
         tuple(item.key for item in payload.subtasks),
         tuple(
@@ -365,14 +440,21 @@ def _validate_cycles(payload: PlanningProposalPayload) -> None:
         activation_edges,
         "activation dependency graph",
     )
-    _validate_input_group_cycles(payload)
+    _validate_input_group_cycles(payload, input_groups=input_groups)
 
 
-def _validate_input_group_cycles(payload: PlanningProposalPayload) -> None:
+def _validate_input_group_cycles(
+    payload: PlanningProposalPayload,
+    *,
+    input_groups: tuple[InputGroupV1, ...] | None = None,
+) -> None:
     """Add potential input edges without changing legacy policy behavior."""
 
-    policy_request = getattr(payload, "collaboration_policy_request", None)
-    raw_groups = getattr(policy_request, "input_groups", ())
+    if input_groups is None:
+        policy_request = getattr(payload, "collaboration_policy_request", None)
+        raw_groups = getattr(policy_request, "input_groups", ())
+    else:
+        raw_groups = input_groups
     if not raw_groups:
         return
     input_groups = cast(tuple[InputGroupV1, ...], raw_groups)

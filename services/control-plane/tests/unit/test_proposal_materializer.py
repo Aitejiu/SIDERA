@@ -16,6 +16,7 @@ from sidera_control_plane.application.work_context_commands import (
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
     CollaborationPolicyRequestV1,
+    CollaborationPolicySnapshotV2,
     CollaborationRuntimeBindingSnapshot,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
@@ -60,6 +61,7 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
+    PlanningProposalPayloadV5,
     ProposalRevision,
     ProposedRootTask,
     ProposedSubtask,
@@ -79,6 +81,8 @@ from sidera_control_plane.domain.work_context import (
     WorkContextRevision,
     WorkContextRevisionReason,
 )
+
+from .result_input_fixtures import proposal_v5_mapping
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -285,6 +289,28 @@ def collaboration_binding() -> CollaborationRuntimeBindingSnapshot:
         projection_schema_versions=(1,),
         decision_schema_versions=(1,),
         strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.EXPERIMENTAL,
+    )
+    return CollaborationRuntimeBindingSnapshot(
+        runtime_definition_id=uuid4(),
+        runtime_instance_id=uuid4(),
+        runtime_interface_version=capability.interface_version,
+        runtime_config_version=3,
+        runtime_capability_snapshot=capability,
+    )
+
+
+def collaboration_binding_v2() -> CollaborationRuntimeBindingSnapshot:
+    capability = CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime-v2",
+        projection_schema_versions=(2,),
+        decision_schema_versions=(2,),
+        strategy_ids=("all_required", "input_groups_v1"),
         idempotency=IdempotencyCapability.OPERATION_ID,
         max_projection_bytes=262_144,
         max_decision_bytes=65_536,
@@ -629,6 +655,37 @@ def v4_proposal_fixture(
     return stored_profile, request, proposal
 
 
+def v5_proposal_fixture() -> tuple[PlanningProfile, PlanningRequest, ProposalRevision]:
+    stored_profile, legacy_request, legacy_proposal = proposal_fixture()
+    stored_profile = replace(
+        stored_profile,
+        proposal_schema_version=5,
+        collaboration_runtime_binding=collaboration_binding_v2(),
+    )
+    profile_snapshot = stored_profile.snapshot(
+        replace(capabilities(), proposal_schema_versions=(5,))
+    )
+    payload = PlanningProposalPayloadV5.from_mapping(proposal_v5_mapping())
+    proposal = ProposalRevision.create(
+        planning_request_id=legacy_request.id,
+        revision=1,
+        brief_revision=legacy_proposal.brief_revision,
+        planning_run_id=legacy_proposal.planning_run_id,
+        kind=legacy_proposal.kind,
+        payload=payload,
+        profile_descriptor=PlanningProfileDescriptor.from_snapshot(profile_snapshot),
+        profile_snapshot=profile_snapshot,
+        created_at=NOW,
+    )
+    request = replace(
+        legacy_request,
+        profile_snapshot=profile_snapshot,
+        current_proposal_revision=proposal.revision,
+        current_proposal_content_hash=proposal.content_hash,
+    )
+    return stored_profile, request, proposal
+
+
 def envelope(request: PlanningRequest) -> CommandEnvelope:
     return CommandEnvelope(
         id=uuid4(),
@@ -780,6 +837,33 @@ def test_v4_materialization_resolves_policy_and_classifies_requests() -> None:
     )
     assert requests["backend-worker"].status is ExecutionRequestStatus.BLOCKED
     assert requests["web-worker"].status is ExecutionRequestStatus.BLOCKED
+
+
+def test_v5_materialization_publishes_snapshot_v4_with_input_groups() -> None:
+    stored_profile, request, proposal = v5_proposal_fixture()
+    command = envelope(request)
+    command.payload["proposal_content_hash"] = proposal.content_hash
+    uow = FakeUnitOfWork(request)
+
+    result = ProposalMaterializer().materialize(
+        cast(ControlPlaneUnitOfWork, uow),
+        request=request,
+        proposal=proposal,
+        profile=stored_profile,
+        envelope=command,
+        now=NOW,
+    )
+
+    assert result.snapshot is not None
+    assert result.snapshot.schema_version == 4
+    assert isinstance(result.snapshot.collaboration_policy, CollaborationPolicySnapshotV2)
+    assert result.snapshot.collaboration_policy.input_groups[0].consumer_worker_item_key == (
+        "review-worker"
+    )
+    assert all(
+        item.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED
+        for item in uow.execution_requests.added
+    )
 
 
 def test_release_required_initial_gate_waits_for_run_when_static_facts_are_ready() -> None:

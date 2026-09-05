@@ -55,6 +55,7 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
+    PlanningProposalPayloadV5,
     ProposalRevision,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
@@ -85,7 +86,7 @@ class OpenCodePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.EXPERIMENTAL,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2, 3, 4),
+        proposal_schema_versions=(2, 3, 4, 5),
         context_package_versions=(1,),
     )
     provider_ref = "opencode-acp-planner"
@@ -523,6 +524,16 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
             "strategy_ids provided in policy.collaboration_policy; do not emit Runtime "
             "module, provider, config, or secret identifiers."
         )
+    if planner_input.proposal_schema_version == 5:
+        prompt += (
+            "\nSchema v5 requires a complete collaboration_policy_request with "
+            "schema_version 2, mode, default_policy, subtask_overrides, and "
+            "input_groups. Use input_groups_v1 only for explicit result-input "
+            "groups; each group must name one consumer WorkerItem, ordered "
+            "candidate WorkerItems, and execution/evidence requirements. Use only "
+            "the policy modes and strategy_ids provided in policy.collaboration_policy; "
+            "do not emit runtime module, provider, config, or secret identifiers."
+        )
     if not is_revision:
         return prompt
     revision_prompt = (
@@ -683,6 +694,17 @@ def _proposal_shape_hint(schema_version: int = 2) -> dict[str, object]:
             "default_policy": {"strategy_id": "all_required"},
             "subtask_overrides": [],
         }
+    if schema_version == 5:
+        proposal = cast(dict[str, object], shape["proposal"])
+        proposal.pop("base_descriptor", None)
+        proposal["schema_version"] = 5
+        proposal["collaboration_policy_request"] = {
+            "schema_version": 2,
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [],
+        }
     return shape
 
 
@@ -808,6 +830,7 @@ def _parse_result(
             payload: (
                 PlanningProposalPayload
                 | PlanningProposalPayloadV4
+                | PlanningProposalPayloadV5
                 | PlanningRevisionProposalPayloadV3
                 | PlanningRevisionProposalPayloadV4
             )
@@ -816,6 +839,10 @@ def _parse_result(
                     planner_input.planning_context, RevisionPlanningContextV1
                 ):
                     raise ValueError("revision planner context is missing")
+                if planner_input.proposal_schema_version == 5:
+                    raise ValueError(
+                        "revision proposal schema v5 is not supported yet"
+                    )
                 payload = (
                     PlanningRevisionProposalPayloadV4.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 4
@@ -848,7 +875,9 @@ def _parse_result(
                 )
             else:
                 payload = (
-                    PlanningProposalPayloadV4.from_mapping(raw_payload)
+                    PlanningProposalPayloadV5.from_mapping(raw_payload)
+                    if planner_input.proposal_schema_version == 5
+                    else PlanningProposalPayloadV4.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 4
                     else PlanningProposalPayload.from_mapping(raw_payload)
                 )

@@ -160,7 +160,10 @@ class PlanningProfileSnapshot:
             "planner_secret_refs",
             _text_tuple(self.planner_secret_refs, "planner_secret_refs"),
         )
-        _validate_collaboration_binding(self.collaboration_runtime_binding)
+        _validate_collaboration_binding(
+            self.collaboration_runtime_binding,
+            proposal_schema_version=self.proposal_schema_version,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +238,10 @@ class PlanningProfile:
             "planner_secret_refs",
             _text_tuple(self.planner_secret_refs, "planner_secret_refs"),
         )
-        _validate_collaboration_binding(self.collaboration_runtime_binding)
+        _validate_collaboration_binding(
+            self.collaboration_runtime_binding,
+            proposal_schema_version=self.proposal_schema_version,
+        )
 
     def assert_user_selectable(self) -> None:
         if self.status is not PlanningProfileStatus.ACTIVE:
@@ -295,7 +301,18 @@ class PlanningProfile:
 
 def _validate_collaboration_binding(
     binding: CollaborationRuntimeBindingSnapshot | None,
+    *,
+    proposal_schema_version: int | None = None,
 ) -> None:
+    if proposal_schema_version == 5:
+        if binding is None:
+            raise ValidationError(
+                "proposal schema v5 requires a collaboration runtime binding"
+            )
+        if not binding.runtime_capability_snapshot.supports_input_groups_v1():
+            raise ValidationError(
+                "proposal schema v5 requires runtime input_groups_v1 capability"
+            )
     if binding is None:
         return
     capability = binding.runtime_capability_snapshot

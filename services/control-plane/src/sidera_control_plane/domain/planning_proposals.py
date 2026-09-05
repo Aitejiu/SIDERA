@@ -10,7 +10,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sidera_control_plane.domain.collaboration import CollaborationPolicyRequestV1
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicyRequestV1,
+    CollaborationPolicyRequestV2,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.planning import PlanningRequestKind
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
@@ -495,6 +498,143 @@ class PlanningProposalPayloadV4:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningProposalPayloadV5:
+    schema_version: int
+    kind: PlanningRequestKind
+    root_task: ProposedRootTask
+    subtasks: tuple[ProposedSubtask, ...]
+    worker_items: tuple[ProposedWorkerItem, ...]
+    subtask_milestones: tuple[SubtaskMilestone, ...]
+    subtask_dependencies: tuple[SubtaskDependency, ...]
+    worker_item_dependencies: tuple[WorkerItemDependency, ...]
+    execution_intents: tuple[ExecutionIntent, ...]
+    decision_summary: DecisionSummary
+    impact_policy: ImpactPolicy
+    collaboration_policy_request: CollaborationPolicyRequestV2
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 5:
+            raise ValidationError("proposal schema_version must be 5")
+        object.__setattr__(
+            self, "kind", _enum(self.kind, PlanningRequestKind, "proposal kind")
+        )
+        if self.kind is not PlanningRequestKind.CREATE:
+            raise ValidationError("proposal v5 kind must be create")
+        for name in (
+            "subtasks",
+            "worker_items",
+            "subtask_milestones",
+            "subtask_dependencies",
+            "worker_item_dependencies",
+            "execution_intents",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        if not isinstance(
+            self.collaboration_policy_request, CollaborationPolicyRequestV2
+        ):
+            raise ValidationError(
+                "proposal v5 requires a collaboration policy request v2"
+            )
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> PlanningProposalPayloadV5:
+        if not isinstance(value, Mapping):
+            raise ValidationError("proposal v5 payload must be a mapping")
+        allowed = {
+            "schema_version",
+            "kind",
+            "root_task",
+            "subtasks",
+            "worker_items",
+            "milestones",
+            "subtask_dependencies",
+            "worker_item_dependencies",
+            "execution_intents",
+            "decision_summary",
+            "impact_policy",
+            "collaboration_policy_request",
+        }
+        unknown = sorted(str(key) for key in value if key not in allowed)
+        if unknown:
+            raise ValidationError(
+                f"unknown proposal v5 fields: {', '.join(unknown)}"
+            )
+        if _int(value, "schema_version") != 5:
+            raise ValidationError("proposal schema_version must be 5")
+        policy_value = value.get("collaboration_policy_request")
+        if not isinstance(policy_value, Mapping):
+            raise ValidationError(
+                "collaboration_policy_request must be a mapping"
+            )
+        legacy_mapping = dict(value)
+        legacy_mapping.pop("collaboration_policy_request", None)
+        legacy_mapping["schema_version"] = 2
+        legacy_mapping["base_descriptor"] = None
+        legacy = PlanningProposalPayload.from_mapping(legacy_mapping)
+        if legacy.kind is not PlanningRequestKind.CREATE:
+            raise ValidationError("proposal v5 kind must be create")
+        return cls(
+            schema_version=5,
+            kind=legacy.kind,
+            root_task=legacy.root_task,
+            subtasks=legacy.subtasks,
+            worker_items=legacy.worker_items,
+            subtask_milestones=legacy.subtask_milestones,
+            subtask_dependencies=legacy.subtask_dependencies,
+            worker_item_dependencies=legacy.worker_item_dependencies,
+            execution_intents=legacy.execution_intents,
+            decision_summary=legacy.decision_summary,
+            impact_policy=legacy.impact_policy,
+            collaboration_policy_request=CollaborationPolicyRequestV2.from_mapping(
+                policy_value
+            ),
+        )
+
+    def to_legacy(self) -> PlanningProposalPayload:
+        return PlanningProposalPayload(
+            schema_version=2,
+            kind=self.kind,
+            root_task=self.root_task,
+            subtasks=self.subtasks,
+            worker_items=self.worker_items,
+            subtask_milestones=self.subtask_milestones,
+            subtask_dependencies=self.subtask_dependencies,
+            worker_item_dependencies=self.worker_item_dependencies,
+            execution_intents=self.execution_intents,
+            decision_summary=self.decision_summary,
+            impact_policy=self.impact_policy,
+            base_descriptor=None,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        mapping = self.to_legacy().to_mapping()
+        mapping.pop("base_descriptor", None)
+        mapping["schema_version"] = 5
+        mapping["collaboration_policy_request"] = (
+            self.collaboration_policy_request.to_mapping()
+        )
+        return mapping
+
+    def canonical_payload(self) -> dict[str, object]:
+        return self.to_mapping()
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_mapping(),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class ProposalRevision:
     planning_request_id: UUID
     revision: int
@@ -506,6 +646,7 @@ class ProposalRevision:
     payload: (
         PlanningProposalPayload
         | PlanningProposalPayloadV4
+        | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
     )
@@ -527,6 +668,7 @@ class ProposalRevision:
         payload: (
             PlanningProposalPayload
             | PlanningProposalPayloadV4
+            | PlanningProposalPayloadV5
             | PlanningRevisionProposalPayloadV3
             | PlanningRevisionProposalPayloadV4
         ),
@@ -535,7 +677,14 @@ class ProposalRevision:
         created_at: datetime,
         derived_diff: ProposalDiff | NormalizedRevisionDiff | None = None,
     ) -> ProposalRevision:
-        if isinstance(payload, (PlanningProposalPayload, PlanningProposalPayloadV4)):
+        if isinstance(
+            payload,
+            (
+                PlanningProposalPayload,
+                PlanningProposalPayloadV4,
+                PlanningProposalPayloadV5,
+            ),
+        ):
             from sidera_control_plane.domain.proposal_validation import (
                 validate_proposal,
             )
@@ -550,7 +699,9 @@ class ProposalRevision:
                 if derived_diff is not None
                 else derive_proposal_diff(
                     payload.to_legacy()
-                    if isinstance(payload, PlanningProposalPayloadV4)
+                    if isinstance(
+                        payload, (PlanningProposalPayloadV4, PlanningProposalPayloadV5)
+                    )
                     else payload
                 )
             )
@@ -596,13 +747,17 @@ def canonical_proposal_bytes(
     payload: (
         PlanningProposalPayload
         | PlanningProposalPayloadV4
+        | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
     ),
     brief_revision: int,
     profile_descriptor: PlanningProfileDescriptor,
 ) -> bytes:
-    if isinstance(payload, (PlanningProposalPayload, PlanningProposalPayloadV4)):
+    if isinstance(
+        payload,
+        (PlanningProposalPayload, PlanningProposalPayloadV4, PlanningProposalPayloadV5),
+    ):
         proposal_mapping = payload.to_mapping()
     else:
         from sidera_control_plane.domain.planning_revision_proposals import (
@@ -638,6 +793,7 @@ def proposal_content_hash(
     payload: (
         PlanningProposalPayload
         | PlanningProposalPayloadV4
+        | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
     ),

@@ -41,6 +41,7 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
+    PlanningProposalPayloadV5,
     ProposalDiff,
     ProposalRevision,
     derive_proposal_diff,
@@ -1255,7 +1256,14 @@ def _to_proposal(row: PlanningProposalRevisionModel) -> ProposalRevision:
         "execution_intents": row.execution_intents,
         "impact_policy": row.impact_policy,
     }
-    if row.proposal_schema_version == 4:
+    if row.proposal_schema_version == 5:
+        if row.kind == PlanningRequestKind.REVISION.value:
+            raise ValidationError(
+                "revision proposal schema v5 is not supported yet"
+            )
+        payload = PlanningProposalPayloadV5.from_mapping(payload_mapping)
+        derived_diff = derive_proposal_diff(payload.to_legacy())
+    elif row.proposal_schema_version == 4:
         payload = (
             PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
             if row.kind == PlanningRequestKind.REVISION.value

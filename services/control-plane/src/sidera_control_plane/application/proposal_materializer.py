@@ -23,7 +23,9 @@ from sidera_control_plane.application.worker_item_materializer import (
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
     CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
     resolve_collaboration_policy,
+    resolve_collaboration_policy_v2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
@@ -44,6 +46,7 @@ from sidera_control_plane.domain.planning_profiles import PlanningProfile
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
+    PlanningProposalPayloadV5,
     ProposalRevision,
     proposal_content_hash,
 )
@@ -393,15 +396,21 @@ class ProposalMaterializer:
     @staticmethod
     def _resolve_collaboration_policy(
         request: PlanningRequest, proposal: ProposalRevision
-    ) -> CollaborationPolicySnapshotV1 | None:
+    ) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
         payload = proposal.payload
-        if not isinstance(payload, PlanningProposalPayloadV4):
-            return None
-        return resolve_collaboration_policy(
-            payload.collaboration_policy_request,
-            request.profile_snapshot.collaboration_runtime_binding,
-            subtask_keys=frozenset(item.key for item in payload.subtasks),
-        )
+        if isinstance(payload, PlanningProposalPayloadV4):
+            return resolve_collaboration_policy(
+                payload.collaboration_policy_request,
+                request.profile_snapshot.collaboration_runtime_binding,
+                subtask_keys=frozenset(item.key for item in payload.subtasks),
+            )
+        if isinstance(payload, PlanningProposalPayloadV5):
+            return resolve_collaboration_policy_v2(
+                payload.collaboration_policy_request,
+                request.profile_snapshot.collaboration_runtime_binding,
+                subtask_keys=frozenset(item.key for item in payload.subtasks),
+            )
+        return None
 
     @staticmethod
     def _snapshot(
@@ -412,7 +421,9 @@ class ProposalMaterializer:
         subtask_task_mapping: Mapping[str, UUID],
         published_by: str,
         now: datetime,
-        collaboration_policy: CollaborationPolicySnapshotV1 | None,
+        collaboration_policy: CollaborationPolicySnapshotV1
+        | CollaborationPolicySnapshotV2
+        | None,
     ) -> TaskPlanSnapshot:
         payload = proposal.payload
         source_ref = (
@@ -451,7 +462,13 @@ class ProposalMaterializer:
         )
         return TaskPlanSnapshot.create(
             snapshot_id=uuid4(),
-            schema_version=3 if isinstance(payload, PlanningProposalPayloadV4) else 2,
+            schema_version=(
+                4
+                if isinstance(payload, PlanningProposalPayloadV5)
+                else 3
+                if isinstance(payload, PlanningProposalPayloadV4)
+                else 2
+            ),
             workspace_id=request.workspace_id,
             root_task_id=root_task_id,
             generation=1,
@@ -479,7 +496,9 @@ class ProposalMaterializer:
         materialized_plan: MaterializedPlan,
         subtask_task_mapping: Mapping[str, UUID],
         now: datetime,
-        collaboration_policy: CollaborationPolicySnapshotV1 | None,
+        collaboration_policy: CollaborationPolicySnapshotV1
+        | CollaborationPolicySnapshotV2
+        | None,
     ) -> tuple[tuple[ExecutionRequest, ...], tuple[ExecutionRequestDependency, ...]]:
         payload = proposal.payload
         worker_by_key = {
@@ -806,6 +825,7 @@ def _plan_worker_dependencies(
     payload: (
         PlanningProposalPayload
         | PlanningProposalPayloadV4
+        | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
     ),

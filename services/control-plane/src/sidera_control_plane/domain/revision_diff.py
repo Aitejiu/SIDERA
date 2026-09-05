@@ -238,7 +238,7 @@ class RevisionDiffNormalizer:
 
         root_changes = _root_changes(base_plan, legacy_payload)
         collaboration_policy_changes = _collaboration_policy_changes(
-            base_plan.collaboration_policy,
+            _legacy_collaboration_policy(base_plan.collaboration_policy),
             target_policy,
         )
         subtask_changes = tuple(
@@ -722,6 +722,16 @@ def _collaboration_policy_changes(
         for path in before
         if before[path] != after[path]
     )
+
+
+def _legacy_collaboration_policy(
+    policy: object,
+) -> CollaborationPolicySnapshotV1 | None:
+    if policy is not None and not isinstance(policy, CollaborationPolicySnapshotV1):
+        raise ValidationError(
+            "revision diff does not support collaboration policy snapshot v2 yet"
+        )
+    return policy
 
 
 def _collaboration_policy_values(

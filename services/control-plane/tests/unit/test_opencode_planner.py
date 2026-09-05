@@ -50,7 +50,10 @@ from sidera_control_plane.domain.planning import (
     PlanningRequestKind,
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfileSnapshot
-from sidera_control_plane.domain.planning_proposals import PlanningProposalPayloadV4
+from sidera_control_plane.domain.planning_proposals import (
+    PlanningProposalPayloadV4,
+    PlanningProposalPayloadV5,
+)
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
@@ -314,7 +317,50 @@ def test_planner_probe_declares_json_text_not_json_schema(tmp_path: Path) -> Non
     assert profile.idempotency is IdempotencyCapability.NONE
     assert profile.cancellation is CancellationCapability.PROCESS
     assert profile.usage_reporting is UsageReportingCapability.TOKENS
-    assert profile.proposal_schema_versions == (2, 3, 4)
+    assert profile.proposal_schema_versions == (2, 3, 4, 5)
+    assert profile.context_package_versions == (1,)
+
+
+def test_opencode_parser_dispatches_initial_v5() -> None:
+    from .result_input_fixtures import proposal_v5_mapping
+    from .test_planning_proposals_v5 import v5_profile_snapshot
+
+    planner_input, _ = _planner_input()
+    snapshot = v5_profile_snapshot()
+    planner_input = replace(
+        planner_input,
+        proposal_schema_version=5,
+        profile_snapshot=snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(snapshot),
+    )
+
+    result = _parse_result(
+        _response("proposal", proposal_v5_mapping()),
+        planner_input,
+        "test-opencode",
+    )
+
+    assert isinstance(result, PlannerProposalResult)
+    assert isinstance(result.proposal.payload, PlanningProposalPayloadV5)
+
+
+def test_v5_planner_prompt_requires_input_group_policy_shape() -> None:
+    from .test_planning_proposals_v5 import v5_profile_snapshot
+
+    planner_input, _ = _planner_input()
+    snapshot = v5_profile_snapshot()
+    planner_input = replace(
+        planner_input,
+        proposal_schema_version=5,
+        profile_snapshot=snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(snapshot),
+    )
+
+    prompt = _planner_prompt(planner_input)
+
+    assert "Schema v5 requires a complete collaboration_policy_request" in prompt
+    assert "input_groups" in prompt
+    assert "ordered candidate WorkerItems" in prompt
 
 
 def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:

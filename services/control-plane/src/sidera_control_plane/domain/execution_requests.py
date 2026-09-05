@@ -12,6 +12,7 @@ from sidera_control_plane.domain.artifacts import ArtifactType, EvidenceClaimSta
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
     CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
 )
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.execution import ExecutionStatus
@@ -644,7 +645,7 @@ def _collaboration_gate_mode(
 
 
 def collaboration_gate_mode_for_policy(
-    policy: CollaborationPolicySnapshotV1 | None,
+    policy: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
     *,
     subtask_key: str,
 ) -> CollaborationGateMode:
