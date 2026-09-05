@@ -253,6 +253,22 @@ def test_evaluation_and_ledger_records_validate_immutable_identity() -> None:
     )
     assert release.execution_request_id == REQUEST_ID
 
+    with pytest.raises(ValidationError, match="input selection"):
+        RuntimeRelease(
+            id=uuid4(),
+            workspace_id=WORKSPACE_ID,
+            run_id=RUN_ID,
+            plan_snapshot_id=SNAPSHOT_ID,
+            plan_generation=1,
+            plan_content_hash="a" * 64,
+            decision_id=DECISION_ID,
+            intent_id=INTENT_ID,
+            execution_request_id=REQUEST_ID,
+            request_version_at_release=1,
+            issued_at=NOW,
+            input_selection_id=uuid4(),
+        )
+
 
 def test_run_rejects_disabled_module_lifecycle_and_invalid_hash() -> None:
     with pytest.raises(ValidationError, match="plan_content_hash"):

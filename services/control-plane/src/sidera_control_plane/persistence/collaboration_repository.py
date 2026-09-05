@@ -731,6 +731,8 @@ def _release_model(release: RuntimeRelease) -> RuntimeReleaseModel:
         intent_id=release.intent_id,
         execution_request_id=release.execution_request_id,
         request_version_at_release=release.request_version_at_release,
+        input_selection_id=release.input_selection_id,
+        input_selection_hash=release.input_selection_hash,
         issued_at=release.issued_at,
     )
 
@@ -818,6 +820,8 @@ def _to_release(row: RuntimeReleaseModel) -> RuntimeRelease:
         intent_id=row.intent_id,
         execution_request_id=row.execution_request_id,
         request_version_at_release=row.request_version_at_release,
+        input_selection_id=row.input_selection_id,
+        input_selection_hash=row.input_selection_hash,
         issued_at=row.issued_at,
     )
 

@@ -139,6 +139,8 @@ class ExecutionRequestRepository:
                 source_execution_id=request.source_execution_id,
                 source_session_id=request.source_session_id,
                 handoff_transition_id=request.handoff_transition_id,
+                input_selection_id=request.input_selection_id,
+                input_selection_hash=request.input_selection_hash,
                 version=request.version,
                 updated_at=datetime.now(UTC),
             )
@@ -283,6 +285,8 @@ def _request_model(request: ExecutionRequest) -> ExecutionRequestModel:
         source_execution_id=request.source_execution_id,
         source_session_id=request.source_session_id,
         handoff_transition_id=request.handoff_transition_id,
+        input_selection_id=request.input_selection_id,
+        input_selection_hash=request.input_selection_hash,
         version=request.version,
     )
 
@@ -320,6 +324,8 @@ def _to_request(row: ExecutionRequestModel) -> ExecutionRequest:
         source_execution_id=row.source_execution_id,
         source_session_id=row.source_session_id,
         handoff_transition_id=row.handoff_transition_id,
+        input_selection_id=row.input_selection_id,
+        input_selection_hash=row.input_selection_hash,
         version=row.version,
         created_at=row.created_at,
         updated_at=row.updated_at,

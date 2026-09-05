@@ -29,6 +29,8 @@ def make_request(
     source_execution_id: UUID | None = None,
     source_session_id: UUID | None = None,
     handoff_transition_id: UUID | None = None,
+    input_selection_id: UUID | None = None,
+    input_selection_hash: str | None = None,
 ) -> ExecutionRequest:
     return ExecutionRequest.create(
         request_id=request_id,
@@ -56,6 +58,8 @@ def make_request(
         source_execution_id=source_execution_id,
         source_session_id=source_session_id,
         handoff_transition_id=handoff_transition_id,
+        input_selection_id=input_selection_id,
+        input_selection_hash=input_selection_hash,
     )
 
 
@@ -74,6 +78,23 @@ def make_dependency(
         required_artifact_refs=artifacts,
         required_evidence_refs=evidence,
     )
+
+
+def test_input_selection_reference_is_optional_but_must_be_complete() -> None:
+    assert make_request().input_selection_id is None
+
+    selection_id = uuid4()
+    request = make_request(
+        input_selection_id=selection_id,
+        input_selection_hash="a" * 64,
+    )
+    assert request.input_selection_id == selection_id
+    assert request.input_selection_hash == "a" * 64
+
+    with pytest.raises(ValidationError, match="input selection"):
+        make_request(input_selection_id=selection_id)
+    with pytest.raises(ValidationError, match="input selection"):
+        make_request(input_selection_hash="a" * 64)
 
 
 def test_execution_request_starts_blocked_and_materializes_once() -> None:

@@ -247,6 +247,8 @@ class ExecutionRequest:
     source_session_id: UUID | None = None
     handoff_transition_id: UUID | None = None
     collaboration_gate_mode: CollaborationGateMode = CollaborationGateMode.UNMANAGED
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
     @classmethod
     def create(
@@ -280,6 +282,8 @@ class ExecutionRequest:
         source_execution_id: UUID | None = None,
         source_session_id: UUID | None = None,
         handoff_transition_id: UUID | None = None,
+        input_selection_id: UUID | None = None,
+        input_selection_hash: str | None = None,
     ) -> ExecutionRequest:
         for name, value in (
             ("request_id", request_id),
@@ -308,6 +312,9 @@ class ExecutionRequest:
             raise ValidationError(
                 "handoff target requires source execution and session lineage"
             )
+        _validate_input_selection_reference(
+            input_selection_id, input_selection_hash
+        )
         if plan_generation < 1:
             raise ValidationError("plan_generation must be positive")
         clean_key = _required_text(worker_item_key, "worker_item_key")
@@ -369,6 +376,8 @@ class ExecutionRequest:
             source_session_id=source_session_id,
             handoff_transition_id=handoff_transition_id,
             collaboration_gate_mode=gate_mode,
+            input_selection_id=input_selection_id,
+            input_selection_hash=input_selection_hash,
         )
 
     @property
@@ -713,6 +722,17 @@ def _required_text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{name} is required")
     return value.strip()
+
+
+def _validate_input_selection_reference(
+    selection_id: UUID | None, selection_hash: str | None
+) -> None:
+    if (selection_id is None) != (selection_hash is None):
+        raise ValidationError("input selection id and hash must be provided together")
+    if selection_id is not None and not isinstance(selection_id, UUID):
+        raise ValidationError("input selection id must be a UUID")
+    if selection_hash is not None and re.fullmatch(r"[0-9a-f]{64}", selection_hash) is None:
+        raise ValidationError("input selection hash must be a lowercase SHA-256 hash")
 
 
 def _aware(value: datetime, name: str) -> None:

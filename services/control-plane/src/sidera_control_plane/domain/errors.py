@@ -20,6 +20,15 @@ class ValidationError(DomainError):
     code = "validation_error"
 
 
+class InputSelectionConflict(DomainError):
+    code = "input_selection_conflict"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "input_selection_conflict: intent already has a different input selection"
+        )
+
+
 class OperatorRequired(ValidationError):
     code = "operator_required"
 

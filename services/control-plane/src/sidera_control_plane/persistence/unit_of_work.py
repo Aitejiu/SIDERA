@@ -29,6 +29,7 @@ from sidera_control_plane.application.ports import (
     HandoffRecoveryDecisionRepositoryPort,
     HandoffTransitionRepositoryPort,
     HandoffWorkspaceTransferRepositoryPort,
+    InputSelectionRepositoryPort,
     KnowledgeCandidateSubmissionRepositoryPort,
     LeaseStorePort,
     ModuleRepositoryPort,
@@ -93,6 +94,9 @@ from sidera_control_plane.persistence.handoff_repository import (
     HandoffRecoveryDecisionRepository,
     HandoffTransitionRepository,
     HandoffWorkspaceTransferRepository,
+)
+from sidera_control_plane.persistence.input_selection_repository import (
+    InputSelectionRepository,
 )
 from sidera_control_plane.persistence.knowledge_candidate_submission_repository import (
     KnowledgeCandidateSubmissionRepository,
@@ -164,6 +168,7 @@ class SqlAlchemyUnitOfWork:
     collaboration_runs: CollaborationRunRepositoryPort
     collaboration_evaluations: CollaborationEvaluationRepositoryPort
     collaboration_ledger: CollaborationLedgerRepositoryPort
+    input_selections: InputSelectionRepositoryPort
     collaboration_governance: CollaborationGovernanceRepositoryPort
     handoff_proposals: HandoffProposalRepositoryPort
     handoff_transitions: HandoffTransitionRepositoryPort
@@ -230,6 +235,7 @@ class SqlAlchemyUnitOfWork:
             self.session
         )
         self.collaboration_ledger = CollaborationLedgerRepository(self.session)
+        self.input_selections = InputSelectionRepository(self.session)
         self.collaboration_governance = CollaborationGovernanceRepository(self.session)
         self.handoff_proposals = HandoffProposalRepository(self.session)
         self.handoff_transitions = HandoffTransitionRepository(self.session)

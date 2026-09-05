@@ -2925,6 +2925,12 @@ class ExecutionRequestModel(TimestampMixin, Base):
             "(source_execution_id IS NOT NULL AND source_session_id IS NOT NULL)",
             name="ck_execution_requests_handoff_lineage",
         ),
+        CheckConstraint(
+            "(input_selection_id IS NULL AND input_selection_hash IS NULL) OR "
+            "(input_selection_id IS NOT NULL AND input_selection_hash "
+            "~ '^[0-9a-f]{64}$')",
+            name="ck_execution_requests_input_selection_pair",
+        ),
         ForeignKeyConstraint(
             ["planning_request_id", "workspace_id"],
             ["planning_requests.id", "planning_requests.workspace_id"],
@@ -2995,6 +3001,15 @@ class ExecutionRequestModel(TimestampMixin, Base):
             deferrable=True,
             initially="DEFERRED",
             name="fk_execution_requests_handoff_transition_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["input_selection_id", "workspace_id"],
+            [
+                "collaboration_input_selections.id",
+                "collaboration_input_selections.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_input_selection_workspace",
         ),
         UniqueConstraint("id", "workspace_id", name="uq_execution_requests_identity"),
         Index(
@@ -3090,6 +3105,10 @@ class ExecutionRequestModel(TimestampMixin, Base):
     handoff_transition_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
+    input_selection_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    input_selection_hash: Mapped[str | None] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -3636,6 +3655,158 @@ class RuntimeIntentModel(TimestampMixin, Base):
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
+class CollaborationInputSelectionModel(Base):
+    __tablename__ = "collaboration_input_selections"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version = 1 AND plan_generation >= 1 "
+            "AND target_request_version >= 1",
+            name="ck_collaboration_input_selections_versions",
+        ),
+        CheckConstraint(
+            "plan_content_hash ~ '^[0-9a-f]{64}$' "
+            "AND projection_hash ~ '^[0-9a-f]{64}$' "
+            "AND selection_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_collaboration_input_selections_hashes",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(groups_json) = 'array' "
+            "AND jsonb_array_length(groups_json) >= 1",
+            name="ck_collaboration_input_selections_groups_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(hard_inputs_json) = 'array'",
+            name="ck_collaboration_input_selections_hard_inputs_array",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["collaboration_runs.id", "collaboration_runs.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_run_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_plan_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["target_execution_request_id", "workspace_id"],
+            ["execution_requests.id", "execution_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_target_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["projection_snapshot_id", "workspace_id"],
+            [
+                "runtime_projection_snapshots.id",
+                "runtime_projection_snapshots.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_input_selections_projection_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "workspace_id"],
+            ["runtime_decisions.id", "runtime_decisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_decision_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["intent_id", "workspace_id"],
+            ["runtime_intents.id", "runtime_intents.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_input_selections_intent_workspace",
+        ),
+        UniqueConstraint(
+            "id",
+            "workspace_id",
+            name="uq_collaboration_input_selections_identity",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "intent_id",
+            name="uq_collaboration_input_selections_intent",
+        ),
+        Index(
+            "ix_collaboration_input_selections_target_request",
+            "workspace_id",
+            "target_execution_request_id",
+            "created_at",
+        ),
+        Index(
+            "ix_collaboration_input_selections_consumer",
+            "workspace_id",
+            "target_worker_item_id",
+            "created_at",
+        ),
+        Index(
+            "ix_collaboration_input_selections_plan",
+            "workspace_id",
+            "root_task_id",
+            "plan_snapshot_id",
+            "plan_generation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_execution_request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_request_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    projection_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    intent_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    groups_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    hard_inputs_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False
+    )
+    selection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
 class RuntimeReleaseModel(Base):
     __tablename__ = "runtime_releases"
     __table_args__ = (
@@ -3649,6 +3820,12 @@ class RuntimeReleaseModel(Base):
         CheckConstraint(
             "plan_content_hash ~ '^[0-9a-f]{64}$'",
             name="ck_runtime_releases_plan_hash",
+        ),
+        CheckConstraint(
+            "(input_selection_id IS NULL AND input_selection_hash IS NULL) OR "
+            "(input_selection_id IS NOT NULL AND input_selection_hash "
+            "~ '^[0-9a-f]{64}$')",
+            name="ck_runtime_releases_input_selection_pair",
         ),
         ForeignKeyConstraint(
             ["run_id", "workspace_id"],
@@ -3679,6 +3856,15 @@ class RuntimeReleaseModel(Base):
             ["execution_requests.id", "execution_requests.workspace_id"],
             ondelete="RESTRICT",
             name="fk_runtime_releases_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["input_selection_id", "workspace_id"],
+            [
+                "collaboration_input_selections.id",
+                "collaboration_input_selections.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_runtime_releases_input_selection_workspace",
         ),
         UniqueConstraint("id", "workspace_id", name="uq_runtime_releases_identity"),
         UniqueConstraint(
@@ -3715,6 +3901,10 @@ class RuntimeReleaseModel(Base):
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
     request_version_at_release: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_selection_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    input_selection_hash: Mapped[str | None] = mapped_column(String(64))
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -3823,6 +4013,8 @@ class CollaborationReleaseProposalModel(TimestampMixin, Base):
         CheckConstraint("status IN ('pending', 'approved', 'rejected', 'stale')", name="ck_collaboration_release_proposals_status"),
         CheckConstraint("target_request_version >= 1 AND input_fingerprint_version >= 1 AND resource_version >= 1", name="ck_collaboration_release_proposals_versions"),
         CheckConstraint("projection_hash ~ '^[0-9a-f]{64}$' AND input_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_collaboration_release_proposals_hashes"),
+        CheckConstraint("(input_selection_id IS NULL AND input_selection_hash IS NULL) OR (input_selection_id IS NOT NULL AND input_selection_hash ~ '^[0-9a-f]{64}$')", name="ck_collaboration_release_proposals_input_selection_pair"),
+        ForeignKeyConstraint(["input_selection_id", "workspace_id"], ["collaboration_input_selections.id", "collaboration_input_selections.workspace_id"], ondelete="RESTRICT", name="fk_collaboration_release_proposals_input_selection_workspace"),
         UniqueConstraint("id", "workspace_id", name="uq_collaboration_release_proposals_identity"),
         Index("uq_collaboration_release_proposals_pending_request", "workspace_id", "hold_id", "execution_request_id", unique=True, postgresql_where=text("status = 'pending'")),
         Index("uq_collaboration_release_proposals_fingerprint", "workspace_id", "hold_id", "execution_request_id", "target_request_version", "input_fingerprint_version", "input_fingerprint", unique=True),
@@ -3839,6 +4031,8 @@ class CollaborationReleaseProposalModel(TimestampMixin, Base):
     target_request_version: Mapped[int] = mapped_column(Integer, nullable=False)
     input_fingerprint_version: Mapped[int] = mapped_column(Integer, nullable=False)
     input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_selection_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    input_selection_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     reason_code: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str] = mapped_column(String(16384), nullable=False)

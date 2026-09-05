@@ -127,6 +127,8 @@ class CollaborationReleaseProposal:
     resource_version: int
     created_at: datetime
     resolved_at: datetime | None
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
     @classmethod
     def create(cls, *, now: datetime, **values: object) -> CollaborationReleaseProposal:
@@ -147,6 +149,14 @@ class CollaborationReleaseProposal:
         _text(self.summary, "summary", _MAX_SUMMARY, required=True)
         _aware(self.created_at, "created_at")
         _optional_aware(self.resolved_at, "resolved_at")
+        if (self.input_selection_id is None) != (self.input_selection_hash is None):
+            raise ValidationError(
+                "proposal input selection id and hash must be provided together"
+            )
+        if self.input_selection_id is not None:
+            _uuids(self, ("input_selection_id",))
+        if self.input_selection_hash is not None:
+            _hash_value(self.input_selection_hash, "input_selection_hash")
         object.__setattr__(self, "status", _status(self.status, ReleaseProposalStatus, "proposal status"))
         if self.status is ReleaseProposalStatus.PENDING and self.resolved_at is not None:
             raise ValidationError("pending proposal must not be resolved")

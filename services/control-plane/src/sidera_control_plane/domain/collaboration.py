@@ -1372,6 +1372,8 @@ class RuntimeRelease:
     execution_request_id: UUID
     request_version_at_release: int
     issued_at: datetime
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -1390,6 +1392,14 @@ class RuntimeRelease:
             self.request_version_at_release, "request_version_at_release"
         )
         _aware(self.issued_at, "release issued_at")
+        if (self.input_selection_id is None) != (self.input_selection_hash is None):
+            raise ValidationError(
+                "release input selection id and hash must be provided together"
+            )
+        if self.input_selection_id is not None:
+            _uuid(self.input_selection_id, "release input selection id")
+        if self.input_selection_hash is not None:
+            _hash(self.input_selection_hash, "release input selection hash")
 
 
 def _policy_entry_from_mapping(

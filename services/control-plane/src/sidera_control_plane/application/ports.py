@@ -91,6 +91,9 @@ from sidera_control_plane.domain.handoffs import (
     HandoffTransition,
     HandoffTransitionStatus,
 )
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+)
 from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
@@ -1140,6 +1143,23 @@ class CollaborationLedgerRepositoryPort(Protocol):
     def save_application(
         self, application: RuntimeIntentApplication, previous_version: int
     ) -> None:
+        raise NotImplementedError
+
+
+class InputSelectionRepositoryPort(Protocol):
+    def add(
+        self, selection: CollaborationInputSelectionV1
+    ) -> CollaborationInputSelectionV1:
+        raise NotImplementedError
+
+    def get(
+        self, workspace_id: UUID, selection_id: UUID
+    ) -> CollaborationInputSelectionV1 | None:
+        raise NotImplementedError
+
+    def get_by_intent(
+        self, workspace_id: UUID, intent_id: UUID
+    ) -> CollaborationInputSelectionV1 | None:
         raise NotImplementedError
 
 
@@ -2374,6 +2394,7 @@ class ControlPlaneUnitOfWork(Protocol):
     collaboration_runs: CollaborationRunRepositoryPort
     collaboration_evaluations: CollaborationEvaluationRepositoryPort
     collaboration_ledger: CollaborationLedgerRepositoryPort
+    input_selections: InputSelectionRepositoryPort
     collaboration_governance: CollaborationGovernanceRepositoryPort
     handoff_proposals: HandoffProposalRepositoryPort
     handoff_transitions: HandoffTransitionRepositoryPort

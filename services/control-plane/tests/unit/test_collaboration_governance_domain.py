@@ -79,6 +79,19 @@ def test_approve_once_does_not_resume_hold() -> None:
     assert hold.status is GovernanceHoldStatus.ACTIVE
 
 
+def test_release_proposal_input_selection_reference_must_be_complete() -> None:
+    assert pending_proposal().input_selection_id is None
+    selection_id = uuid4()
+    proposal = pending_proposal(
+        input_selection_id=selection_id,
+        input_selection_hash="d" * 64,
+    )
+    assert proposal.input_selection_id == selection_id
+
+    with pytest.raises(ValidationError, match="input selection"):
+        pending_proposal(input_selection_id=selection_id)
+
+
 def test_hold_and_proposal_transitions_increment_resource_version_once() -> None:
     hold = active_hold()
     resumed = hold.resume(now=NOW)

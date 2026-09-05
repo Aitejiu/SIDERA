@@ -18,6 +18,7 @@ from sidera_control_plane.persistence.models import (
     CollaborationEvaluationModel,
     CollaborationGovernanceHoldModel,
     CollaborationGovernanceResolutionModel,
+    CollaborationInputSelectionModel,
     CollaborationReleaseProposalModel,
     CollaborationRunModel,
     CommandModel,
@@ -89,6 +90,7 @@ PLANNING_CLEANUP_MODELS = (
     CollaborationGovernanceHoldModel,
     RuntimeIntentApplicationModel,
     RuntimeReleaseModel,
+    CollaborationInputSelectionModel,
     RuntimeIntentModel,
     RuntimeDecisionModel,
     CollaborationEvaluationModel,
@@ -194,7 +196,13 @@ def _clear_database(database: Database) -> None:
                 handoff_transition_id=None,
             )
         )
-        session.execute(update(ExecutionRequestModel).values(handoff_transition_id=None))
+        session.execute(
+            update(ExecutionRequestModel).values(
+                handoff_transition_id=None,
+                input_selection_id=None,
+                input_selection_hash=None,
+            )
+        )
         session.execute(
             update(CollaborationRunModel).values(
                 last_projection_snapshot_id=None,
