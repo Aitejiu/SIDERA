@@ -19,6 +19,19 @@ _MAX_TEXT_LENGTH = 16_384
 class InputGroupInvalid(ValidationError):
     code = "input_group_invalid"
 
+    def __init__(self, message: str) -> None:
+        super().__init__(f"input_group_invalid: {message}")
+
+
+class InputWaitCycle(ValidationError):
+    code = "input_wait_cycle"
+
+    def __init__(self, message: str, *, nodes: tuple[str, ...] = ()) -> None:
+        super().__init__(
+            f"input_wait_cycle: {message}",
+            details={"cycle_nodes": list(nodes)},
+        )
+
 
 class InputGroupMode(StrEnum):
     ALL = "all"
@@ -265,6 +278,77 @@ class InputGroupV1:
             "minimum_count": self.minimum_count,
             "selection_strategy": self.selection_strategy.value,
         }
+
+
+def validate_input_wait_graph(
+    *,
+    worker_keys: frozenset[str],
+    hard_edges: tuple[tuple[str, str], ...],
+    input_groups: tuple[InputGroupV1, ...],
+) -> None:
+    """Validate hard and potential result-input edges as one wait graph."""
+
+    known_workers = set(worker_keys)
+    edges: set[tuple[str, str]] = set()
+    group_keys: set[str] = set()
+
+    for upstream, downstream in hard_edges:
+        if upstream not in known_workers or downstream not in known_workers:
+            raise InputGroupInvalid(
+                "hard edge references an unknown WorkerItem"
+            )
+        if upstream == downstream:
+            raise InputWaitCycle(
+                "hard edge cannot point to itself", nodes=(upstream,)
+            )
+        edges.add((upstream, downstream))
+
+    for group in input_groups:
+        if not isinstance(group, InputGroupV1):
+            raise InputGroupInvalid("input groups must be typed")
+        if group.group_key in group_keys:
+            raise InputGroupInvalid(
+                f"duplicate input group key: {group.group_key}"
+            )
+        group_keys.add(group.group_key)
+        if group.consumer_worker_item_key not in known_workers:
+            raise InputGroupInvalid(
+                "input group consumer references an unknown WorkerItem"
+            )
+        for candidate in group.candidates:
+            if candidate.worker_item_key not in known_workers:
+                raise InputGroupInvalid(
+                    "input group candidate references an unknown WorkerItem"
+                )
+            edges.add((candidate.worker_item_key, group.consumer_worker_item_key))
+
+    _assert_acyclic(known_workers, edges)
+
+
+def _assert_acyclic(
+    worker_keys: set[str], edges: set[tuple[str, str]]
+) -> None:
+    indegree = {key: 0 for key in worker_keys}
+    adjacency: dict[str, set[str]] = {key: set() for key in worker_keys}
+    for upstream, downstream in edges:
+        adjacency[upstream].add(downstream)
+        indegree[downstream] += 1
+
+    queue = sorted(key for key, count in indegree.items() if count == 0)
+    visited = 0
+    while queue:
+        current = queue.pop(0)
+        visited += 1
+        for downstream in sorted(adjacency[current]):
+            indegree[downstream] -= 1
+            if indegree[downstream] == 0:
+                queue.append(downstream)
+        queue.sort()
+    if visited != len(worker_keys):
+        raise InputWaitCycle(
+            "hard and result-input edges contain a cycle",
+            nodes=tuple(sorted(key for key, count in indegree.items() if count > 0)),
+        )
 
 
 def _strict_mapping(

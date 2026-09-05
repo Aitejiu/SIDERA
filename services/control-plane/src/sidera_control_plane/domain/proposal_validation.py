@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from sidera_control_plane.domain.artifacts import ArtifactType
 from sidera_control_plane.domain.collaboration import (
@@ -21,6 +21,12 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV4,
 )
 from sidera_control_plane.domain.plans import DependencyKind, TaskPlanSnapshot
+from sidera_control_plane.domain.result_inputs import (
+    InputGroupInvalid,
+    InputGroupV1,
+    InputWaitCycle,
+    validate_input_wait_graph,
+)
 
 ProposalPayload = (
     PlanningProposalPayload
@@ -359,6 +365,64 @@ def _validate_cycles(payload: PlanningProposalPayload) -> None:
         activation_edges,
         "activation dependency graph",
     )
+    _validate_input_group_cycles(payload)
+
+
+def _validate_input_group_cycles(payload: PlanningProposalPayload) -> None:
+    """Add potential input edges without changing legacy policy behavior."""
+
+    policy_request = getattr(payload, "collaboration_policy_request", None)
+    raw_groups = getattr(policy_request, "input_groups", ())
+    if not raw_groups:
+        return
+    input_groups = cast(tuple[InputGroupV1, ...], raw_groups)
+    grouped_workers: dict[str, list[str]] = {}
+    for item in payload.worker_items:
+        grouped_workers.setdefault(item.subtask_key, []).append(item.key)
+    workers_by_subtask = {
+        key: tuple(values) for key, values in grouped_workers.items()
+    }
+
+    hard_edges: set[tuple[str, str]] = set()
+    for dependency in payload.worker_item_dependencies:
+        if dependency.kind == DependencyKind.HARD.value:
+            hard_edges.add(
+                (
+                    dependency.upstream_worker_item_key,
+                    dependency.downstream_worker_item_key,
+                )
+            )
+    for intent in payload.execution_intents:
+        for dependency in intent.activation_dependencies:
+            if dependency.kind == DependencyKind.HARD.value:
+                hard_edges.add(
+                    (
+                        dependency.upstream_worker_item_key,
+                        dependency.downstream_worker_item_key,
+                    )
+                )
+    for dependency in payload.subtask_dependencies:
+        if dependency.kind.value != DependencyKind.HARD.value:
+            continue
+        for upstream in workers_by_subtask.get(dependency.upstream_subtask_key, ()):
+            for downstream in workers_by_subtask.get(
+                dependency.downstream_subtask_key, ()
+            ):
+                hard_edges.add((upstream, downstream))
+
+    try:
+        validate_input_wait_graph(
+            worker_keys=frozenset(item.key for item in payload.worker_items),
+            hard_edges=tuple(sorted(hard_edges)),
+            input_groups=input_groups,
+        )
+    except InputWaitCycle as exc:
+        raw_nodes = exc.details.get("cycle_nodes", ())
+        cycle_nodes = raw_nodes if isinstance(raw_nodes, (list, tuple)) else ()
+        nodes = tuple(value for value in cycle_nodes if isinstance(value, str))
+        _fail("input_wait_cycle", str(exc), nodes)
+    except InputGroupInvalid as exc:
+        _fail("input_group_invalid", str(exc))
 
 
 def _validate_capabilities(
