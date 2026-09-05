@@ -7,10 +7,13 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from sidera_control_plane.domain.collaboration import CollaborationPolicySnapshotV1
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
+)
 from sidera_control_plane.domain.errors import ValidationError
 
-SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 
 
 class WorkItemKind(StrEnum):
@@ -156,7 +159,9 @@ class TaskPlanSnapshot:
     subtask_milestones: tuple[SubtaskMilestone, ...] = ()
     subtask_dependencies: tuple[SubtaskDependency, ...] = ()
     worker_item_dependencies: tuple[WorkerItemDependency, ...] = ()
-    collaboration_policy: CollaborationPolicySnapshotV1 | None = None
+    collaboration_policy: (
+        CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None
+    ) = None
 
     @classmethod
     def create(
@@ -184,7 +189,9 @@ class TaskPlanSnapshot:
         subtask_milestones: tuple[SubtaskMilestone, ...] = (),
         subtask_dependencies: tuple[SubtaskDependency, ...] = (),
         worker_item_dependencies: tuple[WorkerItemDependency, ...] = (),
-        collaboration_policy: CollaborationPolicySnapshotV1 | None = None,
+        collaboration_policy: (
+            CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None
+        ) = None,
     ) -> TaskPlanSnapshot:
         snapshot = cls(
             id=snapshot_id,
@@ -339,7 +346,7 @@ class TaskPlanSnapshot:
                         for item in required("worker_item_dependencies")
                     ),
                 )
-            if schema_version == 3:
+            if schema_version in {3, 4}:
                 _reject_unknown_fields(
                     payload,
                     {
@@ -369,8 +376,14 @@ class TaskPlanSnapshot:
                 policy = (
                     None
                     if raw_policy is None
-                    else CollaborationPolicySnapshotV1.from_mapping(
-                        _payload_mapping(raw_policy, "collaboration_policy")
+                    else (
+                        CollaborationPolicySnapshotV1.from_mapping(
+                            _payload_mapping(raw_policy, "collaboration_policy")
+                        )
+                        if schema_version == 3
+                        else CollaborationPolicySnapshotV2.from_mapping(
+                            _payload_mapping(raw_policy, "collaboration_policy")
+                        )
                     )
                 )
                 return cls.create(
@@ -442,7 +455,7 @@ class TaskPlanSnapshot:
                     ],
                 }
             )
-        elif self.schema_version in {2, 3}:
+        elif self.schema_version in {2, 3, 4}:
             payload.update(
                 {
                     "subtasks": [
@@ -466,7 +479,7 @@ class TaskPlanSnapshot:
                     ],
                 }
             )
-            if self.schema_version == 3:
+            if self.schema_version in {3, 4}:
                 payload["collaboration_policy"] = (
                     self.collaboration_policy.to_mapping()
                     if self.collaboration_policy is not None
@@ -480,7 +493,7 @@ class TaskPlanSnapshot:
                 "unsupported_schema_version",
                 f"unsupported plan schema version: {self.schema_version}",
             )
-        if self.schema_version in {2, 3}:
+        if self.schema_version in {2, 3, 4}:
             self._validate_v2()
             if (
                 self.schema_version == 3
@@ -492,6 +505,13 @@ class TaskPlanSnapshot:
                 self._fail(
                     "invalid_collaboration_policy",
                     "schema v3 collaboration_policy must be a policy snapshot",
+                )
+            if self.schema_version == 4 and not isinstance(
+                self.collaboration_policy, CollaborationPolicySnapshotV2
+            ):
+                self._fail(
+                    "invalid_collaboration_policy",
+                    "schema v4 collaboration_policy must be a v2 policy snapshot",
                 )
             return
         if self.generation < 1:

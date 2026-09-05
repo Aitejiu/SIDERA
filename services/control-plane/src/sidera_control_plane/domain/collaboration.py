@@ -13,10 +13,12 @@ from uuid import UUID
 
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.modules import (
+    COLLABORATION_INPUT_GROUPS_STRATEGY_ID,
     CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     StabilityLevel,
 )
+from sidera_control_plane.domain.result_inputs import InputGroupInvalid, InputGroupV1
 
 _MAX_TEXT_LENGTH = 16_384
 _MAX_MAP_ENTRIES = 128
@@ -190,6 +192,89 @@ class CollaborationPolicyRequestV1:
             "subtask_overrides": [
                 item.to_mapping() for item in self.subtask_overrides
             ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationPolicyRequestV2:
+    schema_version: int
+    mode: CollaborationMode
+    default_policy: CollaborationPolicyEntry
+    subtask_overrides: tuple[CollaborationPolicyOverride, ...]
+    input_groups: tuple[InputGroupV1, ...]
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> CollaborationPolicyRequestV2:
+        mapping = _strict_mapping(
+            value,
+            "collaboration policy request",
+            {
+                "schema_version",
+                "mode",
+                "default_policy",
+                "subtask_overrides",
+                "input_groups",
+            },
+        )
+        raw_overrides = mapping.get("subtask_overrides")
+        if not isinstance(raw_overrides, (list, tuple)):
+            raise ValidationError("subtask_overrides must be an array")
+        return cls(
+            schema_version=_positive_int(mapping.get("schema_version"), "schema_version"),
+            mode=_enum(mapping.get("mode"), CollaborationMode, "collaboration mode"),
+            default_policy=_policy_entry_from_mapping(mapping.get("default_policy")),
+            subtask_overrides=tuple(
+                _override_from_mapping(item) for item in raw_overrides
+            ),
+            input_groups=_input_groups_from_mapping(mapping.get("input_groups")),
+        )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValidationError("unsupported collaboration policy request schema version")
+        object.__setattr__(
+            self,
+            "mode",
+            _enum(self.mode, CollaborationMode, "collaboration mode"),
+        )
+        if not isinstance(self.default_policy, CollaborationPolicyEntry):
+            raise ValidationError("default_policy must be a collaboration policy")
+        overrides = tuple(self.subtask_overrides)
+        _validate_policy_overrides(overrides)
+        groups = _normalize_input_groups(self.input_groups)
+        if self.mode is CollaborationMode.DISABLED and (overrides or groups):
+            raise ValidationError(
+                "disabled collaboration policy cannot contain overrides or input groups"
+            )
+        object.__setattr__(self, "subtask_overrides", overrides)
+        object.__setattr__(self, "input_groups", groups)
+
+    def validate_for_subtasks(self, subtask_keys: frozenset[str]) -> None:
+        if not isinstance(subtask_keys, (frozenset, set)):
+            raise ValidationError("subtask_keys must be a set")
+        unknown = sorted(
+            item.subtask_key
+            for item in self.subtask_overrides
+            if item.subtask_key not in subtask_keys
+        )
+        if unknown:
+            raise ValidationError(
+                f"unknown collaboration override subtask: {', '.join(unknown)}"
+            )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "mode": self.mode.value,
+            "default_policy": {
+                "strategy_id": self.default_policy.strategy_id.value
+            },
+            "subtask_overrides": [
+                item.to_mapping() for item in self.subtask_overrides
+            ],
+            "input_groups": [item.to_mapping() for item in self.input_groups],
         }
 
 
@@ -430,6 +515,184 @@ class CollaborationPolicySnapshotV1:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CollaborationPolicySnapshotV2:
+    schema_version: int
+    runtime_definition_id: UUID
+    runtime_instance_id: UUID
+    runtime_interface_version: str
+    runtime_config_version: int
+    runtime_capability_snapshot: CollaborationRuntimeCapabilityProfile
+    default_policy: CollaborationPolicyEntry
+    subtask_overrides: tuple[CollaborationPolicyOverride, ...]
+    input_groups: tuple[InputGroupV1, ...]
+
+    @staticmethod
+    def binding_from_mapping(
+        value: Mapping[str, object]
+    ) -> CollaborationRuntimeBindingSnapshot:
+        return CollaborationRuntimeBindingSnapshot.from_mapping(value)
+
+    @classmethod
+    def from_request(
+        cls,
+        request: CollaborationPolicyRequestV2,
+        binding: CollaborationRuntimeBindingSnapshot,
+    ) -> CollaborationPolicySnapshotV2:
+        if not isinstance(request, CollaborationPolicyRequestV2):
+            raise ValidationError("request must be a collaboration policy request v2")
+        if request.mode is not CollaborationMode.ENABLED:
+            raise ValidationError("only enabled policies can create a snapshot")
+        if not binding.runtime_capability_snapshot.supports_input_groups_v1():
+            raise ValidationError(
+                f"runtime does not support {COLLABORATION_INPUT_GROUPS_STRATEGY_ID}"
+            )
+        return cls(
+            schema_version=2,
+            runtime_definition_id=binding.runtime_definition_id,
+            runtime_instance_id=binding.runtime_instance_id,
+            runtime_interface_version=binding.runtime_interface_version,
+            runtime_config_version=binding.runtime_config_version,
+            runtime_capability_snapshot=binding.runtime_capability_snapshot,
+            default_policy=request.default_policy,
+            subtask_overrides=request.subtask_overrides,
+            input_groups=request.input_groups,
+        )
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> CollaborationPolicySnapshotV2:
+        mapping = _strict_mapping(
+            value,
+            "collaboration policy snapshot",
+            {
+                "schema_version",
+                "runtime_definition_id",
+                "runtime_instance_id",
+                "runtime_interface_version",
+                "runtime_config_version",
+                "runtime_capability_snapshot",
+                "default_policy",
+                "subtask_overrides",
+                "input_groups",
+            },
+        )
+        schema_version = _positive_int(
+            mapping.get("schema_version"), "schema_version"
+        )
+        if schema_version != 2:
+            raise ValidationError("unsupported collaboration policy schema version")
+        binding = CollaborationRuntimeBindingSnapshot.from_mapping(
+            {
+                name: mapping[name]
+                for name in (
+                    "runtime_definition_id",
+                    "runtime_instance_id",
+                    "runtime_interface_version",
+                    "runtime_config_version",
+                    "runtime_capability_snapshot",
+                )
+            }
+        )
+        raw_overrides = mapping.get("subtask_overrides")
+        if not isinstance(raw_overrides, (list, tuple)):
+            raise ValidationError("subtask_overrides must be an array")
+        return cls(
+            schema_version=schema_version,
+            runtime_definition_id=binding.runtime_definition_id,
+            runtime_instance_id=binding.runtime_instance_id,
+            runtime_interface_version=binding.runtime_interface_version,
+            runtime_config_version=binding.runtime_config_version,
+            runtime_capability_snapshot=binding.runtime_capability_snapshot,
+            default_policy=_policy_entry_from_mapping(
+                mapping.get("default_policy"), include_enabled=True
+            ),
+            subtask_overrides=tuple(
+                _override_from_mapping(item) for item in raw_overrides
+            ),
+            input_groups=_input_groups_from_mapping(mapping.get("input_groups")),
+        )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValidationError("unsupported collaboration policy schema version")
+        binding = CollaborationRuntimeBindingSnapshot(
+            runtime_definition_id=self.runtime_definition_id,
+            runtime_instance_id=self.runtime_instance_id,
+            runtime_interface_version=self.runtime_interface_version,
+            runtime_config_version=self.runtime_config_version,
+            runtime_capability_snapshot=self.runtime_capability_snapshot,
+        )
+        if not binding.runtime_capability_snapshot.supports_input_groups_v1():
+            raise ValidationError(
+                f"runtime does not support {COLLABORATION_INPUT_GROUPS_STRATEGY_ID}"
+            )
+        object.__setattr__(self, "runtime_definition_id", binding.runtime_definition_id)
+        object.__setattr__(self, "runtime_instance_id", binding.runtime_instance_id)
+        object.__setattr__(
+            self, "runtime_interface_version", binding.runtime_interface_version
+        )
+        object.__setattr__(
+            self,
+            "runtime_capability_snapshot",
+            binding.runtime_capability_snapshot,
+        )
+        if not isinstance(self.default_policy, CollaborationPolicyEntry):
+            raise ValidationError("default_policy must be a collaboration policy")
+        overrides = tuple(self.subtask_overrides)
+        _validate_policy_overrides(overrides)
+        object.__setattr__(self, "subtask_overrides", overrides)
+        object.__setattr__(self, "input_groups", _normalize_input_groups(self.input_groups))
+
+    @property
+    def binding(self) -> CollaborationRuntimeBindingSnapshot:
+        return CollaborationRuntimeBindingSnapshot(
+            runtime_definition_id=self.runtime_definition_id,
+            runtime_instance_id=self.runtime_instance_id,
+            runtime_interface_version=self.runtime_interface_version,
+            runtime_config_version=self.runtime_config_version,
+            runtime_capability_snapshot=self.runtime_capability_snapshot,
+        )
+
+    def effective_policy(self, subtask_key: str) -> CollaborationPolicyEntry:
+        key = _key(subtask_key, "subtask_key")
+        for override in self.subtask_overrides:
+            if override.subtask_key == key:
+                return override.as_policy()
+        return self.default_policy
+
+    def effective_strategy_id(
+        self, *, worker_item_key: str, subtask_key: str
+    ) -> str | None:
+        worker_key = _key(worker_item_key, "worker_item_key")
+        policy = self.effective_policy(subtask_key)
+        is_input_consumer = any(
+            group.consumer_worker_item_key == worker_key
+            for group in self.input_groups
+        )
+        if is_input_consumer:
+            if not policy.enabled:
+                raise ValidationError(
+                    "input group consumer requires an enabled collaboration subtask"
+                )
+            return COLLABORATION_INPUT_GROUPS_STRATEGY_ID
+        if not policy.enabled:
+            return None
+        return policy.strategy_id.value
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            **self.binding.to_mapping(),
+            "default_policy": self.default_policy.to_mapping(),
+            "subtask_overrides": [
+                item.to_mapping() for item in self.subtask_overrides
+            ],
+            "input_groups": [item.to_mapping() for item in self.input_groups],
+        }
+
+
 def resolve_collaboration_policy(
     request: CollaborationPolicyRequestV1,
     binding: CollaborationRuntimeBindingSnapshot | None,
@@ -452,6 +715,30 @@ def resolve_collaboration_policy(
             f"runtime does not support collaboration strategy: {', '.join(unsupported)}"
         )
     return CollaborationPolicySnapshotV1.from_request(request, binding)
+
+
+def resolve_collaboration_policy_v2(
+    request: CollaborationPolicyRequestV2,
+    binding: CollaborationRuntimeBindingSnapshot | None,
+    *,
+    subtask_keys: frozenset[str],
+) -> CollaborationPolicySnapshotV2 | None:
+    if not isinstance(request, CollaborationPolicyRequestV2):
+        raise ValidationError("request must be a collaboration policy request v2")
+    if request.mode is CollaborationMode.DISABLED:
+        return None
+    if binding is None:
+        raise ValidationError("enabled collaboration policy requires runtime binding")
+    request.validate_for_subtasks(subtask_keys)
+    supported = set(binding.runtime_capability_snapshot.strategy_ids)
+    strategies = {request.default_policy.strategy_id.value}
+    strategies.update(item.strategy_id.value for item in request.subtask_overrides)
+    unsupported = sorted(strategies - supported)
+    if unsupported:
+        raise ValidationError(
+            f"runtime does not support collaboration strategy: {', '.join(unsupported)}"
+        )
+    return CollaborationPolicySnapshotV2.from_request(request, binding)
 
 
 @dataclass(slots=True)
@@ -1123,6 +1410,42 @@ def _policy_entry_from_mapping(
             "collaboration strategy",
         ),
     )
+
+
+def _input_groups_from_mapping(value: object) -> tuple[InputGroupV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("input_groups must be an array")
+    groups: list[InputGroupV1] = []
+    for item in value:
+        if isinstance(item, InputGroupV1):
+            groups.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            raise InputGroupInvalid("input group must be a mapping")
+        groups.append(InputGroupV1.from_mapping(item))
+    return tuple(groups)
+
+
+def _normalize_input_groups(
+    groups: tuple[InputGroupV1, ...],
+) -> tuple[InputGroupV1, ...]:
+    normalized = tuple(groups)
+    if any(not isinstance(item, InputGroupV1) for item in normalized):
+        raise InputGroupInvalid("input groups must contain typed groups")
+    keys = [item.group_key for item in normalized]
+    if len(keys) != len(set(keys)):
+        raise InputGroupInvalid("input group keys must be unique")
+    return tuple(sorted(normalized, key=lambda item: item.group_key))
+
+
+def _validate_policy_overrides(
+    overrides: tuple[CollaborationPolicyOverride, ...],
+) -> None:
+    if any(not isinstance(item, CollaborationPolicyOverride) for item in overrides):
+        raise ValidationError("subtask_overrides contains an invalid override")
+    keys = [item.subtask_key for item in overrides]
+    if len(keys) != len(set(keys)):
+        raise ValidationError("duplicate collaboration override")
 
 
 def _override_from_mapping(value: object) -> CollaborationPolicyOverride:

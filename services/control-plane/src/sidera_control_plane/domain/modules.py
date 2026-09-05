@@ -60,6 +60,10 @@ PLANNER_ADAPTER_MODULE_TYPE = "planner_adapter"
 COLLABORATION_RUNTIME_MODULE_TYPE = "collaboration_runtime"
 NOTIFICATION_CHANNEL_MODULE_TYPE = "notification_channel"
 
+COLLABORATION_INPUT_GROUPS_STRATEGY_ID = "input_groups_v1"
+COLLABORATION_PROJECTION_SCHEMA_V2 = 2
+COLLABORATION_DECISION_SCHEMA_V2 = 2
+
 _MODULE_TYPE_ALIASES = {
     "worker-adapter": WORKER_ADAPTER_MODULE_TYPE,
     "workspace-provider": WORKSPACE_PROVIDER_MODULE_TYPE,
@@ -371,6 +375,13 @@ class CollaborationRuntimeCapabilityProfile:
             self,
             "stability",
             _enum_value(self.stability, StabilityLevel, "stability level"),
+        )
+
+    def supports_input_groups_v1(self) -> bool:
+        return (
+            COLLABORATION_PROJECTION_SCHEMA_V2 in self.projection_schema_versions
+            and COLLABORATION_DECISION_SCHEMA_V2 in self.decision_schema_versions
+            and COLLABORATION_INPUT_GROUPS_STRATEGY_ID in self.strategy_ids
         )
 
 
