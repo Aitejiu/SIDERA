@@ -427,6 +427,9 @@ class CollaborationDecisionService:
                     )
                     assessments = disposition.assessments
                     proposals = disposition.proposals
+                    deferred_selections = disposition.selections
+                else:
+                    deferred_selections = ()
                 if any(
                     item.status is RuntimeIntentApplicationStatus.STALE
                     for item in assessments
@@ -468,7 +471,7 @@ class CollaborationDecisionService:
                 else:
                     status = "applied"
 
-                selections = self._new_selections(
+                automatic_selections = self._new_selections(
                     intents,
                     assessments,
                     run=run,
@@ -476,8 +479,11 @@ class CollaborationDecisionService:
                     projection=prepared.projection,
                     now=now,
                 )
-                stored_selections = tuple(
-                    uow.input_selections.add(item) for item in selections
+                stored_selections = (
+                    *deferred_selections,
+                    *tuple(
+                        uow.input_selections.add(item) for item in automatic_selections
+                    ),
                 )
                 selection_by_intent = {
                     item.intent_id: item for item in stored_selections
@@ -506,7 +512,14 @@ class CollaborationDecisionService:
                     now=now,
                 )
                 uow.collaboration_ledger.add_applications(applications)
+                released_selection_ids = {
+                    item.input_selection_id
+                    for item in new_releases
+                    if item.input_selection_id is not None
+                }
                 for selection in selections:
+                    if selection.id not in released_selection_ids:
+                        continue
                     request = requests[selection.target_execution_request_id]
                     if request is None:
                         raise CollaborationDecisionConflict(
@@ -1097,6 +1110,12 @@ class CollaborationDecisionService:
                 "status": proposal.status.value,
                 "reason_code": proposal.reason_code,
                 "input_fingerprint_version": proposal.input_fingerprint_version,
+                "input_selection_id": (
+                    str(proposal.input_selection_id)
+                    if proposal.input_selection_id is not None
+                    else None
+                ),
+                "input_selection_hash": proposal.input_selection_hash,
             },
         )
 

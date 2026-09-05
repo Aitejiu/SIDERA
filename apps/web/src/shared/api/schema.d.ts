@@ -1598,6 +1598,16 @@ export interface components {
         /** ApproveCollaborationReleaseProposalPayload */
         ApproveCollaborationReleaseProposalPayload: {
             /**
+             * Expected Input Selection Hash
+             * @default null
+             */
+            expected_input_selection_hash: string | null;
+            /**
+             * Expected Input Selection Id
+             * @default null
+             */
+            expected_input_selection_id: string | null;
+            /**
              * Reason
              * @default null
              */
@@ -1969,6 +1979,10 @@ export interface components {
             hold_id: string;
             /** Hold Resource Version */
             hold_resource_version: number;
+            /** Input Selection Hash */
+            input_selection_hash?: string | null;
+            /** Input Selection Id */
+            input_selection_id?: string | null;
             /**
              * Proposal Id
              * Format: uuid
@@ -2118,6 +2132,10 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Input Selection Hash */
+            input_selection_hash?: string | null;
+            /** Input Selection Id */
+            input_selection_id?: string | null;
             /**
              * Proposal Id
              * Format: uuid

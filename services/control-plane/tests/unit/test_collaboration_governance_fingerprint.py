@@ -9,6 +9,10 @@ from sidera_control_plane.application.collaboration_governance_fingerprint impor
 )
 from sidera_control_plane.domain.collaboration import RuntimeIntent
 from sidera_control_plane.domain.collaboration_runtime import RuntimeProjectionV1
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+)
+from tests.unit.result_input_fixtures import selection_mapping
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = uuid4()
@@ -148,6 +152,31 @@ def intent_fixture() -> RuntimeIntent:
     )
 
 
+def selection_fixture(
+    projection: RuntimeProjectionV1, intent: RuntimeIntent
+) -> CollaborationInputSelectionV1:
+    original = CollaborationInputSelectionV1.from_mapping(selection_mapping())
+    draft = replace(
+        original,
+        id=uuid4(),
+        workspace_id=projection.workspace_id,
+        root_task_id=projection.root_task_id,
+        run_id=projection.run_id,
+        plan_snapshot_id=projection.plan_snapshot_id,
+        plan_generation=projection.plan_generation,
+        plan_content_hash=projection.plan_content_hash,
+        target_worker_item_id=TARGET_WORKER_ID,
+        target_execution_request_id=intent.target_execution_request_id,
+        target_request_version=intent.target_request_version,
+        projection_snapshot_id=projection.projection_id,
+        projection_hash=projection.content_hash,
+        decision_id=intent.decision_id,
+        intent_id=intent.id,
+        selection_hash="0" * 64,
+    )
+    return replace(draft, selection_hash=draft.compute_selection_hash())
+
+
 def test_target_fingerprint_ignores_projection_noise_and_sorts_collections() -> None:
     first = projection_fixture()
     second = replace(
@@ -265,7 +294,99 @@ def test_target_fingerprint_changes_with_policy_and_handoff_fence() -> None:
         target_handoff_fence={"transition_id": str(uuid4()), "version": 2},
     )
 
-    assert original.value != build_release_proposal_fingerprint(
-        changed_policy, intent, worker_item_id=TARGET_WORKER_ID
-    ).value
+    assert (
+        original.value
+        != build_release_proposal_fingerprint(
+            changed_policy, intent, worker_item_id=TARGET_WORKER_ID
+        ).value
+    )
     assert original.value != changed_fence.value
+
+
+def test_v2_fingerprint_ignores_unselected_progress_and_projection_cursor() -> None:
+    projection = projection_fixture()
+    intent = intent_fixture()
+    selection = selection_fixture(projection, intent)
+    changed = replace(
+        projection,
+        projection_id=uuid4(),
+        fact_cursor=999,
+        policy={**projection.policy, "aggregate_ready_count": 3},
+        artifacts=(
+            *projection.artifacts,
+            {
+                "id": str(uuid4()),
+                "execution_id": str(uuid4()),
+                "artifact_type": "report",
+                "content_hash": "e" * 64,
+            },
+        ),
+    )
+
+    first = build_release_proposal_fingerprint(
+        projection,
+        intent,
+        worker_item_id=TARGET_WORKER_ID,
+        selection=selection,
+        governance_fence={"hold_id": "hold", "version": 1},
+    )
+    second = build_release_proposal_fingerprint(
+        changed,
+        intent,
+        worker_item_id=TARGET_WORKER_ID,
+        selection=selection,
+        governance_fence={"hold_id": "hold", "version": 1},
+    )
+
+    assert first.version == 2
+    assert first.value == second.value
+    assert "aggregate_ready_count" not in str(first.canonical_input)
+    assert "artifacts" not in first.canonical_input
+
+
+def test_v2_fingerprint_changes_with_fixed_selection_and_governance_fences() -> None:
+    projection = projection_fixture()
+    intent = intent_fixture()
+    selection = selection_fixture(projection, intent)
+    first = build_release_proposal_fingerprint(
+        projection,
+        intent,
+        worker_item_id=TARGET_WORKER_ID,
+        selection=selection,
+        governance_fence={"hold_id": "hold", "version": 1},
+    )
+    source = selection.groups[0].sources[0]
+    changed_group = replace(
+        selection.groups[0],
+        sources=(
+            replace(source, source_basis_hash="f" * 64),
+            *selection.groups[0].sources[1:],
+        ),
+    )
+    changed_draft = replace(
+        selection,
+        groups=(changed_group,),
+        selection_hash="0" * 64,
+    )
+    changed_selection = replace(
+        changed_draft,
+        selection_hash=changed_draft.compute_selection_hash(),
+    )
+
+    changed_input = build_release_proposal_fingerprint(
+        projection,
+        intent,
+        worker_item_id=TARGET_WORKER_ID,
+        selection=changed_selection,
+        governance_fence={"hold_id": "hold", "version": 1},
+    )
+    changed_fence = build_release_proposal_fingerprint(
+        projection,
+        intent,
+        worker_item_id=TARGET_WORKER_ID,
+        selection=selection,
+        governance_fence={"hold_id": "hold", "version": 2},
+    )
+
+    assert first.value != changed_input.value
+    assert first.value != changed_fence.value

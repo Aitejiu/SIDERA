@@ -3,20 +3,37 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from hashlib import sha256
+from typing import TYPE_CHECKING
 from uuid import UUID
 
+from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
 from sidera_control_plane.domain.collaboration_runtime import canonical_json_bytes
+from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.execution import ExecutionStatus
+from sidera_control_plane.domain.execution_requests import DependencyEnforcement
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+    InputSelectionHardInputV1,
+    InputSelectionSourceV1,
+)
 from sidera_control_plane.domain.result_inputs import (
     InputCandidateState,
+    InputGroupCandidateV1,
     InputGroupEvaluation,
     InputGroupMode,
     InputGroupRequirementsV1,
     InputGroupV1,
+    InputSelectionStrategy,
     ResultInputArtifact,
     ResultInputEvidence,
     ResultInputSource,
 )
+
+if TYPE_CHECKING:
+    from sidera_control_plane.application.collaboration_projection import (
+        CollaborationFacts,
+        CollaborationRequestFact,
+    )
 
 _POSSIBLY_ACTIVE_STATUSES = frozenset(
     {ExecutionStatus.QUEUED, ExecutionStatus.LEASED, ExecutionStatus.RUNNING}
@@ -78,6 +95,224 @@ class ResultInputEvaluator:
         )
 
 
+def validate_selected_sources(
+    *,
+    selection: CollaborationInputSelectionV1,
+    facts: CollaborationFacts,
+) -> str | None:
+    """Validate an immutable selection without selecting newer candidates."""
+
+    head = facts.plan_head
+    if (
+        selection.workspace_id != head.workspace_id
+        or selection.root_task_id != head.root_task_id
+        or selection.run_id != head.run_id
+        or selection.plan_snapshot_id != head.plan_snapshot_id
+        or selection.plan_generation != head.plan_generation
+        or selection.plan_content_hash != head.plan_content_hash
+    ):
+        return "plan_generation_stale"
+    request = next(
+        (
+            item
+            for item in facts.requests
+            if item.id == selection.target_execution_request_id
+        ),
+        None,
+    )
+    if (
+        request is None
+        or request.worker_item_id != selection.target_worker_item_id
+        or request.version != selection.target_request_version
+    ):
+        return "input_selection_target_stale"
+
+    try:
+        configured = _configured_groups(facts, request=request)
+    except (ValidationError, ValueError, TypeError):
+        return "input_selection_rule_changed"
+    selected_by_key = {item.group_key: item for item in selection.groups}
+    configured_by_key = {item.group_key: item for item in configured}
+    if set(selected_by_key) != set(configured_by_key):
+        return "input_selection_rule_changed"
+
+    from sidera_control_plane.application.result_input_sources import (
+        resolve_result_input_source,
+    )
+
+    evaluator = ResultInputEvaluator()
+    for group_key in sorted(configured_by_key):
+        group = configured_by_key[group_key]
+        selected = selected_by_key[group_key]
+        rule_hash = sha256(canonical_json_bytes(group.to_mapping())).hexdigest()
+        if selected.rule_hash != rule_hash:
+            return "input_selection_rule_changed"
+        candidate_priority = {
+            item.worker_item_key: item.priority for item in group.candidates
+        }
+        evaluation = evaluator.evaluate_group(
+            group=group,
+            sources=tuple(
+                resolve_result_input_source(
+                    worker_item_key=item.worker_item_key,
+                    facts=facts,
+                )
+                for item in group.candidates
+            ),
+        )
+        states = {item.worker_item_key: item for item in evaluation.candidate_states}
+        for source in selected.sources:
+            state = states.get(source.worker_item_key)
+            if (
+                candidate_priority.get(source.worker_item_key) != source.priority
+                or state is None
+                or not state.ready
+                or state.source is None
+            ):
+                return "input_selection_source_stale"
+            try:
+                current = _selection_source(state.source, priority=source.priority)
+            except (ValidationError, ValueError):
+                return "input_selection_source_stale"
+            if current != source:
+                return "input_selection_source_stale"
+
+    try:
+        hard_inputs = build_hard_input_selections(request=request, facts=facts)
+    except (ValidationError, ValueError):
+        return "hard_dependency_changed"
+    if hard_inputs != selection.hard_inputs:
+        return "hard_dependency_changed"
+    return None
+
+
+def build_hard_input_selections(
+    *,
+    request: CollaborationRequestFact,
+    facts: CollaborationFacts,
+) -> tuple[InputSelectionHardInputV1, ...]:
+    """Build exact hard-dependency selections from authoritative facts."""
+
+    from sidera_control_plane.application.result_input_sources import (
+        resolve_result_input_source,
+    )
+
+    requests = {item.id: item for item in facts.requests}
+    evaluator = ResultInputEvaluator()
+    values: list[InputSelectionHardInputV1] = []
+    dependencies = sorted(
+        (
+            item
+            for item in facts.dependencies
+            if item.downstream_request_id == request.id
+            and item.enforcement is DependencyEnforcement.HARD
+        ),
+        key=lambda item: str(item.upstream_request_id),
+    )
+    for dependency in dependencies:
+        upstream = requests.get(dependency.upstream_request_id)
+        if upstream is None:
+            raise ValueError("hard input source request is missing")
+        requirements = InputGroupRequirementsV1(
+            execution_status=ExecutionStatus.SUCCEEDED,
+            required_artifact_refs=dependency.required_artifact_refs,
+            required_evidence_refs=dependency.required_evidence_refs,
+            evidence_status=EvidenceClaimStatus.CANDIDATE,
+        )
+        group = InputGroupV1(
+            group_key=f"hard:{dependency.upstream_request_id}",
+            title=f"Hard input {upstream.worker_item_key}",
+            consumer_worker_item_key=request.worker_item_key,
+            candidates=(
+                InputGroupCandidateV1(
+                    worker_item_key=upstream.worker_item_key,
+                    priority=1,
+                ),
+            ),
+            requirements=requirements,
+            mode=InputGroupMode.ALL,
+            minimum_count=None,
+            selection_strategy=InputSelectionStrategy.PLAN_ORDER,
+        )
+        evaluation = evaluator.evaluate_group(
+            group=group,
+            sources=(
+                resolve_result_input_source(
+                    worker_item_key=upstream.worker_item_key,
+                    facts=facts,
+                ),
+            ),
+        )
+        if not evaluation.satisfied or len(evaluation.ready_sources) != 1:
+            raise ValueError("hard input source is not ready")
+        selected = _selection_source(evaluation.ready_sources[0], priority=1)
+        dependency_mapping = {
+            "downstream_request_id": str(dependency.downstream_request_id),
+            "upstream_request_id": str(dependency.upstream_request_id),
+            "enforcement": dependency.enforcement.value,
+            "required_artifact_refs": list(dependency.required_artifact_refs),
+            "required_evidence_refs": list(dependency.required_evidence_refs),
+        }
+        values.append(
+            InputSelectionHardInputV1(
+                dependency_key=f"request:{dependency.upstream_request_id}",
+                rule_hash=sha256(canonical_json_bytes(dependency_mapping)).hexdigest(),
+                source=selected,
+            )
+        )
+    return tuple(values)
+
+
+def _configured_groups(
+    facts: CollaborationFacts,
+    *,
+    request: CollaborationRequestFact,
+) -> tuple[InputGroupV1, ...]:
+    policy = facts.plan_head.policy_snapshot
+    if policy is None:
+        configured = facts.plan_snapshot.collaboration_policy
+        policy = configured.to_mapping() if configured is not None else {}
+    raw_groups = policy.get("input_groups", ())
+    if not isinstance(raw_groups, (list, tuple)):
+        raise TypeError("input groups are invalid")
+    return tuple(
+        group
+        for group in (InputGroupV1.from_mapping(item) for item in raw_groups)
+        if group.consumer_worker_item_key == request.worker_item_key
+    )
+
+
+def _selection_source(
+    source: ResultInputSource,
+    *,
+    priority: int,
+) -> InputSelectionSourceV1:
+    if (
+        source.worker_item_id is None
+        or source.effective_request_id is None
+        or not source.allowed_lineage_ids
+        or source.effective_execution_id is None
+        or source.attempt is None
+        or source.source_basis_hash is None
+    ):
+        raise ValueError("ready input source has incomplete provenance")
+    return InputSelectionSourceV1(
+        worker_item_key=source.worker_item_key,
+        worker_item_id=source.worker_item_id,
+        subtask_path=source.subtask_path,
+        effective_request_id=source.effective_request_id,
+        allowed_lineage_ids=source.allowed_lineage_ids,
+        effective_lineage_id=source.allowed_lineage_ids[-1],
+        effective_execution_id=source.effective_execution_id,
+        attempt=source.attempt,
+        inheritance_refs=source.inheritance_refs,
+        priority=priority,
+        source_basis_hash=source.source_basis_hash,
+        artifacts=source.artifacts,
+        evidence=source.evidence,
+    )
+
+
 def _evaluate_source(
     *,
     source: ResultInputSource,
@@ -89,7 +324,9 @@ def _evaluate_source(
     for selector in requirements.required_artifact_refs:
         artifact_type = selector.removeprefix("artifact_type:")
         matches = tuple(
-            item for item in source.artifacts if item.artifact_type.value == artifact_type
+            item
+            for item in source.artifacts
+            if item.artifact_type.value == artifact_type
         )
         if not matches:
             missing_artifact_refs.append(selector)

@@ -534,6 +534,8 @@ def _proposal_identity_matches(
         and current.target_request_version == expected.target_request_version
         and current.input_fingerprint_version == expected.input_fingerprint_version
         and current.input_fingerprint == expected.input_fingerprint
+        and current.input_selection_id == expected.input_selection_id
+        and current.input_selection_hash == expected.input_selection_hash
     )
 
 

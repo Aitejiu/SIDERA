@@ -20,6 +20,12 @@ from sidera_control_plane.application.collaboration_decisions import (
     CollaborationDecisionApplicationResult,
     CollaborationDecisionService,
 )
+from sidera_control_plane.application.collaboration_governance_commands import (
+    CollaborationGovernanceCommandHandler,
+)
+from sidera_control_plane.application.collaboration_governance_release import (
+    CollaborationGovernanceReleaseApplier,
+)
 from sidera_control_plane.application.collaboration_reconciler import (
     CollaborationReconciler,
 )
@@ -80,6 +86,7 @@ from sidera_control_plane.persistence.collaboration_fact_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     CollaborationInputSelectionModel,
+    CollaborationReleaseProposalModel,
     ExecutionModel,
     ExecutionRequestModel,
     RuntimeReleaseModel,
@@ -451,6 +458,175 @@ class ResultInputScenario:
                 or 0
             )
 
+    def pause_release(self, key: str) -> None:
+        # Confirmation creates the Run before its first runtime reconciliation.
+        # Pause exercises the public command only after that Run is current.
+        self._reconcile_once()
+        with self.uow_factory() as uow:
+            worker_item = uow.worker_items.get(
+                self.worker_item_ids[key], self.workspace_id
+            )
+            assert worker_item is not None
+            worker_version = worker_item.version
+        CommandService(
+            self.uow_factory,
+            (
+                CollaborationGovernanceCommandHandler(
+                    clock=self.clock,
+                    local_actor_type="local",
+                    local_actor_id="operator",
+                ),
+            ),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="PauseCollaborationRelease",
+                target_type="worker_item",
+                actor_type="local",
+                actor_id="operator",
+                target_id=self.worker_item_ids[key],
+                payload={
+                    "transport": "web",
+                    "reason": "review fixed result inputs",
+                    "target_plan_generation": 1,
+                },
+                expected_version=worker_version,
+                idempotency_key=f"result-input-pause:{self.worker_item_ids[key]}",
+                correlation_id=self.ids["root_task"],
+            )
+        )
+
+    def pending_proposal(self, key: str):
+        with self.database.session() as session:
+            proposal_id = session.scalar(
+                select(CollaborationReleaseProposalModel.id).where(
+                    CollaborationReleaseProposalModel.workspace_id == self.workspace_id,
+                    CollaborationReleaseProposalModel.execution_request_id
+                    == self.request_ids[key],
+                    CollaborationReleaseProposalModel.status == "pending",
+                )
+            )
+        assert proposal_id is not None
+        with self.uow_factory() as uow:
+            proposal = uow.collaboration_governance.get_proposal(
+                self.workspace_id, proposal_id
+            )
+            assert proposal is not None
+            return proposal
+
+    def governance_service(self) -> CommandService:
+        applier = CollaborationGovernanceReleaseApplier(
+            fact_store_factory=lambda uow: SqlAlchemyCollaborationFactStore(
+                session=cast(SqlAlchemyUnitOfWork, uow).session
+            )
+        )
+        return CommandService(
+            self.uow_factory,
+            (
+                CollaborationGovernanceCommandHandler(
+                    clock=self.clock,
+                    local_actor_type="local",
+                    local_actor_id="operator",
+                    approver=applier,
+                ),
+            ),
+        )
+
+    def approval_command(
+        self,
+        proposal: Any,
+        *,
+        include_selection: bool = True,
+        selection_hash: str | None = None,
+    ) -> CommandEnvelope:
+        payload: dict[str, object] = {
+            "transport": "web",
+            "reason": "reviewed fixed result inputs",
+        }
+        if include_selection and proposal.input_selection_id is not None:
+            payload.update(
+                {
+                    "expected_input_selection_id": str(proposal.input_selection_id),
+                    "expected_input_selection_hash": (
+                        selection_hash or proposal.input_selection_hash
+                    ),
+                }
+            )
+        return CommandEnvelope(
+            id=uuid4(),
+            workspace_id=self.workspace_id,
+            command_type="ApproveCollaborationReleaseProposal",
+            target_type="collaboration_release_proposal",
+            actor_type="local",
+            actor_id="operator",
+            target_id=proposal.id,
+            payload=payload,
+            expected_version=proposal.resource_version,
+            idempotency_key=f"result-input-approve:{proposal.id}:{uuid4()}",
+            correlation_id=self.ids["root_task"],
+        )
+
+    def approve(self, proposal: Any) -> Any:
+        return self.governance_service().handle(self.approval_command(proposal))
+
+    def rejection_command(self, proposal: Any) -> CommandEnvelope:
+        return CommandEnvelope(
+            id=uuid4(),
+            workspace_id=self.workspace_id,
+            command_type="RejectCollaborationReleaseProposal",
+            target_type="collaboration_release_proposal",
+            actor_type="local",
+            actor_id="operator",
+            target_id=proposal.id,
+            payload={"transport": "web", "reason": "needs revision"},
+            expected_version=proposal.resource_version,
+            idempotency_key=f"result-input-reject:{proposal.id}:{uuid4()}",
+            correlation_id=self.ids["root_task"],
+        )
+
+    def resume_command(self, proposal: Any) -> CommandEnvelope:
+        with self.uow_factory() as uow:
+            hold = uow.collaboration_governance.get_hold(
+                self.workspace_id, proposal.hold_id
+            )
+            assert hold is not None
+        return CommandEnvelope(
+            id=uuid4(),
+            workspace_id=self.workspace_id,
+            command_type="ResumeAutomaticCollaboration",
+            target_type="collaboration_governance_hold",
+            actor_type="local",
+            actor_id="operator",
+            target_id=hold.id,
+            payload={"transport": "web", "reason": "resume automatic release"},
+            expected_version=hold.resource_version,
+            idempotency_key=f"result-input-resume:{hold.id}:{uuid4()}",
+            correlation_id=self.ids["root_task"],
+        )
+
+    def release_selection_ref(self, key: str) -> tuple[UUID | None, str | None]:
+        with self.database.session() as session:
+            release = session.scalar(
+                select(RuntimeReleaseModel).where(
+                    RuntimeReleaseModel.workspace_id == self.workspace_id,
+                    RuntimeReleaseModel.execution_request_id == self.request_ids[key],
+                )
+            )
+        assert release is not None
+        return release.input_selection_id, release.input_selection_hash
+
+    def request_version(self, key: str) -> int:
+        with self.database.session() as session:
+            value = session.scalar(
+                select(ExecutionRequestModel.version).where(
+                    ExecutionRequestModel.workspace_id == self.workspace_id,
+                    ExecutionRequestModel.id == self.request_ids[key],
+                )
+            )
+        assert value is not None
+        return int(value)
+
     def selection_count(self, key: str) -> int:
         with self.database.session() as session:
             return int(
@@ -584,7 +760,7 @@ class ResultInputScenario:
     def _ensure_source_executions(self) -> None:
         if self._execution_id("a") is not None:
             return
-        assert self._reconcile_once()
+        self._reconcile_once()
         ActivationReconciler(
             uow_factory=self.uow_factory,
             owner_id="result-input-activation",

@@ -9,7 +9,10 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from sidera_control_plane.domain.collaboration import CollaborationPolicySnapshotV1
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
+)
 from sidera_control_plane.domain.collaboration_projections import (
     CollaborationDecisionProjectionFact,
     CollaborationExecutionProjectionFact,
@@ -23,6 +26,7 @@ from sidera_control_plane.domain.collaboration_projections import (
     CollaborationRequestProjectionFact,
     CollaborationRunProjectionFact,
 )
+from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plan_normalization import (
     CanonicalTaskPlan,
     PlanNormalizer,
@@ -491,10 +495,15 @@ def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
 
 def _policy_snapshot(
     value: Mapping[str, object],
-) -> CollaborationPolicySnapshotV1 | None:
+) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
     try:
-        return CollaborationPolicySnapshotV1.from_mapping(value)
-    except (KeyError, TypeError, ValueError):
+        schema_version = value.get("schema_version")
+        if schema_version == 1:
+            return CollaborationPolicySnapshotV1.from_mapping(value)
+        if schema_version == 2:
+            return CollaborationPolicySnapshotV2.from_mapping(value)
+        return None
+    except (ValidationError, KeyError, TypeError, ValueError):
         return None
 
 
@@ -622,6 +631,8 @@ def _proposal(
         summary=_bounded(row.summary, 2000),
         created_at=_as_utc(row.created_at),
         resolved_at=_optional_utc(row.resolved_at),
+        input_selection_id=row.input_selection_id,
+        input_selection_hash=row.input_selection_hash,
     )
 
 

@@ -347,12 +347,12 @@ def test_r6_3_3_schema_has_named_status_and_timestamp_checks(
         } <= checks["notification_reconciliation_cursors"]
 
 
-def test_r6_3_3_schema_is_at_revision_0025(database: Database) -> None:
+def test_r6_3_3_schema_survives_current_revision(database: Database) -> None:
     with database.engine.connect() as connection:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0025_r6_3_3_notification_gateway"
+    assert version == "0026_r6_3_4_result_inputs"
 
 
 def test_r6_3_3_migration_downgrade_is_forward_only() -> None:

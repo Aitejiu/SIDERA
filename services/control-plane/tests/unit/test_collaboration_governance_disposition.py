@@ -145,6 +145,14 @@ class FakeGovernanceRepository:
     def find_matching_proposal(self, workspace_id, hold_id, execution_request_id, target_request_version, fingerprint_version, fingerprint, *, for_update=False):
         return next((item for item in self.proposals if item.input_fingerprint == fingerprint), None)
 
+    def list_pending_proposals_for_hold(self, workspace_id, hold_id, *, for_update=False):
+        return tuple(
+            item
+            for item in self.proposals
+            if item.hold_id == hold_id
+            and item.status is ReleaseProposalStatus.PENDING
+        )
+
     def add_proposal(self, proposal):
         self.proposals.append(proposal)
 

@@ -119,7 +119,15 @@ class CollaborationGovernanceCommandHandler:
                 envelope,
                 target_type="collaboration_release_proposal",
             )
-            self._parse_payload(envelope.payload, allowed={"transport", "reason"})
+            self._parse_payload(
+                envelope.payload,
+                allowed={
+                    "transport",
+                    "reason",
+                    "expected_input_selection_id",
+                    "expected_input_selection_hash",
+                },
+            )
             if self._approver is None:
                 _raise(
                     "collaboration_governance_disabled",

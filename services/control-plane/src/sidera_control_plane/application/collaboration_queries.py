@@ -62,6 +62,8 @@ class CollaborationGovernanceProposalView:
     governance_mode: str
     available_actions: tuple[str, ...]
     deep_link: str
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +210,8 @@ class CollaborationQueryService:
                 summary.available_actions if proposal.status == "pending" else ()
             ),
             deep_link=f"/workspaces/{workspace_id}/worker-items/{proposal.worker_item_id}",
+            input_selection_id=proposal.input_selection_id,
+            input_selection_hash=proposal.input_selection_hash,
         )
 
     @staticmethod

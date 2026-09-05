@@ -79,10 +79,13 @@ def test_r6_1_upgrade_downgrade_upgrade_backfills_only_real_heads(
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    if version == "0025_r6_3_3_notification_gateway":
+    if version in {
+        "0025_r6_3_3_notification_gateway",
+        "0026_r6_3_4_result_inputs",
+    }:
         pytest.skip(
-            "R6.3.3 is forward-only; historical downgrade rehearsal belongs "
-            "to a pre-R6.3.3 migration database"
+            "R6.3.3 and later are forward-only; historical downgrade rehearsal "
+            "belongs to a pre-R6.3.3 migration database"
         )
     try:
         command.downgrade(config, "0016_r5_3_work_context_packages")

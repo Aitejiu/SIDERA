@@ -17,14 +17,19 @@ from sidera_control_plane.application.collaboration_governance_fingerprint impor
     build_release_proposal_fingerprint,
 )
 from sidera_control_plane.application.collaboration_projection import (
+    CollaborationFacts,
     CollaborationProjectionAssembler,
 )
 from sidera_control_plane.application.collaboration_release_validation import (
     CollaborationReleaseEligibilityValidator,
+    ReleaseEligibilityAssessment,
 )
 from sidera_control_plane.application.ports import (
     CollaborationFactStorePort,
     ControlPlaneUnitOfWork,
+)
+from sidera_control_plane.application.result_input_evaluation import (
+    validate_selected_sources,
 )
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
@@ -48,6 +53,7 @@ from sidera_control_plane.domain.collaboration_governance import (
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeEnvelopeError,
     RuntimeProjectionV1,
+    RuntimeProjectionV2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import VersionConflict
@@ -55,6 +61,9 @@ from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution_requests import (
     ExecutionRequest,
     ExecutionRequestStatus,
+)
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
 )
 from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
 
@@ -72,7 +81,8 @@ class _ApprovalLineage:
     application: RuntimeIntentApplication
     decision: Any
     intent: RuntimeIntent
-    original_projection: RuntimeProjectionV1
+    original_projection: RuntimeProjectionV1 | RuntimeProjectionV2
+    input_selection: CollaborationInputSelectionV1 | None
 
 
 class CollaborationGovernanceReleaseApplier:
@@ -129,6 +139,7 @@ class CollaborationGovernanceReleaseApplier:
             hold_identity=hold_identity,
             expected_version=command.expected_version,
         )
+        _validate_selection_expectation(command.payload, lineage.proposal)
 
         # The mutable lineage is locked before immutable ledger rows are read.
         # A superseded generation cannot be loaded by the fact store, so resolve
@@ -142,7 +153,9 @@ class CollaborationGovernanceReleaseApplier:
                 now=now,
                 wake_runtime=False,
             )
-        current_projection = self._current_projection(uow, lineage.run, now=now)
+        current_projection, current_facts = self._current_projection(
+            uow, lineage.run, now=now
+        )
         stale_reason = self._stale_reason(
             uow,
             lineage,
@@ -161,14 +174,55 @@ class CollaborationGovernanceReleaseApplier:
             )
 
         assert lineage.request is not None
-        assessment = self._release_validator.assess(
-            lineage.intent,
-            request=lineage.request,
-            run=lineage.run,
-            plan_head=lineage.head,
-            current_projection=current_projection,
-            existing_release=None,
-        )
+        if lineage.input_selection is None:
+            assessment = self._release_validator.assess(
+                lineage.intent,
+                request=lineage.request,
+                run=lineage.run,
+                plan_head=lineage.head,
+                current_projection=current_projection,
+                existing_release=None,
+                current_facts=current_facts,
+            )
+        else:
+            target_entry = next(
+                (
+                    item
+                    for item in current_projection.execution_requests
+                    if item.get("id") == str(lineage.request.id)
+                ),
+                None,
+            )
+            if target_entry is None or target_entry.get("eligible") is not True:
+                return self._resolve_stale(
+                    uow,
+                    command,
+                    lineage,
+                    reason="join_condition_unsatisfied",
+                    now=now,
+                    wake_runtime=False,
+                )
+            selected_source_reason = validate_selected_sources(
+                selection=lineage.input_selection,
+                facts=current_facts,
+            )
+            if selected_source_reason is not None:
+                return self._resolve_stale(
+                    uow,
+                    command,
+                    lineage,
+                    reason=selected_source_reason,
+                    now=now,
+                    wake_runtime=True,
+                )
+            assessment = ReleaseEligibilityAssessment(
+                status=RuntimeIntentApplicationStatus.APPLIED,
+                result_code="governance_approved",
+                result_summary="the fixed result inputs remain valid",
+                request=lineage.request,
+                input_groups=lineage.input_selection.groups,
+                hard_inputs=lineage.input_selection.hard_inputs,
+            )
         if assessment.status is not RuntimeIntentApplicationStatus.APPLIED:
             return self._resolve_stale(
                 uow,
@@ -183,6 +237,8 @@ class CollaborationGovernanceReleaseApplier:
             current_projection,
             lineage.intent,
             worker_item_id=lineage.request.worker_item_id,
+            selection=lineage.input_selection,
+            governance_fence=_governance_fence(lineage.hold),
         )
         if (
             fingerprint.version != lineage.proposal.input_fingerprint_version
@@ -212,6 +268,8 @@ class CollaborationGovernanceReleaseApplier:
             execution_request_id=lineage.intent.target_execution_request_id,
             request_version_at_release=lineage.intent.target_request_version,
             issued_at=now,
+            input_selection_id=lineage.proposal.input_selection_id,
+            input_selection_hash=lineage.proposal.input_selection_hash,
         )
         uow.collaboration_ledger.add_releases((release,))
         uow.flush()
@@ -246,6 +304,16 @@ class CollaborationGovernanceReleaseApplier:
         )
         uow.collaboration_governance.add_resolution(resolution)
 
+        if lineage.input_selection is not None:
+            previous_request_version = lineage.request.version
+            changed = lineage.request.bind_input_selection(
+                selection_id=lineage.input_selection.id,
+                selection_hash=lineage.input_selection.selection_hash,
+                now=now,
+            )
+            if changed:
+                uow.execution_requests.save(lineage.request, previous_request_version)
+
         updated_assessment = replace(assessment, proposal=approved_proposal)
         update_collaboration_request_gates(
             uow,
@@ -272,6 +340,12 @@ class CollaborationGovernanceReleaseApplier:
                 "intent_id": str(lineage.intent.id),
                 "execution_request_id": str(lineage.request.id),
                 "request_version_at_release": release.request_version_at_release,
+                "input_selection_id": (
+                    str(release.input_selection_id)
+                    if release.input_selection_id is not None
+                    else None
+                ),
+                "input_selection_hash": release.input_selection_hash,
                 "status": lineage.request.status.value,
                 "gate_reason": lineage.request.gate_reason,
             },
@@ -291,6 +365,12 @@ class CollaborationGovernanceReleaseApplier:
                 "status": approved_proposal.status.value,
                 "result": GovernanceResolutionResult.APPLIED.value,
                 "release_id": str(release.id),
+                "input_selection_id": (
+                    str(approved_proposal.input_selection_id)
+                    if approved_proposal.input_selection_id is not None
+                    else None
+                ),
+                "input_selection_hash": approved_proposal.input_selection_hash,
             },
         )
         uow.events.append_with_outbox(released_event)
@@ -452,6 +532,11 @@ class CollaborationGovernanceReleaseApplier:
                 "Proposal immutable lineage is incomplete",
             )
         original_projection = _rehydrate_projection(stored_projection)
+        input_selection = (
+            uow.input_selections.get(workspace_id, proposal.input_selection_id)
+            if proposal.input_selection_id is not None
+            else None
+        )
         if (
             decision.workspace_id != workspace_id
             or decision.run_id != run.id
@@ -471,6 +556,30 @@ class CollaborationGovernanceReleaseApplier:
             or original_projection.plan_snapshot_id != run.plan_snapshot_id
             or original_projection.plan_generation != run.plan_generation
             or original_projection.plan_content_hash != run.plan_content_hash
+            or (
+                proposal.input_selection_id is not None
+                and (
+                    input_selection is None
+                    or input_selection.id != proposal.input_selection_id
+                    or input_selection.selection_hash != proposal.input_selection_hash
+                    or input_selection.workspace_id != workspace_id
+                    or input_selection.root_task_id != run.root_task_id
+                    or input_selection.run_id != run.id
+                    or input_selection.plan_snapshot_id != run.plan_snapshot_id
+                    or input_selection.plan_generation != run.plan_generation
+                    or input_selection.plan_content_hash != run.plan_content_hash
+                    or input_selection.target_worker_item_id != worker_item.id
+                    or input_selection.target_execution_request_id
+                    != proposal.execution_request_id
+                    or input_selection.target_request_version
+                    != proposal.target_request_version
+                    or input_selection.projection_snapshot_id
+                    != proposal.projection_snapshot_id
+                    or input_selection.projection_hash != proposal.projection_hash
+                    or input_selection.decision_id != proposal.decision_id
+                    or input_selection.intent_id != proposal.intent_id
+                )
+            )
         ):
             _raise(
                 "collaboration_governance_lineage_invalid",
@@ -487,6 +596,7 @@ class CollaborationGovernanceReleaseApplier:
             decision=decision,
             intent=intent,
             original_projection=original_projection,
+            input_selection=input_selection,
         )
 
     def _stale_reason(
@@ -494,7 +604,7 @@ class CollaborationGovernanceReleaseApplier:
         uow: ControlPlaneUnitOfWork,
         lineage: _ApprovalLineage,
         *,
-        current_projection: RuntimeProjectionV1,
+        current_projection: RuntimeProjectionV1 | RuntimeProjectionV2,
     ) -> str | None:
         head = lineage.head
         run = lineage.run
@@ -587,7 +697,7 @@ class CollaborationGovernanceReleaseApplier:
         run: CollaborationRun,
         *,
         now: datetime,
-    ) -> RuntimeProjectionV1:
+    ) -> tuple[RuntimeProjectionV1 | RuntimeProjectionV2, CollaborationFacts]:
         cursor = uow.projection_changes.latest_target_cursor(
             run.workspace_id,
             "collaboration_runtime",
@@ -611,17 +721,15 @@ class CollaborationGovernanceReleaseApplier:
             fact_cursor=cursor,
             now=now,
         )
-        if not isinstance(projection, RuntimeProjectionV1):
-            raise RuntimeEnvelopeError(
-                "Decision v2 governance release is not enabled in this path"
-            )
-        return projection
+        if not isinstance(projection, (RuntimeProjectionV1, RuntimeProjectionV2)):
+            raise RuntimeEnvelopeError("unsupported governance release Projection")
+        return projection, facts
 
     def _can_form_current_recommendation(
         self,
         uow: ControlPlaneUnitOfWork,
         lineage: _ApprovalLineage,
-        current_projection: RuntimeProjectionV1,
+        current_projection: RuntimeProjectionV1 | RuntimeProjectionV2,
     ) -> bool:
         request = lineage.request
         placement = (
@@ -807,11 +915,16 @@ class CollaborationGovernanceReleaseApplier:
         )
 
 
-def _rehydrate_projection(snapshot: Any) -> RuntimeProjectionV1:
+def _rehydrate_projection(
+    snapshot: Any,
+) -> RuntimeProjectionV1 | RuntimeProjectionV2:
     try:
-        projection = RuntimeProjectionV1.from_mapping(
-            snapshot.payload,
-            created_at=snapshot.created_at,
+        schema_version = snapshot.payload.get("schema_version")
+        projection_type = (
+            RuntimeProjectionV2 if schema_version == 2 else RuntimeProjectionV1
+        )
+        projection = projection_type.from_mapping(
+            snapshot.payload, created_at=snapshot.created_at
         )
     except (RuntimeEnvelopeError, TypeError, ValueError) as exc:
         raise CollaborationGovernanceCommandError(
@@ -879,6 +992,8 @@ def _proposal_identity_matches(
         and proposal.target_request_version == identity.target_request_version
         and proposal.input_fingerprint_version == identity.input_fingerprint_version
         and proposal.input_fingerprint == identity.input_fingerprint
+        and proposal.input_selection_id == identity.input_selection_id
+        and proposal.input_selection_hash == identity.input_selection_hash
         and proposal.reason_code == identity.reason_code
         and proposal.summary == identity.summary
         and proposal.created_at == identity.created_at
@@ -922,6 +1037,50 @@ def _reason(payload: Mapping[str, object]) -> str | None:
     ):
         _raise("collaboration_governance_target_invalid", "reason is invalid")
     return clean
+
+
+def _validate_selection_expectation(
+    payload: Mapping[str, object],
+    proposal: CollaborationReleaseProposal,
+) -> None:
+    raw_id = payload.get("expected_input_selection_id")
+    raw_hash = payload.get("expected_input_selection_hash")
+    if proposal.input_selection_id is None:
+        if raw_id is not None or raw_hash is not None:
+            _raise(
+                "collaboration_governance_selection_unexpected",
+                "legacy Proposal does not have an input Selection",
+            )
+        return
+    if raw_id is None or raw_hash is None:
+        _raise(
+            "collaboration_governance_selection_expected",
+            "approval requires the reviewed input Selection identity",
+        )
+    try:
+        expected_id = UUID(str(raw_id))
+    except (TypeError, ValueError) as exc:
+        raise CollaborationGovernanceCommandError(
+            "collaboration_governance_selection_expected",
+            "approval input Selection id is invalid",
+        ) from exc
+    if (
+        expected_id != proposal.input_selection_id
+        or raw_hash != proposal.input_selection_hash
+    ):
+        _raise(
+            "collaboration_governance_selection_conflict",
+            "approval input Selection no longer matches the Proposal",
+        )
+
+
+def _governance_fence(hold: CollaborationGovernanceHold) -> dict[str, object]:
+    return {
+        "hold_id": str(hold.id),
+        "hold_resource_version": hold.resource_version,
+        "hold_status": hold.status.value,
+        "worker_item_id": str(hold.worker_item_id),
+    }
 
 
 def _raise(code: str, message: str) -> NoReturn:

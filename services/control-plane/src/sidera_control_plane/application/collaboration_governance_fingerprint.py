@@ -12,8 +12,12 @@ from sidera_control_plane.domain.collaboration_runtime import (
     canonical_json_bytes,
 )
 from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+)
 
 _VERSION = 1
+_SELECTION_VERSION = 2
 _VOLATILE_KEYS = frozenset(
     {
         "created_at",
@@ -47,13 +51,30 @@ def build_release_proposal_fingerprint(
     *,
     worker_item_id: UUID,
     target_handoff_fence: Mapping[str, object] | None = None,
+    governance_fence: Mapping[str, object] | None = None,
+    selection: CollaborationInputSelectionV1 | None = None,
 ) -> ReleaseProposalFingerprint:
-    if projection.workspace_id != intent.workspace_id or projection.run_id != intent.run_id:
-        raise ValidationError("projection and intent governance identity does not match")
+    if (
+        projection.workspace_id != intent.workspace_id
+        or projection.run_id != intent.run_id
+    ):
+        raise ValidationError(
+            "projection and intent governance identity does not match"
+        )
     target_request_id = str(intent.target_execution_request_id)
     target_request = _find_by_id(
         projection.execution_requests, target_request_id, "target execution request"
     )
+    if selection is not None:
+        return _selection_fingerprint(
+            projection,
+            intent,
+            selection=selection,
+            worker_item_id=worker_item_id,
+            target_request=target_request,
+            target_handoff_fence=target_handoff_fence,
+            governance_fence=governance_fence,
+        )
     target_worker = next(
         (
             item
@@ -75,9 +96,7 @@ def build_release_proposal_fingerprint(
         _without_volatile(item) for item in dependencies
     )
     hard_dependencies = tuple(
-        item
-        for item in dependencies
-        if item.get("enforcement") == "hard"
+        item for item in dependencies if item.get("enforcement") == "hard"
     )
     upstream_ids = {
         str(item["upstream_request_id"])
@@ -162,6 +181,79 @@ def build_release_proposal_fingerprint(
     )
 
 
+def _selection_fingerprint(
+    projection: RuntimeProjectionV1 | RuntimeProjectionV2,
+    intent: RuntimeIntent,
+    *,
+    selection: CollaborationInputSelectionV1,
+    worker_item_id: UUID,
+    target_request: Mapping[str, object],
+    target_handoff_fence: Mapping[str, object] | None,
+    governance_fence: Mapping[str, object] | None,
+) -> ReleaseProposalFingerprint:
+    if (
+        selection.workspace_id != projection.workspace_id
+        or selection.root_task_id != projection.root_task_id
+        or selection.run_id != projection.run_id
+        or selection.plan_snapshot_id != projection.plan_snapshot_id
+        or selection.plan_generation != projection.plan_generation
+        or selection.plan_content_hash != projection.plan_content_hash
+        or selection.target_worker_item_id != worker_item_id
+        or selection.target_execution_request_id != intent.target_execution_request_id
+        or selection.target_request_version != intent.target_request_version
+        or selection.decision_id != intent.decision_id
+        or selection.intent_id != intent.id
+        or selection.selection_hash != selection.compute_selection_hash()
+    ):
+        raise ValidationError(
+            "selection and governance proposal identity does not match"
+        )
+    handoff_fence = target_handoff_fence
+    if handoff_fence is None:
+        candidate = target_request.get("handoff_fence")
+        handoff_fence = candidate if isinstance(candidate, Mapping) else {}
+    target = {
+        key: target_request.get(key)
+        for key in (
+            "id",
+            "worker_item_id",
+            "worker_item_key",
+            "subtask_key",
+            "collaboration_gate_mode",
+            "expected_artifact_refs",
+            "expected_evidence_refs",
+        )
+        if key in target_request
+    }
+    canonical_input: Mapping[str, object] = {
+        "schema_version": _SELECTION_VERSION,
+        "workspace_id": str(selection.workspace_id),
+        "root_task_id": str(selection.root_task_id),
+        "run_id": str(selection.run_id),
+        "plan_snapshot_id": str(selection.plan_snapshot_id),
+        "plan_generation": selection.plan_generation,
+        "plan_content_hash": selection.plan_content_hash,
+        "target": _without_volatile(target),
+        "target_request_version": selection.target_request_version,
+        "input_selection_id": str(selection.id),
+        "input_selection_hash": selection.selection_hash,
+        "groups": tuple(item.to_mapping() for item in selection.groups),
+        "hard_inputs": tuple(item.to_mapping() for item in selection.hard_inputs),
+        "governance_fence": _without_volatile(governance_fence or {}),
+        "handoff_fence": _without_volatile(handoff_fence),
+        "intent": {
+            "intent_type": intent.intent_type,
+            "target_execution_request_id": str(intent.target_execution_request_id),
+            "target_request_version": intent.target_request_version,
+        },
+    }
+    return ReleaseProposalFingerprint(
+        version=_SELECTION_VERSION,
+        canonical_input=canonical_input,
+        value=sha256(canonical_json_bytes(canonical_input)).hexdigest(),
+    )
+
+
 def _find_by_id(
     values: tuple[Mapping[str, object], ...], identity: str, name: str
 ) -> Mapping[str, object]:
@@ -179,7 +271,10 @@ def _target_policy(
     overrides = policy.get("subtask_overrides")
     if isinstance(overrides, (list, tuple)) and isinstance(subtask_key, str):
         for override in overrides:
-            if isinstance(override, Mapping) and override.get("subtask_key") == subtask_key:
+            if (
+                isinstance(override, Mapping)
+                and override.get("subtask_key") == subtask_key
+            ):
                 selected = override
                 break
     return selected if isinstance(selected, Mapping) else {}

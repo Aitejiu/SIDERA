@@ -145,6 +145,8 @@ class CollaborationReleaseProposalProjectionFact:
     summary: str
     created_at: datetime
     resolved_at: datetime | None
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +170,8 @@ class CollaborationReleaseProposalSummaryProjection:
     created_at: datetime
     target_request_version: int
     resolved_at: datetime | None = None
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1295,6 +1299,8 @@ def _proposal_summary(
         created_at=proposal.created_at,
         target_request_version=proposal.target_request_version,
         resolved_at=proposal.resolved_at,
+        input_selection_id=proposal.input_selection_id,
+        input_selection_hash=proposal.input_selection_hash,
     )
 
 

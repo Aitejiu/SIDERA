@@ -820,6 +820,8 @@ class CollaborationReleaseProposalSummaryResponse(BaseModel):
     created_at: datetime
     target_request_version: int
     resolved_at: datetime | None = None
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
 
 class CollaborationGovernanceHistoryResponse(BaseModel):
@@ -1004,6 +1006,8 @@ class CollaborationGovernanceProposalResponse(BaseModel):
         Literal["pause", "approve", "reject", "resume_automatic"], ...
     ]
     deep_link: str
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
 
 
 class CollaborationDecisionPageResponse(BaseModel):
@@ -2196,6 +2200,22 @@ class ApproveCollaborationReleaseProposalPayload(BaseModel):
 
     transport: Literal["web", "main_agent"]
     reason: str | None = Field(default=None, max_length=2000)
+    expected_input_selection_id: UUID | None = None
+    expected_input_selection_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def validate_input_selection_expectation(
+        self,
+    ) -> "ApproveCollaborationReleaseProposalPayload":
+        if (self.expected_input_selection_id is None) != (
+            self.expected_input_selection_hash is None
+        ):
+            raise ValueError(
+                "expected input selection id and hash must be provided together"
+            )
+        return self
 
 
 class RejectCollaborationReleaseProposalPayload(BaseModel):
