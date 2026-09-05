@@ -3,16 +3,19 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, aliased
 
 from sidera_control_plane.application.collaboration_projection import (
     CollaborationArtifactFact,
     CollaborationEvidenceFact,
+    CollaborationExecutionBindingFact,
     CollaborationExecutionFact,
     CollaborationFacts,
+    CollaborationHandoffTransitionFact,
     CollaborationPlanHeadFact,
     CollaborationRequestFact,
+    CollaborationWorkerPlacementFact,
 )
 from sidera_control_plane.domain.collaboration import CollaborationRun, RuntimeRelease
 from sidera_control_plane.domain.errors import ValidationError
@@ -25,14 +28,19 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
     EvidenceClaimModel,
+    ExecutionBindingModel,
     ExecutionModel,
     ExecutionRequestDependencyModel,
     ExecutionRequestModel,
+    HandoffTransitionModel,
     PlanSnapshotModel,
     RootTaskPlanHeadModel,
     RuntimeDecisionModel,
     RuntimeReleaseModel,
+    WorkerItemPlacementModel,
 )
+
+_MAX_RESULT_SOURCE_FACTS = 4096
 
 
 class SqlAlchemyCollaborationFactStore:
@@ -120,6 +128,7 @@ class SqlAlchemyCollaborationFactStore:
         snapshot = TaskPlanSnapshot.from_payload(dict(snapshot_row.payload))
         self._validate_snapshot_identity(snapshot, run)
 
+        worker_placements = self._load_worker_placements(session, run)
         requests = self._load_requests(session, run, snapshot)
         request_ids = tuple(item.id for item in requests)
         dependencies = self._load_dependencies(session, run, request_ids)
@@ -128,10 +137,29 @@ class SqlAlchemyCollaborationFactStore:
             for item in requests
             if item.execution_lineage_id is not None
         )
-        executions = self._load_executions(session, workspace_id, lineage_ids)
+        executions = self._load_executions(
+            session,
+            workspace_id,
+            worker_item_ids=tuple(
+                item.worker_item_id for item in worker_placements
+            ),
+            subtask_task_ids=tuple(
+                item.subtask_task_id for item in worker_placements
+            ),
+            legacy_lineage_ids=lineage_ids,
+        )
         execution_ids = tuple(item.id for item in executions)
         artifacts = self._load_artifacts(session, workspace_id, execution_ids)
         evidence = self._load_evidence(session, workspace_id, execution_ids)
+        execution_bindings = self._load_execution_bindings(
+            session, workspace_id, execution_ids
+        )
+        handoff_transitions = self._load_handoff_transitions(
+            session,
+            workspace_id,
+            tuple(item.worker_item_id for item in worker_placements),
+            execution_ids,
+        )
         releases = self._load_releases(session, run, request_ids)
         previous_strategy_state = self._load_previous_strategy_state(session, run)
 
@@ -156,6 +184,41 @@ class SqlAlchemyCollaborationFactStore:
             evidence=evidence,
             releases=releases,
             previous_strategy_state=previous_strategy_state,
+            worker_placements=worker_placements,
+            execution_bindings=execution_bindings,
+            handoff_transitions=handoff_transitions,
+        )
+
+    @staticmethod
+    def _load_worker_placements(
+        session: Session, run: CollaborationRun
+    ) -> tuple[CollaborationWorkerPlacementFact, ...]:
+        rows = session.execute(
+            select(
+                WorkerItemPlacementModel.worker_item_key,
+                WorkerItemPlacementModel.worker_item_id,
+                WorkerItemPlacementModel.subtask_key,
+                WorkerItemPlacementModel.subtask_task_id,
+            ).where(
+                WorkerItemPlacementModel.workspace_id == run.workspace_id,
+                WorkerItemPlacementModel.root_task_id == run.root_task_id,
+                WorkerItemPlacementModel.plan_snapshot_id == run.plan_snapshot_id,
+                WorkerItemPlacementModel.plan_generation == run.plan_generation,
+                WorkerItemPlacementModel.subtask_task_id.is_not(None),
+            )
+            .order_by(WorkerItemPlacementModel.worker_item_key)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
+        ).all()
+        _ensure_bounded(rows, "worker placements")
+        return tuple(
+            CollaborationWorkerPlacementFact(
+                worker_item_key=row.worker_item_key,
+                worker_item_id=row.worker_item_id,
+                subtask_key=row.subtask_key,
+                subtask_task_id=row.subtask_task_id,
+                subtask_path=(row.subtask_key,),
+            )
+            for row in rows
         )
 
     @staticmethod
@@ -204,6 +267,10 @@ class SqlAlchemyCollaborationFactStore:
                 ExecutionRequestModel.gate_reason,
                 ExecutionRequestModel.execution_lineage_id,
                 ExecutionRequestModel.first_execution_id,
+                ExecutionRequestModel.max_attempts,
+                ExecutionRequestModel.source_execution_id,
+                ExecutionRequestModel.source_session_id,
+                ExecutionRequestModel.handoff_transition_id,
                 ExecutionRequestModel.expected_artifact_refs,
                 ExecutionRequestModel.expected_evidence_refs,
             )
@@ -214,7 +281,9 @@ class SqlAlchemyCollaborationFactStore:
                 ExecutionRequestModel.plan_generation == run.plan_generation,
             )
             .order_by(ExecutionRequestModel.id)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
         ).all()
+        _ensure_bounded(rows, "requests")
         return tuple(
             CollaborationRequestFact(
                 id=row.id,
@@ -230,6 +299,10 @@ class SqlAlchemyCollaborationFactStore:
                 gate_reason=row.gate_reason,
                 execution_lineage_id=row.execution_lineage_id,
                 first_execution_id=row.first_execution_id,
+                max_attempts=row.max_attempts,
+                source_execution_id=row.source_execution_id,
+                source_session_id=row.source_session_id,
+                handoff_transition_id=row.handoff_transition_id,
                 expected_artifact_refs=_string_tuple(row.expected_artifact_refs),
                 expected_evidence_refs=_string_tuple(row.expected_evidence_refs),
             )
@@ -280,7 +353,9 @@ class SqlAlchemyCollaborationFactStore:
                 ExecutionRequestDependencyModel.downstream_request_id,
                 ExecutionRequestDependencyModel.upstream_request_id,
             )
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
         ).all()
+        _ensure_bounded(rows, "dependencies")
         return tuple(
             ExecutionRequestDependency(
                 downstream_request_id=row.downstream_request_id,
@@ -296,31 +371,53 @@ class SqlAlchemyCollaborationFactStore:
     def _load_executions(
         session: Session,
         workspace_id: UUID,
-        lineage_ids: Sequence[UUID],
+        *,
+        worker_item_ids: Sequence[UUID],
+        subtask_task_ids: Sequence[UUID],
+        legacy_lineage_ids: Sequence[UUID],
     ) -> tuple[CollaborationExecutionFact, ...]:
-        if not lineage_ids:
+        has_placement_scope = bool(worker_item_ids or subtask_task_ids)
+        if has_placement_scope and (not worker_item_ids or not subtask_task_ids):
+            raise ValidationError("collaboration worker placement scope is incomplete")
+        if not has_placement_scope and not legacy_lineage_ids:
             return ()
+
+        statement = select(
+            ExecutionModel.id,
+            ExecutionModel.lineage_id,
+            ExecutionModel.task_id,
+            ExecutionModel.worker_item_id,
+            ExecutionModel.attempt,
+            ExecutionModel.max_attempts,
+            ExecutionModel.status,
+            ExecutionModel.failure_code,
+            ExecutionModel.started_at,
+            ExecutionModel.finished_at,
+            ExecutionModel.version,
+            ExecutionModel.source_execution_id,
+            ExecutionModel.source_session_id,
+            ExecutionModel.handoff_transition_id,
+        ).where(ExecutionModel.workspace_id == workspace_id)
+        if has_placement_scope:
+            statement = statement.where(
+                ExecutionModel.worker_item_id.in_(worker_item_ids),
+                ExecutionModel.task_id.in_(subtask_task_ids),
+            )
+        else:
+            # Schema-v1 plan snapshots predate placement rows. Preserve their
+            # established projection scope without treating it as v2 authority.
+            statement = statement.where(
+                ExecutionModel.lineage_id.in_(legacy_lineage_ids)
+            )
+
         rows = session.execute(
-            select(
-                ExecutionModel.id,
-                ExecutionModel.lineage_id,
-                ExecutionModel.task_id,
-                ExecutionModel.worker_item_id,
-                ExecutionModel.attempt,
-                ExecutionModel.status,
-                ExecutionModel.failure_code,
-                ExecutionModel.started_at,
-                ExecutionModel.finished_at,
-                ExecutionModel.version,
-            )
-            .where(
-                ExecutionModel.workspace_id == workspace_id,
-                ExecutionModel.lineage_id.in_(lineage_ids),
-            )
+            statement
             .order_by(
                 ExecutionModel.lineage_id, ExecutionModel.attempt, ExecutionModel.id
             )
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
         ).all()
+        _ensure_bounded(rows, "executions")
         return tuple(
             CollaborationExecutionFact(
                 id=row.id,
@@ -328,11 +425,15 @@ class SqlAlchemyCollaborationFactStore:
                 task_id=row.task_id,
                 worker_item_id=row.worker_item_id,
                 attempt=row.attempt,
+                max_attempts=row.max_attempts,
                 status=row.status,
                 failure_code=row.failure_code,
                 started_at=row.started_at,
                 finished_at=row.finished_at,
                 version=row.version,
+                source_execution_id=row.source_execution_id,
+                source_session_id=row.source_session_id,
+                handoff_transition_id=row.handoff_transition_id,
             )
             for row in rows
         )
@@ -360,7 +461,9 @@ class SqlAlchemyCollaborationFactStore:
                 ArtifactModel.execution_id.in_(execution_ids),
             )
             .order_by(ArtifactModel.execution_id, ArtifactModel.id)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
         ).all()
+        _ensure_bounded(rows, "artifacts")
         return tuple(
             CollaborationArtifactFact(
                 id=row.id,
@@ -396,7 +499,9 @@ class SqlAlchemyCollaborationFactStore:
                 EvidenceClaimModel.execution_id.in_(execution_ids),
             )
             .order_by(EvidenceClaimModel.execution_id, EvidenceClaimModel.id)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
         ).all()
+        _ensure_bounded(rows, "evidence")
         return tuple(
             CollaborationEvidenceFact(
                 id=row.id,
@@ -405,6 +510,83 @@ class SqlAlchemyCollaborationFactStore:
                 acceptance_criterion_ref=row.acceptance_criterion_ref,
                 status=row.status,
                 artifact_ids=tuple(UUID(str(value)) for value in row.artifact_ids),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _load_execution_bindings(
+        session: Session,
+        workspace_id: UUID,
+        execution_ids: Sequence[UUID],
+    ) -> tuple[CollaborationExecutionBindingFact, ...]:
+        if not execution_ids:
+            return ()
+        rows = session.execute(
+            select(
+                ExecutionBindingModel.id,
+                ExecutionBindingModel.execution_id,
+                ExecutionBindingModel.worker_id,
+                ExecutionBindingModel.version,
+            )
+            .where(
+                ExecutionBindingModel.workspace_id == workspace_id,
+                ExecutionBindingModel.execution_id.in_(execution_ids),
+            )
+            .order_by(ExecutionBindingModel.execution_id, ExecutionBindingModel.id)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
+        ).all()
+        _ensure_bounded(rows, "execution bindings")
+        return tuple(
+            CollaborationExecutionBindingFact(
+                id=row.id,
+                execution_id=row.execution_id,
+                worker_id=row.worker_id,
+                version=row.version,
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _load_handoff_transitions(
+        session: Session,
+        workspace_id: UUID,
+        worker_item_ids: Sequence[UUID],
+        execution_ids: Sequence[UUID],
+    ) -> tuple[CollaborationHandoffTransitionFact, ...]:
+        if not worker_item_ids or not execution_ids:
+            return ()
+        rows = session.execute(
+            select(
+                HandoffTransitionModel.id,
+                HandoffTransitionModel.worker_item_id,
+                HandoffTransitionModel.source_execution_id,
+                HandoffTransitionModel.target_execution_id,
+                HandoffTransitionModel.status,
+                HandoffTransitionModel.phase,
+                HandoffTransitionModel.writer_state,
+            )
+            .where(
+                HandoffTransitionModel.workspace_id == workspace_id,
+                HandoffTransitionModel.worker_item_id.in_(worker_item_ids),
+                or_(
+                    HandoffTransitionModel.source_execution_id.in_(execution_ids),
+                    HandoffTransitionModel.target_execution_id.in_(execution_ids),
+                ),
+            )
+            .order_by(HandoffTransitionModel.id)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
+        ).all()
+        _ensure_bounded(rows, "handoff transitions")
+        return tuple(
+            CollaborationHandoffTransitionFact(
+                id=row.id,
+                worker_item_id=row.worker_item_id,
+                source_execution_id=row.source_execution_id,
+                target_execution_id=row.target_execution_id,
+                status=row.status,
+                phase=row.phase,
+                writer_state=row.writer_state,
             )
             for row in rows
         )
@@ -440,7 +622,9 @@ class SqlAlchemyCollaborationFactStore:
                 RuntimeReleaseModel.execution_request_id.in_(request_ids),
             )
             .order_by(RuntimeReleaseModel.issued_at, RuntimeReleaseModel.id)
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
         ).all()
+        _ensure_bounded(rows, "releases")
         return tuple(
             RuntimeRelease(
                 id=row.id,
@@ -482,3 +666,8 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValidationError("projection reference list must be an array")
     return tuple(str(item) for item in value)
+
+
+def _ensure_bounded(rows: Sequence[object], name: str) -> None:
+    if len(rows) > _MAX_RESULT_SOURCE_FACTS:
+        raise ValidationError(f"collaboration {name} exceed the bounded fact limit")

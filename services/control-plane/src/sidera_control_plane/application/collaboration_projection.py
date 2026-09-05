@@ -88,6 +88,10 @@ class CollaborationRequestFact:
     first_execution_id: UUID | None
     expected_artifact_refs: tuple[str, ...]
     expected_evidence_refs: tuple[str, ...]
+    max_attempts: int = 1
+    source_execution_id: UUID | None = None
+    source_session_id: UUID | None = None
+    handoff_transition_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +106,10 @@ class CollaborationExecutionFact:
     started_at: datetime | None
     finished_at: datetime | None
     version: int
+    max_attempts: int = 1
+    source_execution_id: UUID | None = None
+    source_session_id: UUID | None = None
+    handoff_transition_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +134,34 @@ class CollaborationEvidenceFact:
 
 
 @dataclass(frozen=True, slots=True)
+class CollaborationWorkerPlacementFact:
+    worker_item_key: str
+    worker_item_id: UUID
+    subtask_key: str
+    subtask_task_id: UUID
+    subtask_path: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationExecutionBindingFact:
+    id: UUID
+    execution_id: UUID
+    worker_id: UUID
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationHandoffTransitionFact:
+    id: UUID
+    worker_item_id: UUID
+    source_execution_id: UUID
+    target_execution_id: UUID | None
+    status: str
+    phase: str
+    writer_state: str
+
+
+@dataclass(frozen=True, slots=True)
 class CollaborationFacts:
     plan_head: CollaborationPlanHeadFact
     plan_snapshot: TaskPlanSnapshot
@@ -136,6 +172,9 @@ class CollaborationFacts:
     evidence: tuple[CollaborationEvidenceFact, ...]
     releases: tuple[RuntimeRelease, ...]
     previous_strategy_state: Mapping[str, object]
+    worker_placements: tuple[CollaborationWorkerPlacementFact, ...] = ()
+    execution_bindings: tuple[CollaborationExecutionBindingFact, ...] = ()
+    handoff_transitions: tuple[CollaborationHandoffTransitionFact, ...] = ()
 
 
 class CollaborationProjectionAssembler:

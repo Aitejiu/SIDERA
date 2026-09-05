@@ -150,6 +150,89 @@ class ResultInputEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultInputSource:
+    """One explicitly resolved result identity before readiness evaluation."""
+
+    worker_item_key: str
+    worker_item_id: UUID | None
+    subtask_path: tuple[str, ...]
+    effective_request_id: UUID | None
+    allowed_lineage_ids: tuple[UUID, ...]
+    effective_execution_id: UUID | None
+    attempt: int | None
+    execution_status: ExecutionStatus | None
+    inheritance_refs: tuple[str, ...]
+    artifacts: tuple[ResultInputArtifact, ...]
+    evidence: tuple[ResultInputEvidence, ...]
+    retry_possible: bool
+    outcome_unknown: bool
+    reason_code: str | None
+    source_basis_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "worker_item_key", _key(self.worker_item_key, "worker_item_key")
+        )
+        for name in (
+            "worker_item_id",
+            "effective_request_id",
+            "effective_execution_id",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _descriptor_uuid(value, name)
+        object.__setattr__(
+            self,
+            "subtask_path",
+            _source_text_array(self.subtask_path, "subtask_path"),
+        )
+        object.__setattr__(
+            self,
+            "allowed_lineage_ids",
+            _source_uuid_array(self.allowed_lineage_ids, "allowed_lineage_ids"),
+        )
+        if self.attempt is not None:
+            _positive_int(self.attempt, "attempt")
+        if self.execution_status is not None:
+            object.__setattr__(
+                self,
+                "execution_status",
+                _enum(self.execution_status, ExecutionStatus, "execution_status"),
+            )
+        object.__setattr__(
+            self,
+            "inheritance_refs",
+            _source_text_array(self.inheritance_refs, "inheritance_refs"),
+        )
+        if any(not isinstance(item, ResultInputArtifact) for item in self.artifacts):
+            raise ValidationError("result source artifacts must be typed")
+        if any(not isinstance(item, ResultInputEvidence) for item in self.evidence):
+            raise ValidationError("result source evidence must be typed")
+        object.__setattr__(
+            self,
+            "artifacts",
+            tuple(sorted(self.artifacts, key=lambda item: str(item.artifact_id))),
+        )
+        object.__setattr__(
+            self,
+            "evidence",
+            tuple(sorted(self.evidence, key=lambda item: str(item.evidence_id))),
+        )
+        if type(self.retry_possible) is not bool or type(self.outcome_unknown) is not bool:
+            raise ValidationError("result source possibility flags must be booleans")
+        if self.reason_code is not None:
+            object.__setattr__(
+                self, "reason_code", _descriptor_text(self.reason_code, "reason_code")
+            )
+        if self.source_basis_hash is not None:
+            object.__setattr__(
+                self,
+                "source_basis_hash",
+                _descriptor_hash(self.source_basis_hash, "source_basis_hash"),
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class InputGroupCandidateV1:
     worker_item_key: str
     priority: int
@@ -602,6 +685,24 @@ def _descriptor_uuid_array(value: object, name: str) -> tuple[UUID, ...]:
     items = tuple(sorted((_descriptor_uuid(item, name) for item in value), key=str))
     if not items:
         raise ValidationError(f"{name} must not be empty")
+    if len(items) != len(set(items)):
+        raise ValidationError(f"{name} must be unique")
+    return items
+
+
+def _source_text_array(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be an array")
+    items = tuple(_descriptor_text(item, name) for item in value)
+    if len(items) != len(set(items)):
+        raise ValidationError(f"{name} must be unique")
+    return items
+
+
+def _source_uuid_array(value: object, name: str) -> tuple[UUID, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be an array")
+    items = tuple(_descriptor_uuid(item, name) for item in value)
     if len(items) != len(set(items)):
         raise ValidationError(f"{name} must be unique")
     return items

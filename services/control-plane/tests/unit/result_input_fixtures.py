@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime
 from hashlib import sha256
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 def _selection_hash_payload(value: dict[str, object]) -> dict[str, object]:
@@ -145,6 +147,251 @@ def selection_mapping() -> dict[str, object]:
     """Return an independent, valid immutable-selection fixture."""
 
     return deepcopy(_SELECTION_MAPPING)
+
+
+def effective_source_facts(*, request_case: str):
+    from sidera_control_plane.application.collaboration_projection import (
+        CollaborationArtifactFact,
+        CollaborationEvidenceFact,
+        CollaborationExecutionBindingFact,
+        CollaborationExecutionFact,
+        CollaborationFacts,
+        CollaborationHandoffTransitionFact,
+        CollaborationPlanHeadFact,
+        CollaborationRequestFact,
+        CollaborationWorkerPlacementFact,
+    )
+    from sidera_control_plane.domain.modules import (
+        CollaborationRuntimeCapabilityProfile,
+        IdempotencyCapability,
+        StabilityLevel,
+    )
+    from sidera_control_plane.domain.plans import TaskPlanSnapshot
+
+    allowed_cases = {
+        "current",
+        "authorized_continuation",
+        "authorized_handoff",
+        "unrelated_newer_request",
+        "ambiguous_current",
+    }
+    if request_case not in allowed_cases:
+        raise ValueError(f"unsupported effective source case: {request_case}")
+
+    def identity(name: str) -> UUID:
+        return uuid5(NAMESPACE_URL, f"sidera:r6.3.4:source:{name}")
+
+    now = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+    workspace_id = identity("workspace")
+    root_task_id = identity("root")
+    plan_snapshot_id = identity("plan")
+    run_id = identity("run")
+    worker_item_id = identity("worker-a")
+    unrelated_worker_item_id = identity("worker-unrelated")
+    subtask_id = identity("subtask")
+    base_request_id = identity("request-base")
+    target_request_id = identity("request-target")
+    base_execution_id = identity("execution-base")
+    continuation_execution_id = identity("execution-continuation")
+    target_execution_id = identity("execution-target")
+    handoff_id = identity("handoff")
+
+    capability = CollaborationRuntimeCapabilityProfile(
+        interface_version="collaboration-runtime.v1",
+        projection_schema_versions=(1,),
+        decision_schema_versions=(1,),
+        strategy_ids=("all_required",),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=262_144,
+        max_decision_bytes=65_536,
+        max_intents_per_decision=128,
+        max_strategy_state_bytes=16_384,
+        stability=StabilityLevel.STABLE,
+    )
+    snapshot = TaskPlanSnapshot.create(
+        snapshot_id=plan_snapshot_id,
+        schema_version=3,
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        generation=1,
+        parent_snapshot_id=None,
+        source_type="test",
+        source_ref="result-input-source-fixture",
+        title="Result source plan",
+        goal_summary="Resolve exact result source identities",
+        acceptance_refs=("acceptance:research-complete",),
+        published_by="test",
+        published_at=now,
+    )
+
+    def request(
+        request_id: UUID,
+        *,
+        item_id: UUID = worker_item_id,
+        lineage_id: UUID = base_execution_id,
+        handoff_transition_id: UUID | None = None,
+    ) -> CollaborationRequestFact:
+        return CollaborationRequestFact(
+            id=request_id,
+            subtask_key="research",
+            worker_item_key="a",
+            subtask_task_id=subtask_id,
+            worker_item_id=item_id,
+            version=1,
+            status="materialized",
+            collaboration_gate_mode="unmanaged",
+            gate_reason="ready",
+            execution_lineage_id=lineage_id,
+            first_execution_id=lineage_id,
+            expected_artifact_refs=("artifact_type:report",),
+            expected_evidence_refs=("acceptance:research-complete",),
+            max_attempts=2,
+            handoff_transition_id=handoff_transition_id,
+        )
+
+    def execution(
+        execution_id: UUID,
+        *,
+        item_id: UUID = worker_item_id,
+        source_execution_id: UUID | None = None,
+        handoff_transition_id: UUID | None = None,
+    ) -> CollaborationExecutionFact:
+        return CollaborationExecutionFact(
+            id=execution_id,
+            lineage_id=execution_id,
+            task_id=subtask_id,
+            worker_item_id=item_id,
+            attempt=1,
+            status="succeeded",
+            failure_code=None,
+            started_at=now,
+            finished_at=now,
+            version=1,
+            max_attempts=2,
+            source_execution_id=source_execution_id,
+            handoff_transition_id=handoff_transition_id,
+        )
+
+    requests = [request(base_request_id)]
+    executions = [execution(base_execution_id)]
+    transitions = []
+    if request_case == "authorized_continuation":
+        executions.append(
+            execution(
+                continuation_execution_id,
+                source_execution_id=base_execution_id,
+            )
+        )
+    elif request_case == "authorized_handoff":
+        requests.append(
+            request(
+                target_request_id,
+                lineage_id=target_execution_id,
+                handoff_transition_id=handoff_id,
+            )
+        )
+        executions.append(
+            execution(
+                target_execution_id,
+                source_execution_id=base_execution_id,
+                handoff_transition_id=handoff_id,
+            )
+        )
+        transitions.append(
+            CollaborationHandoffTransitionFact(
+                id=handoff_id,
+                worker_item_id=worker_item_id,
+                source_execution_id=base_execution_id,
+                target_execution_id=target_execution_id,
+                status="converged",
+                phase="complete",
+                writer_state="target_active",
+            )
+        )
+    elif request_case == "unrelated_newer_request":
+        unrelated_execution_id = identity("execution-unrelated")
+        requests.append(
+            request(
+                identity("request-unrelated"),
+                item_id=unrelated_worker_item_id,
+                lineage_id=unrelated_execution_id,
+            )
+        )
+        executions.append(
+            execution(
+                unrelated_execution_id,
+                item_id=unrelated_worker_item_id,
+            )
+        )
+    elif request_case == "ambiguous_current":
+        duplicate_execution_id = identity("execution-duplicate")
+        requests.append(
+            request(identity("request-duplicate"), lineage_id=duplicate_execution_id)
+        )
+        executions.append(execution(duplicate_execution_id))
+
+    artifacts = tuple(
+        CollaborationArtifactFact(
+            id=identity(f"artifact-{item.id}"),
+            execution_id=item.id,
+            task_id=subtask_id,
+            artifact_type="report",
+            content_hash=sha256(f"report:{item.id}".encode()).hexdigest(),
+            size_bytes=64,
+            media_type="text/plain",
+        )
+        for item in executions
+    )
+    evidence = tuple(
+        CollaborationEvidenceFact(
+            id=identity(f"evidence-{item.id}"),
+            execution_id=item.id,
+            task_id=subtask_id,
+            acceptance_criterion_ref="acceptance:research-complete",
+            status="candidate",
+            artifact_ids=(artifacts[index].id,),
+        )
+        for index, item in enumerate(executions)
+    )
+    return CollaborationFacts(
+        plan_head=CollaborationPlanHeadFact(
+            workspace_id=workspace_id,
+            root_task_id=root_task_id,
+            run_id=run_id,
+            plan_snapshot_id=plan_snapshot_id,
+            plan_generation=1,
+            plan_content_hash="a" * 64,
+            run_resource_version=1,
+            runtime_capability_snapshot=capability,
+        ),
+        plan_snapshot=snapshot,
+        requests=tuple(requests),
+        dependencies=(),
+        executions=tuple(executions),
+        artifacts=artifacts,
+        evidence=evidence,
+        releases=(),
+        previous_strategy_state={},
+        worker_placements=(
+            CollaborationWorkerPlacementFact(
+                worker_item_key="a",
+                worker_item_id=worker_item_id,
+                subtask_key="research",
+                subtask_task_id=subtask_id,
+                subtask_path=("research",),
+            ),
+        ),
+        execution_bindings=tuple(
+            CollaborationExecutionBindingFact(
+                id=identity(f"binding-{item.id}"),
+                execution_id=item.id,
+                worker_id=identity(f"worker-{item.id}"),
+                version=1,
+            )
+            for item in executions
+        ),
+        handoff_transitions=tuple(transitions),
+    )
 
 
 def proposal_v5_mapping() -> dict[str, object]:

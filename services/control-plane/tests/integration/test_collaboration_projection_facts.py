@@ -7,6 +7,9 @@ from sqlalchemy import update
 from sidera_control_plane.application.collaboration_projection import (
     CollaborationProjectionAssembler,
 )
+from sidera_control_plane.application.result_input_sources import (
+    resolve_result_input_source,
+)
 from sidera_control_plane.domain.collaboration import (
     CollaborationPolicyEntry,
     CollaborationPolicySnapshotV1,
@@ -32,12 +35,19 @@ from sidera_control_plane.persistence.models import (
     CollaborationGovernanceHoldModel,
     CollaborationReleaseProposalModel,
     EvidenceClaimModel,
+    ExecutionModel,
+    HandoffTransitionModel,
     PlanSnapshotModel,
     RootTaskPlanHeadModel,
+    TaskModel,
+    WorkerItemModel,
+    WorkerItemPlacementModel,
 )
 
+from .test_handoff_repository import _seed as seed_handoff
 from .test_r5_1_execution_request_schema import (
     NOW,
+    WORKSPACE_B,
     request_row,
     seed_execution_request_facts,
 )
@@ -84,6 +94,102 @@ def _snapshot(
         acceptance_refs=("acceptance:projection",),
         published_by="integration",
         published_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+    )
+
+
+def _persist_run(
+    *,
+    uow_factory,
+    ids: dict[str, UUID],
+    snapshot: TaskPlanSnapshot,
+) -> CollaborationRun:
+    capability = _capability()
+    policy = CollaborationPolicySnapshotV1(
+        schema_version=1,
+        runtime_definition_id=ids["module_definition"],
+        runtime_instance_id=ids["module_instance"],
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=1,
+        runtime_capability_snapshot=capability,
+        default_policy=CollaborationPolicyEntry(
+            enabled=True,
+            strategy_id=CollaborationStrategy.ALL_REQUIRED,
+        ),
+        subtask_overrides=(),
+    )
+    run = CollaborationRun.create(
+        run_id=uuid4(),
+        workspace_id=snapshot.workspace_id,
+        root_task_id=snapshot.root_task_id,
+        plan_snapshot_id=snapshot.id,
+        plan_generation=snapshot.generation,
+        plan_content_hash=plan_snapshot_content_hash(snapshot),
+        runtime_definition_id=ids["module_definition"],
+        runtime_instance_id=ids["module_instance"],
+        runtime_interface_version="collaboration-runtime-v1",
+        runtime_config_version=1,
+        runtime_capability_snapshot=capability,
+        policy_snapshot=policy.to_mapping(),
+        now=NOW,
+    )
+    with uow_factory() as uow:
+        uow.collaboration_runs.add(run)
+    return run
+
+
+def _seed_placed_source_run(database, workspace_id: UUID, uow_factory):
+    ids = seed_execution_request_facts(database, workspace_id)
+    snapshot = _snapshot(
+        workspace_id=workspace_id,
+        root_task_id=ids["root_task"],
+        snapshot_id=ids["plan"],
+        generation=1,
+        parent_snapshot_id=None,
+    )
+    snapshot_hash = plan_snapshot_content_hash(snapshot)
+    with database.session() as session:
+        session.execute(
+            update(PlanSnapshotModel)
+            .where(PlanSnapshotModel.id == snapshot.id)
+            .values(payload=snapshot.to_payload())
+        )
+        session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=workspace_id,
+                root_task_id=ids["root_task"],
+                active_snapshot_id=snapshot.id,
+                active_generation=1,
+                active_snapshot_hash=snapshot_hash,
+                version=1,
+                updated_at=NOW,
+            )
+        )
+        session.add(
+            WorkerItemPlacementModel(
+                plan_snapshot_id=snapshot.id,
+                plan_generation=1,
+                workspace_id=workspace_id,
+                root_task_id=ids["root_task"],
+                worker_item_id=ids["worker_item"],
+                worker_item_key="backend",
+                subtask_key="implementation",
+                subtask_task_id=ids["subtask"],
+                role="implementer",
+                capability_requirements=["python"],
+                worker_policy_ref=None,
+                configuration_ref=None,
+            )
+        )
+        request = request_row(ids, request_id=ids["request"])
+        request.status = "materialized"
+        request.execution_lineage_id = ids["execution"]
+        request.first_execution_id = ids["execution"]
+        session.add(request)
+        session.commit()
+    return ids, snapshot, _persist_run(
+        uow_factory=uow_factory,
+        ids=ids,
+        snapshot=snapshot,
     )
 
 
@@ -290,3 +396,408 @@ def test_fact_store_is_current_generation_scoped_and_private_column_safe(
         SqlAlchemyCollaborationFactStore(database).load(
             workspace_id, run, fact_cursor=7
         )
+
+
+def test_result_source_facts_exclude_same_worker_key_from_another_root(
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    ids, _, run = _seed_placed_source_run(database, workspace_id, uow_factory)
+    current_artifact_id = uuid4()
+    other_artifact_id = uuid4()
+    other_root_id = uuid4()
+    other_subtask_id = uuid4()
+    other_plan_id = uuid4()
+    other_worker_item_id = uuid4()
+    other_execution_id = uuid4()
+
+    with database.session() as session:
+        session.add_all(
+            [
+                ArtifactModel(
+                    id=current_artifact_id,
+                    workspace_id=workspace_id,
+                    task_id=ids["subtask"],
+                    execution_id=ids["execution"],
+                    artifact_type="report",
+                    storage_ref="private://current-report",
+                    content_hash="1" * 64,
+                    size_bytes=64,
+                    media_type="text/plain",
+                    provenance={},
+                    created_at=NOW,
+                ),
+                TaskModel(
+                    id=other_root_id,
+                    workspace_id=workspace_id,
+                    title="Other root",
+                    description="Must not enter current source facts",
+                    acceptance_criteria=["acceptance:other"],
+                    status="running",
+                    priority=50,
+                    requested_by="integration",
+                    version=1,
+                    created_at=NOW,
+                ),
+                TaskModel(
+                    id=other_subtask_id,
+                    workspace_id=workspace_id,
+                    title="Other subtask",
+                    description="Same worker key in another root",
+                    acceptance_criteria=["acceptance:other"],
+                    status="running",
+                    priority=50,
+                    requested_by="integration",
+                    version=1,
+                    created_at=NOW,
+                ),
+            ]
+        )
+        session.flush()
+        session.add(
+            PlanSnapshotModel(
+                id=other_plan_id,
+                schema_version=1,
+                workspace_id=workspace_id,
+                root_task_id=other_root_id,
+                generation=1,
+                parent_snapshot_id=None,
+                source_type="integration",
+                source_ref="test:other-root",
+                title="Other plan",
+                goal_summary="Scope isolation",
+                payload={},
+                published_by="integration",
+                published_at=NOW,
+                created_at=NOW,
+            )
+        )
+        session.add(
+            WorkerItemModel(
+                id=other_worker_item_id,
+                workspace_id=workspace_id,
+                root_task_id=other_root_id,
+                stable_key="backend",
+                title="Other backend",
+                responsibility="Must remain isolated",
+                status="active",
+                context_version=1,
+                acknowledged_context_version=1,
+                derived_from_worker_item_ids=[],
+                version=1,
+                created_at=NOW,
+            )
+        )
+        session.flush()
+        session.add(
+            WorkerItemPlacementModel(
+                plan_snapshot_id=other_plan_id,
+                plan_generation=1,
+                workspace_id=workspace_id,
+                root_task_id=other_root_id,
+                worker_item_id=other_worker_item_id,
+                worker_item_key="backend",
+                subtask_key="implementation",
+                subtask_task_id=other_subtask_id,
+                role="implementer",
+                capability_requirements=["python"],
+                worker_policy_ref=None,
+                configuration_ref=None,
+            )
+        )
+        session.add(
+            ExecutionModel(
+                id=other_execution_id,
+                workspace_id=workspace_id,
+                task_id=other_subtask_id,
+                lineage_id=other_execution_id,
+                attempt=1,
+                max_attempts=1,
+                purpose="scope isolation",
+                status="succeeded",
+                capability_requirements=["python"],
+                adapter_preferences=[],
+                adapter_forbidden=[],
+                worker_item_id=other_worker_item_id,
+                last_fencing_token=0,
+                not_before=NOW,
+                started_at=NOW,
+                finished_at=NOW,
+                version=1,
+                created_at=NOW,
+            )
+        )
+        session.flush()
+        session.add(
+            ArtifactModel(
+                id=other_artifact_id,
+                workspace_id=workspace_id,
+                task_id=other_subtask_id,
+                execution_id=other_execution_id,
+                artifact_type="report",
+                storage_ref="private://other-root-report",
+                content_hash="2" * 64,
+                size_bytes=64,
+                media_type="text/plain",
+                provenance={},
+                created_at=NOW,
+            )
+        )
+        session.commit()
+
+    facts = SqlAlchemyCollaborationFactStore(database).load(
+        workspace_id, run, fact_cursor=0
+    )
+    assert {item.worker_item_id for item in facts.worker_placements} == {
+        ids["worker_item"]
+    }
+    assert {item.id for item in facts.executions} == {ids["execution"]}
+    assert {item.id for item in facts.artifacts} == {current_artifact_id}
+    assert other_artifact_id not in {
+        item.artifact_id
+        for item in resolve_result_input_source(
+            worker_item_key="backend", facts=facts
+        ).artifacts
+    }
+
+
+def test_result_source_facts_do_not_resolve_a_foreign_workspace_artifact_id(
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    ids, _, run = _seed_placed_source_run(database, workspace_id, uow_factory)
+    foreign_worker_item_id = uuid4()
+    foreign_execution_id = uuid4()
+    foreign_artifact_id = uuid4()
+
+    with database.session() as session:
+        session.add(
+            WorkerItemModel(
+                id=foreign_worker_item_id,
+                workspace_id=WORKSPACE_B,
+                root_task_id=ids["workspace_b_task"],
+                stable_key="backend",
+                title="Foreign backend",
+                responsibility="Foreign workspace source",
+                status="active",
+                context_version=1,
+                acknowledged_context_version=1,
+                derived_from_worker_item_ids=[],
+                version=1,
+                created_at=NOW,
+            )
+        )
+        session.flush()
+        session.add(
+            ExecutionModel(
+                id=foreign_execution_id,
+                workspace_id=WORKSPACE_B,
+                task_id=ids["workspace_b_task"],
+                lineage_id=foreign_execution_id,
+                attempt=1,
+                max_attempts=1,
+                purpose="foreign workspace source",
+                status="succeeded",
+                capability_requirements=[],
+                adapter_preferences=[],
+                adapter_forbidden=[],
+                worker_item_id=foreign_worker_item_id,
+                last_fencing_token=0,
+                not_before=NOW,
+                started_at=NOW,
+                finished_at=NOW,
+                version=1,
+                created_at=NOW,
+            )
+        )
+        session.flush()
+        session.add(
+            ArtifactModel(
+                id=foreign_artifact_id,
+                workspace_id=WORKSPACE_B,
+                task_id=ids["workspace_b_task"],
+                execution_id=foreign_execution_id,
+                artifact_type="report",
+                storage_ref="private://foreign-report",
+                content_hash="3" * 64,
+                size_bytes=64,
+                media_type="text/plain",
+                provenance={},
+                created_at=NOW,
+            )
+        )
+        session.commit()
+
+    facts = SqlAlchemyCollaborationFactStore(database).load(
+        workspace_id, run, fact_cursor=0
+    )
+    assert foreign_execution_id not in {item.id for item in facts.executions}
+    assert foreign_artifact_id not in {item.id for item in facts.artifacts}
+    assert foreign_artifact_id not in {
+        item.artifact_id
+        for item in resolve_result_input_source(
+            worker_item_key="backend", facts=facts
+        ).artifacts
+    }
+
+
+def test_converged_handoff_retires_source_execution_artifacts(
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    ids = seed_execution_request_facts(database, workspace_id)
+    handoff = seed_handoff(database, workspace_id, with_transition=True)
+    root_task_id = handoff.proposal.payload.root_task_id
+    plan_snapshot_id = handoff.proposal.payload.observed_plan_snapshot_id
+    worker_key = f"handoff-worker-{handoff.worker_item_id.hex[:8]}"
+    snapshot = _snapshot(
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        snapshot_id=plan_snapshot_id,
+        generation=1,
+        parent_snapshot_id=None,
+    )
+    snapshot_hash = plan_snapshot_content_hash(snapshot)
+    source_request_id = uuid4()
+    target_request_id = uuid4()
+    source_artifact_id = uuid4()
+    target_artifact_id = uuid4()
+
+    with database.session() as session:
+        session.execute(
+            update(PlanSnapshotModel)
+            .where(PlanSnapshotModel.id == plan_snapshot_id)
+            .values(schema_version=2, payload=snapshot.to_payload())
+        )
+        session.add(
+            RootTaskPlanHeadModel(
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                active_snapshot_id=plan_snapshot_id,
+                active_generation=1,
+                active_snapshot_hash=snapshot_hash,
+                version=1,
+                updated_at=NOW,
+            )
+        )
+        session.add(
+            WorkerItemPlacementModel(
+                plan_snapshot_id=plan_snapshot_id,
+                plan_generation=1,
+                workspace_id=workspace_id,
+                root_task_id=root_task_id,
+                worker_item_id=handoff.worker_item_id,
+                worker_item_key=worker_key,
+                subtask_key="handoff",
+                subtask_task_id=root_task_id,
+                role="implementer",
+                capability_requirements=["code"],
+                worker_policy_ref=None,
+                configuration_ref=None,
+            )
+        )
+        session.execute(
+            update(ExecutionModel)
+            .where(ExecutionModel.id == handoff.source_execution_id)
+            .values(status="succeeded", finished_at=NOW)
+        )
+        session.execute(
+            update(ExecutionModel)
+            .where(ExecutionModel.id == handoff.target_execution_id)
+            .values(
+                lineage_id=handoff.target_execution_id,
+                attempt=1,
+                status="succeeded",
+                finished_at=NOW,
+            )
+        )
+        session.execute(
+            update(HandoffTransitionModel)
+            .where(HandoffTransitionModel.id == handoff.transition.id)
+            .values(
+                target_execution_id=handoff.target_execution_id,
+                status="converged",
+                phase="complete",
+                writer_state="target_active",
+                completed_at=NOW,
+                version=2,
+            )
+        )
+
+        source_request = request_row(
+            ids, request_id=source_request_id, worker_key=worker_key
+        )
+        source_request.plan_snapshot_id = plan_snapshot_id
+        source_request.root_task_id = root_task_id
+        source_request.subtask_task_id = root_task_id
+        source_request.worker_item_id = handoff.worker_item_id
+        source_request.status = "materialized"
+        source_request.execution_lineage_id = handoff.source_execution_id
+        source_request.first_execution_id = handoff.source_execution_id
+        session.add(source_request)
+
+        target_request = request_row(
+            ids, request_id=target_request_id, worker_key=worker_key
+        )
+        target_request.plan_snapshot_id = plan_snapshot_id
+        target_request.root_task_id = root_task_id
+        target_request.subtask_task_id = root_task_id
+        target_request.worker_item_id = handoff.worker_item_id
+        target_request.intent_key = f"{worker_key}-handoff"
+        target_request.status = "materialized"
+        target_request.execution_lineage_id = handoff.target_execution_id
+        target_request.first_execution_id = handoff.target_execution_id
+        target_request.source_execution_id = handoff.source_execution_id
+        target_request.source_session_id = handoff.source_session_id
+        target_request.handoff_transition_id = handoff.transition.id
+        session.add(target_request)
+        session.add_all(
+            [
+                ArtifactModel(
+                    id=source_artifact_id,
+                    workspace_id=workspace_id,
+                    task_id=root_task_id,
+                    execution_id=handoff.source_execution_id,
+                    artifact_type="report",
+                    storage_ref="private://retired-source",
+                    content_hash="4" * 64,
+                    size_bytes=64,
+                    media_type="text/plain",
+                    provenance={},
+                    created_at=NOW,
+                ),
+                ArtifactModel(
+                    id=target_artifact_id,
+                    workspace_id=workspace_id,
+                    task_id=root_task_id,
+                    execution_id=handoff.target_execution_id,
+                    artifact_type="report",
+                    storage_ref="private://handoff-target",
+                    content_hash="5" * 64,
+                    size_bytes=64,
+                    media_type="text/plain",
+                    provenance={},
+                    created_at=NOW,
+                ),
+            ]
+        )
+        session.commit()
+
+    run = _persist_run(uow_factory=uow_factory, ids=ids, snapshot=snapshot)
+    facts = SqlAlchemyCollaborationFactStore(database).load(
+        workspace_id, run, fact_cursor=0
+    )
+    source = resolve_result_input_source(worker_item_key=worker_key, facts=facts)
+
+    assert source.reason_code is None
+    assert source.effective_request_id == target_request_id
+    assert source.effective_execution_id == handoff.target_execution_id
+    assert source.allowed_lineage_ids == (
+        handoff.source_execution_id,
+        handoff.target_execution_id,
+    )
+    assert {item.artifact_id for item in source.artifacts} == {target_artifact_id}
+    assert source_artifact_id not in {item.artifact_id for item in source.artifacts}
