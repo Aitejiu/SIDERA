@@ -233,6 +233,120 @@ class ResultInputSource:
 
 
 @dataclass(frozen=True, slots=True)
+class InputCandidateState:
+    """Readiness of one configured candidate on one authoritative source basis."""
+
+    worker_item_key: str
+    source: ResultInputSource | None
+    ready: bool
+    missing_artifact_refs: tuple[str, ...]
+    missing_evidence_refs: tuple[str, ...]
+    retry_possible: bool
+    outcome_unknown: bool
+    source_basis_hash: str | None
+    reason_code: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "worker_item_key", _key(self.worker_item_key, "worker_item_key")
+        )
+        if self.source is not None:
+            if not isinstance(self.source, ResultInputSource):
+                raise ValidationError("candidate state source must be typed")
+            if self.source.worker_item_key != self.worker_item_key:
+                raise ValidationError("candidate state source key does not match")
+        for name in ("ready", "retry_possible", "outcome_unknown"):
+            if type(getattr(self, name)) is not bool:
+                raise ValidationError(f"candidate state {name} must be a boolean")
+        object.__setattr__(
+            self,
+            "missing_artifact_refs",
+            _source_text_array(self.missing_artifact_refs, "missing_artifact_refs"),
+        )
+        object.__setattr__(
+            self,
+            "missing_evidence_refs",
+            _source_text_array(self.missing_evidence_refs, "missing_evidence_refs"),
+        )
+        if self.source_basis_hash is not None:
+            object.__setattr__(
+                self,
+                "source_basis_hash",
+                _descriptor_hash(self.source_basis_hash, "source_basis_hash"),
+            )
+        if self.reason_code is not None:
+            object.__setattr__(
+                self, "reason_code", _descriptor_text(self.reason_code, "reason_code")
+            )
+        if self.ready and (
+            self.source is None
+            or self.source_basis_hash is None
+            or self.missing_artifact_refs
+            or self.missing_evidence_refs
+            or self.outcome_unknown
+        ):
+            raise ValidationError("ready candidate state has an incomplete source basis")
+        if self.ready and self.reason_code is not None:
+            raise ValidationError("ready candidate state cannot have a reason code")
+        if self.source is not None and (
+            self.source.source_basis_hash != self.source_basis_hash
+        ):
+            raise ValidationError("candidate state source basis hash does not match")
+
+
+@dataclass(frozen=True, slots=True)
+class InputGroupEvaluation:
+    """Deterministic result-readiness facts for one configured input group."""
+
+    group_key: str
+    required_count: int
+    ready_count: int
+    ready_sources: tuple[ResultInputSource, ...]
+    candidate_states: tuple[InputCandidateState, ...]
+    satisfied: bool
+    reason_code: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "group_key", _key(self.group_key, "group_key"))
+        _positive_int(self.required_count, "required_count")
+        _descriptor_non_negative_int(self.ready_count, "ready_count")
+        if any(not isinstance(item, ResultInputSource) for item in self.ready_sources):
+            raise ValidationError("ready_sources must contain typed result sources")
+        if any(
+            not isinstance(item, InputCandidateState)
+            for item in self.candidate_states
+        ):
+            raise ValidationError("candidate_states must contain typed states")
+        candidate_keys = tuple(item.worker_item_key for item in self.candidate_states)
+        if not candidate_keys:
+            raise ValidationError("input group evaluation requires candidate states")
+        if len(candidate_keys) != len(set(candidate_keys)):
+            raise ValidationError("candidate state WorkerItems must be unique")
+        if self.required_count > len(candidate_keys):
+            raise ValidationError("input group required_count exceeds its candidates")
+        ready_keys = tuple(item.worker_item_key for item in self.ready_sources)
+        state_ready_keys = tuple(
+            item.worker_item_key for item in self.candidate_states if item.ready
+        )
+        if self.ready_count != len(self.ready_sources) or ready_keys != state_ready_keys:
+            raise ValidationError("input group ready source counts are inconsistent")
+        if tuple(
+            item.source for item in self.candidate_states if item.ready
+        ) != self.ready_sources:
+            raise ValidationError("input group ready source facts are inconsistent")
+        if type(self.satisfied) is not bool:
+            raise ValidationError("input group satisfied must be a boolean")
+        if self.satisfied != (self.ready_count >= self.required_count):
+            raise ValidationError("input group satisfied does not match its counts")
+        if self.reason_code is not None:
+            object.__setattr__(
+                self, "reason_code", _descriptor_text(self.reason_code, "reason_code")
+            )
+        if self.satisfied and self.reason_code is not None:
+            raise ValidationError("satisfied input group cannot have a reason code")
+
+
+@dataclass(frozen=True, slots=True)
 class InputGroupCandidateV1:
     worker_item_key: str
     priority: int

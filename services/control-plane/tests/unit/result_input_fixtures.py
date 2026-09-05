@@ -4,7 +4,11 @@ import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, UUID, uuid5
+
+if TYPE_CHECKING:
+    from sidera_control_plane.domain.result_inputs import ResultInputSource
 
 
 def _selection_hash_payload(value: dict[str, object]) -> dict[str, object]:
@@ -391,6 +395,65 @@ def effective_source_facts(*, request_case: str):
             for item in executions
         ),
         handoff_transitions=tuple(transitions),
+    )
+
+
+def result_source(
+    key: str,
+    *,
+    execution_status: str = "succeeded",
+    attempt: int = 1,
+    retry_possible: bool = False,
+    outcome_unknown: bool = False,
+) -> ResultInputSource:
+    """Return a deterministic, post-resolution source for evaluator tests."""
+
+    from sidera_control_plane.domain.artifacts import ArtifactType
+    from sidera_control_plane.domain.execution import ExecutionStatus
+    from sidera_control_plane.domain.result_inputs import (
+        ResultInputArtifact,
+        ResultInputEvidence,
+        ResultInputSource,
+    )
+
+    def identity(kind: str) -> UUID:
+        return uuid5(
+            NAMESPACE_URL,
+            f"sidera:r6.3.4:evaluation:{key}:{attempt}:{kind}",
+        )
+
+    artifact_id = identity("report")
+    body = f"report:{key}:{attempt}".encode()
+    return ResultInputSource(
+        worker_item_key=key,
+        worker_item_id=identity("worker-item"),
+        subtask_path=("research",),
+        effective_request_id=identity("request"),
+        allowed_lineage_ids=(identity("lineage"),),
+        effective_execution_id=identity("execution"),
+        attempt=attempt,
+        execution_status=ExecutionStatus(execution_status),
+        inheritance_refs=(),
+        artifacts=(
+            ResultInputArtifact(
+                artifact_id=artifact_id,
+                artifact_type=ArtifactType.REPORT,
+                content_hash=sha256(body).hexdigest(),
+                size_bytes=len(body),
+                media_type="text/plain",
+            ),
+        ),
+        evidence=(
+            ResultInputEvidence(
+                evidence_id=identity("evidence"),
+                acceptance_criterion_ref="acceptance:research-complete",
+                artifact_ids=(artifact_id,),
+            ),
+        ),
+        retry_possible=retry_possible,
+        outcome_unknown=outcome_unknown,
+        reason_code=None,
+        source_basis_hash=None,
     )
 
 
