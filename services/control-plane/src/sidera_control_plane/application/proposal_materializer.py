@@ -53,6 +53,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.plans import (
     DependencyKind,
@@ -828,6 +829,7 @@ def _plan_worker_dependencies(
         | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
     ),
 ) -> tuple[WorkerItemDependency, ...]:
     edges: dict[tuple[str, str], WorkerItemDependency] = {}

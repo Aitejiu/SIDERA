@@ -17,6 +17,7 @@ from sidera_control_plane.application.plan_revision_queries import (
     RevisionFieldChangeView,
     RevisionFreshnessView,
     RevisionImpactCountsView,
+    RevisionInputGroupChangeView,
     RevisionSubtaskChangeView,
     RevisionTargetDescriptorView,
     RevisionTransitionPreviewView,
@@ -26,11 +27,13 @@ from sidera_control_plane.application.planning_queries import PlanningCollaborat
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.revision_diff import (
     DependencyChange,
     FieldChange,
+    InputGroupChange,
     NormalizedRevisionDiff,
     SubtaskChange,
     WorkerItemChange,
@@ -106,14 +109,23 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                 canonical_payload.get("proposal"), "proposal canonical payload"
             )
             payload = (
-                PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
-                if proposal.proposal_schema_version == 4
-                else PlanningRevisionProposalPayloadV3.from_mapping(payload_mapping)
+                PlanningRevisionProposalPayloadV5.from_mapping(payload_mapping)
+                if proposal.proposal_schema_version == 5
+                else (
+                    PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
+                    if proposal.proposal_schema_version == 4
+                    else PlanningRevisionProposalPayloadV3.from_mapping(
+                        payload_mapping
+                    )
+                )
             )
             diff = NormalizedRevisionDiff.from_mapping(dict(proposal.derived_diff))
             policy_request = (
                 payload.collaboration_policy_request.to_mapping()
-                if isinstance(payload, PlanningRevisionProposalPayloadV4)
+                if isinstance(
+                    payload,
+                    (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+                )
                 else None
             )
             collaboration = PlanningCollaborationView.from_request_mapping(
@@ -124,7 +136,13 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                     workspace_id,
                     request.profile_snapshot,
                     enabled=(
-                        isinstance(payload, PlanningRevisionProposalPayloadV4)
+                        isinstance(
+                            payload,
+                            (
+                                PlanningRevisionProposalPayloadV4,
+                                PlanningRevisionProposalPayloadV5,
+                            ),
+                        )
                         and payload.collaboration_policy_request.mode.value == "enabled"
                     ),
                 ),
@@ -254,7 +272,11 @@ def _revision_diff_view(
     request: PlanningRequestModel,
     proposal: PlanningProposalRevisionModel,
     base_snapshot: TaskPlanSnapshot,
-    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    payload: (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ),
     diff: NormalizedRevisionDiff,
     freshness: RevisionFreshnessView,
     collaboration: PlanningCollaborationView,
@@ -279,6 +301,9 @@ def _revision_diff_view(
         root_changes=tuple(_field_view(item) for item in diff.root_changes),
         collaboration_policy_changes=tuple(
             _field_view(item) for item in diff.collaboration_policy_changes
+        ),
+        input_group_changes=tuple(
+            _input_group_view(item) for item in diff.input_group_changes
         ),
         collaboration=collaboration,
         subtask_changes=tuple(
@@ -355,7 +380,11 @@ def _collaboration_runtime_provider(
 
 def _path_maps(
     base_snapshot: TaskPlanSnapshot,
-    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    payload: (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ),
 ) -> tuple[dict[str, str], dict[str, str]]:
     subtask_titles = {item.key: item.title for item in base_snapshot.subtasks}
     subtask_titles.update({item.key: item.title for item in payload.subtasks})
@@ -382,6 +411,16 @@ def _field_view(value: FieldChange) -> RevisionFieldChangeView:
         field_path=value.field_path,
         before=value.before,
         after=value.after,
+    )
+
+
+def _input_group_view(value: InputGroupChange) -> RevisionInputGroupChangeView:
+    return RevisionInputGroupChangeView(
+        consumer_worker_item_key=value.consumer_worker_item_key,
+        group_key=value.group_key,
+        before=value.before,
+        after=value.after,
+        reason=value.reason,
     )
 
 

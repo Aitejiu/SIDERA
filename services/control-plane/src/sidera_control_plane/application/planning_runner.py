@@ -52,7 +52,10 @@ from sidera_control_plane.application.secret_resolution import (
     SecretResolutionError,
     SecretResolver,
 )
-from sidera_control_plane.domain.collaboration import resolve_collaboration_policy
+from sidera_control_plane.domain.collaboration import (
+    resolve_collaboration_policy,
+    resolve_collaboration_policy_v2,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -102,6 +105,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.proposal_validation import validate_proposal
 from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
@@ -1219,11 +1223,22 @@ class PlanningRunner:
                     (
                         PlanningRevisionProposalPayloadV3,
                         PlanningRevisionProposalPayloadV4,
+                        PlanningRevisionProposalPayloadV5,
                     ),
                 ):
-                    raise ValueError("revision proposal schema v3 or v4 is required")
+                    raise ValueError(
+                        "revision proposal schema v3, v4, or v5 is required"
+                    )
                 collaboration_policy = (
-                    resolve_collaboration_policy(
+                    resolve_collaboration_policy_v2(
+                        validated_payload.collaboration_policy_request,
+                        request.profile_snapshot.collaboration_runtime_binding,
+                        subtask_keys=frozenset(
+                            item.key for item in validated_payload.subtasks
+                        ),
+                    )
+                    if isinstance(validated_payload, PlanningRevisionProposalPayloadV5)
+                    else resolve_collaboration_policy(
                         validated_payload.collaboration_policy_request,
                         request.profile_snapshot.collaboration_runtime_binding,
                         subtask_keys=frozenset(

@@ -49,6 +49,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 from sidera_control_plane.persistence.models import (
@@ -1258,11 +1259,13 @@ def _to_proposal(row: PlanningProposalRevisionModel) -> ProposalRevision:
     }
     if row.proposal_schema_version == 5:
         if row.kind == PlanningRequestKind.REVISION.value:
-            raise ValidationError(
-                "revision proposal schema v5 is not supported yet"
+            payload = PlanningRevisionProposalPayloadV5.from_mapping(payload_mapping)
+            derived_diff = NormalizedRevisionDiff.from_mapping(
+                _mapping(row.derived_diff, "proposal derived_diff")
             )
-        payload = PlanningProposalPayloadV5.from_mapping(payload_mapping)
-        derived_diff = derive_proposal_diff(payload.to_legacy())
+        else:
+            payload = PlanningProposalPayloadV5.from_mapping(payload_mapping)
+            derived_diff = derive_proposal_diff(payload.to_legacy())
     elif row.proposal_schema_version == 4:
         payload = (
             PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)

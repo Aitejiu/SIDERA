@@ -67,6 +67,7 @@ const revisionDiff: RevisionDiff = {
     runtime_config_version: null,
   },
   collaboration_policy_changes: [],
+  input_group_changes: [],
   root_changes: [{
     field_path: "acceptance_criteria",
     before: ["旧验收"],

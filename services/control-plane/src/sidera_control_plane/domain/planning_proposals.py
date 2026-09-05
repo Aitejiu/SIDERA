@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from sidera_control_plane.domain.planning_revision_proposals import (
         PlanningRevisionProposalPayloadV3,
         PlanningRevisionProposalPayloadV4,
+        PlanningRevisionProposalPayloadV5,
     )
     from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
 
@@ -649,6 +650,7 @@ class ProposalRevision:
         | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
     )
     derived_diff: ProposalDiff | NormalizedRevisionDiff
     canonical_payload: bytes
@@ -671,6 +673,7 @@ class ProposalRevision:
             | PlanningProposalPayloadV5
             | PlanningRevisionProposalPayloadV3
             | PlanningRevisionProposalPayloadV4
+            | PlanningRevisionProposalPayloadV5
         ),
         profile_descriptor: PlanningProfileDescriptor,
         profile_snapshot: PlanningProfileSnapshot,
@@ -750,6 +753,7 @@ def canonical_proposal_bytes(
         | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
     ),
     brief_revision: int,
     profile_descriptor: PlanningProfileDescriptor,
@@ -763,11 +767,16 @@ def canonical_proposal_bytes(
         from sidera_control_plane.domain.planning_revision_proposals import (
             PlanningRevisionProposalPayloadV3,
             PlanningRevisionProposalPayloadV4,
+            PlanningRevisionProposalPayloadV5,
         )
 
         if not isinstance(
             payload,
-            (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+            (
+                PlanningRevisionProposalPayloadV3,
+                PlanningRevisionProposalPayloadV4,
+                PlanningRevisionProposalPayloadV5,
+            ),
         ):
             raise ValidationError("canonical proposal serializer requires typed payload")
         proposal_mapping = payload.canonical_payload()
@@ -796,6 +805,7 @@ def proposal_content_hash(
         | PlanningProposalPayloadV5
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
     ),
     *,
     brief_revision: int,

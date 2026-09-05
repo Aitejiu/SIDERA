@@ -604,9 +604,9 @@ class PlanningCommandHandler:
         if profile is None:
             raise NotFound("planning profile not found")
         profile.assert_user_selectable()
-        if profile.proposal_schema_version not in {3, 4}:
+        if profile.proposal_schema_version not in {3, 4, 5}:
             raise ValidationError(
-                "plan revision requires a planning profile with proposal schema v3 or v4"
+                "plan revision requires a planning profile with proposal schema v3, v4, or v5"
             )
         instance = uow.modules.get_instance(
             profile.planner_module_instance_id, envelope.workspace_id

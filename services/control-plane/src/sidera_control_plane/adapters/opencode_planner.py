@@ -32,7 +32,10 @@ from sidera_control_plane.application.planner_runtime import (
 from sidera_control_plane.application.revision_planning_context import (
     RevisionPlanningContextV1,
 )
-from sidera_control_plane.domain.collaboration import resolve_collaboration_policy
+from sidera_control_plane.domain.collaboration import (
+    resolve_collaboration_policy,
+    resolve_collaboration_policy_v2,
+)
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextMaterializationV1,
@@ -61,6 +64,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.proposal_validation import validate_proposal
@@ -553,6 +557,14 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
             "one of the policy modes provided above, and every strategy_id must be "
             "one of the provided strategy_ids."
         )
+    if planner_input.proposal_schema_version == 5:
+        revision_prompt += (
+            " Include the complete schema-version 2 collaboration_policy_request, "
+            "including every target input_groups rule. Preserve each group_key and "
+            "consumer/candidate relationship unless the revised requirement changes "
+            "it; any changed group must be reflected in the target plan and is not "
+            "an execution-preserve decision by itself."
+        )
     return prompt + revision_prompt
 
 
@@ -775,6 +787,16 @@ def _revision_proposal_shape_hint(schema_version: int = 3) -> dict[str, object]:
             "default_policy": {"strategy_id": "all_required"},
             "subtask_overrides": [],
         }
+    if schema_version == 5:
+        proposal = cast(dict[str, object], shape["proposal"])
+        proposal["schema_version"] = 5
+        proposal["collaboration_policy_request"] = {
+            "schema_version": 2,
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [],
+        }
     return shape
 
 
@@ -833,18 +855,17 @@ def _parse_result(
                 | PlanningProposalPayloadV5
                 | PlanningRevisionProposalPayloadV3
                 | PlanningRevisionProposalPayloadV4
+                | PlanningRevisionProposalPayloadV5
             )
             if planner_input.kind is PlanningRequestKind.REVISION:
                 if not isinstance(
                     planner_input.planning_context, RevisionPlanningContextV1
                 ):
                     raise ValueError("revision planner context is missing")
-                if planner_input.proposal_schema_version == 5:
-                    raise ValueError(
-                        "revision proposal schema v5 is not supported yet"
-                    )
                 payload = (
-                    PlanningRevisionProposalPayloadV4.from_mapping(raw_payload)
+                    PlanningRevisionProposalPayloadV5.from_mapping(raw_payload)
+                    if planner_input.proposal_schema_version == 5
+                    else PlanningRevisionProposalPayloadV4.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 4
                     else PlanningRevisionProposalPayloadV3.from_mapping(raw_payload)
                 )
@@ -860,7 +881,13 @@ def _parse_result(
                     base_snapshot=base_plan,
                 )
                 collaboration_policy = (
-                    resolve_collaboration_policy(
+                    resolve_collaboration_policy_v2(
+                        payload.collaboration_policy_request,
+                        planner_input.profile_snapshot.collaboration_runtime_binding,
+                        subtask_keys=frozenset(item.key for item in payload.subtasks),
+                    )
+                    if isinstance(payload, PlanningRevisionProposalPayloadV5)
+                    else resolve_collaboration_policy(
                         payload.collaboration_policy_request,
                         planner_input.profile_snapshot.collaboration_runtime_binding,
                         subtask_keys=frozenset(item.key for item in payload.subtasks),

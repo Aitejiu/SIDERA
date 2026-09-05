@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
@@ -51,6 +52,7 @@ from sidera_control_plane.application.plan_revision_queries import (
     RevisionFieldChangeView,
     RevisionFreshnessView,
     RevisionImpactCountsView,
+    RevisionInputGroupChangeView,
     RevisionSubtaskChangeView,
     RevisionTargetDescriptorView,
     RevisionTransitionPreviewView,
@@ -104,6 +106,15 @@ from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
 from sidera_control_plane.notification_readiness import NotificationReadinessReport
+
+
+def _plain_revision_value(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_revision_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_revision_value(item) for item in value]
+    return value
+
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 InputText = Annotated[str, StringConstraints(min_length=1)]
@@ -2759,6 +2770,32 @@ class RevisionFieldChangeResponse(BaseModel):
         )
 
 
+class RevisionInputGroupChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consumer_worker_item_key: str
+    group_key: str
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
+    reason: str
+
+    @classmethod
+    def from_view(
+        cls, view: RevisionInputGroupChangeView
+    ) -> "RevisionInputGroupChangeResponse":
+        return cls(
+            consumer_worker_item_key=view.consumer_worker_item_key,
+            group_key=view.group_key,
+            before=(
+                _plain_revision_value(view.before) if view.before is not None else None
+            ),
+            after=(
+                _plain_revision_value(view.after) if view.after is not None else None
+            ),
+            reason=view.reason,
+        )
+
+
 class PlanningCollaborationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2959,6 +2996,7 @@ class RevisionDiffResponse(BaseModel):
     target_descriptor_preview: RevisionTargetDescriptorResponse
     root_changes: tuple[RevisionFieldChangeResponse, ...]
     collaboration_policy_changes: tuple[RevisionFieldChangeResponse, ...]
+    input_group_changes: tuple[RevisionInputGroupChangeResponse, ...]
     collaboration: PlanningCollaborationResponse
     subtask_changes: tuple[RevisionSubtaskChangeResponse, ...]
     worker_item_changes: tuple[RevisionWorkerItemChangeResponse, ...]
@@ -2993,6 +3031,10 @@ class RevisionDiffResponse(BaseModel):
             collaboration_policy_changes=tuple(
                 RevisionFieldChangeResponse.from_view(item)
                 for item in view.collaboration_policy_changes
+            ),
+            input_group_changes=tuple(
+                RevisionInputGroupChangeResponse.from_view(item)
+                for item in view.input_group_changes
             ),
             collaboration=PlanningCollaborationResponse.from_view(view.collaboration),
             subtask_changes=tuple(

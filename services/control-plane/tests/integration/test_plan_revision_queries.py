@@ -78,6 +78,7 @@ def test_revision_queries_expose_base_diff_paths_policy_and_active_head(
         "runtime_config_version": None,
     }
     assert diff_body["collaboration_policy_changes"] == []
+    assert diff_body["input_group_changes"] == []
     assert "patch_body" not in diff_body
 
     assert active_plan.status_code == 200, active_plan.text

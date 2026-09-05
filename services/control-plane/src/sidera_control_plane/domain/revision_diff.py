@@ -5,12 +5,14 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
 from sidera_control_plane.domain.collaboration import (
     CollaborationMode,
     CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
 )
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plan_revisions import (
@@ -23,6 +25,7 @@ from sidera_control_plane.domain.plan_revisions import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
@@ -72,6 +75,40 @@ class DependencyChange:
 
 
 @dataclass(frozen=True, slots=True)
+class InputGroupChange:
+    consumer_worker_item_key: str
+    group_key: str
+    before: Mapping[str, object] | None
+    after: Mapping[str, object] | None
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.consumer_worker_item_key.strip():
+            raise ValidationError("input group change consumer is required")
+        if not self.group_key.strip():
+            raise ValidationError("input group change group_key is required")
+        if self.before is None and self.after is None:
+            raise ValidationError("input group change must have before or after")
+        for name in ("before", "after"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, Mapping):
+                    raise ValidationError(f"input group change {name} must be a mapping")
+                object.__setattr__(self, name, _freeze_value(value))
+        if not self.reason.strip():
+            raise ValidationError("input group change reason is required")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "consumer_worker_item_key": self.consumer_worker_item_key,
+            "group_key": self.group_key,
+            "before": _plain_value(self.before),
+            "after": _plain_value(self.after),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerTransitionPreview:
     target_worker_item_key: str
     worker_item_id: UUID | None
@@ -98,6 +135,7 @@ class NormalizedRevisionDiff:
     target_descriptor_preview: TargetPlanDescriptorPreview
     root_changes: tuple[FieldChange, ...]
     collaboration_policy_changes: tuple[FieldChange, ...]
+    input_group_changes: tuple[InputGroupChange, ...]
     subtask_changes: tuple[SubtaskChange, ...]
     worker_changes: tuple[WorkerItemChange, ...]
     subtask_dependency_changes: tuple[DependencyChange, ...]
@@ -150,6 +188,10 @@ class NormalizedRevisionDiff:
             "risk_flags": list(self.risk_flags),
             "diff_hash": self.diff_hash,
         }
+        if self.input_group_changes:
+            mapping["input_group_changes"] = [
+                item.to_mapping() for item in self.input_group_changes
+            ]
         if self.collaboration_policy_changes:
             mapping["collaboration_policy_changes"] = [
                 _field_mapping(item) for item in self.collaboration_policy_changes
@@ -167,6 +209,9 @@ class NormalizedRevisionDiff:
             root_changes=_field_changes_from_mapping(raw.get("root_changes")),
             collaboration_policy_changes=_field_changes_from_mapping(
                 raw.get("collaboration_policy_changes", [])
+            ),
+            input_group_changes=_input_group_changes_from_mapping(
+                raw.get("input_group_changes", [])
             ),
             subtask_changes=_subtask_changes_from_mapping(raw.get("subtask_changes")),
             worker_changes=_worker_changes_from_mapping(raw.get("worker_changes")),
@@ -199,14 +244,25 @@ class RevisionDiffNormalizer:
     def normalize(
         self,
         base_plan: TaskPlanSnapshot,
-        payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+        payload: (
+            PlanningRevisionProposalPayloadV3
+            | PlanningRevisionProposalPayloadV4
+            | PlanningRevisionProposalPayloadV5
+        ),
         *,
-        collaboration_policy: CollaborationPolicySnapshotV1 | None = None,
+        collaboration_policy: (
+            CollaborationPolicySnapshotV1
+            | CollaborationPolicySnapshotV2
+            | None
+        ) = None,
     ) -> NormalizedRevisionDiff:
         payload.validate_against_base(base_plan)
         legacy_payload = (
             payload.as_v3()
-            if isinstance(payload, PlanningRevisionProposalPayloadV4)
+            if isinstance(
+                payload,
+                (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+            )
             else payload
         )
         target_policy = _target_collaboration_policy(payload, collaboration_policy)
@@ -237,10 +293,13 @@ class RevisionDiffNormalizer:
         }
 
         root_changes = _root_changes(base_plan, legacy_payload)
+        base_policy = _legacy_collaboration_policy(base_plan.collaboration_policy)
         collaboration_policy_changes = _collaboration_policy_changes(
-            _legacy_collaboration_policy(base_plan.collaboration_policy),
+            base_policy,
             target_policy,
         )
+        input_group_changes = _input_group_changes(base_policy, target_policy)
+        input_group_consumers = _input_group_change_consumers(input_group_changes)
         subtask_changes = tuple(
             _subtask_change(
                 target_subtasks[key], base_subtasks_by_id, subtask_decisions[key]
@@ -254,6 +313,7 @@ class RevisionDiffNormalizer:
                 worker_decisions[key],
                 base_subtasks_by_key,
                 legacy_payload,
+                input_group_consumers=input_group_consumers,
             )
             for key in sorted(target_workers)
         )
@@ -293,6 +353,7 @@ class RevisionDiffNormalizer:
             subtask_dependency_changes,
             worker_dependency_changes,
             legacy_payload,
+            input_group_changes,
         )
         target_hash = _target_plan_hash(payload, target_policy)
         preview = TargetPlanDescriptorPreview(
@@ -305,6 +366,7 @@ class RevisionDiffNormalizer:
             target_descriptor_preview=preview,
             root_changes=root_changes,
             collaboration_policy_changes=collaboration_policy_changes,
+            input_group_changes=input_group_changes,
             subtask_changes=subtask_changes,
             worker_changes=worker_changes,
             subtask_dependency_changes=subtask_dependency_changes,
@@ -321,6 +383,7 @@ class RevisionDiffNormalizer:
             target_descriptor_preview=diff.target_descriptor_preview,
             root_changes=diff.root_changes,
             collaboration_policy_changes=diff.collaboration_policy_changes,
+            input_group_changes=diff.input_group_changes,
             subtask_changes=diff.subtask_changes,
             worker_changes=diff.worker_changes,
             subtask_dependency_changes=diff.subtask_dependency_changes,
@@ -386,6 +449,8 @@ def _worker_change(
     decision: Any,
     base_subtasks: Mapping[str, Any],
     payload: PlanningRevisionProposalPayloadV3,
+    *,
+    input_group_consumers: frozenset[str] = frozenset(),
 ) -> WorkerItemChange:
     before = base.get(decision.existing_worker_item_id)
     from_subtask = before.subtask_key if before is not None else None
@@ -438,6 +503,9 @@ def _worker_change(
                 ),
             )
         )
+    reasons = tuple(decision.change_reasons)
+    if target.key in input_group_consumers:
+        reasons = (*reasons, "input_group_changed")
     return WorkerItemChange(
         target_worker_item_key=target.key,
         existing_worker_item_id=decision.existing_worker_item_id,
@@ -446,7 +514,7 @@ def _worker_change(
         to_subtask_key=target.subtask_key,
         context_disposition=decision.context_disposition,
         field_changes=changes,
-        reasons=decision.change_reasons,
+        reasons=reasons,
     )
 
 
@@ -472,7 +540,11 @@ def _validate_context_dispositions(
     for item in worker_changes:
         if item.strategy is not IdentityStrategy.REUSE:
             continue
-        changed = bool(item.field_changes) or item.to_subtask_key in changed_subtasks
+        changed = (
+            bool(item.field_changes)
+            or item.to_subtask_key in changed_subtasks
+            or "input_group_changed" in item.reasons
+        )
         if context_changed:
             changed = True
         if changed and item.context_disposition is ContextDisposition.UNCHANGED:
@@ -508,6 +580,10 @@ def _transition_preview(
             actions = (WorkerTransitionAction.PATCH, WorkerTransitionAction.CONTINUE)
             fallback = WorkerTransitionAction.CONTINUE
             reasons.append("context_changed")
+        elif "input_group_changed" in item.reasons:
+            actions = (WorkerTransitionAction.PATCH, WorkerTransitionAction.CONTINUE)
+            fallback = WorkerTransitionAction.CONTINUE
+            reasons.append("input_group_changed")
         else:
             actions = (WorkerTransitionAction.PRESERVE,)
             fallback = None
@@ -578,6 +654,7 @@ def _risk_flags(
     subtask_dependencies: tuple[DependencyChange, ...],
     worker_dependencies: tuple[DependencyChange, ...],
     payload: PlanningRevisionProposalPayloadV3,
+    input_group_changes: tuple[InputGroupChange, ...],
 ) -> tuple[str, ...]:
     risks: set[str] = set()
     if root_changes:
@@ -593,6 +670,8 @@ def _risk_flags(
         risks.add("worker_item_retired")
     if subtask_dependencies or worker_dependencies:
         risks.add("dependency_graph_changed")
+    if input_group_changes:
+        risks.add("input_group_rules_changed")
     if any(item.field_changes for item in subtask_changes):
         risks.add("subtask_context_changed")
     return tuple(sorted(risks))
@@ -684,11 +763,48 @@ def _dependency_changes(
 
 
 def _target_collaboration_policy(
-    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
-    resolved: CollaborationPolicySnapshotV1 | None,
-) -> CollaborationPolicySnapshotV1 | None:
+    payload: (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ),
+    resolved: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
+) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
+    if isinstance(payload, PlanningRevisionProposalPayloadV5):
+        request = payload.collaboration_policy_request
+        if request.mode is CollaborationMode.DISABLED:
+            if resolved is not None:
+                raise ValidationError(
+                    "disabled collaboration policy cannot have a resolved snapshot"
+                )
+            return None
+        if resolved is None:
+            raise ValidationError(
+                "enabled revision requires a resolved collaboration policy"
+            )
+        if not isinstance(resolved, CollaborationPolicySnapshotV2):
+            raise ValidationError(
+                "revision v5 requires a resolved collaboration policy snapshot v2"
+            )
+        if resolved.default_policy != request.default_policy:
+            raise ValidationError(
+                "resolved collaboration default policy does not match proposal"
+            )
+        if resolved.subtask_overrides != request.subtask_overrides:
+            raise ValidationError(
+                "resolved collaboration overrides do not match proposal"
+            )
+        if resolved.input_groups != request.input_groups:
+            raise ValidationError(
+                "resolved collaboration input groups do not match proposal"
+            )
+        return resolved
     if not isinstance(payload, PlanningRevisionProposalPayloadV4):
         return None
+    if resolved is not None and not isinstance(resolved, CollaborationPolicySnapshotV1):
+        raise ValidationError(
+            "revision v4 requires a resolved collaboration policy snapshot v1"
+        )
     if payload.collaboration_policy_request.mode is CollaborationMode.DISABLED:
         if resolved is not None:
             raise ValidationError(
@@ -712,8 +828,8 @@ def _target_collaboration_policy(
 
 
 def _collaboration_policy_changes(
-    base: CollaborationPolicySnapshotV1 | None,
-    target: CollaborationPolicySnapshotV1 | None,
+    base: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
+    target: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
 ) -> tuple[FieldChange, ...]:
     before = _collaboration_policy_values(base)
     after = _collaboration_policy_values(target)
@@ -726,16 +842,18 @@ def _collaboration_policy_changes(
 
 def _legacy_collaboration_policy(
     policy: object,
-) -> CollaborationPolicySnapshotV1 | None:
-    if policy is not None and not isinstance(policy, CollaborationPolicySnapshotV1):
+) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
+    if policy is not None and not isinstance(
+        policy, (CollaborationPolicySnapshotV1, CollaborationPolicySnapshotV2)
+    ):
         raise ValidationError(
-            "revision diff does not support collaboration policy snapshot v2 yet"
+            "revision diff received an unsupported collaboration policy snapshot"
         )
     return policy
 
 
 def _collaboration_policy_values(
-    policy: CollaborationPolicySnapshotV1 | None,
+    policy: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
 ) -> dict[str, object]:
     if policy is None:
         return {
@@ -788,11 +906,83 @@ def _collaboration_policy_values(
     }
 
 
+def _input_group_changes(
+    base: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
+    target: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
+) -> tuple[InputGroupChange, ...]:
+    before = _input_group_mappings(base)
+    after = _input_group_mappings(target)
+    changes: list[InputGroupChange] = []
+    for group_key in sorted(set(before) | set(after)):
+        before_group = before.get(group_key)
+        after_group = after.get(group_key)
+        if before_group == after_group:
+            continue
+        selected = after_group or before_group
+        if selected is None:
+            continue
+        consumer = selected["consumer_worker_item_key"]
+        if not isinstance(consumer, str):
+            raise ValidationError("input group consumer must be a string")
+        if before_group is None:
+            reason = "input_group_added"
+        elif after_group is None:
+            reason = "input_group_removed"
+        elif (
+            before_group.get("consumer_worker_item_key")
+            != after_group.get("consumer_worker_item_key")
+        ):
+            reason = "input_group_consumer_changed"
+        else:
+            reason = "input_group_rules_changed"
+        changes.append(
+            InputGroupChange(
+                consumer_worker_item_key=consumer,
+                group_key=group_key,
+                before=before_group,
+                after=after_group,
+                reason=reason,
+            )
+        )
+    return tuple(changes)
+
+
+def _input_group_mappings(
+    policy: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
+) -> dict[str, dict[str, object]]:
+    if not isinstance(policy, CollaborationPolicySnapshotV2):
+        return {}
+    return {
+        group.group_key: group.to_mapping() for group in policy.input_groups
+    }
+
+
+def _input_group_change_consumers(
+    changes: tuple[InputGroupChange, ...],
+) -> frozenset[str]:
+    consumers: set[str] = set()
+    for change in changes:
+        for value in (change.before, change.after):
+            if value is None:
+                continue
+            consumer = value.get("consumer_worker_item_key")
+            if isinstance(consumer, str):
+                consumers.add(consumer)
+    return frozenset(consumers)
+
+
 def _target_plan_hash(
-    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
-    collaboration_policy: CollaborationPolicySnapshotV1 | None,
+    payload: (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ),
+    collaboration_policy: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
 ) -> str:
-    if isinstance(payload, PlanningRevisionProposalPayloadV4):
+    if isinstance(
+        payload,
+        (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+    ):
         target = payload.as_v3().canonical_payload()
         target["collaboration_policy"] = (
             collaboration_policy.to_mapping()
@@ -860,6 +1050,10 @@ def _dependency_change_mapping(value: DependencyChange) -> dict[str, object]:
     }
 
 
+def _input_group_change_mapping(value: InputGroupChange) -> dict[str, object]:
+    return value.to_mapping()
+
+
 def _transition_mapping(value: WorkerTransitionPreview) -> dict[str, object]:
     return {
         "target_worker_item_key": value.target_worker_item_key,
@@ -889,6 +1083,34 @@ def _hash_diff(diff: NormalizedRevisionDiff) -> str:
 def _mapping(value: object, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValidationError(f"{name} must be an object")
+    return value
+
+
+def _optional_mapping(
+    value: object, name: str
+) -> Mapping[str, object] | None:
+    return None if value is None else _mapping(value, name)
+
+
+def _freeze_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    raise ValidationError(
+        f"input group change contains unsupported value: {type(value).__name__}"
+    )
+
+
+def _plain_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_value(item) for item in value]
     return value
 
 
@@ -1046,6 +1268,28 @@ def _dependency_change(value: Mapping[str, object]) -> DependencyChange:
 def _dependency_changes_from_mapping(value: object) -> tuple[DependencyChange, ...]:
     return tuple(
         _dependency_change(item) for item in _mappings(value, "dependency_changes")
+    )
+
+
+def _input_group_change_from_mapping(value: Mapping[str, object]) -> InputGroupChange:
+    return InputGroupChange(
+        consumer_worker_item_key=_text(
+            value.get("consumer_worker_item_key"),
+            "consumer_worker_item_key",
+        ),
+        group_key=_text(value.get("group_key"), "group_key"),
+        before=_optional_mapping(value.get("before"), "before"),
+        after=_optional_mapping(value.get("after"), "after"),
+        reason=_text(value.get("reason"), "reason"),
+    )
+
+
+def _input_group_changes_from_mapping(
+    value: object,
+) -> tuple[InputGroupChange, ...]:
+    return tuple(
+        _input_group_change_from_mapping(item)
+        for item in _mappings(value, "input_group_changes")
     )
 
 

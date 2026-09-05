@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sidera_control_plane.domain.collaboration import CollaborationPolicyRequestV1
+from sidera_control_plane.domain.collaboration import (
+    CollaborationPolicyRequestV1,
+    CollaborationPolicyRequestV2,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plan_revisions import (
     ContextDisposition,
@@ -36,6 +39,12 @@ from sidera_control_plane.domain.plans import (
     TaskPlanSnapshot,
     WorkerItemDependency,
     WorkItemKind,
+)
+from sidera_control_plane.domain.result_inputs import (
+    InputGroupInvalid,
+    InputGroupV1,
+    InputWaitCycle,
+    validate_input_wait_graph,
 )
 
 
@@ -552,17 +561,263 @@ class PlanningRevisionProposalPayloadV4:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningRevisionProposalPayloadV5:
+    schema_version: int
+    kind: PlanningRequestKind
+    base_descriptor: RevisionBaseDescriptorV1
+    root_task: ProposedRootTask
+    subtasks: tuple[ProposedSubtask, ...]
+    worker_items: tuple[ProposedWorkerItem, ...]
+    subtask_milestones: tuple[SubtaskMilestone, ...]
+    subtask_dependencies: tuple[SubtaskDependency, ...]
+    worker_item_dependencies: tuple[WorkerItemDependency, ...]
+    execution_intents: tuple[ExecutionIntent, ...]
+    subtask_identity_decisions: tuple[SubtaskIdentityDecision, ...]
+    worker_item_identity_decisions: tuple[WorkerItemIdentityDecision, ...]
+    retired_subtask_ids: tuple[UUID, ...]
+    retired_worker_item_ids: tuple[UUID, ...]
+    decision_summary: DecisionSummary
+    impact_policy: ImpactPolicy
+    collaboration_policy_request: CollaborationPolicyRequestV2
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 5:
+            raise ValidationError("revision proposal schema_version must be 5")
+        if self.kind is not PlanningRequestKind.REVISION:
+            raise ValidationError("revision proposal kind must be revision")
+        if not isinstance(self.base_descriptor, RevisionBaseDescriptorV1):
+            raise ValidationError("revision proposal requires an exact base descriptor")
+        for name in (
+            "subtasks",
+            "worker_items",
+            "subtask_milestones",
+            "subtask_dependencies",
+            "worker_item_dependencies",
+            "execution_intents",
+            "subtask_identity_decisions",
+            "worker_item_identity_decisions",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        object.__setattr__(
+            self,
+            "retired_subtask_ids",
+            _unique_uuids(self.retired_subtask_ids, "retired_subtask_ids"),
+        )
+        object.__setattr__(
+            self,
+            "retired_worker_item_ids",
+            _unique_uuids(self.retired_worker_item_ids, "retired_worker_item_ids"),
+        )
+        if not isinstance(
+            self.collaboration_policy_request, CollaborationPolicyRequestV2
+        ):
+            raise ValidationError(
+                "revision proposal v5 requires a collaboration policy request v2"
+            )
+        self.validate()
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> PlanningRevisionProposalPayloadV5:
+        if not isinstance(value, Mapping):
+            raise ValidationError("revision proposal v5 payload must be a mapping")
+        allowed = {
+            "schema_version",
+            "kind",
+            "base_descriptor",
+            "root_task",
+            "subtasks",
+            "worker_items",
+            "milestones",
+            "subtask_dependencies",
+            "worker_item_dependencies",
+            "execution_intents",
+            "subtask_identity_decisions",
+            "worker_item_identity_decisions",
+            "retired_subtask_ids",
+            "retired_worker_item_ids",
+            "decision_summary",
+            "impact_policy",
+            "collaboration_policy_request",
+        }
+        unknown = sorted(str(key) for key in value if key not in allowed)
+        if unknown:
+            raise ValidationError(
+                f"unknown revision proposal v5 fields: {', '.join(unknown)}"
+            )
+        if _int(value, "schema_version") != 5:
+            raise ValidationError("revision proposal schema_version must be 5")
+        policy_value = value.get("collaboration_policy_request")
+        if not isinstance(policy_value, Mapping):
+            raise ValidationError("collaboration_policy_request must be a mapping")
+        legacy_mapping = dict(value)
+        legacy_mapping.pop("collaboration_policy_request", None)
+        legacy_mapping["schema_version"] = 3
+        legacy = PlanningRevisionProposalPayloadV3.from_mapping(legacy_mapping)
+        return cls(
+            schema_version=5,
+            kind=legacy.kind,
+            base_descriptor=legacy.base_descriptor,
+            root_task=legacy.root_task,
+            subtasks=legacy.subtasks,
+            worker_items=legacy.worker_items,
+            subtask_milestones=legacy.subtask_milestones,
+            subtask_dependencies=legacy.subtask_dependencies,
+            worker_item_dependencies=legacy.worker_item_dependencies,
+            execution_intents=legacy.execution_intents,
+            subtask_identity_decisions=legacy.subtask_identity_decisions,
+            worker_item_identity_decisions=legacy.worker_item_identity_decisions,
+            retired_subtask_ids=legacy.retired_subtask_ids,
+            retired_worker_item_ids=legacy.retired_worker_item_ids,
+            decision_summary=legacy.decision_summary,
+            impact_policy=legacy.impact_policy,
+            collaboration_policy_request=CollaborationPolicyRequestV2.from_mapping(
+                policy_value
+            ),
+        )
+
+    def as_v3(self) -> PlanningRevisionProposalPayloadV3:
+        return PlanningRevisionProposalPayloadV3(
+            schema_version=3,
+            kind=self.kind,
+            base_descriptor=self.base_descriptor,
+            root_task=self.root_task,
+            subtasks=self.subtasks,
+            worker_items=self.worker_items,
+            subtask_milestones=self.subtask_milestones,
+            subtask_dependencies=self.subtask_dependencies,
+            worker_item_dependencies=self.worker_item_dependencies,
+            execution_intents=self.execution_intents,
+            subtask_identity_decisions=self.subtask_identity_decisions,
+            worker_item_identity_decisions=self.worker_item_identity_decisions,
+            retired_subtask_ids=self.retired_subtask_ids,
+            retired_worker_item_ids=self.retired_worker_item_ids,
+            decision_summary=self.decision_summary,
+            impact_policy=self.impact_policy,
+        )
+
+    def _as_v3(self) -> PlanningRevisionProposalPayloadV3:
+        """Keep the private legacy alias available to older callers."""
+        return self.as_v3()
+
+    def validate(self) -> None:
+        self.as_v3().validate()
+        self.collaboration_policy_request.validate_for_subtasks(
+            frozenset(item.key for item in self.subtasks)
+        )
+
+    def validate_against_base(self, base_snapshot: TaskPlanSnapshot) -> None:
+        self.validate()
+        _validate_input_group_wait_graph(
+            worker_items=self.worker_items,
+            subtask_dependencies=self.subtask_dependencies,
+            worker_item_dependencies=self.worker_item_dependencies,
+            execution_intents=self.execution_intents,
+            input_groups=self.collaboration_policy_request.input_groups,
+        )
+        self.as_v3().validate_against_base(base_snapshot)
+
+    def to_mapping(self) -> dict[str, object]:
+        mapping = self.as_v3().canonical_payload()
+        mapping["schema_version"] = 5
+        mapping["collaboration_policy_request"] = (
+            self.collaboration_policy_request.to_mapping()
+        )
+        return mapping
+
+    def canonical_payload(self) -> dict[str, object]:
+        return self.to_mapping()
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_mapping(),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
+def _validate_input_group_wait_graph(
+    *,
+    worker_items: Sequence[ProposedWorkerItem],
+    subtask_dependencies: Sequence[SubtaskDependency],
+    worker_item_dependencies: Sequence[WorkerItemDependency],
+    execution_intents: Sequence[ExecutionIntent],
+    input_groups: tuple[InputGroupV1, ...],
+) -> None:
+    workers_by_subtask: dict[str, tuple[str, ...]] = {}
+    grouped: dict[str, list[str]] = {}
+    for item in worker_items:
+        grouped.setdefault(item.subtask_key, []).append(item.key)
+    workers_by_subtask = {
+        key: tuple(values) for key, values in grouped.items()
+    }
+    hard_edges: set[tuple[str, str]] = set()
+    for dependency in worker_item_dependencies:
+        if dependency.kind == DependencyKind.HARD.value:
+            hard_edges.add(
+                (
+                    dependency.upstream_worker_item_key,
+                    dependency.downstream_worker_item_key,
+                )
+            )
+    for intent in execution_intents:
+        for dependency in intent.activation_dependencies:
+            if dependency.kind == DependencyKind.HARD.value:
+                hard_edges.add(
+                    (
+                        dependency.upstream_worker_item_key,
+                        dependency.downstream_worker_item_key,
+                    )
+                )
+    for dependency in subtask_dependencies:
+        if dependency.kind is not DependencyKind.HARD:
+            continue
+        for upstream in workers_by_subtask.get(dependency.upstream_subtask_key, ()):
+            for downstream in workers_by_subtask.get(
+                dependency.downstream_subtask_key, ()
+            ):
+                hard_edges.add((upstream, downstream))
+    try:
+        validate_input_wait_graph(
+            worker_keys=frozenset(item.key for item in worker_items),
+            hard_edges=tuple(sorted(hard_edges)),
+            input_groups=input_groups,
+        )
+    except (InputGroupInvalid, InputWaitCycle) as exc:
+        raise ValidationError(str(exc), details=exc.details) from exc
+
+
 def validate_revision_proposal(
-    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    payload: (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ),
     *,
     profile_snapshot: object,
     brief_revision: int,
-) -> PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4:
+) -> (
+    PlanningRevisionProposalPayloadV3
+    | PlanningRevisionProposalPayloadV4
+    | PlanningRevisionProposalPayloadV5
+):
     if not isinstance(
         payload,
-        (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+        (
+            PlanningRevisionProposalPayloadV3,
+            PlanningRevisionProposalPayloadV4,
+            PlanningRevisionProposalPayloadV5,
+        ),
     ):
-        raise ValidationError("revision proposal must use schema v3 or v4")
+        raise ValidationError("revision proposal must use schema v3, v4, or v5")
     if (
         getattr(profile_snapshot, "proposal_schema_version", None)
         != payload.schema_version
@@ -573,6 +828,14 @@ def validate_revision_proposal(
     if brief_revision < 1:
         raise ValidationError("brief revision must be positive")
     payload.validate()
+    if isinstance(payload, PlanningRevisionProposalPayloadV5):
+        _validate_input_group_wait_graph(
+            worker_items=payload.worker_items,
+            subtask_dependencies=payload.subtask_dependencies,
+            worker_item_dependencies=payload.worker_item_dependencies,
+            execution_intents=payload.execution_intents,
+            input_groups=payload.collaboration_policy_request.input_groups,
+        )
     return payload
 
 

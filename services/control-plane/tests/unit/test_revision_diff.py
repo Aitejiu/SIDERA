@@ -6,7 +6,9 @@ import pytest
 
 from sidera_control_plane.domain.collaboration import (
     CollaborationPolicyRequestV1,
+    CollaborationPolicyRequestV2,
     CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
     CollaborationRuntimeBindingSnapshot,
 )
 from sidera_control_plane.domain.errors import ValidationError
@@ -48,6 +50,8 @@ from sidera_control_plane.domain.revision_diff import (
     NormalizedRevisionDiff,
     RevisionDiffNormalizer,
 )
+from tests.unit.result_input_fixtures import revision_v5_mapping
+from tests.unit.test_collaboration_policy_v2 import runtime_binding
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("20000000-0000-0000-0000-000000000001")
@@ -263,6 +267,49 @@ def test_normalized_diff_round_trips_through_its_persisted_mapping() -> None:
     restored = NormalizedRevisionDiff.from_mapping(diff.to_mapping())
 
     assert restored == diff
+    assert "input_group_changes" not in diff.to_mapping()
+
+
+def test_legacy_revision_diff_hashes_remain_stable() -> None:
+    snapshot = base_snapshot()
+    payload = revision_payload(snapshot)
+    normalizer = RevisionDiffNormalizer()
+
+    disabled = CollaborationPolicyRequestV1.from_mapping(
+        {
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+        }
+    )
+    v4 = PlanningRevisionProposalPayloadV4(
+        schema_version=4,
+        kind=payload.kind,
+        base_descriptor=payload.base_descriptor,
+        root_task=payload.root_task,
+        subtasks=payload.subtasks,
+        worker_items=payload.worker_items,
+        subtask_milestones=payload.subtask_milestones,
+        subtask_dependencies=payload.subtask_dependencies,
+        worker_item_dependencies=payload.worker_item_dependencies,
+        execution_intents=payload.execution_intents,
+        subtask_identity_decisions=payload.subtask_identity_decisions,
+        worker_item_identity_decisions=payload.worker_item_identity_decisions,
+        retired_subtask_ids=payload.retired_subtask_ids,
+        retired_worker_item_ids=payload.retired_worker_item_ids,
+        decision_summary=payload.decision_summary,
+        impact_policy=payload.impact_policy,
+        collaboration_policy_request=disabled,
+    )
+
+    assert (
+        normalizer.normalize(snapshot, payload).diff_hash
+        == "6977eaebf386ab5ce6707ce246488649e69e8b76a37b040b864e61220cedd735"
+    )
+    assert (
+        normalizer.normalize(snapshot, v4).diff_hash
+        == "b0ad95615494cdf5770fc9ec03957ac3517fc31ea00eb97a17c7edea009dca43"
+    )
 
 
 def test_v4_revision_diff_includes_collaboration_policy_change() -> None:
@@ -358,3 +405,160 @@ def test_normalizer_rejects_unchanged_context_when_effective_fields_change() -> 
 
     with pytest.raises(ValidationError, match="context fingerprint"):
         RevisionDiffNormalizer().normalize(snapshot, altered)
+
+
+def _v4_snapshot_with_two_workers() -> TaskPlanSnapshot:
+    base = base_snapshot()
+    source_id = UUID("40000000-0000-0000-0000-000000000002")
+    source = WorkerItemPlanItem(
+        key="source",
+        worker_item_id=source_id,
+        subtask_key="implementation",
+        title="Source worker",
+        role="researcher",
+        responsibility="Produce a source result.",
+        capability_requirements=("python",),
+        worker_policy_ref="policy:default",
+        configuration_ref=None,
+        concurrency_limit=1,
+        source_refs=("brief:initial",),
+    )
+    request = CollaborationPolicyRequestV2.from_mapping(
+        {
+            "schema_version": 2,
+            "mode": "enabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [
+                {
+                    "group_key": "source",
+                    "title": "Source result",
+                    "consumer_worker_item_key": "backend",
+                    "candidates": [{"worker_item_key": "source", "priority": 1}],
+                    "requirements": {
+                        "execution_status": "succeeded",
+                        "required_artifact_refs": ["artifact_type:report"],
+                        "required_evidence_refs": ["acceptance:source"],
+                        "evidence_status": "candidate",
+                    },
+                    "mode": "all",
+                    "minimum_count": None,
+                    "selection_strategy": "plan_order",
+                }
+            ],
+        }
+    )
+    policy = CollaborationPolicySnapshotV2.from_request(request, runtime_binding())
+    return replace(
+        base,
+        schema_version=4,
+        worker_item_plans=(*base.worker_item_plans, source),
+        collaboration_policy=policy,
+    )
+
+
+def test_v5_group_consumer_change_requires_explicit_context_disposition() -> None:
+    snapshot = _v4_snapshot_with_two_workers()
+    raw_payload = revision_v5_mapping()
+    descriptor = raw_payload["base_descriptor"]
+    assert isinstance(descriptor, dict)
+    descriptor.update(
+        {
+            "workspace_id": str(snapshot.workspace_id),
+            "root_task_id": str(snapshot.root_task_id),
+            "plan_snapshot_id": str(snapshot.id),
+            "plan_generation": snapshot.generation,
+            "plan_content_hash": plan_snapshot_content_hash(snapshot),
+        }
+    )
+    policy = raw_payload["collaboration_policy_request"]
+    assert isinstance(policy, dict)
+    group = policy["input_groups"]
+    assert isinstance(group, list)
+    assert isinstance(group[0], dict)
+    group[0]["consumer_worker_item_key"] = "a"
+    group[0]["candidates"] = [
+        {"worker_item_key": "b", "priority": 1},
+        {"worker_item_key": "c", "priority": 2},
+    ]
+    decisions = raw_payload["worker_item_identity_decisions"]
+    assert isinstance(decisions, list)
+    assert isinstance(decisions[0], dict)
+    decisions[0]["context_disposition"] = "unchanged"
+    decisions[0]["change_reasons"] = []
+    retired = raw_payload["retired_worker_item_ids"]
+    assert isinstance(retired, list)
+    retired.append("40000000-0000-0000-0000-000000000002")
+
+    from sidera_control_plane.domain.planning_revision_proposals import (
+        PlanningRevisionProposalPayloadV5,
+    )
+
+    payload = PlanningRevisionProposalPayloadV5.from_mapping(raw_payload)
+    resolved = CollaborationPolicySnapshotV2.from_request(
+        payload.collaboration_policy_request, runtime_binding()
+    )
+
+    with pytest.raises(ValidationError, match="context fingerprint"):
+        RevisionDiffNormalizer().normalize(
+            snapshot,
+            payload,
+            collaboration_policy=resolved,
+        )
+
+
+def test_v5_group_consumer_change_uses_patch_transition_when_declared() -> None:
+    snapshot = _v4_snapshot_with_two_workers()
+    raw_payload = revision_v5_mapping()
+    descriptor = raw_payload["base_descriptor"]
+    assert isinstance(descriptor, dict)
+    descriptor.update(
+        {
+            "workspace_id": str(snapshot.workspace_id),
+            "root_task_id": str(snapshot.root_task_id),
+            "plan_snapshot_id": str(snapshot.id),
+            "plan_generation": snapshot.generation,
+            "plan_content_hash": plan_snapshot_content_hash(snapshot),
+        }
+    )
+    policy = raw_payload["collaboration_policy_request"]
+    assert isinstance(policy, dict)
+    group = policy["input_groups"]
+    assert isinstance(group, list)
+    assert isinstance(group[0], dict)
+    group[0]["consumer_worker_item_key"] = "a"
+    group[0]["candidates"] = [
+        {"worker_item_key": "b", "priority": 1},
+        {"worker_item_key": "c", "priority": 2},
+    ]
+    decisions = raw_payload["worker_item_identity_decisions"]
+    assert isinstance(decisions, list)
+    assert isinstance(decisions[0], dict)
+    decisions[0]["context_disposition"] = "patch_required"
+    decisions[0]["change_reasons"] = ["input group consumer changed"]
+    retired = raw_payload["retired_worker_item_ids"]
+    assert isinstance(retired, list)
+    retired.append("40000000-0000-0000-0000-000000000002")
+
+    from sidera_control_plane.domain.planning_revision_proposals import (
+        PlanningRevisionProposalPayloadV5,
+    )
+
+    payload = PlanningRevisionProposalPayloadV5.from_mapping(raw_payload)
+    resolved = CollaborationPolicySnapshotV2.from_request(
+        payload.collaboration_policy_request, runtime_binding()
+    )
+    diff = RevisionDiffNormalizer().normalize(
+        snapshot,
+        payload,
+        collaboration_policy=resolved,
+    )
+
+    transition = next(
+        item for item in diff.transition_preview if item.target_worker_item_key == "a"
+    )
+    assert transition.allowed_actions == (
+        WorkerTransitionAction.PATCH,
+        WorkerTransitionAction.CONTINUE,
+    )
+    assert "input_group_changed" in transition.reason_codes

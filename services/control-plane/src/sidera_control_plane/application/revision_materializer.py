@@ -14,7 +14,9 @@ from sidera_control_plane.application.worker_item_materializer import (
 )
 from sidera_control_plane.domain.collaboration import (
     CollaborationPolicySnapshotV1,
+    CollaborationPolicySnapshotV2,
     resolve_collaboration_policy,
+    resolve_collaboration_policy_v2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import (
@@ -53,6 +55,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.plans import (
     SubtaskPlanItem,
@@ -94,7 +97,7 @@ class RevisionMaterializationResult:
 
 
 class RevisionMaterializer:
-    """Atomically publish one confirmed schema-v3 plan revision."""
+    """Atomically publish one confirmed plan revision."""
 
     def __init__(
         self,
@@ -128,7 +131,10 @@ class RevisionMaterializer:
         )
         payload = (
             proposal_payload.as_v3()
-            if isinstance(proposal_payload, PlanningRevisionProposalPayloadV4)
+            if isinstance(
+                proposal_payload,
+                (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+            )
             else proposal_payload
         )
         existing = uow.proposal_materializations.get_by_request(
@@ -464,7 +470,11 @@ class RevisionMaterializer:
         proposal: ProposalRevision,
         profile: PlanningProfile,
         envelope: CommandEnvelope,
-    ) -> PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4:
+    ) -> (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ):
         if request.kind is not PlanningRequestKind.REVISION:
             raise ValidationError("ConfirmPlanRevision requires a revision request")
         if proposal.kind is not PlanningRequestKind.REVISION:
@@ -474,9 +484,13 @@ class RevisionMaterializer:
         payload = proposal.payload
         if not isinstance(
             payload,
-            (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+            (
+                PlanningRevisionProposalPayloadV3,
+                PlanningRevisionProposalPayloadV4,
+                PlanningRevisionProposalPayloadV5,
+            ),
         ):
-            raise ValidationError("revision proposal schema v3 or v4 is required")
+            raise ValidationError("revision proposal schema v3, v4, or v5 is required")
         if request.base_descriptor != payload.base_descriptor:
             raise ValidationError("proposal base does not match the planning request")
         if request.current_proposal_revision != proposal.revision:
@@ -561,15 +575,26 @@ class RevisionMaterializer:
     @staticmethod
     def _resolve_collaboration_policy(
         request: PlanningRequest,
-        payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
-    ) -> CollaborationPolicySnapshotV1 | None:
-        if not isinstance(payload, PlanningRevisionProposalPayloadV4):
-            return None
-        return resolve_collaboration_policy(
-            payload.collaboration_policy_request,
-            request.profile_snapshot.collaboration_runtime_binding,
-            subtask_keys=frozenset(item.key for item in payload.subtasks),
-        )
+        payload: (
+            PlanningRevisionProposalPayloadV3
+            | PlanningRevisionProposalPayloadV4
+            | PlanningRevisionProposalPayloadV5
+        ),
+    ) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
+        subtask_keys = frozenset(item.key for item in payload.subtasks)
+        if isinstance(payload, PlanningRevisionProposalPayloadV5):
+            return resolve_collaboration_policy_v2(
+                payload.collaboration_policy_request,
+                request.profile_snapshot.collaboration_runtime_binding,
+                subtask_keys=subtask_keys,
+            )
+        if isinstance(payload, PlanningRevisionProposalPayloadV4):
+            return resolve_collaboration_policy(
+                payload.collaboration_policy_request,
+                request.profile_snapshot.collaboration_runtime_binding,
+                subtask_keys=subtask_keys,
+            )
+        return None
 
     @staticmethod
     def _validate_previous_transitions(
@@ -848,7 +873,9 @@ class RevisionMaterializer:
         worker_ids: Mapping[str, UUID],
         published_by: str,
         now: datetime,
-        collaboration_policy: CollaborationPolicySnapshotV1 | None,
+        collaboration_policy: CollaborationPolicySnapshotV1
+        | CollaborationPolicySnapshotV2
+        | None,
     ) -> TaskPlanSnapshot:
         subtasks = tuple(
             SubtaskPlanItem(
@@ -883,8 +910,14 @@ class RevisionMaterializer:
         return TaskPlanSnapshot.create(
             snapshot_id=uuid4(),
             schema_version=(
-                3
-                if isinstance(proposal.payload, PlanningRevisionProposalPayloadV4)
+                4
+                if isinstance(
+                    proposal.payload,
+                    (
+                        PlanningRevisionProposalPayloadV4,
+                        PlanningRevisionProposalPayloadV5,
+                    ),
+                )
                 else 2
             ),
             workspace_id=request.workspace_id,

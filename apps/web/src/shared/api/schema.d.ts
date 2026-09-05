@@ -5600,6 +5600,8 @@ export interface components {
             diff_hash: string;
             freshness: components["schemas"]["RevisionFreshnessResponse"];
             impact_counts: components["schemas"]["RevisionImpactCountsResponse"];
+            /** Input Group Changes */
+            input_group_changes: components["schemas"]["RevisionInputGroupChangeResponse"][];
             /**
              * Planning Request Id
              * Format: uuid
@@ -5688,6 +5690,23 @@ export interface components {
             preserve: number;
             /** Retire */
             retire: number;
+        };
+        /** RevisionInputGroupChangeResponse */
+        RevisionInputGroupChangeResponse: {
+            /** After */
+            after: {
+                [key: string]: unknown;
+            } | null;
+            /** Before */
+            before: {
+                [key: string]: unknown;
+            } | null;
+            /** Consumer Worker Item Key */
+            consumer_worker_item_key: string;
+            /** Group Key */
+            group_key: string;
+            /** Reason */
+            reason: string;
         };
         /** RevisionSubtaskChangeResponse */
         RevisionSubtaskChangeResponse: {

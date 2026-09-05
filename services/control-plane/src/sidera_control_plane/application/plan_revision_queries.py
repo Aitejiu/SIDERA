@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -46,6 +47,15 @@ class RevisionFieldChangeView:
     field_path: str
     before: object
     after: object
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionInputGroupChangeView:
+    consumer_worker_item_key: str
+    group_key: str
+    before: Mapping[str, object] | None
+    after: Mapping[str, object] | None
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +135,7 @@ class RevisionDiffView:
     target_descriptor_preview: RevisionTargetDescriptorView
     root_changes: tuple[RevisionFieldChangeView, ...]
     collaboration_policy_changes: tuple[RevisionFieldChangeView, ...]
+    input_group_changes: tuple[RevisionInputGroupChangeView, ...]
     collaboration: PlanningCollaborationView
     subtask_changes: tuple[RevisionSubtaskChangeView, ...]
     worker_item_changes: tuple[RevisionWorkerItemChangeView, ...]

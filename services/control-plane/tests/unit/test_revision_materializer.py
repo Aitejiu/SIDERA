@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,6 +12,7 @@ from sidera_control_plane.application.revision_materializer import (
     _head_matches_base,
     _worker_transition,
 )
+from sidera_control_plane.domain.collaboration import CollaborationPolicySnapshotV2
 from sidera_control_plane.domain.plan_revisions import (
     RootTaskPlanHead,
     WorkerTransitionAction,
@@ -20,11 +22,17 @@ from sidera_control_plane.domain.plan_transitions import (
     WorkerTransitionStatus,
     WriterState,
 )
+from sidera_control_plane.domain.planning_proposals import ProposalRevision
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV5,
+)
 from sidera_control_plane.domain.revision_diff import (
     RevisionDiffNormalizer,
     WorkerTransitionPreview,
 )
 from sidera_control_plane.domain.worker_item import WorkerItem
+from tests.unit.result_input_fixtures import revision_v5_mapping
+from tests.unit.test_collaboration_policy_v2 import runtime_binding
 from tests.unit.test_revision_diff import base_snapshot, revision_payload
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
@@ -134,3 +142,60 @@ def test_converged_worker_transition_closes_writer() -> None:
     )
 
     assert transition.can_release_fence
+
+
+def test_v5_target_snapshot_publishes_schema4_and_keeps_input_groups() -> None:
+    base = base_snapshot()
+    raw = revision_v5_mapping()
+    descriptor = raw["base_descriptor"]
+    assert isinstance(descriptor, dict)
+    descriptor.update(
+        {
+            "workspace_id": str(base.workspace_id),
+            "root_task_id": str(base.root_task_id),
+            "plan_snapshot_id": str(base.id),
+            "plan_generation": base.generation,
+            "plan_content_hash": plan_snapshot_content_hash(base),
+        }
+    )
+    payload = PlanningRevisionProposalPayloadV5.from_mapping(raw)
+    policy = CollaborationPolicySnapshotV2.from_request(
+        payload.collaboration_policy_request, runtime_binding()
+    )
+    proposal = cast(
+        ProposalRevision,
+        SimpleNamespace(
+            id=uuid4(),
+            revision=1,
+            content_hash="proposal-hash",
+            payload=payload,
+        ),
+    )
+    subtask_id = base.subtasks[0].task_id
+    assert subtask_id is not None
+
+    snapshot = RevisionMaterializer._target_snapshot(
+        request=cast(
+            Any,
+            SimpleNamespace(
+                id=uuid4(),
+                workspace_id=base.workspace_id,
+            ),
+        ),
+        proposal=proposal,
+        payload=payload.as_v3(),
+        subtask_ids={"implementation": subtask_id},
+        worker_ids={
+            "a": WORKER_ID,
+            "b": UUID("40000000-0000-0000-0000-000000000002"),
+            "c": UUID("40000000-0000-0000-0000-000000000003"),
+            "summary": UUID("40000000-0000-0000-0000-000000000004"),
+        },
+        published_by="operator",
+        now=NOW,
+        collaboration_policy=policy,
+    )
+
+    assert snapshot.schema_version == 4
+    assert isinstance(snapshot.collaboration_policy, CollaborationPolicySnapshotV2)
+    assert snapshot.collaboration_policy.input_groups[0].group_key == "research"

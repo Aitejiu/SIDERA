@@ -21,6 +21,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV5,
 )
 from sidera_control_plane.domain.plans import DependencyKind, TaskPlanSnapshot
 from sidera_control_plane.domain.result_inputs import (
@@ -36,6 +37,7 @@ ProposalPayload = (
     | PlanningProposalPayloadV5
     | PlanningRevisionProposalPayloadV3
     | PlanningRevisionProposalPayloadV4
+    | PlanningRevisionProposalPayloadV5
 )
 
 
@@ -70,14 +72,18 @@ def validate_proposal(
     if expected_kind is PlanningRequestKind.REVISION:
         if not isinstance(
             typed_payload,
-            (PlanningRevisionProposalPayloadV3, PlanningRevisionProposalPayloadV4),
+            (
+                PlanningRevisionProposalPayloadV3,
+                PlanningRevisionProposalPayloadV4,
+                PlanningRevisionProposalPayloadV5,
+            ),
         ):
             if not explicit_revision:
                 expected_kind = PlanningRequestKind.CREATE
             else:
                 _fail(
                     "proposal_schema_invalid",
-                    "revision proposal schema v3 is required",
+                    "revision proposal schema v3, v4, or v5 is required",
                 )
         else:
             _validate_revision_proposal(
@@ -152,6 +158,7 @@ def _typed_payload(
             PlanningProposalPayloadV5,
             PlanningRevisionProposalPayloadV3,
             PlanningRevisionProposalPayloadV4,
+            PlanningRevisionProposalPayloadV5,
         ),
     ):
         return payload
@@ -173,6 +180,8 @@ def _typed_payload(
         try:
             if schema_version == 4:
                 return PlanningRevisionProposalPayloadV4.from_mapping(payload)
+            if schema_version == 5:
+                return PlanningRevisionProposalPayloadV5.from_mapping(payload)
             return PlanningRevisionProposalPayloadV3.from_mapping(payload)
         except ValidationError as exc:
             _fail("proposal_schema_invalid", str(exc))
@@ -188,7 +197,11 @@ def _typed_payload(
 
 
 def _validate_revision_proposal(
-    payload: PlanningRevisionProposalPayloadV3 | PlanningRevisionProposalPayloadV4,
+    payload: (
+        PlanningRevisionProposalPayloadV3
+        | PlanningRevisionProposalPayloadV4
+        | PlanningRevisionProposalPayloadV5
+    ),
     *,
     profile_snapshot: PlanningProfileSnapshot,
     capability_snapshot: PlannerAdapterCapabilityProfile | None,
@@ -240,6 +253,8 @@ def _validate_revision_proposal(
     _validate_budget(payload, profile_snapshot)
     if isinstance(payload, PlanningRevisionProposalPayloadV4):
         _validate_collaboration_request(payload, profile_snapshot)
+    elif isinstance(payload, PlanningRevisionProposalPayloadV5):
+        _validate_collaboration_request_v2(payload, profile_snapshot)
 
 
 def _validate_collaboration_request(
@@ -273,7 +288,7 @@ def _validate_collaboration_request(
 
 
 def _validate_collaboration_request_v2(
-    payload: PlanningProposalPayloadV5,
+    payload: PlanningProposalPayloadV5 | PlanningRevisionProposalPayloadV5,
     profile_snapshot: PlanningProfileSnapshot,
 ) -> None:
     request = payload.collaboration_policy_request
