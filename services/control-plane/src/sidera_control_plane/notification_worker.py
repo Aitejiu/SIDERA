@@ -16,9 +16,9 @@ from sidera_control_plane.application.notification_delivery import (
     NotificationDeliveryService,
 )
 from sidera_control_plane.application.notification_policy import (
-    POLICY_VERSION,
     NotificationEvaluationMode,
     NotificationPolicyV1,
+    NotificationPolicyV2,
 )
 from sidera_control_plane.application.notification_reconciler import (
     NotificationDueScanResult,
@@ -54,6 +54,14 @@ class NotificationReconcilerPort(Protocol):
     ) -> NotificationDueScanResult:
         raise NotImplementedError
 
+    def baseline_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner: str | None = None,
+    ) -> NotificationReconciliationResult:
+        raise NotImplementedError
+
 
 WorkspaceProvider = Callable[[], tuple[UUID, ...]]
 Clock = Callable[[], datetime]
@@ -72,6 +80,98 @@ class NotificationWorkerRunSummary:
     expired_leases: int = 0
     failed_workspaces: int = 0
     diagnostic_codes: tuple[str, ...] = ()
+
+
+class NotificationReconcilerSet:
+    """Run policy versions independently while exposing one worker port."""
+
+    def __init__(self, reconcilers: Sequence[NotificationReconciler]) -> None:
+        if not reconcilers:
+            raise ValueError("at least one notification reconciler is required")
+        self._reconcilers = tuple(reconcilers)
+
+    def reconcile_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner: str,
+        limit: int,
+        mode: NotificationEvaluationMode | str,
+    ) -> NotificationReconciliationResult:
+        results = tuple(
+            reconciler.reconcile_workspace(
+                workspace_id,
+                owner=owner,
+                limit=limit,
+                mode=mode,
+            )
+            for reconciler in self._reconcilers
+        )
+        return NotificationReconciliationResult(
+            workspace_id=workspace_id,
+            acquired=all(result.acquired for result in results),
+            processed_changes=sum(result.processed_changes for result in results),
+            relevant_changes=sum(result.relevant_changes for result in results),
+            observations=sum(result.observations for result in results),
+            facts_created=sum(result.facts_created for result in results),
+            threads_changed=sum(result.threads_changed for result in results),
+            intents_created=sum(result.intents_created for result in results),
+            cursor=max(result.cursor for result in results),
+            diagnostic_code=_first_diagnostic(results),
+        )
+
+    def scan_due(
+        self,
+        workspace_id: UUID,
+        owner_id: str,
+        now: datetime,
+        limit: int,
+    ) -> NotificationDueScanResult:
+        results = tuple(
+            reconciler.scan_due(workspace_id, owner_id, now, limit)
+            for reconciler in self._reconcilers
+        )
+        return NotificationDueScanResult(
+            workspace_id=workspace_id,
+            acquired=all(result.acquired for result in results),
+            scanned=sum(result.scanned for result in results),
+            observations=sum(result.observations for result in results),
+            facts_created=sum(result.facts_created for result in results),
+            threads_changed=sum(result.threads_changed for result in results),
+            intents_created=sum(result.intents_created for result in results),
+            diagnostic_code=_first_diagnostic(results),
+        )
+
+    def baseline_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        owner: str | None = None,
+    ) -> NotificationReconciliationResult:
+        results = tuple(
+            reconciler.baseline_workspace(workspace_id, owner=owner)
+            for reconciler in self._reconcilers
+        )
+        return NotificationReconciliationResult(
+            workspace_id=workspace_id,
+            acquired=all(result.acquired for result in results),
+            processed_changes=sum(result.processed_changes for result in results),
+            relevant_changes=sum(result.relevant_changes for result in results),
+            observations=sum(result.observations for result in results),
+            facts_created=sum(result.facts_created for result in results),
+            threads_changed=sum(result.threads_changed for result in results),
+            intents_created=sum(result.intents_created for result in results),
+            cursor=max(result.cursor for result in results),
+            diagnostic_code=_first_diagnostic(results),
+        )
+
+
+def _first_diagnostic(results: Sequence[object]) -> str | None:
+    for result in results:
+        diagnostic_code = getattr(result, "diagnostic_code", None)
+        if diagnostic_code is not None:
+            return diagnostic_code
+    return None
 
 
 class NotificationWorker:
@@ -242,7 +342,7 @@ class NotificationWorker:
 @dataclass(slots=True)
 class NotificationWorkerRuntime:
     worker: NotificationWorker
-    reconciler: NotificationReconciler
+    reconciler: NotificationReconcilerSet
     delivery_service: NotificationDeliveryService
     database: Database
 
@@ -254,15 +354,25 @@ def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
     owner_id = f"notification-worker:{settings.local_actor_id}"
-    reconciler = NotificationReconciler(
+    v1_reconciler = NotificationReconciler(
         uow_factory,
         policy=NotificationPolicyV1(
             blocked_grace_seconds=settings.notification_blocked_grace_seconds
         ),
-        owner=owner_id,
+        owner=f"{owner_id}:v1",
         batch_size=settings.notification_reconcile_batch_size,
         lease_seconds=settings.notification_cursor_lease_seconds,
     )
+    v2_reconciler = NotificationReconciler(
+        uow_factory,
+        policy=NotificationPolicyV2(
+            blocked_grace_seconds=settings.notification_blocked_grace_seconds
+        ),
+        owner=f"{owner_id}:v2",
+        batch_size=settings.notification_reconcile_batch_size,
+        lease_seconds=settings.notification_cursor_lease_seconds,
+    )
+    reconciler = NotificationReconcilerSet((v1_reconciler, v2_reconciler))
     delivery_service = NotificationDeliveryService(
         uow_factory,
         clock=lambda: datetime.now(UTC),
@@ -293,17 +403,16 @@ def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
 
     def baseline_complete(workspace_id: UUID) -> bool:
         with database.session() as session:
-            return (
-                session.scalar(
-                    select(NotificationReconciliationCursorModel.workspace_id).where(
+            versions = set(
+                session.scalars(
+                    select(NotificationReconciliationCursorModel.policy_version).where(
                         NotificationReconciliationCursorModel.workspace_id
                         == workspace_id,
-                        NotificationReconciliationCursorModel.policy_version
-                        == POLICY_VERSION,
+                        NotificationReconciliationCursorModel.policy_version.in_((1, 2)),
                     )
-                )
-                is not None
+                ).all()
             )
+            return {1, 2}.issubset(versions)
 
     try:
         worker = NotificationWorker(

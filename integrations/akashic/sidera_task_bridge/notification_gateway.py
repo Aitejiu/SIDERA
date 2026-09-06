@@ -414,7 +414,12 @@ def render_notification_message(
         f"Open: {_escaped(envelope.deep_link)}"
     )
     details = (
-        f"Summary: {_escaped(envelope.summary)}\n"
+        (
+            "Reason: result input delivery blocked\n"
+            if envelope.kind == "result_inputs_blocked"
+            else ""
+        )
+        + f"Summary: {_escaped(envelope.summary)}\n"
         f"Next: {_escaped(envelope.next_action)}\n"
     )
     budget = max_bytes - len(stable.encode("utf-8")) - 1

@@ -29,6 +29,11 @@ export function NotificationThreadRow({
         </span>
         <span className="notification-thread__main">
           <span className="notification-thread__path">{notificationPath(thread)}</span>
+          {notificationReasonLabel(thread.topic) ? (
+            <span className="notification-thread__reason">
+              {notificationReasonLabel(thread.topic)}
+            </span>
+          ) : null}
           <strong>{thread.title}</strong>
           <span className="notification-thread__summary">{thread.summary}</span>
         </span>
@@ -53,6 +58,25 @@ export function notificationPath(thread: NotificationThread): string {
   return [thread.root_task_title, thread.subtask_title, thread.worker_item_title]
     .filter((part): part is string => part !== null && part.trim().length > 0)
     .join(" / ");
+}
+
+export function notificationReasonLabel(topic: string): string | null {
+  const [kind, reason] = topic.split(":", 2);
+  if (kind !== "result_inputs_blocked") {
+    return null;
+  }
+  switch (reason) {
+    case "result_input_unavailable":
+      return "选中的结果暂时不可用";
+    case "result_input_integrity_failed":
+      return "选中的结果完整性校验失败";
+    case "result_input_format_unsupported":
+      return "选中的结果格式不支持";
+    case "result_input_budget_exceeded":
+      return "选中的结果超出交付限制";
+    default:
+      return "结果输入阻塞";
+  }
 }
 
 function threadState(thread: NotificationThread): {

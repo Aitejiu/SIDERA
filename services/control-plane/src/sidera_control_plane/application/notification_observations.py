@@ -67,6 +67,7 @@ class NotificationObservationSubjectType(StrEnum):
     PLANNING_REQUEST = "planning_request"
     WORKER_ITEM = "worker_item"
     EXECUTION = "execution"
+    EXECUTION_REQUEST = "execution_request"
     WORKSPACE = "workspace"
 
 

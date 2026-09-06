@@ -62,6 +62,13 @@ from sidera_control_plane.application.handoff_input_transfer import (
     HandoffInputTransferService,
 )
 from sidera_control_plane.application.handoff_target import HandoffTargetService
+from sidera_control_plane.application.notification_policy import (
+    NotificationPolicyV1,
+    NotificationPolicyV2,
+)
+from sidera_control_plane.application.notification_reconciler import (
+    NotificationReconciler,
+)
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.ports import (
@@ -171,6 +178,7 @@ from sidera_control_plane.persistence.models import (
     ContextAssemblyRequestModel,
     ExecutionModel,
     ExecutionRequestModel,
+    NotificationFactModel,
     OutboxMessageModel,
     RuntimeReleaseModel,
 )
@@ -1036,6 +1044,33 @@ class ResultInputScenario:
         path.replace(backup)
         self._unavailable_artifacts[artifact_id] = backup
 
+    def block_selected_body(
+        self,
+        key: str = "summary",
+        *,
+        source_key: str = "b",
+        failure_mode: str = "unavailable",
+    ) -> object:
+        """Drive the real Gateway path after making one selected body fail delivery."""
+
+        self.activate()
+        self.assemble_context(key)
+        self.complete_source("a", body=b"report-a\n")
+        artifact_id = self.source_artifact_id(source_key)
+        if failure_mode == "unavailable":
+            self.make_artifact_unavailable(artifact_id)
+        elif failure_mode == "integrity":
+            self.corrupt_artifact(artifact_id, body=b"tampered-result\n")
+        else:
+            raise ValueError("failure_mode must be unavailable or integrity")
+        return self.start_worker(key)
+
+    def source_artifact_id(self, key: str) -> UUID:
+        artifact_id = self._source_artifact_ids.get(key)
+        if artifact_id is None:
+            raise AssertionError(f"source artifact {key!r} is unavailable")
+        return artifact_id
+
     def restore_artifact(self, artifact_id: UUID) -> None:
         path = self._artifact_path(artifact_id)
         backup = self._unavailable_artifacts.pop(artifact_id, None)
@@ -1078,6 +1113,52 @@ class ResultInputScenario:
             if not self._reconcile_once():
                 return
         raise AssertionError("collaboration reconciliation did not converge")
+
+    def run_notifications(self, *, limit: int = 100) -> tuple[object, ...]:
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        results = []
+        policies = (
+            (1, NotificationPolicyV1()),
+            (2, NotificationPolicyV2()),
+        )
+        for policy_version, policy in policies:
+            reconciler = NotificationReconciler(
+                self.uow_factory,
+                policy=policy,
+                clock=self.clock,
+                owner=f"result-input-notification-v{policy_version}",
+                batch_size=limit,
+            )
+            for _ in range(10):
+                result = reconciler.reconcile_workspace(
+                    self.workspace_id,
+                    limit=limit,
+                )
+                assert result.acquired, result
+                assert result.diagnostic_code is None, result
+                results.append(result)
+                if result.processed_changes < limit:
+                    break
+            else:
+                raise AssertionError("notification backlog did not converge")
+        return tuple(results)
+
+    def notification_facts(self, kind: str) -> tuple[NotificationFactModel, ...]:
+        with self.database.session() as session:
+            return tuple(
+                session.scalars(
+                    select(NotificationFactModel)
+                    .where(
+                        NotificationFactModel.workspace_id == self.workspace_id,
+                        NotificationFactModel.kind == kind,
+                    )
+                    .order_by(
+                        NotificationFactModel.created_at.asc(),
+                        NotificationFactModel.id.asc(),
+                    )
+                ).all()
+            )
 
     def activate(self) -> None:
         ActivationReconciler(

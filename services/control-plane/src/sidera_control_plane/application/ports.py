@@ -2211,6 +2211,7 @@ class NotificationLedger(Protocol):
         topic: str,
         *,
         for_update: bool = False,
+        policy_version: int | None = None,
     ) -> NotificationPolicyState | None:
         raise NotImplementedError
 
@@ -2221,6 +2222,7 @@ class NotificationLedger(Protocol):
         limit: int,
         *,
         for_update_skip_locked: bool = False,
+        policy_version: int | None = None,
     ) -> tuple[NotificationPolicyState, ...]:
         raise NotImplementedError
 

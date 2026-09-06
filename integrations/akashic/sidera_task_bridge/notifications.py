@@ -35,6 +35,7 @@ type NoticeKind = Literal[
     "task_needs_user",
     "task_blocked",
     "task_failed",
+    "result_inputs_blocked",
     "task_milestone_completed",
     "task_completed",
 ]
@@ -936,8 +937,12 @@ def _task_fact(
         item = _best_attention_item(normalized_attention, attention_kind)
         subtitle = _text(item.get("subtask_title")) or None
         reason = _text(item.get("reason")) or "任务需要处理。"
-        fact_text = reason
-        next_step = "打开任务查看需要处理的事项"
+        if attention_kind == "result_inputs_blocked":
+            fact_text = reason or "结果输入暂时无法交付，需要处理。"
+            next_step = "检查结果输入"
+        else:
+            fact_text = reason
+            next_step = "打开任务查看需要处理的事项"
     elif root_completed and (previous is None or previous.status != "completed"):
         kind = "task_completed"
         fingerprint = _fingerprint(["root_completed", version])
@@ -1041,6 +1046,8 @@ def _attention_kind(
     items: list[Mapping[str, Any]], overview: Mapping[str, Any]
 ) -> NoticeKind | None:
     values = [(_text(item.get("kind")) or "").lower() for item in items]
+    if any("result_input" in value for value in values):
+        return "result_inputs_blocked"
     if (_non_negative_int(overview.get("failed_subtask_count"), 0) or 0) > 0 or any(
         "fail" in value for value in values
     ):
@@ -1057,7 +1064,9 @@ def _attention_kind(
 def _best_attention_item(
     items: list[Mapping[str, Any]], kind: NoticeKind
 ) -> Mapping[str, Any]:
-    if kind == "task_failed":
+    if kind == "result_inputs_blocked":
+        priority = "result_input"
+    elif kind == "task_failed":
         priority = "fail"
     elif kind == "task_blocked":
         priority = "block"

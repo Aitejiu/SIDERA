@@ -220,6 +220,19 @@ describe("InboxPage", () => {
     expect(screen.getByText("外部渠道连续失败，需要确认是否重新投递。")).toBeVisible();
   });
 
+  it("names the exact result input blocker in the inbox", async () => {
+    const blocked = makeThread({
+      title: "汇总任务",
+      summary: "结果输入暂时无法交付，需要处理。",
+      topic: "result_inputs_blocked:result_input_unavailable",
+    });
+    installHandlers({ threads: { action: [blocked], progress: [], archived: [] } });
+    renderPage();
+
+    expect(await screen.findByText("选中的结果暂时不可用")).toBeVisible();
+    expect(screen.getByText("结果输入暂时无法交付，需要处理。")).toBeVisible();
+  });
+
   it("shows counts and human task path before notification details", async () => {
     installHandlers();
     renderPage();

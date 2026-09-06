@@ -399,6 +399,7 @@ class SqlAlchemyNotificationRepository:
         topic: str,
         *,
         for_update: bool = False,
+        policy_version: int | None = None,
     ) -> NotificationPolicyState | None:
         statement = select(NotificationPolicyStateModel).where(
             NotificationPolicyStateModel.workspace_id == workspace_id,
@@ -408,6 +409,10 @@ class SqlAlchemyNotificationRepository:
             NotificationPolicyStateModel.subject_id == subject_id,
             NotificationPolicyStateModel.topic == topic,
         )
+        if policy_version is not None:
+            statement = statement.where(
+                NotificationPolicyStateModel.policy_version == policy_version
+            )
         if for_update:
             statement = statement.with_for_update()
         row = self._session.scalar(statement)
@@ -420,6 +425,7 @@ class SqlAlchemyNotificationRepository:
         limit: int,
         *,
         for_update_skip_locked: bool = False,
+        policy_version: int | None = None,
     ) -> tuple[NotificationPolicyState, ...]:
         _positive_limit(limit)
         statement = (
@@ -436,6 +442,10 @@ class SqlAlchemyNotificationRepository:
             )
             .limit(limit)
         )
+        if policy_version is not None:
+            statement = statement.where(
+                NotificationPolicyStateModel.policy_version == policy_version
+            )
         if for_update_skip_locked:
             statement = statement.with_for_update(skip_locked=True)
         rows = self._session.scalars(statement).all()
@@ -458,6 +468,7 @@ class SqlAlchemyNotificationRepository:
                 NotificationPolicyStateModel.subject_type == state.subject_type,
                 NotificationPolicyStateModel.subject_id == state.subject_id,
                 NotificationPolicyStateModel.topic == state.topic,
+                NotificationPolicyStateModel.policy_version == state.policy_version,
                 NotificationPolicyStateModel.resource_version == previous_version,
             )
             .values(
@@ -1177,6 +1188,7 @@ class SqlAlchemyNotificationRepository:
                 NotificationPolicyStateModel.subject_type == state.subject_type,
                 NotificationPolicyStateModel.subject_id == state.subject_id,
                 NotificationPolicyStateModel.topic == state.topic,
+                NotificationPolicyStateModel.policy_version == state.policy_version,
             )
         )
 

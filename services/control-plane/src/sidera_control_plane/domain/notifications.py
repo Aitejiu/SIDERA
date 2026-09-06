@@ -55,6 +55,7 @@ class NotificationKind(StrEnum):
     GOVERNANCE_DECISION_REQUIRED = "governance_decision_required"
     EXECUTION_ATTENTION = "execution_attention"
     EXECUTION_FAILURE = "execution_failure"
+    RESULT_INPUTS_BLOCKED = "result_inputs_blocked"
     TASK_BLOCKED = "task_blocked"
     TASK_MILESTONE_COMPLETED = "task_milestone_completed"
     TASK_COMPLETED = "task_completed"

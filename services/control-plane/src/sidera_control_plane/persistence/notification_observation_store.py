@@ -12,6 +12,7 @@ from sidera_control_plane.application.notification_observations import (
     NotificationBaselineCandidate,
     NotificationObservationComposer,
     NotificationObservationSource,
+    NotificationObservationSubjectType,
     NotificationRouteBackfillCandidate,
     observation_subject_key,
     projection_change_is_observable,
@@ -23,6 +24,7 @@ from sidera_control_plane.domain.notifications import (
 from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.persistence.models import (
     ExecutionModel,
+    ExecutionRequestModel,
     NotificationDeliveryIntentModel,
     NotificationFactModel,
     NotificationPolicyStateModel,
@@ -30,12 +32,22 @@ from sidera_control_plane.persistence.models import (
     NotificationSourceBindingModel,
     NotificationThreadModel,
     PlanningRequestModel,
+    SchedulingBlockModel,
     TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
 )
 from sidera_control_plane.persistence.projection_change_repository import (
     ProjectionChangeRepository,
+)
+
+_RESULT_INPUT_FAILURE_CODES = frozenset(
+    {
+        "result_input_unavailable",
+        "result_input_integrity_failed",
+        "result_input_format_unsupported",
+        "result_input_budget_exceeded",
+    }
 )
 
 
@@ -138,8 +150,44 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             )
             candidates[("planning_request", request_id, None)] = candidate
 
+        active_result_blocks = self._session.execute(
+            select(
+                SchedulingBlockModel.execution_id,
+                ExecutionModel.version,
+                SchedulingBlockModel.reason_code,
+            )
+            .join(
+                ExecutionModel,
+                (ExecutionModel.id == SchedulingBlockModel.execution_id)
+                & (ExecutionModel.workspace_id == SchedulingBlockModel.workspace_id),
+            )
+            .where(
+                SchedulingBlockModel.workspace_id == workspace_id,
+                SchedulingBlockModel.status == "active",
+                SchedulingBlockModel.reason_code.in_(_RESULT_INPUT_FAILURE_CODES),
+            )
+            .order_by(SchedulingBlockModel.execution_id.asc())
+        ).all()
+        for execution_id, version, reason_code in active_result_blocks:
+            topic = f"result_inputs_blocked:{reason_code}"
+            candidate = NotificationBaselineCandidate(
+                change=_baseline_change(
+                    workspace_id=workspace_id,
+                    projection_type="executions",
+                    resource_id=execution_id,
+                    resource_version=version,
+                    source_cursor=source_cursor,
+                    now=now,
+                    topic=topic,
+                    change_type="notification_baseline_result_inputs_blocked",
+                ),
+                topic=topic,
+            )
+            candidates[("executions", execution_id, topic)] = candidate
+
         policy_states = self._session.execute(
             select(
+                NotificationPolicyStateModel.policy_version,
                 NotificationPolicyStateModel.subject_type,
                 NotificationPolicyStateModel.subject_id,
                 NotificationPolicyStateModel.topic,
@@ -147,7 +195,7 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             )
             .where(
                 NotificationPolicyStateModel.workspace_id == workspace_id,
-                NotificationPolicyStateModel.policy_version == 1,
+                NotificationPolicyStateModel.policy_version.in_((1, 2)),
             )
             .order_by(
                 NotificationPolicyStateModel.subject_type.asc(),
@@ -160,15 +208,30 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             "planning_request": "planning_request",
             "worker_item": "worker_item_workspace",
             "execution": "executions",
+            "execution_request": "executions",
         }
-        for subject_type, subject_id, topic, observed_payload in policy_states:
+        for (
+            policy_version,
+            subject_type,
+            subject_id,
+            topic,
+            observed_payload,
+        ) in policy_states:
             projection_type = projection_types.get(subject_type)
             if projection_type is None:
                 continue
+            candidate_resource_id = subject_id
+            if subject_type == "execution_request" and isinstance(
+                observed_payload, Mapping
+            ):
+                candidate_resource_id = observed_payload.get("source_resource_id")
             try:
-                resource_id = UUID(subject_id)
+                resource_id = UUID(candidate_resource_id)
             except (AttributeError, TypeError, ValueError):
                 continue
+            is_result_input = (
+                policy_version == 2 and subject_type == "execution_request"
+            )
             candidate = NotificationBaselineCandidate(
                 change=_baseline_change(
                     workspace_id=workspace_id,
@@ -183,6 +246,11 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                     source_cursor=source_cursor,
                     now=now,
                     topic=topic,
+                    change_type=(
+                        "notification_baseline_result_inputs_blocked"
+                        if is_result_input
+                        else "notification_baseline"
+                    ),
                 ),
                 topic=topic,
             )
@@ -223,7 +291,7 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                     WorkerItemModel.id == resource_id,
                 )
             )
-        elif subject_type == "execution":
+        elif subject_type in {"execution", "execution_request"}:
             version = self._session.scalar(
                 select(ExecutionModel.version).where(
                     ExecutionModel.workspace_id == workspace_id,
@@ -341,6 +409,9 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
 
         worker_item = None
         execution = None
+        execution_request = None
+        scheduling_block = None
+        result_input_change = False
         planning_request = None
         source_resource_version = change.resource_version or 1
         subtask_id = None
@@ -402,6 +473,42 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                     subtask_id = placement.subtask_task_id if placement else None
             if root_task_id is None:
                 root_task_id = execution.task_id
+            change_reason = change.change_type.lower()
+            result_input_change = (
+                "scheduling" in change_reason or "result_input" in change_reason
+            )
+            scheduling_block = self._session.scalar(
+                select(SchedulingBlockModel)
+                .where(
+                    SchedulingBlockModel.workspace_id == change.workspace_id,
+                    SchedulingBlockModel.execution_id == execution.id,
+                )
+                .order_by(
+                    SchedulingBlockModel.last_seen_at.desc(),
+                    SchedulingBlockModel.version.desc(),
+                )
+                .limit(1)
+            )
+            if (
+                scheduling_block is not None
+                and scheduling_block.reason_code in _RESULT_INPUT_FAILURE_CODES
+            ):
+                result_input_change = True
+                execution_request = self._session.scalar(
+                    select(ExecutionRequestModel)
+                    .where(
+                        ExecutionRequestModel.workspace_id == change.workspace_id,
+                        ExecutionRequestModel.execution_lineage_id
+                        == execution.lineage_id,
+                    )
+                    .order_by(
+                        ExecutionRequestModel.version.desc(),
+                        ExecutionRequestModel.id.asc(),
+                    )
+                    .limit(1)
+                )
+                if execution_request is None:
+                    return None
         elif change.projection_type == "planning_request":
             planning_request = self._session.scalar(
                 select(PlanningRequestModel).where(
@@ -470,6 +577,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                 worker_item.status if worker_item is not None else None
             ),
             execution_status=execution.status if execution is not None else None,
+            scheduling_block=scheduling_block,
+            result_input_change=result_input_change,
         )
 
         source_type, origin_route_active = self._origin_source(
@@ -486,6 +595,25 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         }
         if execution is not None:
             authoritative_fields["failure_code"] = execution.failure_code
+        if (
+            scheduling_block is not None
+            and scheduling_block.reason_code in _RESULT_INPUT_FAILURE_CODES
+        ):
+            authoritative_fields.update(
+                {
+                    "result_input_reason": scheduling_block.reason_code,
+                    "result_input_block_id": str(scheduling_block.id),
+                    "result_input_block_status": scheduling_block.status,
+                    "result_input_block_version": scheduling_block.version,
+                    "result_input_fingerprint": scheduling_block.fingerprint,
+                    "execution_id": str(execution.id) if execution is not None else None,
+                    "execution_request_id": (
+                        str(execution_request.id)
+                        if execution_request is not None
+                        else None
+                    ),
+                }
+            )
         if worker_item is not None:
             authoritative_fields["worker_item_version"] = worker_item.version
         if planning_request is not None:
@@ -493,11 +621,23 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
 
         subject_type = subject.subject_type.value
         subject_id = str(change.resource_id)
+        if (
+            result_input_change
+            and scheduling_block is not None
+            and scheduling_block.reason_code in _RESULT_INPUT_FAILURE_CODES
+            and execution_request is not None
+            and kind == NotificationKind.RESULT_INPUTS_BLOCKED.value
+        ):
+            subject_type = NotificationObservationSubjectType.EXECUTION_REQUEST.value
+            subject_id = str(execution_request.id)
         deep_link = f"/workspaces/{change.workspace_id}/tasks/{root_task.id}"
         if worker_item is not None:
             deep_link += f"/worker-items/{worker_item.id}"
         elif planning_request is not None:
             deep_link += f"?planning_request={planning_request.id}"
+        if subject_type == NotificationObservationSubjectType.EXECUTION_REQUEST.value:
+            separator = "&" if "?" in deep_link else "?"
+            deep_link += f"{separator}execution_request={execution_request.id}"
 
         return NotificationAuthoritativeRead(
             recipient_type="workspace_operator",
@@ -532,6 +672,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         planning_request_status: str | None,
         worker_item_status: str | None,
         execution_status: str | None,
+        scheduling_block: SchedulingBlockModel | None,
+        result_input_change: bool,
     ) -> tuple[
         str,
         str,
@@ -547,6 +689,20 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             or worker_item_status
             or root_task_status
         )
+        if (
+            result_input_change
+            and scheduling_block is not None
+            and scheduling_block.reason_code in _RESULT_INPUT_FAILURE_CODES
+        ):
+            recovered = scheduling_block.status == "resolved"
+            return (
+                NotificationKind.RESULT_INPUTS_BLOCKED.value,
+                f"result_inputs_blocked:{scheduling_block.reason_code}",
+                "recovered" if recovered else "blocked",
+                NotificationTransition.RECOVERED if recovered else None,
+                scheduling_block.requires_operator,
+                False,
+            )
         if change.projection_type == "planning_request":
             if "clarification" in reason or status == "waiting_for_user":
                 return (
@@ -751,6 +907,7 @@ def _baseline_change(
     source_cursor: int,
     now: datetime,
     topic: str | None,
+    change_type: str = "notification_baseline",
 ) -> ProjectionChange:
     correlation_id = uuid5(
         NAMESPACE_URL,
@@ -763,7 +920,7 @@ def _baseline_change(
         schema_version=1,
         projection_type=projection_type,
         resource_id=resource_id,
-        change_type="notification_baseline",
+        change_type=change_type,
         resource_version=resource_version,
         occurred_at=now,
         correlation_id=correlation_id,

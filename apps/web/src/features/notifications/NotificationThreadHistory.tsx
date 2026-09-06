@@ -7,6 +7,7 @@ import {
   notificationAttemptsQueryKey,
   type NotificationThreadDetail,
 } from "./api";
+import { notificationReasonLabel } from "./NotificationThreadRow";
 
 export function NotificationThreadHistory({
   workspaceId,
@@ -105,6 +106,11 @@ export function NotificationThreadHistory({
                       <time dateTime={fact.occurred_at}>{formatTime(fact.occurred_at)}</time>
                     </div>
                     <p>{fact.summary}</p>
+                    {notificationReasonLabel(fact.topic) ? (
+                      <span className="notification-fact__reason">
+                        {notificationReasonLabel(fact.topic)}
+                      </span>
+                    ) : null}
                     {fact.action ? <span className="notification-fact__action">{fact.action}</span> : null}
                   </div>
                 </li>

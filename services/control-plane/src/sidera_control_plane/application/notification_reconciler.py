@@ -11,7 +11,6 @@ from sidera_control_plane.application.notification_observations import (
     observation_subject_key,
 )
 from sidera_control_plane.application.notification_policy import (
-    POLICY_VERSION,
     NotificationEvaluationMode,
     NotificationObservation,
     NotificationPolicyV1,
@@ -113,6 +112,7 @@ class NotificationReconciler:
         self._uow_factory = uow_factory
         self._observation_source = observation_source
         self._policy = policy or NotificationPolicyV1()
+        self._policy_version = self._policy.policy_version
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner = owner
         self._batch_size = batch_size
@@ -139,7 +139,7 @@ class NotificationReconciler:
                 now = self._clock()
                 cursor = uow.notifications.claim_cursor(
                     workspace_id,
-                    POLICY_VERSION,
+                    self._policy_version,
                     lease_owner,
                     now,
                     self._lease_seconds,
@@ -286,15 +286,19 @@ class NotificationReconciler:
         intents_created = 0
         try:
             with self._uow_factory() as uow:
-                states = uow.notifications.list_due_policy_states(
+                states = self._list_due_policy_states(
+                    uow,
                     workspace_id,
                     now,
                     batch_size,
-                    for_update_skip_locked=True,
                 )
                 source = self._observation_source or uow.notification_observations
                 for state in states:
                     scanned += 1
+                    if not self._handles_observation_kind(
+                        state.observed_payload.get("kind")
+                    ):
+                        continue
                     change = self._due_change(state, now=now)
                     observation = self._observe_one(source, change, workspace_id)
                     if observation is None:
@@ -361,7 +365,7 @@ class NotificationReconciler:
                 now = self._clock()
                 cursor = uow.notifications.claim_cursor(
                     workspace_id,
-                    POLICY_VERSION,
+                    self._policy_version,
                     lease_owner,
                     now,
                     self._lease_seconds,
@@ -392,7 +396,7 @@ class NotificationReconciler:
                     observation = self._observe_one(
                         source, candidate.change, workspace_id
                     )
-                    if observation is None:
+                    if observation is None or not self._handles_observation(observation):
                         continue
                     observation = replace(
                         observation,
@@ -489,8 +493,13 @@ class NotificationReconciler:
         }.get(state.subject_type)
         if projection_type is None:
             raise _ObservationFailure("notification_observation_invalid")
+        raw_resource_id = state.subject_id
+        if state.subject_type == "execution_request":
+            observed_payload = getattr(state, "observed_payload", {})
+            if isinstance(observed_payload, dict):
+                raw_resource_id = observed_payload.get("source_resource_id")
         try:
-            resource_id = UUID(state.subject_id)
+            resource_id = UUID(str(raw_resource_id))
         except (AttributeError, TypeError, ValueError) as exc:
             raise _ObservationFailure("notification_observation_invalid") from exc
         correlation_id = uuid5(
@@ -498,13 +507,18 @@ class NotificationReconciler:
             f"sidera:notification-due:{state.workspace_id}:{state.subject_type}:"
             f"{state.subject_id}:{state.topic}",
         )
+        change_type = "notification_due_requery"
+        if state.subject_type == "execution_request" or state.topic.startswith(
+            "result_inputs_blocked:"
+        ):
+            change_type = "notification_due_requery_result_inputs"
         return ProjectionChange(
             workspace_id=state.workspace_id,
             cursor=0,
             schema_version=1,
             projection_type=projection_type,
             resource_id=resource_id,
-            change_type="notification_due_requery",
+            change_type=change_type,
             resource_version=state.resource_version,
             occurred_at=now,
             correlation_id=correlation_id,
@@ -547,7 +561,11 @@ class NotificationReconciler:
             "completed",
             "recovered",
         }
-        recovery_kinds = {"task_blocked", "execution_failure"}
+        recovery_kinds = {
+            "task_blocked",
+            "execution_failure",
+            "result_inputs_blocked",
+        }
         if (
             isinstance(previous_kind, str)
             and previous_kind in recovery_kinds
@@ -560,6 +578,17 @@ class NotificationReconciler:
                 transition=NotificationTransition.RECOVERED,
             )
         return prepared
+
+    def _handles_observation(self, observation: NotificationObservation) -> bool:
+        accepts = getattr(self._policy, "accepts_observation", None)
+        return not callable(accepts) or bool(accepts(observation))
+
+    def _handles_observation_kind(self, kind: object) -> bool:
+        if not isinstance(kind, str):
+            return True
+        if self._policy_version == 2:
+            return kind == "result_inputs_blocked"
+        return kind != "result_inputs_blocked"
 
     def _load_observations(
         self,
@@ -597,6 +626,8 @@ class NotificationReconciler:
                 raise _ObservationFailure("notification_observation_invalid")
             if observation.workspace_id != workspace_id:
                 raise _ObservationFailure("notification_observation_invalid")
+            if not self._handles_observation(observation):
+                continue
             result.append((change, observation))
         return tuple(result)
 
@@ -609,15 +640,9 @@ class NotificationReconciler:
         now: datetime,
         mode: NotificationEvaluationMode | str,
     ) -> tuple[int, int, int]:
-        previous_state = uow.notifications.get_policy_state(
-            observation.workspace_id,
-            observation.recipient_type,
-            observation.recipient_id,
-            observation.subject_type,
-            observation.subject_id,
-            observation.topic,
-            for_update=True,
-        )
+        if not self._handles_observation(observation):
+            return 0, 0, 0
+        previous_state = self._get_policy_state(uow, observation)
         try:
             mutation = self._policy.evaluate(
                 observation,
@@ -716,6 +741,59 @@ class NotificationReconciler:
                 next_state, previous_state.resource_version
             )
         return facts_created, threads_changed, intents_created
+
+    def _get_policy_state(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        observation: NotificationObservation,
+    ):
+        ledger = uow.notifications
+        try:
+            return ledger.get_policy_state(
+                observation.workspace_id,
+                observation.recipient_type,
+                observation.recipient_id,
+                observation.subject_type,
+                observation.subject_id,
+                observation.topic,
+                for_update=True,
+                policy_version=self._policy_version,
+            )
+        except TypeError:
+            # Keep small in-memory ports from older test/integration adapters usable.
+            return ledger.get_policy_state(
+                observation.workspace_id,
+                observation.recipient_type,
+                observation.recipient_id,
+                observation.subject_type,
+                observation.subject_id,
+                observation.topic,
+                for_update=True,
+            )
+
+    def _list_due_policy_states(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        workspace_id: UUID,
+        now: datetime,
+        limit: int,
+    ):
+        ledger = uow.notifications
+        try:
+            return ledger.list_due_policy_states(
+                workspace_id,
+                now,
+                limit,
+                for_update_skip_locked=True,
+                policy_version=self._policy_version,
+            )
+        except TypeError:
+            return ledger.list_due_policy_states(
+                workspace_id,
+                now,
+                limit,
+                for_update_skip_locked=True,
+            )
 
     def _resolve_origin_route(
         self,

@@ -8,6 +8,24 @@ from uuid import UUID
 from sidera_control_plane.application.errors import InvalidCursor, NotFound
 
 NOTIFICATION_CATEGORIES = frozenset({"action", "progress", "archived"})
+NOTIFICATION_KIND_LABELS = {
+    "result_inputs_blocked": "结果输入阻塞",
+}
+NOTIFICATION_KIND_SCOPES = {
+    "result_inputs_blocked": "execution_request",
+}
+
+
+def notification_kind_label(kind: str) -> str:
+    """Return a bounded UI label without exposing provider or payload details."""
+
+    return NOTIFICATION_KIND_LABELS.get(kind, "任务通知")
+
+
+def notification_kind_scope(kind: str) -> str | None:
+    """Return the business scope for kinds with a non-default owner."""
+
+    return NOTIFICATION_KIND_SCOPES.get(kind)
 
 
 @dataclass(frozen=True, slots=True)

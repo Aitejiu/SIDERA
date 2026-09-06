@@ -260,6 +260,8 @@ class NotificationPolicyMutation:
 
 
 class NotificationPolicyV1:
+    policy_version = POLICY_VERSION
+
     def __init__(
         self, *, blocked_grace_seconds: int = DEFAULT_BLOCKED_GRACE_SECONDS
     ) -> None:
@@ -272,6 +274,11 @@ class NotificationPolicyV1:
                 "blocked_grace_seconds must be between 60 and 86400 seconds"
             )
         self._blocked_grace = timedelta(seconds=blocked_grace_seconds)
+
+    def accepts_observation(self, observation: NotificationObservation) -> bool:
+        """Return whether this policy owns the observation's business reason."""
+
+        return _kind_value(observation.kind) != NotificationKind.RESULT_INPUTS_BLOCKED.value
 
     def due_condition(
         self, state: NotificationPolicyState, *, now: datetime
@@ -443,14 +450,14 @@ class NotificationPolicyV1:
             reason=emit_reason if fact is None else "fact_created",
         )
 
-    @staticmethod
     def _validate_state_scope(
+        self,
         observation: NotificationObservation,
         state: NotificationPolicyState | None,
     ) -> None:
         if state is None:
             return
-        if state.policy_version != POLICY_VERSION:
+        if state.policy_version != self.policy_version:
             raise ValidationError("unsupported notification policy version")
         if (
             state.workspace_id != observation.workspace_id
@@ -462,8 +469,9 @@ class NotificationPolicyV1:
         ):
             raise ValidationError("policy state does not match observation scope")
 
-    @staticmethod
-    def _is_silent(observation: NotificationObservation, kind: str) -> bool:
+    def _is_silent(
+        self, observation: NotificationObservation, kind: str
+    ) -> bool:
         return kind in {
             "worker_step",
             "trace_chunk",
@@ -473,6 +481,7 @@ class NotificationPolicyV1:
             "retry_queued",
             "notification_thread",
             "notification_delivery",
+            NotificationKind.RESULT_INPUTS_BLOCKED.value,
         } or observation.source_projection_type in {
             "notification_thread",
             "notification_delivery",
@@ -490,8 +499,8 @@ class NotificationPolicyV1:
             "waiting_for_dependency",
         } or kind in {NotificationKind.TASK_BLOCKED.value, "execution_blocked"}
 
-    @staticmethod
     def _is_recovery(
+        self,
         observation: NotificationObservation,
         state: NotificationPolicyState | None,
     ) -> bool:
@@ -505,6 +514,7 @@ class NotificationPolicyV1:
             in {
                 NotificationKind.TASK_BLOCKED.value,
                 NotificationKind.EXECUTION_FAILURE.value,
+                NotificationKind.RESULT_INPUTS_BLOCKED.value,
                 "task_blocked",
                 "execution_failure",
             }
@@ -543,6 +553,7 @@ class NotificationPolicyV1:
             else kind,
             "status": observation.observed_status,
             "resource_version": observation.source_resource_version,
+            "source_resource_id": str(observation.source_resource_id),
             "requires_operator": observation.requires_operator
             or any(item.requires_operator for item in observation.attention_items),
             "completed_milestones": [
@@ -559,7 +570,7 @@ class NotificationPolicyV1:
             subject_type=observation.subject_type,
             subject_id=observation.subject_id,
             topic=observation.topic,
-            policy_version=POLICY_VERSION,
+            policy_version=self.policy_version,
             observed_status=observation.observed_status,
             observed_fingerprint=observation.authoritative_fingerprint,
             observed_payload=observed_payload,
@@ -577,8 +588,7 @@ class NotificationPolicyV1:
             return NotificationKind.EXECUTION_ATTENTION.value
         return kind
 
-    @staticmethod
-    def _is_actionable_kind(kind: str, has_operator_attention: bool) -> bool:
+    def _is_actionable_kind(self, kind: str, has_operator_attention: bool) -> bool:
         return has_operator_attention or kind in {
             NotificationKind.PLANNING_CLARIFICATION.value,
             NotificationKind.PLANNING_PROPOSAL_READY.value,
@@ -655,8 +665,8 @@ class NotificationPolicyV1:
             return NotificationRouteEligibility.ORIGIN_IF_ACTIVE
         return NotificationRouteEligibility.WEB_ONLY
 
-    @staticmethod
     def _fact(
+        self,
         observation: NotificationObservation,
         *,
         kind: str,
@@ -678,7 +688,7 @@ class NotificationPolicyV1:
             summary, action = "通知渠道状态需要检查。", "查看通知运维状态"
         return NotificationFact.create(
             workspace_id=observation.workspace_id,
-            policy_version=POLICY_VERSION,
+            policy_version=self.policy_version,
             recipient_type=observation.recipient_type,
             recipient_id=observation.recipient_id,
             kind=kind,
@@ -702,6 +712,25 @@ class NotificationPolicyV1:
             occurred_at=now,
             created_at=now,
         )
+
+
+class NotificationPolicyV2(NotificationPolicyV1):
+    """Own result-input delivery failures without replaying V1 history."""
+
+    policy_version = 2
+
+    def accepts_observation(self, observation: NotificationObservation) -> bool:
+        return (
+            _kind_value(observation.kind)
+            == NotificationKind.RESULT_INPUTS_BLOCKED.value
+        )
+
+    def _is_silent(self, observation: NotificationObservation, kind: str) -> bool:
+        return kind != NotificationKind.RESULT_INPUTS_BLOCKED.value
+
+    def _is_actionable_kind(self, kind: str, has_operator_attention: bool) -> bool:
+        del has_operator_attention
+        return kind == NotificationKind.RESULT_INPUTS_BLOCKED.value
 
 
 def build_notification_channel_health_fact(
@@ -812,6 +841,7 @@ _STATIC_COPY: dict[str, tuple[str, str]] = {
     NotificationKind.GOVERNANCE_DECISION_REQUIRED.value: ("协作治理需要你的决定。", "查看治理事项"),
     NotificationKind.EXECUTION_ATTENTION.value: ("任务有一项事项需要处理。", "打开任务查看"),
     NotificationKind.EXECUTION_FAILURE.value: ("任务执行失败，需要处理。", "检查执行状态"),
+    NotificationKind.RESULT_INPUTS_BLOCKED.value: ("结果输入暂时无法交付，需要处理。", "检查结果输入"),
     NotificationKind.TASK_BLOCKED.value: ("任务持续阻塞，需要处理。", "检查任务阻塞"),
     NotificationKind.TASK_MILESTONE_COMPLETED.value: ("一个重要里程碑已完成。", "查看任务进展"),
     NotificationKind.TASK_COMPLETED.value: ("根任务已完成。", "查看任务交付结果"),
