@@ -58,7 +58,12 @@ def install_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         status_code = (
             422
-            if exc.code in {ValidationError.code, "adapter_workflow_requires_loopback"}
+            if exc.code
+            in {
+                ValidationError.code,
+                "adapter_workflow_requires_loopback",
+                "result_inputs_disabled",
+            }
             else 409
         )
         return _error_response(status_code, exc.code, str(exc), exc.details)

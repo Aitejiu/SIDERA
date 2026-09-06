@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     collaboration_backoff_max_seconds: int = Field(default=60, gt=0, le=3600)
     collaboration_recovery_sweep_seconds: int = Field(default=30, gt=0, le=3600)
     collaboration_governance_enabled: bool = False
+    result_inputs_enabled: bool = False
     collaboration_max_projection_bytes: int = Field(
         default=262_144, gt=0, le=1_048_576
     )

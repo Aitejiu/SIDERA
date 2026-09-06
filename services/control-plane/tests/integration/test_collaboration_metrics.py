@@ -61,6 +61,10 @@ def test_collaboration_metrics_are_bounded_and_use_only_allowlisted_labels(
         "sidera_collaboration_governance_proposal_age_seconds",
         "sidera_collaboration_governance_stale_total",
         "sidera_collaboration_governance_conflicts_total",
+        "sidera_collaboration_result_input_blocked_total",
+        "sidera_collaboration_result_input_selection_total",
+        "sidera_collaboration_result_input_delivery_total",
+        "sidera_collaboration_result_input_delivery_duration_seconds",
     }
     samples = {
         (sample.name, tuple(sample.labels)): sample.value for sample in view.samples
@@ -303,6 +307,12 @@ def test_governance_metric_labels_reject_ids_and_free_text() -> None:
         CollaborationMetricSample(
             name="sidera_collaboration_governance_stale_total",
             labels=(("reason_code", "user supplied reason"),),
+            value=1,
+        )
+    with pytest.raises(ValueError):
+        CollaborationMetricSample(
+            name="sidera_collaboration_result_input_blocked_total",
+            labels=(("reason", "worker-" + str(uuid4())),),
             value=1,
         )
 

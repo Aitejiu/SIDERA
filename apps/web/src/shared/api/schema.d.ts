@@ -2153,6 +2153,10 @@ export interface components {
             checks: components["schemas"]["CollaborationReadinessCheckResponse"][];
             /** Component */
             component: string;
+            /** Result Input Capabilities Ready */
+            result_input_capabilities_ready: boolean;
+            /** Result Input Writes Enabled */
+            result_input_writes_enabled: boolean;
             /**
              * Status
              * @enum {string}

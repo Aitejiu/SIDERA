@@ -78,8 +78,18 @@ def test_disabled_governance_is_reported_without_an_extra_gate(
     monkeypatch.setattr(readiness_module, "_alembic_check", ready)
     monkeypatch.setattr(readiness_module, "_reference_runtime_check", ready)
     monkeypatch.setattr(readiness_module, "_capability_check", ready)
+    monkeypatch.setattr(readiness_module, "_result_input_reader_check", ready)
+    monkeypatch.setattr(readiness_module, "_result_input_runtime_check", ready)
+    monkeypatch.setattr(
+        readiness_module, "_result_input_worker_adapter_check", ready
+    )
+    monkeypatch.setattr(readiness_module, "_result_input_binding_check", ready)
+    monkeypatch.setattr(readiness_module, "_result_input_artifact_store_check", ready)
 
-    settings = Settings(database_url="postgresql+psycopg://test:test@localhost/test")
+    settings = Settings(
+        database_url="postgresql+psycopg://test:test@localhost/test",
+        result_inputs_enabled=True,
+    )
     report = build_collaboration_readiness(settings, object()).check()
 
     assert report.ready is True
@@ -99,6 +109,13 @@ def test_enabled_governance_adds_schema_and_process_gates(monkeypatch) -> None:
     monkeypatch.setattr(readiness_module, "_alembic_check", ready)
     monkeypatch.setattr(readiness_module, "_reference_runtime_check", ready)
     monkeypatch.setattr(readiness_module, "_capability_check", ready)
+    monkeypatch.setattr(readiness_module, "_result_input_reader_check", ready)
+    monkeypatch.setattr(readiness_module, "_result_input_runtime_check", ready)
+    monkeypatch.setattr(
+        readiness_module, "_result_input_worker_adapter_check", ready
+    )
+    monkeypatch.setattr(readiness_module, "_result_input_binding_check", ready)
+    monkeypatch.setattr(readiness_module, "_result_input_artifact_store_check", ready)
     monkeypatch.setattr(
         readiness_module,
         "_governance_schema_check",
@@ -124,6 +141,7 @@ def test_enabled_governance_adds_schema_and_process_gates(monkeypatch) -> None:
     settings = Settings(
         database_url="postgresql+psycopg://test:test@localhost/test",
         collaboration_governance_enabled=True,
+        result_inputs_enabled=True,
     )
     report = build_collaboration_readiness(settings, object()).check()
 
@@ -133,6 +151,8 @@ def test_enabled_governance_adds_schema_and_process_gates(monkeypatch) -> None:
         "dependency",
         "dependency",
         "dependency",
+        "result_input_writes",
+        "result_input_capabilities",
         "governance_schema",
         "governance_handler",
         "collaboration_worker",
@@ -159,6 +179,8 @@ def test_readiness_response_is_typed_and_keeps_safe_check_fields() -> None:
         "component": "sidera-collaboration-worker",
         "as_of": "2026-09-04T00:00:00Z",
         "status": "not_ready",
+        "result_input_writes_enabled": False,
+        "result_input_capabilities_ready": False,
         "checks": [
             {
                 "name": "governance",

@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import update
 
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
+from sidera_control_plane.domain.errors import ResultInputsDisabled
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ExecutionRequestModel,
@@ -46,6 +47,16 @@ def test_quorum_does_not_bypass_independent_hard_dependency(
     assert scenario.release_count("summary") == 1
     assert scenario.execution_count("summary") == 1
     assert scenario.request_state("summary") == "materialized"
+
+
+def test_v5_confirmation_is_rejected_when_new_result_inputs_are_disabled(
+    scenario: ResultInputScenario,
+) -> None:
+    with pytest.raises(ResultInputsDisabled) as error:
+        scenario.confirm_plan(result_inputs_enabled=False)
+
+    assert error.value.code == "result_inputs_disabled"
+    assert error.value.details["setting"] == "SIDERA_RESULT_INPUTS_ENABLED"
 
 
 def test_all_input_groups_must_be_satisfied_before_activation(

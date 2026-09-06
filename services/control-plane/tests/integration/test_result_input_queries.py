@@ -126,6 +126,23 @@ def test_worker_result_query_exposes_execution_delivery_metadata(scenario) -> No
     assert "storage_ref" not in response.text
 
 
+def test_existing_v2_reads_ignore_disabled_new_write_gate(scenario) -> None:
+    scenario.run_to_started_summary()
+    selection = scenario.selection("summary")
+
+    result_inputs = scenario.get_result_inputs(
+        "summary", result_inputs_enabled=False
+    )
+    input_selection = scenario.get_input_selection(
+        selection.id, result_inputs_enabled=False
+    )
+
+    assert result_inputs.status_code == 200, result_inputs.text
+    assert result_inputs.json()["delivery"]["acknowledgement_status"] == "acknowledged"
+    assert input_selection.status_code == 200, input_selection.text
+    assert input_selection.json()["selection_hash"] == selection.selection_hash
+
+
 def test_worker_result_query_keeps_waiting_input_state_separate(scenario) -> None:
     scenario.confirm_plan(max_attempts=2)
     scenario.complete_source("b", body=b"report-b\n")

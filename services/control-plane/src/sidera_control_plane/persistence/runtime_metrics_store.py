@@ -15,6 +15,9 @@ from sidera_control_plane.application.collaboration_metrics import (
     COLLABORATION_GOVERNANCE_RESOLUTION_ACTIONS,
     COLLABORATION_GOVERNANCE_RESOLUTION_RESULTS,
     COLLABORATION_GOVERNANCE_STALE_REASONS,
+    RESULT_INPUT_BLOCK_REASONS,
+    RESULT_INPUT_DELIVERY_OUTCOMES,
+    RESULT_INPUT_SELECTION_RESULTS,
     CollaborationMetricSample,
     CollaborationMetricsView,
 )
@@ -32,6 +35,8 @@ from sidera_control_plane.persistence.models import (
     CollaborationReleaseProposalModel,
     CollaborationRunModel,
     CommandModel,
+    ContextPackageMaterializationAuditModel,
+    ContextPackageModel,
     EventModel,
     ExecutionBindingModel,
     ExecutionModel,
@@ -339,6 +344,52 @@ class SqlAlchemyRuntimeMetricsStore:
                     .group_by(stale_reason)
                 ).all()
             ]
+            selection_command_rows = [
+                row[0]
+                for row in session.execute(
+                    select(CommandModel.rejection_reason).where(
+                        CommandModel.workspace_id == workspace_id,
+                        CommandModel.rejection_reason.is_not(None),
+                    )
+                ).all()
+            ]
+            result_input_block_rows = [
+                row[0]
+                for row in session.execute(
+                    select(SchedulingBlockModel.reason_code).where(
+                        SchedulingBlockModel.workspace_id == workspace_id,
+                        SchedulingBlockModel.reason_code.in_(
+                            RESULT_INPUT_BLOCK_REASONS[:-1]
+                        ),
+                    )
+                ).all()
+            ]
+            context_delivery_rows = [
+                (row[0], row[1], row[2], row[3])
+                for row in session.execute(
+                    select(
+                        ContextPackageModel.created_at,
+                        ContextPackageMaterializationAuditModel.outcome,
+                        ContextPackageMaterializationAuditModel.failure_code,
+                        ContextPackageMaterializationAuditModel.occurred_at,
+                    )
+                    .select_from(ContextPackageMaterializationAuditModel)
+                    .join(
+                        ContextPackageModel,
+                        and_(
+                            ContextPackageModel.id
+                            == ContextPackageMaterializationAuditModel.package_id,
+                            ContextPackageModel.workspace_id
+                            == ContextPackageMaterializationAuditModel.workspace_id,
+                        ),
+                    )
+                    .where(
+                        ContextPackageMaterializationAuditModel.workspace_id
+                        == workspace_id,
+                        ContextPackageModel.manifest_schema_version == 2,
+                    )
+                ).all()
+            ]
 
         counts: Counter[tuple[str, tuple[tuple[str, str], ...]]] = Counter()
         values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(
@@ -415,6 +466,15 @@ class SqlAlchemyRuntimeMetricsStore:
             command_rows=command_rows,
             resolution_rows=resolution_rows,
             stale_rows=stale_rows,
+        )
+        _add_result_input_metrics(
+            counts,
+            values,
+            decisions=decisions,
+            intents=intents,
+            selection_command_rows=selection_command_rows,
+            result_input_block_rows=result_input_block_rows,
+            context_delivery_rows=context_delivery_rows,
         )
         _add_collaboration_zero_series(counts, values)
         samples = tuple(
@@ -594,6 +654,38 @@ def _add_collaboration_zero_series(
             0,
         )
 
+    for reason in RESULT_INPUT_BLOCK_REASONS:
+        counts.setdefault(
+            _metric_key(
+                "sidera_collaboration_result_input_blocked_total",
+                {"reason": reason},
+            ),
+            0,
+        )
+    for result in RESULT_INPUT_SELECTION_RESULTS:
+        counts.setdefault(
+            _metric_key(
+                "sidera_collaboration_result_input_selection_total",
+                {"result": result},
+            ),
+            0,
+        )
+    for outcome in RESULT_INPUT_DELIVERY_OUTCOMES:
+        counts.setdefault(
+            _metric_key(
+                "sidera_collaboration_result_input_delivery_total",
+                {"outcome": outcome},
+            ),
+            0,
+        )
+        values.setdefault(
+            _metric_key(
+                "sidera_collaboration_result_input_delivery_duration_seconds",
+                {"outcome": outcome},
+            ),
+            0.0,
+        )
+
 
 def _add_governance_metrics(
     counts: Counter[tuple[str, tuple[tuple[str, str], ...]]],
@@ -679,6 +771,88 @@ def _add_governance_metrics(
             {"reason_code": stable_reason},
             _bounded_count(value),
         )
+
+
+def _add_result_input_metrics(
+    counts: Counter[tuple[str, tuple[tuple[str, str], ...]]],
+    values: dict[tuple[str, tuple[tuple[str, str], ...]], float],
+    *,
+    decisions: Sequence[object],
+    intents: Sequence[object],
+    selection_command_rows: Sequence[object],
+    result_input_block_rows: Sequence[object],
+    context_delivery_rows: Sequence[tuple[object, object, object, object]],
+) -> None:
+    for item in (*decisions, *intents, *selection_command_rows):
+        result = _selection_metric_result(getattr(item, "reason_code", item))
+        if result is not None:
+            _increment_metric(
+                counts,
+                "sidera_collaboration_result_input_selection_total",
+                {"result": result},
+            )
+    for reason in result_input_block_rows:
+        _increment_metric(
+            counts,
+            "sidera_collaboration_result_input_blocked_total",
+            {"reason": _stable_result_input_reason(reason)},
+        )
+    for created_at, outcome, failure_code, occurred_at in context_delivery_rows:
+        stable_outcome = _result_input_delivery_outcome(outcome, failure_code)
+        _increment_metric(
+            counts,
+            "sidera_collaboration_result_input_delivery_total",
+            {"outcome": stable_outcome},
+        )
+        duration = _delivery_duration(created_at, occurred_at)
+        if duration is not None:
+            values[
+                _metric_key(
+                    "sidera_collaboration_result_input_delivery_duration_seconds",
+                    {"outcome": stable_outcome},
+                )
+            ] += duration
+        if stable_outcome == "blocked":
+            _increment_metric(
+                counts,
+                "sidera_collaboration_result_input_blocked_total",
+                {"reason": _stable_result_input_reason(failure_code)},
+            )
+
+
+def _selection_metric_result(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"input_selection_conflict", "selection_conflict"}:
+        return "conflict"
+    if normalized.startswith("input_selection_") and normalized.endswith(
+        ("_stale", "_changed")
+    ):
+        return "stale"
+    if normalized == "collaboration_governance_selection_conflict":
+        return "conflict"
+    return None
+
+
+def _stable_result_input_reason(value: object) -> str:
+    if isinstance(value, str) and value in RESULT_INPUT_BLOCK_REASONS:
+        return value
+    return "unknown"
+
+
+def _result_input_delivery_outcome(value: object, failure_code: object) -> str:
+    if value == "succeeded":
+        return "delivered"
+    if _stable_result_input_reason(failure_code) != "unknown":
+        return "blocked"
+    return "failed"
+
+
+def _delivery_duration(created_at: object, occurred_at: object) -> float | None:
+    if not isinstance(created_at, datetime) or not isinstance(occurred_at, datetime):
+        return None
+    return max(0.0, (_as_utc(occurred_at) - _as_utc(created_at)).total_seconds())
 
 
 def _add_metric_count(

@@ -20,6 +20,19 @@ class ValidationError(DomainError):
     code = "validation_error"
 
 
+class ResultInputsDisabled(ValidationError):
+    code = "result_inputs_disabled"
+
+    def __init__(self, *, proposal_schema_version: int) -> None:
+        super().__init__(
+            "new result-input proposal confirmation writes are disabled",
+            details={
+                "setting": "SIDERA_RESULT_INPUTS_ENABLED",
+                "proposal_schema_version": proposal_schema_version,
+            },
+        )
+
+
 class InputSelectionConflict(DomainError):
     code = "input_selection_conflict"
 

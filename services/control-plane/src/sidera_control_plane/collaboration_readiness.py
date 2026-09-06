@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import re
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from uuid import UUID
 
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
-from sqlalchemy import text
+from sqlalchemy import and_, select, text
 
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
     ReferenceCollaborationRuntime,
@@ -26,16 +27,40 @@ from sidera_control_plane.application.collaboration_runtime_resolver import (
     RegistryCollaborationRuntimeFactory,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+)
 from sidera_control_plane.domain.modules import (
     COLLABORATION_RUNTIME_MODULE_TYPE,
+    WORKER_ADAPTER_MODULE_TYPE,
     CollaborationRuntimeCapabilityProfile,
     IdempotencyCapability,
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
     StabilityLevel,
+    WorkerAdapterCapabilityProfile,
+)
+from sidera_control_plane.persistence.artifact_content_store import (
+    LocalArtifactContentStore,
+)
+from sidera_control_plane.persistence.context_package_query_store import (
+    SqlAlchemyContextPackageQueryStore,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.models import (
+    ModuleDefinitionModel,
+    ModuleInstanceModel,
+    PlanningProfileModel,
+    WorkerModel,
+    WorkerRuntimeConfigurationModel,
+)
+from sidera_control_plane.persistence.module_repository import (
+    capability_profile_from_payload,
+)
+from sidera_control_plane.persistence.result_input_query_store import (
+    SqlAlchemyResultInputQueryStore,
+)
 
 _STABLE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -90,11 +115,23 @@ class ReadinessReport:
     def ready(self) -> bool:
         return all(check.ready for check in self.checks)
 
+    @property
+    def result_input_writes_enabled(self) -> bool:
+        check = _check_by_name(self.checks, "result_input_writes")
+        return check is not None and check.ready and check.code == "ok"
+
+    @property
+    def result_input_capabilities_ready(self) -> bool:
+        check = _check_by_name(self.checks, "result_input_capabilities")
+        return check is not None and check.ready and check.code == "ok"
+
     def to_payload(self) -> dict[str, object]:
         return {
             "component": self.component,
             "as_of": self.as_of.isoformat(),
             "status": "ready" if self.ready else "not_ready",
+            "result_input_writes_enabled": self.result_input_writes_enabled,
+            "result_input_capabilities_ready": self.result_input_capabilities_ready,
             "checks": [
                 {
                     "name": check.name,
@@ -157,6 +194,8 @@ def build_collaboration_readiness(
         ),
         lambda: _reference_runtime_check(factory),
         _capability_check,
+        lambda: _result_input_writes_check(settings),
+        lambda: _result_input_capabilities_check(settings, database),
     ]
     if settings.collaboration_governance_enabled:
         checks.extend(
@@ -407,6 +446,370 @@ def _capability_check() -> ReadinessCheck:
     )
 
 
+def _result_input_writes_check(settings: Settings) -> ReadinessCheck:
+    if not settings.result_inputs_enabled:
+        return ReadinessCheck(
+            name="result_input_writes",
+            ready=False,
+            code="result_inputs_disabled",
+            summary=(
+                "new V5 result-input confirmation writes are disabled; existing V2 readers remain available"
+            ),
+        )
+    return ReadinessCheck(
+        name="result_input_writes",
+        ready=True,
+        code="ok",
+        summary="new V5 result-input confirmation writes are explicitly enabled",
+    )
+
+
+def _result_input_capabilities_check(
+    settings: Settings, database: Database
+) -> ReadinessCheck:
+    checks = (
+        _result_input_reader_check(database),
+        _result_input_runtime_check(),
+        _result_input_worker_adapter_check(database),
+        _result_input_binding_check(database),
+        _result_input_artifact_store_check(settings),
+    )
+    if not all(check.ready for check in checks):
+        return ReadinessCheck(
+            name="result_input_capabilities",
+            ready=False,
+            code="result_input_capability_missing",
+            summary=(
+                "one or more result-input readers, Runtime, worker adapter, binding, or ArtifactStore capabilities are unavailable"
+            ),
+        )
+    return ReadinessCheck(
+        name="result_input_capabilities",
+        ready=True,
+        code="ok",
+        summary=(
+            "result-input readers, Runtime 2/2, worker adapter context 2, binding, and ArtifactStore are ready"
+        ),
+    )
+
+
+def _result_input_reader_check(database: Database) -> ReadinessCheck:
+    required_columns = {
+        "collaboration_input_selections": {
+            "id",
+            "workspace_id",
+            "schema_version",
+            "groups_json",
+            "hard_inputs_json",
+            "selection_hash",
+        },
+        "context_assembly_requests": {
+            "manifest_schema_version",
+            "input_selection_id",
+            "input_selection_hash",
+            "result_input_budget",
+        },
+        "context_packages": {"manifest_schema_version", "result_input_manifest"},
+        "context_package_materialization_audits": {
+            "package_id",
+            "outcome",
+            "failure_code",
+            "occurred_at",
+        },
+    }
+    try:
+        control_plane_root = Path(__file__).resolve().parents[2]
+        config = AlembicConfig(str(control_plane_root / "alembic.ini"))
+        config.set_main_option(
+            "script_location", str(control_plane_root / "migrations")
+        )
+        directory = ScriptDirectory.from_config(config)
+        migration_26 = directory.get_revision("0026_r6_3_4_result_inputs")
+        migration_27 = directory.get_revision("0027_r6_3_4_result_input_context")
+        if (
+            migration_26 is None
+            or migration_27 is None
+            or migration_27.down_revision != migration_26.revision
+        ):
+            return ReadinessCheck(
+                name="result_input_reader",
+                ready=False,
+                code="result_input_migration_missing",
+                summary="the result-input migration chain is incomplete",
+            )
+        with database.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT table_name, column_name "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name IN ("
+                    "'collaboration_input_selections', "
+                    "'context_assembly_requests', "
+                    "'context_packages', "
+                    "'context_package_materialization_audits')"
+                )
+            ).all()
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="result_input_reader",
+            ready=False,
+            code="result_input_reader_unavailable",
+            summary="result-input repository and V2 context reader could not be verified",
+        )
+
+    columns_by_table: dict[str, set[str]] = {}
+    for table_name, column_name in rows:
+        columns_by_table.setdefault(str(table_name), set()).add(str(column_name))
+    if any(
+        not required.issubset(columns_by_table.get(table_name, set()))
+        for table_name, required in required_columns.items()
+    ):
+        return ReadinessCheck(
+            name="result_input_reader",
+            ready=False,
+            code="result_input_schema_missing",
+            summary="selection and V2 context reader schema is incomplete",
+        )
+    try:
+        reader_methods = (
+            SqlAlchemyResultInputQueryStore.load_worker_result_inputs,
+            SqlAlchemyResultInputQueryStore.load_input_selection,
+            SqlAlchemyContextPackageQueryStore.get_package_for_consumer,
+        )
+        if not all(callable(method) for method in reader_methods):
+            raise TypeError("result-input reader contract is incomplete")
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="result_input_reader",
+            ready=False,
+            code="result_input_reader_unavailable",
+            summary="result-input repository and V2 context reader are unavailable",
+        )
+    return ReadinessCheck(
+        name="result_input_reader",
+        ready=True,
+        code="ok",
+        summary="selection and V2 context readers are available",
+    )
+
+
+def _result_input_runtime_check() -> ReadinessCheck:
+    try:
+        capability = _reference_capability()
+        runtime = ReferenceCollaborationRuntime()
+        if not capability.supports_input_groups_v1() or not callable(
+            getattr(runtime, "evaluate", None)
+        ):
+            raise TypeError("result-input Runtime capability is incomplete")
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="result_input_runtime",
+            ready=False,
+            code="result_input_runtime_capability_missing",
+            summary="Reference Runtime does not expose the V2 input-group capability",
+        )
+    return ReadinessCheck(
+        name="result_input_runtime",
+        ready=True,
+        code="ok",
+        summary="Reference Runtime supports Projection 2, Decision 2, and input_groups_v1",
+    )
+
+
+def _result_input_worker_adapter_check(database: Database) -> ReadinessCheck:
+    try:
+        with database.session() as session:
+            rows = session.execute(
+                select(
+                    WorkerRuntimeConfigurationModel.worker_id,
+                    WorkerRuntimeConfigurationModel.adapter_module_config_version,
+                    ModuleInstanceModel.config_version,
+                    ModuleInstanceModel.lifecycle,
+                    ModuleDefinitionModel.capabilities,
+                    ModuleDefinitionModel.lifecycle,
+                )
+                .select_from(WorkerModel)
+                .outerjoin(
+                    WorkerRuntimeConfigurationModel,
+                    and_(
+                        WorkerRuntimeConfigurationModel.worker_id == WorkerModel.id,
+                        WorkerRuntimeConfigurationModel.workspace_id
+                        == WorkerModel.workspace_id,
+                    ),
+                )
+                .outerjoin(
+                    ModuleInstanceModel,
+                    and_(
+                        ModuleInstanceModel.id
+                        == WorkerRuntimeConfigurationModel.adapter_module_instance_id,
+                        ModuleInstanceModel.workspace_id == WorkerModel.workspace_id,
+                    ),
+                )
+                .outerjoin(
+                    ModuleDefinitionModel,
+                    and_(
+                        ModuleDefinitionModel.id == ModuleInstanceModel.definition_id,
+                        ModuleDefinitionModel.workspace_id == WorkerModel.workspace_id,
+                    ),
+                )
+                .where(WorkerModel.desired_state == "active")
+            ).all()
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="result_input_worker_adapter",
+            ready=False,
+            code="result_input_worker_adapter_unavailable",
+            summary="selected worker adapter configuration could not be verified",
+        )
+
+    for (
+        worker_id,
+        bound_config_version,
+        config_version,
+        instance_lifecycle,
+        capabilities,
+        definition_lifecycle,
+    ) in rows:
+        del worker_id
+        if (
+            bound_config_version is None
+            or config_version is None
+            or instance_lifecycle != "active"
+            or definition_lifecycle != "active"
+        ):
+            return ReadinessCheck(
+                name="result_input_worker_adapter",
+                ready=False,
+                code="result_input_worker_adapter_missing",
+                summary="an active worker lacks an active adapter configuration",
+            )
+        if bound_config_version != config_version:
+            return ReadinessCheck(
+                name="result_input_worker_adapter",
+                ready=False,
+                code="result_input_worker_adapter_config_mismatch",
+                summary="an active worker adapter binding points to a stale configuration",
+            )
+        try:
+            profile = capability_profile_from_payload(
+                WORKER_ADAPTER_MODULE_TYPE, capabilities
+            )
+        except Exception:  # noqa: BLE001
+            return ReadinessCheck(
+                name="result_input_worker_adapter",
+                ready=False,
+                code="result_input_worker_adapter_invalid",
+                summary="an active worker adapter capability profile is invalid",
+            )
+        if not isinstance(profile, WorkerAdapterCapabilityProfile) or not profile.supports_context_package_version(2):
+            return ReadinessCheck(
+                name="result_input_worker_adapter",
+                ready=False,
+                code="result_input_worker_context_unsupported",
+                summary="an active worker adapter does not support context package version 2",
+            )
+    return ReadinessCheck(
+        name="result_input_worker_adapter",
+        ready=True,
+        code="ok",
+        summary="all active worker adapters support context package version 2",
+    )
+
+
+def _result_input_binding_check(database: Database) -> ReadinessCheck:
+    try:
+        with database.session() as session:
+            profiles = session.scalars(
+                select(PlanningProfileModel).where(
+                    PlanningProfileModel.status == "active",
+                    PlanningProfileModel.user_selectable.is_(True),
+                )
+            ).all()
+            for profile in profiles:
+                policy = profile.policy
+                if not isinstance(policy, Mapping) or policy.get("proposal_schema_version") != 5:
+                    continue
+                binding_value = policy.get("collaboration_runtime_binding")
+                if not isinstance(binding_value, Mapping):
+                    return ReadinessCheck(
+                        name="result_input_binding",
+                        ready=False,
+                        code="result_input_binding_missing",
+                        summary="a selectable V5 profile has no Runtime binding",
+                    )
+                binding = CollaborationRuntimeBindingSnapshot.from_mapping(binding_value)
+                instance = session.scalar(
+                    select(ModuleInstanceModel).where(
+                        ModuleInstanceModel.id == binding.runtime_instance_id,
+                        ModuleInstanceModel.workspace_id == profile.workspace_id,
+                    )
+                )
+                definition = session.scalar(
+                    select(ModuleDefinitionModel).where(
+                        ModuleDefinitionModel.id == binding.runtime_definition_id,
+                        ModuleDefinitionModel.workspace_id == profile.workspace_id,
+                    )
+                )
+                if (
+                    instance is None
+                    or definition is None
+                    or instance.definition_id != definition.id
+                    or instance.config_version != binding.runtime_config_version
+                    or instance.lifecycle != "active"
+                    or definition.lifecycle != "active"
+                    or not binding.runtime_capability_snapshot.supports_input_groups_v1()
+                ):
+                    return ReadinessCheck(
+                        name="result_input_binding",
+                        ready=False,
+                        code="result_input_binding_mismatch",
+                        summary="a selectable V5 profile Runtime binding is stale or incompatible",
+                    )
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="result_input_binding",
+            ready=False,
+            code="result_input_binding_unavailable",
+            summary="selectable V5 profile Runtime bindings could not be verified",
+        )
+    return ReadinessCheck(
+        name="result_input_binding",
+        ready=True,
+        code="ok",
+        summary="selectable V5 profiles have compatible Runtime bindings",
+    )
+
+
+def _result_input_artifact_store_check(settings: Settings) -> ReadinessCheck:
+    try:
+        root = Path(settings.artifact_root).expanduser().resolve()
+        if (
+            not root.is_dir()
+            or not os.access(root, os.R_OK)
+            or settings.artifact_max_bytes <= 0
+        ):
+            raise OSError("artifact store is not readable")
+        store = LocalArtifactContentStore(
+            root, max_bytes=settings.artifact_max_bytes
+        )
+        if not callable(store.read) or not callable(store.content_metadata):
+            raise TypeError("artifact store reader contract is incomplete")
+    except Exception:  # noqa: BLE001
+        return ReadinessCheck(
+            name="result_input_artifact_store",
+            ready=False,
+            code="result_input_artifact_store_unavailable",
+            summary="ArtifactStore is not readable with the configured size limit",
+        )
+    return ReadinessCheck(
+        name="result_input_artifact_store",
+        ready=True,
+        code="ok",
+        summary="ArtifactStore can read content within the configured size limit",
+    )
+
+
 def _reference_module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
     definition_id = UUID("f0000000-0000-0000-0000-000000000001")
     definition = ModuleDefinition(
@@ -435,9 +838,9 @@ def _reference_module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
 def _reference_capability() -> CollaborationRuntimeCapabilityProfile:
     return CollaborationRuntimeCapabilityProfile(
         interface_version="collaboration-runtime.v1",
-        projection_schema_versions=(1,),
-        decision_schema_versions=(1,),
-        strategy_ids=("all_required",),
+        projection_schema_versions=(1, 2),
+        decision_schema_versions=(1, 2),
+        strategy_ids=("all_required", "input_groups_v1"),
         idempotency=IdempotencyCapability.OPERATION_ID,
         max_projection_bytes=262_144,
         max_decision_bytes=65_536,
@@ -445,6 +848,12 @@ def _reference_capability() -> CollaborationRuntimeCapabilityProfile:
         max_strategy_state_bytes=16_384,
         stability=StabilityLevel.STABLE,
     )
+
+
+def _check_by_name(
+    checks: Sequence[ReadinessCheck], name: str
+) -> ReadinessCheck | None:
+    return next((check for check in checks if check.name == name), None)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

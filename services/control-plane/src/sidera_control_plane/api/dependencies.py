@@ -237,6 +237,7 @@ def get_command_service(
                 local_actor_id=settings.local_actor_id,
                 clock=lambda: datetime.now(UTC),
                 planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
+                result_inputs_enabled=settings.result_inputs_enabled,
                 candidate_submission_service=KnowledgeCandidateSubmissionService(
                     FileCandidateProposalSpool(
                         settings.knowledge_candidate_spool_dir,

@@ -524,6 +524,7 @@ class ResultInputScenario:
         groups: tuple[dict[str, object], ...] | None = None,
         hard_edges: tuple[tuple[str, str], ...] = (),
         max_attempts: int = 1,
+        result_inputs_enabled: bool = True,
     ) -> None:
         planner_capability = replace(
             planner_capabilities(), proposal_schema_versions=(5,)
@@ -699,6 +700,7 @@ class ResultInputScenario:
                     local_actor_type="local",
                     local_actor_id="operator",
                     clock=self.clock,
+                    result_inputs_enabled=result_inputs_enabled,
                 ),
             ),
         ).handle(
@@ -834,6 +836,7 @@ class ResultInputScenario:
                     local_actor_type="local",
                     local_actor_id="operator",
                     clock=self.clock,
+                    result_inputs_enabled=True,
                 ),
             ),
         ).handle(
@@ -933,6 +936,7 @@ class ResultInputScenario:
                     local_actor_type="local",
                     local_actor_id="operator",
                     clock=self.clock,
+                    result_inputs_enabled=True,
                 ),
             ),
         ).handle(
@@ -2213,6 +2217,7 @@ class ResultInputScenario:
         *,
         execution_request_id: UUID | None = None,
         workspace_id: UUID | None = None,
+        result_inputs_enabled: bool = True,
     ):
         route_workspace_id = workspace_id or self.workspace_id
         params = (
@@ -2223,6 +2228,7 @@ class ResultInputScenario:
         settings = Settings(
             database_url=str(self.database.engine.url),
             collaboration_governance_enabled=True,
+            result_inputs_enabled=result_inputs_enabled,
             local_actor_id="operator",
         )
         with TestClient(create_app(settings)) as client:
@@ -2233,12 +2239,17 @@ class ResultInputScenario:
             )
 
     def get_input_selection(
-        self, selection_id: UUID, *, workspace_id: UUID | None = None
+        self,
+        selection_id: UUID,
+        *,
+        workspace_id: UUID | None = None,
+        result_inputs_enabled: bool = True,
     ):
         route_workspace_id = workspace_id or self.workspace_id
         settings = Settings(
             database_url=str(self.database.engine.url),
             collaboration_governance_enabled=True,
+            result_inputs_enabled=result_inputs_enabled,
             local_actor_id="operator",
         )
         with TestClient(create_app(settings)) as client:

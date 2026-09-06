@@ -28,7 +28,11 @@ from sidera_control_plane.domain.collaboration import (
     resolve_collaboration_policy_v2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
-from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
+from sidera_control_plane.domain.errors import (
+    InvalidTransition,
+    ResultInputsDisabled,
+    ValidationError,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution_requests import (
     ActivationGate,
@@ -83,12 +87,16 @@ class ProposalMaterializer:
     """Materialize one confirmed proposal without dispatching another command."""
 
     def __init__(
-        self, worker_item_materializer: WorkerItemMaterializer | None = None
+        self,
+        worker_item_materializer: WorkerItemMaterializer | None = None,
+        *,
+        result_inputs_enabled: bool = True,
     ) -> None:
         self._worker_item_materializer = (
             worker_item_materializer or WorkerItemMaterializer()
         )
         self._work_context_factory = WorkContextRevisionFactory()
+        self._result_inputs_enabled = result_inputs_enabled
 
     def materialize(
         self,
@@ -122,6 +130,7 @@ class ProposalMaterializer:
                 execution_requests=(),
                 event_ids=(),
             )
+        self._assert_result_input_writes_enabled(proposal, profile)
 
         if request.status is not PlanningRequestStatus.PROPOSAL_READY:
             raise InvalidTransition("only a proposal-ready request can materialize")
@@ -129,6 +138,7 @@ class ProposalMaterializer:
         work_context = uow.work_contexts.get_by_planning_request(
             request.id, request.workspace_id, for_update=True
         )
+
         if work_context is None:
             raise NotFound("work context not found")
         current_context_revision = uow.work_contexts.get_revision(
@@ -307,6 +317,22 @@ class ProposalMaterializer:
             tasks=(root_task, *subtasks),
             execution_requests=execution_requests,
             event_ids=tuple(event.id for event in events),
+        )
+
+    def _assert_result_input_writes_enabled(
+        self, proposal: ProposalRevision, profile: PlanningProfile
+    ) -> None:
+        if self._result_inputs_enabled:
+            return
+        if (
+            proposal.proposal_schema_version != 5
+            and profile.proposal_schema_version != 5
+        ):
+            return
+        raise ResultInputsDisabled(
+            proposal_schema_version=max(
+                proposal.proposal_schema_version, profile.proposal_schema_version
+            )
         )
 
     @staticmethod

@@ -38,6 +38,15 @@ COLLABORATION_GOVERNANCE_CONFLICT_OPERATIONS = (
     "reject",
     "resume_automatic",
 )
+RESULT_INPUT_BLOCK_REASONS = (
+    "result_input_unavailable",
+    "result_input_integrity_failed",
+    "result_input_format_unsupported",
+    "result_input_budget_exceeded",
+    "unknown",
+)
+RESULT_INPUT_SELECTION_RESULTS = ("conflict", "stale")
+RESULT_INPUT_DELIVERY_OUTCOMES = ("delivered", "blocked", "failed")
 
 COLLABORATION_METRIC_NAMES = frozenset(
     {
@@ -56,6 +65,10 @@ COLLABORATION_METRIC_NAMES = frozenset(
         "sidera_collaboration_governance_proposal_age_seconds",
         "sidera_collaboration_governance_stale_total",
         "sidera_collaboration_governance_conflicts_total",
+        "sidera_collaboration_result_input_blocked_total",
+        "sidera_collaboration_result_input_selection_total",
+        "sidera_collaboration_result_input_delivery_total",
+        "sidera_collaboration_result_input_delivery_duration_seconds",
     }
 )
 
@@ -75,6 +88,12 @@ _METRIC_LABELS = {
     "sidera_collaboration_governance_proposal_age_seconds": frozenset(),
     "sidera_collaboration_governance_stale_total": frozenset({"reason_code"}),
     "sidera_collaboration_governance_conflicts_total": frozenset({"operation"}),
+    "sidera_collaboration_result_input_blocked_total": frozenset({"reason"}),
+    "sidera_collaboration_result_input_selection_total": frozenset({"result"}),
+    "sidera_collaboration_result_input_delivery_total": frozenset({"outcome"}),
+    "sidera_collaboration_result_input_delivery_duration_seconds": frozenset(
+        {"outcome"}
+    ),
 }
 
 _ALLOWED_LABEL_VALUES = {
@@ -92,6 +111,8 @@ _ALLOWED_LABEL_VALUES = {
             "stale",
             "duplicate",
             "deferred",
+            "delivered",
+            "failed",
             "issued",
             "none",
         }
@@ -109,6 +130,7 @@ _ALLOWED_LABEL_VALUES = {
             "unsupported_runtime_capability",
             "runtime_config_mismatch",
             "worker_phase_failed",
+            *RESULT_INPUT_BLOCK_REASONS,
             "unknown",
         }
     ),

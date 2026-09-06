@@ -105,7 +105,10 @@ from sidera_control_plane.collaboration_readiness import ReadinessReport
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import ContextPackageManifestV2
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
-from sidera_control_plane.domain.result_inputs import InputGroupCandidateV1, InputGroupV1
+from sidera_control_plane.domain.result_inputs import (
+    InputGroupCandidateV1,
+    InputGroupV1,
+)
 from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
 from sidera_control_plane.notification_readiness import NotificationReadinessReport
 
@@ -5261,6 +5264,8 @@ class CollaborationReadinessResponse(BaseModel):
     component: str
     as_of: datetime
     status: Literal["ready", "not_ready"]
+    result_input_writes_enabled: bool
+    result_input_capabilities_ready: bool
     checks: tuple[CollaborationReadinessCheckResponse, ...]
 
     @classmethod
@@ -5269,6 +5274,8 @@ class CollaborationReadinessResponse(BaseModel):
             component=report.component,
             as_of=report.as_of,
             status="ready" if report.ready else "not_ready",
+            result_input_writes_enabled=report.result_input_writes_enabled,
+            result_input_capabilities_ready=report.result_input_capabilities_ready,
             checks=tuple(
                 CollaborationReadinessCheckResponse(
                     name=check.name,

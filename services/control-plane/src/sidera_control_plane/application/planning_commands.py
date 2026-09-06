@@ -35,6 +35,7 @@ from sidera_control_plane.domain.errors import (
     OperatorRequired,
     PlanGenerationConflict,
     PlanningConflict,
+    ResultInputsDisabled,
     ValidationError,
     VersionConflict,
 )
@@ -69,6 +70,7 @@ from sidera_control_plane.domain.planning_profiles import (
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
 )
+from sidera_control_plane.domain.planning_proposals import ProposalRevision
 from sidera_control_plane.domain.work_context import (
     WorkContext,
     WorkContextRevision,
@@ -105,6 +107,7 @@ class PlanningCommandHandler:
         work_context_factory: WorkContextRevisionFactory | None = None,
         planning_context_ttl_seconds: int = 1_800,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
+        result_inputs_enabled: bool = False,
     ) -> None:
         if planning_context_ttl_seconds < 1:
             raise ValueError("planning_context_ttl_seconds must be positive")
@@ -112,8 +115,13 @@ class PlanningCommandHandler:
         self._local_actor_id = local_actor_id
         self._clock = clock or (lambda: datetime.now(UTC))
         self._planning_context_ttl_seconds = planning_context_ttl_seconds
-        self._materializer = materializer or ProposalMaterializer()
-        self._revision_materializer = revision_materializer or RevisionMaterializer()
+        self._result_inputs_enabled = result_inputs_enabled
+        self._materializer = materializer or ProposalMaterializer(
+            result_inputs_enabled=result_inputs_enabled
+        )
+        self._revision_materializer = revision_materializer or RevisionMaterializer(
+            result_inputs_enabled=result_inputs_enabled
+        )
         self._work_context_factory = (
             work_context_factory or WorkContextRevisionFactory()
         )
@@ -1126,6 +1134,9 @@ class PlanningCommandHandler:
         )
         if profile is None:
             raise NotFound("planning profile not found")
+        self._assert_result_input_confirmation_allowed(
+            uow, request=request, proposal=proposal, profile=profile
+        )
         result = self._materializer.materialize(
             uow,
             request=request,
@@ -1199,6 +1210,9 @@ class PlanningCommandHandler:
         )
         if profile is None:
             raise NotFound("planning profile not found")
+        self._assert_result_input_confirmation_allowed(
+            uow, request=request, proposal=proposal, profile=profile
+        )
         now = self._clock()
         try:
             result = self._revision_materializer.materialize(
@@ -1509,6 +1523,32 @@ class PlanningCommandHandler:
                 lease.released_at = now
                 lease.version += 1
                 uow.planning_leases.save(lease, lease.version - 1)
+
+    def _assert_result_input_confirmation_allowed(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        request: PlanningRequest,
+        proposal: ProposalRevision,
+        profile: PlanningProfile,
+    ) -> None:
+        if self._result_inputs_enabled:
+            return
+        proposal_schema_version = getattr(proposal, "proposal_schema_version", 0)
+        profile_schema_version = getattr(profile, "proposal_schema_version", 0)
+        if (
+            proposal_schema_version != 5
+            and profile_schema_version != 5
+        ):
+            return
+        existing = uow.proposal_materializations.get_by_request(
+            request.id, request.workspace_id
+        )
+        if existing is not None and existing.proposal_revision_id == proposal.id:
+            return
+        raise ResultInputsDisabled(
+            proposal_schema_version=max(proposal_schema_version, profile_schema_version)
+        )
 
     def _require_operator(self, envelope: CommandEnvelope) -> None:
         if (

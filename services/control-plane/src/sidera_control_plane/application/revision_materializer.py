@@ -22,6 +22,7 @@ from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import (
     DomainError,
     InvalidTransition,
+    ResultInputsDisabled,
     ValidationError,
 )
 from sidera_control_plane.domain.events import EventData
@@ -104,11 +105,13 @@ class RevisionMaterializer:
         *,
         diff_normalizer: RevisionDiffNormalizer | None = None,
         worker_item_materializer: WorkerItemMaterializer | None = None,
+        result_inputs_enabled: bool = True,
     ) -> None:
         self._diff_normalizer = diff_normalizer or RevisionDiffNormalizer()
         self._worker_item_materializer = (
             worker_item_materializer or WorkerItemMaterializer()
         )
+        self._result_inputs_enabled = result_inputs_enabled
 
     def materialize(
         self,
@@ -182,6 +185,7 @@ class RevisionMaterializer:
                 ),
                 event_ids=(),
             )
+        self._assert_result_input_writes_enabled(proposal, profile)
 
         if request.status is not PlanningRequestStatus.PROPOSAL_READY:
             raise InvalidTransition("only a proposal-ready revision can materialize")
@@ -1184,6 +1188,22 @@ class RevisionMaterializer:
             )
         )
         return tuple(events)
+
+    def _assert_result_input_writes_enabled(
+        self, proposal: ProposalRevision, profile: PlanningProfile
+    ) -> None:
+        if self._result_inputs_enabled:
+            return
+        if (
+            proposal.proposal_schema_version != 5
+            and profile.proposal_schema_version != 5
+        ):
+            return
+        raise ResultInputsDisabled(
+            proposal_schema_version=max(
+                proposal.proposal_schema_version, profile.proposal_schema_version
+            )
+        )
 
 
 def _task_lock_ids(
