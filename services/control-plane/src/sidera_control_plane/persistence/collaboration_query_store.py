@@ -149,16 +149,19 @@ class SqlAlchemyCollaborationQueryStore:
         workspace_id: UUID,
         root_task_id: UUID,
         plan: CanonicalTaskPlan,
+        include_superseded: bool = False,
     ) -> CollaborationProjectionFacts | None:
+        run_conditions = [
+            CollaborationRunModel.workspace_id == workspace_id,
+            CollaborationRunModel.root_task_id == root_task_id,
+            CollaborationRunModel.plan_snapshot_id == plan.snapshot_id,
+            CollaborationRunModel.plan_generation == plan.generation,
+        ]
+        if not include_superseded:
+            run_conditions.append(CollaborationRunModel.status != "superseded")
         run = session.scalar(
             select(CollaborationRunModel)
-            .where(
-                CollaborationRunModel.workspace_id == workspace_id,
-                CollaborationRunModel.root_task_id == root_task_id,
-                CollaborationRunModel.plan_snapshot_id == plan.snapshot_id,
-                CollaborationRunModel.plan_generation == plan.generation,
-                CollaborationRunModel.status != "superseded",
-            )
+            .where(*run_conditions)
             .order_by(CollaborationRunModel.updated_at.desc())
             .limit(1)
         )

@@ -10,12 +10,14 @@ from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
     ReferenceCollaborationRuntime,
 )
+from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.collaboration_decisions import (
@@ -81,6 +83,7 @@ from sidera_control_plane.application.worker_gateway import (
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
 from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.workspace_handoff import WorkspaceHandoffService
+from sidera_control_plane.config import Settings
 from sidera_control_plane.context_package_worker import ContextPackageWorker
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.collaboration import (
@@ -2122,6 +2125,46 @@ class ResultInputScenario:
             )
             assert selection is not None
             return selection
+
+    def get_result_inputs(
+        self,
+        key: str,
+        *,
+        execution_request_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ):
+        route_workspace_id = workspace_id or self.workspace_id
+        params = (
+            {"execution_request_id": str(execution_request_id)}
+            if execution_request_id is not None
+            else {}
+        )
+        settings = Settings(
+            database_url=str(self.database.engine.url),
+            collaboration_governance_enabled=True,
+            local_actor_id="operator",
+        )
+        with TestClient(create_app(settings)) as client:
+            return client.get(
+                f"/api/v1/workspaces/{route_workspace_id}/worker-items/"
+                f"{self.worker_item_ids[key]}/result-inputs",
+                params=params,
+            )
+
+    def get_input_selection(
+        self, selection_id: UUID, *, workspace_id: UUID | None = None
+    ):
+        route_workspace_id = workspace_id or self.workspace_id
+        settings = Settings(
+            database_url=str(self.database.engine.url),
+            collaboration_governance_enabled=True,
+            local_actor_id="operator",
+        )
+        with TestClient(create_app(settings)) as client:
+            return client.get(
+                f"/api/v1/workspaces/{route_workspace_id}/collaboration/"
+                f"input-selections/{selection_id}"
+            )
 
     def _reconcile_once(self) -> bool:
         prepared = self._collaboration_reconciler.prepare_next(

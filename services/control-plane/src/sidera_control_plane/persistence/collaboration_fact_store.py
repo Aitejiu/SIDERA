@@ -66,17 +66,26 @@ class SqlAlchemyCollaborationFactStore:
         run: CollaborationRun,
         *,
         fact_cursor: int,
+        allow_stale_head: bool = False,
     ) -> CollaborationFacts:
         self._validate_run_scope(workspace_id, run, fact_cursor)
         if self._session is not None:
             return self._load_from_session(
-                self._session, workspace_id, run, fact_cursor=fact_cursor
+                self._session,
+                workspace_id,
+                run,
+                fact_cursor=fact_cursor,
+                allow_stale_head=allow_stale_head,
             )
         if self._database is None:
             raise RuntimeError("fact store has no database or session")
         with self._database.session() as session:
             return self._load_from_session(
-                session, workspace_id, run, fact_cursor=fact_cursor
+                session,
+                workspace_id,
+                run,
+                fact_cursor=fact_cursor,
+                allow_stale_head=allow_stale_head,
             )
 
     def load_in_session(
@@ -86,11 +95,16 @@ class SqlAlchemyCollaborationFactStore:
         run: CollaborationRun,
         *,
         fact_cursor: int,
+        allow_stale_head: bool = False,
     ) -> CollaborationFacts:
         """Load facts without opening a second transaction."""
         self._validate_run_scope(workspace_id, run, fact_cursor)
         return self._load_from_session(
-            session, workspace_id, run, fact_cursor=fact_cursor
+            session,
+            workspace_id,
+            run,
+            fact_cursor=fact_cursor,
+            allow_stale_head=allow_stale_head,
         )
 
     def _load_from_session(
@@ -100,6 +114,7 @@ class SqlAlchemyCollaborationFactStore:
         run: CollaborationRun,
         *,
         fact_cursor: int,
+        allow_stale_head: bool,
     ) -> CollaborationFacts:
         head = session.scalar(
             select(RootTaskPlanHeadModel).where(
@@ -109,7 +124,7 @@ class SqlAlchemyCollaborationFactStore:
         )
         if head is None:
             raise ValidationError("collaboration plan head does not exist")
-        if (
+        if not allow_stale_head and (
             head.active_snapshot_id != run.plan_snapshot_id
             or head.active_generation != run.plan_generation
             or head.active_snapshot_hash != run.plan_content_hash

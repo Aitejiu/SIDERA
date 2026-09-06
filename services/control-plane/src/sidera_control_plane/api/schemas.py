@@ -1011,6 +1011,286 @@ class CollaborationGovernanceProposalResponse(BaseModel):
     input_selection_hash: str | None = None
 
 
+class ResultInputArtifactResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+    artifact_type: str
+    content_hash: str
+    size_bytes: int = Field(ge=0)
+    media_type: str
+
+
+class ResultInputEvidenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: UUID
+    acceptance_criterion_ref: str
+    artifact_ids: tuple[UUID, ...]
+
+
+class ResultInputCandidateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_key: str
+    worker_item_id: UUID | None
+    worker_item_title: str
+    subtask_key: str | None
+    subtask_path: tuple[str, ...]
+    priority: int = Field(ge=1)
+    ready: bool
+    reason_code: str | None
+    missing_artifact_refs: tuple[str, ...]
+    missing_evidence_refs: tuple[str, ...]
+    retry_possible: bool
+    outcome_unknown: bool
+    execution_request_id: UUID | None
+    execution_id: UUID | None
+    attempt: int | None
+    execution_status: str | None
+    artifacts: tuple[ResultInputArtifactResponse, ...]
+    evidence: tuple[ResultInputEvidenceResponse, ...]
+
+
+class ResultInputSelectedSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_key: str
+    worker_item_id: UUID
+    worker_item_title: str
+    subtask_key: str | None
+    subtask_path: tuple[str, ...]
+    effective_request_id: UUID
+    effective_lineage_id: UUID
+    effective_execution_id: UUID
+    attempt: int = Field(ge=1)
+    priority: int = Field(ge=1)
+    inheritance_refs: tuple[str, ...]
+    source_basis_hash: str
+    artifacts: tuple[ResultInputArtifactResponse, ...]
+    evidence: tuple[ResultInputEvidenceResponse, ...]
+
+
+class ResultInputGroupResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    group_key: str
+    title: str
+    mode: str
+    minimum_count: int | None
+    required_count: int = Field(ge=0)
+    ready_count: int = Field(ge=0)
+    reason_code: str | None
+    candidates: tuple[ResultInputCandidateResponse, ...]
+    selected_sources: tuple[ResultInputSelectedSourceResponse, ...]
+    selection_id: UUID | None
+    selection_hash: str | None
+
+
+class ResultInputHardDependencyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dependency_key: str
+    upstream_request_id: UUID
+    upstream_worker_item_id: UUID | None
+    upstream_worker_item_key: str
+    upstream_worker_item_title: str
+    required_artifact_refs: tuple[str, ...]
+    required_evidence_refs: tuple[str, ...]
+    ready: bool
+    reason_code: str | None
+    selected_source: ResultInputSelectedSourceResponse | None
+
+
+class ResultInputRequestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_request_id: UUID
+    worker_item_id: UUID
+    worker_item_key: str
+    subtask_key: str
+    version: int = Field(ge=1)
+    status: str
+    collaboration_gate_mode: str
+    gate_reason: str
+
+
+class ResultInputExecutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_request_id: UUID
+    request_status: str
+    request_version: int = Field(ge=1)
+    collaboration_gate_mode: str
+    gate_reason: str
+    execution_id: UUID | None
+    lineage_id: UUID | None
+    attempt: int | None
+    status: str | None
+    failure_code: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    release_status: str
+    released_at: datetime | None
+
+
+class ResultInputGovernanceHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    resource_id: UUID
+    status: str
+    summary: str
+    occurred_at: datetime
+    result_code: str | None
+    proposal_id: UUID | None
+    resolution_action: str | None
+    resolution_result: str | None
+
+
+class ResultInputGovernanceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    state: str
+    waiting_summary: str | None
+    governance_mode: str
+    release_state: str
+    active_hold_id: UUID | None
+    hold_resource_version: int | None
+    active_proposal_id: UUID | None
+    active_proposal_version: int | None
+    active_proposal_input_selection_id: UUID | None
+    active_proposal_input_selection_hash: str | None
+    attention_state: str
+    available_action_names: tuple[str, ...]
+    history: tuple[ResultInputGovernanceHistoryResponse, ...]
+
+
+class ResultInputDeliveryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consumer_type: str
+    consumer_id: UUID | None
+    package_id: UUID | None
+    context_version: int | None
+    package_hash: str | None
+    package_status: str | None
+    assembly_request_id: UUID | None
+    assembly_status: str | None
+    assembly_attempt: int | None
+    assembly_version: int | None
+    assembly_request_fingerprint: str | None
+    materialization_attempt: int | None
+    materialization_outcome: str | None
+    materialization_failure_code: str | None
+    materialization_occurred_at: datetime | None
+    acknowledgement_status: str
+    acknowledged_package_hash: str | None
+    acknowledged_at: datetime | None
+    reason_code: str | None
+
+
+class ResultInputActionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+    command_type: str
+    target_type: str
+    target_id: UUID
+    expected_version: int | None
+    expected_fingerprint: str | None
+    expected_plan_generation: int | None
+    expected_input_selection_id: UUID | None
+    expected_input_selection_hash: str | None
+
+
+class WorkerResultInputsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    worker_item_id: UUID
+    worker_item_key: str
+    worker_item_title: str
+    request: ResultInputRequestResponse | None
+    plan_snapshot_id: UUID | None
+    plan_generation: int | None
+    plan_content_hash: str | None
+    is_historical: bool
+    groups: tuple[ResultInputGroupResponse, ...]
+    hard_dependencies: tuple[ResultInputHardDependencyResponse, ...]
+    governance: ResultInputGovernanceResponse
+    delivery: ResultInputDeliveryResponse
+    execution: ResultInputExecutionResponse | None
+    available_actions: tuple[ResultInputActionResponse, ...]
+
+
+class InputSelectionConsumerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consumer_type: str
+    consumer_id: UUID
+    execution_request_id: UUID | None
+    worker_item_id: UUID | None
+    package_id: UUID | None
+    context_version: int | None
+    package_hash: str | None
+    package_status: str | None
+    assembly_request_id: UUID | None
+    assembly_status: str | None
+    assembly_attempt: int | None
+    assembly_version: int | None
+    materialization_attempt: int | None
+    materialization_outcome: str | None
+    materialization_failure_code: str | None
+    acknowledgement_status: str
+    acknowledged_at: datetime | None
+
+
+class InputSelectionGroupResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    group_key: str
+    rule_hash: str
+    sources: tuple[ResultInputSelectedSourceResponse, ...]
+
+
+class InputSelectionHardInputResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dependency_key: str
+    rule_hash: str
+    source: ResultInputSelectedSourceResponse
+
+
+class InputSelectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    selection_id: UUID
+    workspace_id: UUID
+    root_task_id: UUID
+    run_id: UUID
+    plan_snapshot_id: UUID
+    plan_generation: int
+    plan_content_hash: str
+    target_worker_item_id: UUID
+    target_execution_request_id: UUID
+    target_request_version: int
+    projection_snapshot_id: UUID
+    projection_hash: str
+    decision_id: UUID
+    intent_id: UUID
+    groups: tuple[InputSelectionGroupResponse, ...]
+    hard_inputs: tuple[InputSelectionHardInputResponse, ...]
+    selection_hash: str
+    created_at: datetime
+    consumers: tuple[InputSelectionConsumerResponse, ...]
+    consumers_truncated: bool
+
+
 class CollaborationDecisionPageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

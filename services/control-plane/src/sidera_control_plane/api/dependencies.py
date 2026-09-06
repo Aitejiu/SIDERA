@@ -71,6 +71,9 @@ from sidera_control_plane.application.planning_metrics import PlanningMetricsSer
 from sidera_control_plane.application.planning_queries import PlanningQueryService
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
+from sidera_control_plane.application.result_input_queries import (
+    ResultInputQueryService,
+)
 from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
 from sidera_control_plane.application.runtime_metrics import RuntimeMetricsService
 from sidera_control_plane.application.subtask_workspace_queries import (
@@ -136,6 +139,9 @@ from sidera_control_plane.persistence.planning_query_store import (
 from sidera_control_plane.persistence.resource_query_store import (
     SqlAlchemyModuleQueryStore,
     SqlAlchemyResourceQueryStore,
+)
+from sidera_control_plane.persistence.result_input_query_store import (
+    SqlAlchemyResultInputQueryStore,
 )
 from sidera_control_plane.persistence.runtime_metrics_store import (
     SqlAlchemyRuntimeMetricsStore,
@@ -435,6 +441,16 @@ def get_collaboration_query_service(
 ) -> CollaborationQueryService:
     return CollaborationQueryService(
         SqlAlchemyCollaborationQueryStore(database),
+        governance_enabled=settings.collaboration_governance_enabled,
+    )
+
+
+def get_result_input_query_service(
+    database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ResultInputQueryService:
+    return ResultInputQueryService(
+        SqlAlchemyResultInputQueryStore(database),
         governance_enabled=settings.collaboration_governance_enabled,
     )
 
