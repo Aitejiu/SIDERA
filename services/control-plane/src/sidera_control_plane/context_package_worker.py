@@ -763,7 +763,7 @@ def _validate_inheritance_budget(
             raise ExecutionContextAuthorizationError(
                 "execution context inheritance source link is stale"
             )
-        if kind not in {"continuation", "retry"}:
+        if kind not in {"continuation", "retry", "handoff"}:
             raise ExecutionContextAuthorizationError(
                 "execution context inheritance kind is invalid"
             )

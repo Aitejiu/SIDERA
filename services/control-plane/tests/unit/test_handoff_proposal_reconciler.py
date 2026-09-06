@@ -190,6 +190,9 @@ class ReconcileUnitOfWork:
             workspace_id=WORKSPACE_ID,
             task_id=payload.subtask_id,
             worker_item_id=payload.worker_item_id,
+            lineage_id=payload.source_execution_id,
+            source_execution_id=None,
+            source_session_id=None,
             version=payload.source_execution_version,
             status=ExecutionStatus.RUNNING,
         )
@@ -237,6 +240,9 @@ class ReconcileUnitOfWork:
         })
         self.worker_items = SimpleNamespace(get=lambda *_args, **_kwargs: self.worker_item)
         self.executions = SimpleNamespace(get=lambda *_args, **_kwargs: self.execution)
+        self.execution_requests = SimpleNamespace(
+            get_effective_by_execution_lineage=lambda *_args, **_kwargs: None
+        )
         self.sessions = SimpleNamespace(get=lambda *_args, **_kwargs: self.session)
         self.workers = SimpleNamespace(get=self._worker_get)
         self.workspaces = SimpleNamespace(get_for_execution=lambda *_args, **_kwargs: self.manifest)

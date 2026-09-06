@@ -1247,6 +1247,11 @@ def _head_matches_base(
 def _actual_action(preview: WorkerTransitionPreview) -> WorkerTransitionAction:
     if preview.worker_item_id is None:
         return WorkerTransitionAction.CREATE
+    if "input_group_changed" in preview.reason_codes:
+        # A changed authorization set belongs to a new execution. Patching the
+        # running writer would silently replace the input snapshot it already
+        # acknowledged.
+        return WorkerTransitionAction.CONTINUE
     if WorkerTransitionAction.PATCH in preview.allowed_actions:
         return WorkerTransitionAction.PATCH
     if WorkerTransitionAction.MOVE in preview.allowed_actions:

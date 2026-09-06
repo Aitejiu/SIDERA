@@ -36,7 +36,7 @@ def resolve_result_input_source(
 
     current_requests = tuple(
         item
-        for item in facts.requests
+        for item in (*facts.requests, *facts.result_source_requests)
         if item.worker_item_key == worker_item_key
         and item.worker_item_id == placement.worker_item_id
         and item.subtask_task_id == placement.subtask_task_id
@@ -245,7 +245,7 @@ def _handoff_target(
     )
     requests = tuple(
         item
-        for item in facts.requests
+        for item in (*facts.requests, *facts.result_source_requests)
         if item.worker_item_key == placement.worker_item_key
         and item.worker_item_id == placement.worker_item_id
         and item.subtask_task_id == placement.subtask_task_id

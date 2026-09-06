@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -130,6 +131,13 @@ class SqlAlchemyCollaborationFactStore:
 
         worker_placements = self._load_worker_placements(session, run)
         requests = self._load_requests(session, run, snapshot)
+        result_source_requests = self._load_result_source_requests(
+            session,
+            run,
+            snapshot,
+            worker_placements=worker_placements,
+            current_request_ids=tuple(item.id for item in requests),
+        )
         request_ids = tuple(item.id for item in requests)
         dependencies = self._load_dependencies(session, run, request_ids)
         lineage_ids = tuple(
@@ -187,6 +195,7 @@ class SqlAlchemyCollaborationFactStore:
             worker_placements=worker_placements,
             execution_bindings=execution_bindings,
             handoff_transitions=handoff_transitions,
+            result_source_requests=result_source_requests,
         )
 
     @staticmethod
@@ -285,28 +294,128 @@ class SqlAlchemyCollaborationFactStore:
         ).all()
         _ensure_bounded(rows, "requests")
         return tuple(
-            CollaborationRequestFact(
-                id=row.id,
-                subtask_key=subtask_keys.get(
-                    row.subtask_task_id, str(row.subtask_task_id)
-                ),
-                worker_item_key=row.worker_item_key,
-                subtask_task_id=row.subtask_task_id,
-                worker_item_id=row.worker_item_id,
-                version=row.version,
-                status=row.status,
-                collaboration_gate_mode=row.collaboration_gate_mode,
-                gate_reason=row.gate_reason,
-                execution_lineage_id=row.execution_lineage_id,
-                first_execution_id=row.first_execution_id,
-                max_attempts=row.max_attempts,
-                source_execution_id=row.source_execution_id,
-                source_session_id=row.source_session_id,
-                handoff_transition_id=row.handoff_transition_id,
-                expected_artifact_refs=_string_tuple(row.expected_artifact_refs),
-                expected_evidence_refs=_string_tuple(row.expected_evidence_refs),
+            SqlAlchemyCollaborationFactStore._request_fact(
+                row, subtask_keys=subtask_keys
             )
             for row in rows
+        )
+
+    @classmethod
+    def _load_result_source_requests(
+        cls,
+        session: Session,
+        run: CollaborationRun,
+        snapshot: TaskPlanSnapshot,
+        *,
+        worker_placements: Sequence[CollaborationWorkerPlacementFact],
+        current_request_ids: Sequence[UUID],
+    ) -> tuple[CollaborationRequestFact, ...]:
+        """Load only historical requests usable as result-source lineage facts.
+
+        These rows are deliberately kept out of ``facts.requests`` so an old
+        request cannot become a new runtime release target after a Revision.
+        The stable WorkerItem and subtask identities define the source scope.
+        """
+        if not worker_placements:
+            return ()
+        worker_item_ids = tuple({item.worker_item_id for item in worker_placements})
+        subtask_task_ids = tuple({item.subtask_task_id for item in worker_placements})
+        if not worker_item_ids or not subtask_task_ids:
+            return ()
+        subtask_keys = {
+            item.task_id: item.key
+            for item in snapshot.subtasks
+            if item.task_id is not None
+        }
+        statement = select(
+            ExecutionRequestModel.id,
+            ExecutionRequestModel.worker_item_key,
+            ExecutionRequestModel.subtask_task_id,
+            ExecutionRequestModel.worker_item_id,
+            ExecutionRequestModel.version,
+            ExecutionRequestModel.status,
+            ExecutionRequestModel.collaboration_gate_mode,
+            ExecutionRequestModel.gate_reason,
+            ExecutionRequestModel.execution_lineage_id,
+            ExecutionRequestModel.first_execution_id,
+            ExecutionRequestModel.max_attempts,
+            ExecutionRequestModel.source_execution_id,
+            ExecutionRequestModel.source_session_id,
+            ExecutionRequestModel.handoff_transition_id,
+            ExecutionRequestModel.expected_artifact_refs,
+            ExecutionRequestModel.expected_evidence_refs,
+            ExecutionRequestModel.plan_generation,
+            ExecutionRequestModel.created_at,
+        ).where(
+            ExecutionRequestModel.workspace_id == run.workspace_id,
+            ExecutionRequestModel.root_task_id == run.root_task_id,
+            ExecutionRequestModel.plan_generation < run.plan_generation,
+            ExecutionRequestModel.worker_item_id.in_(worker_item_ids),
+            ExecutionRequestModel.subtask_task_id.in_(subtask_task_ids),
+            ExecutionRequestModel.handoff_transition_id.is_(None),
+            ExecutionRequestModel.status.not_in({"cancelled", "obsolete"}),
+        )
+        if current_request_ids:
+            statement = statement.where(
+                ~ExecutionRequestModel.id.in_(tuple(current_request_ids))
+            )
+        rows = session.execute(
+            statement
+            .order_by(
+                ExecutionRequestModel.worker_item_id,
+                ExecutionRequestModel.subtask_task_id,
+                ExecutionRequestModel.plan_generation.desc(),
+                ExecutionRequestModel.created_at.desc(),
+                ExecutionRequestModel.id.desc(),
+            )
+            .limit(_MAX_RESULT_SOURCE_FACTS + 1)
+        ).all()
+        _ensure_bounded(rows, "result source requests")
+        placement_keys = {
+            (item.worker_item_id, item.subtask_task_id): item.worker_item_key
+            for item in worker_placements
+        }
+        selected: list[CollaborationRequestFact] = []
+        seen: set[tuple[UUID, UUID]] = set()
+        for row in rows:
+            identity = (row.worker_item_id, row.subtask_task_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            selected.append(
+                cls._request_fact(
+                    row,
+                    subtask_keys=subtask_keys,
+                    worker_item_key=placement_keys[identity],
+                )
+            )
+        return tuple(selected)
+
+    @staticmethod
+    def _request_fact(
+        row: Any,
+        *,
+        subtask_keys: Mapping[UUID, str],
+        worker_item_key: str | None = None,
+    ) -> CollaborationRequestFact:
+        return CollaborationRequestFact(
+            id=row.id,
+            subtask_key=subtask_keys.get(row.subtask_task_id, str(row.subtask_task_id)),
+            worker_item_key=worker_item_key or row.worker_item_key,
+            subtask_task_id=row.subtask_task_id,
+            worker_item_id=row.worker_item_id,
+            version=row.version,
+            status=row.status,
+            collaboration_gate_mode=row.collaboration_gate_mode,
+            gate_reason=row.gate_reason,
+            execution_lineage_id=row.execution_lineage_id,
+            first_execution_id=row.first_execution_id,
+            max_attempts=row.max_attempts,
+            source_execution_id=row.source_execution_id,
+            source_session_id=row.source_session_id,
+            handoff_transition_id=row.handoff_transition_id,
+            expected_artifact_refs=_string_tuple(row.expected_artifact_refs),
+            expected_evidence_refs=_string_tuple(row.expected_evidence_refs),
         )
 
     @staticmethod

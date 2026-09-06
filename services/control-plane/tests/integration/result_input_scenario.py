@@ -43,7 +43,20 @@ from sidera_control_plane.application.collaboration_runtime_resolver import (
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.event_ingestor import ArtifactRegistry
-from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
+from sidera_control_plane.application.execution_commands import (
+    ExecutionCommandHandler,
+    ExecutionInputCommandHandler,
+)
+from sidera_control_plane.application.handoff_candidates import (
+    HandoffCandidateService,
+)
+from sidera_control_plane.application.handoff_commands import HandoffCommandHandler
+from sidera_control_plane.application.handoff_context import HandoffContextService
+from sidera_control_plane.application.handoff_coordinator import HandoffCoordinator
+from sidera_control_plane.application.handoff_input_transfer import (
+    HandoffInputTransferService,
+)
+from sidera_control_plane.application.handoff_target import HandoffTargetService
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.ports import (
@@ -62,10 +75,13 @@ from sidera_control_plane.application.worker_gateway import (
     WorkerGateway,
 )
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
+from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
+from sidera_control_plane.application.workspace_handoff import WorkspaceHandoffService
 from sidera_control_plane.context_package_worker import ContextPackageWorker
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.collaboration import (
     CollaborationRuntimeBindingSnapshot,
+    resolve_collaboration_policy_v2,
 )
 from sidera_control_plane.domain.collaboration_runtime import (
     RuntimeDecisionV2,
@@ -84,11 +100,21 @@ from sidera_control_plane.domain.context_packages import (
 )
 from sidera_control_plane.domain.execution import ExecutionSession
 from sidera_control_plane.domain.gateway import AdapterSessionHandle
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffInspectionOutcome,
+    HandoffWorkspaceInspection,
+    HandoffWorkspaceTargetSpec,
+)
+from sidera_control_plane.domain.handoffs import (
+    HandoffTransition,
+    HandoffTransitionStatus,
+)
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     CollaborationRuntimeCapabilityProfile,
     HandoffCheckpointMode,
+    HandoffTransferMode,
     IdempotencyCapability,
     ModuleDefinition,
     ModuleInstance,
@@ -100,12 +126,17 @@ from sidera_control_plane.domain.modules import (
     WorkerAdapterCapabilityProfile,
     WorkspaceProviderCapabilityProfile,
 )
-from sidera_control_plane.domain.planning import PlanningRequest
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
+from sidera_control_plane.domain.planning import PlanningRequest, PlanningRequestKind
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayloadV5,
     ProposalRevision,
 )
+from sidera_control_plane.domain.planning_revision_proposals import (
+    PlanningRevisionProposalPayloadV5,
+)
+from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 from sidera_control_plane.domain.work_context import (
     WorkContext,
     WorkContextRevisionReason,
@@ -116,6 +147,7 @@ from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
+    WorkspaceLifecycle,
 )
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
@@ -215,8 +247,12 @@ _CAPTURE_ADAPTER_CAPABILITIES = WorkerAdapterCapabilityProfile(
 class _CaptureWorkerAdapter(FakeWorkerAdapter):
     _CAPABILITIES = _CAPTURE_ADAPTER_CAPABILITIES
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        capabilities: WorkerAdapterCapabilityProfile = _CAPTURE_ADAPTER_CAPABILITIES,
+    ) -> None:
         super().__init__()
+        self._CAPABILITIES = capabilities
         self.accepted_contexts: list[ContextMaterialization] = []
         self.start_calls: list[ExecutionSpec] = []
 
@@ -251,10 +287,27 @@ class _CaptureWorkerAdapter(FakeWorkerAdapter):
         operation_id: UUID,
     ) -> AdapterSessionHandle:
         self.start_calls.append(spec)
-        return super().start_session(spec, workspace, operation_id=operation_id)
+        handle = super().start_session(spec, workspace, operation_id=operation_id)
+        context = spec.context_package
+        if context is not None:
+            metadata = context.metadata
+            with self._lock:
+                session = self._sessions[handle.adapter_session_id]
+                session.handoff_context = (
+                    metadata.package_id,
+                    metadata.package_hash,
+                    metadata.context_version or 1,
+                )
+        return handle
 
 
 class _CaptureWorkspaceProvider:
+    def __init__(self) -> None:
+        self._manifests_by_location: dict[str, ExecutionWorkspaceManifest] = {}
+        self._handoff_transfers: dict[
+            UUID, tuple[UUID, ExecutionWorkspaceManifest]
+        ] = {}
+
     def prepare(
         self,
         spec: ExecutionSpec,
@@ -262,7 +315,7 @@ class _CaptureWorkspaceProvider:
         operation_id: UUID,
     ) -> ExecutionWorkspaceManifest:
         del operation_id
-        return ExecutionWorkspaceManifest.create(
+        manifest = ExecutionWorkspaceManifest.create(
             id=uuid4(),
             workspace_id=spec.workspace_id,
             task_id=spec.task_id,
@@ -280,12 +333,18 @@ class _CaptureWorkspaceProvider:
             fencing_token=spec.fencing_token,
             created_at=FROZEN_NOW,
         )
+        self._manifests_by_location[manifest.location_ref] = manifest
+        return manifest
 
     def freeze(
         self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
     ) -> ExecutionWorkspaceManifest:
         del operation_id
-        return manifest
+        current = self._manifests_by_location.get(manifest.location_ref, manifest)
+        if current.lifecycle is WorkspaceLifecycle.ACTIVE:
+            current.freeze(now=FROZEN_NOW)
+        self._manifests_by_location[current.location_ref] = current
+        return current
 
     def retain(
         self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
@@ -300,7 +359,69 @@ class _CaptureWorkspaceProvider:
         return manifest
 
     def inspect(self, location_ref: str) -> object:
-        raise RuntimeError(f"not implemented for {location_ref}")
+        manifest = self._manifests_by_location.get(location_ref)
+        if manifest is None:
+            raise RuntimeError(f"unknown capture workspace {location_ref}")
+        return manifest
+
+    def transfer_handoff(
+        self,
+        source_manifest: ExecutionWorkspaceManifest,
+        target: object,
+        *,
+        transition_id: UUID,
+        logical_attempt: int,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        del logical_attempt
+        if not isinstance(target, HandoffWorkspaceTargetSpec):
+            raise TypeError("capture workspace target must be typed")
+        target_manifest = ExecutionWorkspaceManifest.create(
+            id=uuid4(),
+            workspace_id=target.workspace_id,
+            task_id=target.task_id,
+            execution_id=target.target_execution_id,
+            checkouts=source_manifest.checkouts,
+            location_ref=source_manifest.location_ref,
+            retention_seconds=source_manifest.retention_seconds,
+            fencing_token=target.anticipated_fencing_token,
+            created_at=FROZEN_NOW,
+        )
+        target_manifest.mark_preparing()
+        target_manifest.mark_ready()
+        self._handoff_transfers[operation_id] = (source_manifest.id, target_manifest)
+        return target_manifest
+
+    def inspect_handoff_transfer(
+        self,
+        *,
+        transition_id: UUID,
+        logical_attempt: int,
+        operation_id: UUID,
+    ) -> HandoffWorkspaceInspection:
+        transfer = self._handoff_transfers.get(operation_id)
+        source_manifest_id = transfer[0] if transfer is not None else None
+        target_manifest = transfer[1] if transfer is not None else None
+        return HandoffWorkspaceInspection(
+            transition_id=transition_id,
+            logical_attempt=logical_attempt,
+            operation_id=operation_id,
+            outcome=(
+                HandoffInspectionOutcome.SUCCEEDED
+                if target_manifest is not None
+                else HandoffInspectionOutcome.ABSENT
+            ),
+            source_manifest_id=source_manifest_id,
+            target_manifest_id=(target_manifest.id if target_manifest is not None else None),
+            source_lifecycle=WorkspaceLifecycle.FROZEN.value
+            if source_manifest_id is not None
+            else None,
+            target_lifecycle=(
+                target_manifest.lifecycle.value if target_manifest is not None else None
+            ),
+            observed_at=FROZEN_NOW,
+            evidence_refs=("capture://handoff-transfer",),
+        )
 
 
 class ResultInputScenario:
@@ -320,6 +441,10 @@ class ResultInputScenario:
         )
         self._artifact_root = tmp_path / "result-input-artifacts"
         self._source_storage_refs: dict[str, str] = {}
+        self._capture_workspace_provider = _CaptureWorkspaceProvider()
+        self._capture_workspace_instance: ModuleInstance | None = None
+        self._capture_adapters_by_instance: dict[UUID, _CaptureWorkerAdapter] = {}
+        self._capture_workers_by_adapter_instance: dict[UUID, UUID] = {}
         self.ids: dict[str, UUID] = {
             name: uuid4()
             for name in (
@@ -587,6 +712,223 @@ class ResultInputScenario:
         self.complete_source("a", body=b"report-a\n")
         self.start_worker("summary")
 
+    def revise_group(self, *, minimum_count: int) -> object:
+        """Submit and confirm a real v5 Revision against the current plan head."""
+        if type(minimum_count) is not int or minimum_count < 1:
+            raise ValueError("minimum_count must be a positive integer")
+
+        with self.uow_factory() as uow:
+            root_task = uow.tasks.get(
+                self.ids["root_task"], self.workspace_id, for_update=True
+            )
+            head = uow.plans.get_head(
+                self.ids["root_task"], self.workspace_id, for_update=True
+            )
+            base_snapshot = uow.plans.get(head.active_snapshot_id, self.workspace_id)
+            original_request = uow.planning_requests.get(
+                self.ids["planning_request"], self.workspace_id
+            )
+            original_proposal = uow.planning_records.get_current_proposal(
+                self.ids["planning_request"], self.workspace_id
+            )
+            assert root_task is not None
+            assert head is not None
+            assert base_snapshot is not None
+            assert original_request is not None
+            assert original_proposal is not None
+            expected_root_version = root_task.version
+            expected_profile_id = original_request.profile_snapshot.profile_id
+            expected_profile_version = original_request.profile_snapshot.profile_version
+            raw = deepcopy(original_proposal.payload.to_mapping())
+
+        raw["kind"] = PlanningRequestKind.REVISION.value
+        raw["base_descriptor"] = {
+            "schema_version": 1,
+            "workspace_id": str(self.workspace_id),
+            "root_task_id": str(base_snapshot.root_task_id),
+            "plan_snapshot_id": str(base_snapshot.id),
+            "plan_generation": base_snapshot.generation,
+            "plan_content_hash": plan_snapshot_content_hash(base_snapshot),
+            "root_task_version": expected_root_version,
+            "captured_at": self.now.isoformat(),
+        }
+        raw["subtask_identity_decisions"] = [
+            {
+                "target_subtask_key": item.key,
+                "strategy": "reuse",
+                "existing_subtask_task_id": str(item.task_id),
+                "derived_from_subtask_task_ids": [],
+                "reason": "reuse stable Task identity",
+            }
+            for item in base_snapshot.subtasks
+        ]
+        raw["worker_item_identity_decisions"] = [
+            {
+                "target_worker_item_key": item.key,
+                "strategy": "reuse",
+                "existing_worker_item_id": str(item.worker_item_id),
+                "derived_from_worker_item_ids": [],
+                "target_subtask_key": item.subtask_key,
+                "context_disposition": (
+                    "patch_required" if item.key == "summary" else "unchanged"
+                ),
+                "change_reasons": (
+                    ["result input quorum changed"] if item.key == "summary" else []
+                ),
+            }
+            for item in base_snapshot.worker_item_plans
+        ]
+        raw["retired_subtask_ids"] = []
+        raw["retired_worker_item_ids"] = []
+        impact_policy = raw.get("impact_policy")
+        assert isinstance(impact_policy, dict)
+        impact_policy["revision_operation"] = "revise"
+        policy = raw.get("collaboration_policy_request")
+        assert isinstance(policy, dict)
+        groups = policy.get("input_groups")
+        assert isinstance(groups, list)
+        group = next(item for item in groups if item["group_key"] == "research")
+        group["minimum_count"] = minimum_count
+        payload = PlanningRevisionProposalPayloadV5.from_mapping(raw)
+
+        submit = CommandService(
+            self.uow_factory,
+            (
+                PlanningCommandHandler(
+                    local_actor_type="local",
+                    local_actor_id="operator",
+                    clock=self.clock,
+                ),
+            ),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="SubmitPlanRevision",
+                target_type="task",
+                actor_type="local",
+                actor_id="operator",
+                target_id=self.ids["root_task"],
+                payload={
+                    "root_task_id": str(self.ids["root_task"]),
+                    "expected_base_snapshot_id": str(base_snapshot.id),
+                    "expected_base_generation": base_snapshot.generation,
+                    "expected_base_content_hash": plan_snapshot_content_hash(
+                        base_snapshot
+                    ),
+                    "objective": "Revise the result quorum without changing worker identities",
+                    "constraints": ["Keep the running execution input immutable"],
+                    "acceptance_criteria": ["The next execution receives the new quorum"],
+                    "planning_profile_id": str(expected_profile_id),
+                    "planning_profile_version": expected_profile_version,
+                },
+                expected_version=expected_root_version,
+                idempotency_key=(
+                    f"result-input-revision-submit:{self.ids['root_task']}"
+                ),
+                correlation_id=self.ids["root_task"],
+            )
+        )
+        revision_request_id = submit.aggregate_id
+
+        with self.uow_factory() as uow:
+            revision_request = uow.planning_requests.get(
+                revision_request_id, self.workspace_id, for_update=True
+            )
+            assert revision_request is not None
+            run = revision_request.runs[0]
+            previous_request_version = revision_request.version
+            previous_run_version = run.version
+            lease_id = uuid4()
+            revision_request.start_planning(
+                run_id=run.id,
+                lease_id=lease_id,
+                fencing_token=1,
+                now=self.now,
+            )
+            revision_request.succeed_run(
+                run_id=run.id,
+                lease_id=lease_id,
+                fencing_token=1,
+                provider_ref="fake:result-input-revision",
+                structured_result_type="planning.proposal.v5",
+                usage=run.usage,
+                now=self.now,
+            )
+            resolved_policy = resolve_collaboration_policy_v2(
+                payload.collaboration_policy_request,
+                revision_request.profile_snapshot.collaboration_runtime_binding,
+                subtask_keys=frozenset(item.key for item in payload.subtasks),
+            )
+            diff = RevisionDiffNormalizer().normalize(
+                base_snapshot,
+                payload,
+                collaboration_policy=resolved_policy,
+            )
+            proposal = ProposalRevision.create(
+                planning_request_id=revision_request.id,
+                revision=1,
+                brief_revision=1,
+                planning_run_id=run.id,
+                kind=revision_request.kind,
+                payload=payload,
+                profile_descriptor=PlanningProfileDescriptor.from_snapshot(
+                    revision_request.profile_snapshot
+                ),
+                profile_snapshot=revision_request.profile_snapshot,
+                created_at=self.now,
+                derived_diff=diff,
+            )
+            revision_request.mark_proposal_ready(
+                run_id=run.id,
+                proposal_revision=proposal.revision,
+                content_hash=proposal.content_hash,
+                now=self.now,
+            )
+            uow.planning_records.add_proposal(proposal, self.workspace_id)
+            uow.planning_runs.save(run, previous_run_version)
+            uow.planning_requests.save(revision_request, previous_request_version)
+            expected_request_version = revision_request.version
+
+        confirmed = CommandService(
+            self.uow_factory,
+            (
+                PlanningCommandHandler(
+                    local_actor_type="local",
+                    local_actor_id="operator",
+                    clock=self.clock,
+                ),
+            ),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ConfirmPlanRevision",
+                target_type="planning_request",
+                actor_type="local",
+                actor_id="operator",
+                target_id=revision_request_id,
+                payload={
+                    "expected_proposal_revision": proposal.revision,
+                    "expected_proposal_content_hash": proposal.content_hash,
+                    "expected_diff_hash": diff.diff_hash,
+                    "expected_base_snapshot_id": str(base_snapshot.id),
+                    "expected_base_content_hash": plan_snapshot_content_hash(
+                        base_snapshot
+                    ),
+                    "profile_id": str(expected_profile_id),
+                    "profile_version": expected_profile_version,
+                },
+                expected_version=expected_request_version,
+                idempotency_key=(
+                    f"result-input-revision-confirm:{revision_request_id}"
+                ),
+                correlation_id=self.ids["root_task"],
+            )
+        )
+        self.ids["revision_request"] = revision_request_id
+        return confirmed
+
     def complete_source(self, key: str, *, body: bytes, evidence: bool = True) -> UUID:
         self._ensure_source_executions()
         execution_id = self._execution_id(key)
@@ -712,6 +1054,19 @@ class ResultInputScenario:
         assert isinstance(package, ContextPackageManifestV2)
         return package
 
+    def context_package_for_execution(self, execution_id: UUID) -> object:
+        with self.uow_factory() as uow:
+            for schema_version in (2, 1):
+                package = uow.context_packages.get_for_consumer(
+                    ContextPurpose.EXECUTION,
+                    execution_id,
+                    self.workspace_id,
+                    manifest_schema_version=schema_version,
+                )
+                if package is not None:
+                    return package
+        raise AssertionError("execution context package was not found")
+
     def run_context_worker(self, key: str):
         return ContextPackageWorker(
             uow_factory=self.uow_factory,
@@ -725,7 +1080,6 @@ class ResultInputScenario:
         execution_id = self._execution_id(key)
         assert execution_id is not None
         adapter = _CaptureWorkerAdapter()
-        workspace_provider = _CaptureWorkspaceProvider()
         self._install_capture_runtime(execution_id, adapter)
 
         scheduled = Scheduler(
@@ -736,11 +1090,177 @@ class ResultInputScenario:
         ).run_once(limit=20)
         assert scheduled.assigned == 1
         message = self._assignment_message(execution_id)
-        gateway = WorkerGateway(
+        self._capture_adapter = adapter
+        self._capture_adapters_by_key.setdefault(key, []).append(adapter)
+        gateway = self._capture_gateway()
+        self._gateway = gateway
+        return gateway.handle(message)
+
+    def handoff_worker(
+        self,
+        key: str,
+        *,
+        target_context_versions: tuple[int, ...],
+        workspace_mode: str,
+    ) -> HandoffTransition:
+        """Prepare, confirm, and drive one real WorkerItem handoff."""
+
+        if not workspace_mode.strip():
+            raise ValueError("workspace_mode is required")
+        source_execution_id = self.latest_execution_id(key)
+        source_workspace_instance = self._capture_workspace_instance
+        if source_workspace_instance is None:
+            raise AssertionError("source capture workspace runtime is not installed")
+        source_adapters = self._capture_adapters_by_key.get(key, ())
+        if not source_adapters:
+            raise AssertionError("source capture adapter runtime is not installed")
+        for handle in source_adapters[0].active_sessions():
+            source_adapters[0].release_boundary(handle)
+
+        target_adapter = _CaptureWorkerAdapter(
+            capabilities=replace(
+                _CAPTURE_ADAPTER_CAPABILITIES,
+                context_package_versions=tuple(target_context_versions),
+            )
+        )
+        target_worker_id, _adapter_instance_id, _workspace_instance_id = (
+            self._install_capture_runtime(
+                source_execution_id,
+                target_adapter,
+                workspace_mode=workspace_mode,
+                reuse_workspace_instance=source_workspace_instance,
+            )
+        )
+        self._capture_adapter = target_adapter
+        self._capture_adapters_by_key.setdefault(key, []).append(target_adapter)
+
+        runtime_resolver = WorkerRuntimeResolver()
+        candidates = HandoffCandidateService(
             self.uow_factory,
-            adapter_factories={"capture": lambda _instance: adapter},
+            runtime_resolver=runtime_resolver,
+        )
+        handoff_commands = CommandService(
+            self.uow_factory,
+            (
+                HandoffCommandHandler(
+                    self.clock,
+                    candidate_service=candidates,
+                    runtime_resolver=runtime_resolver,
+                ),
+            ),
+        )
+        with self.uow_factory() as uow:
+            worker_item = uow.worker_items.get(
+                self.worker_item_ids[key], self.workspace_id
+            )
+            assert worker_item is not None
+            worker_item_version = worker_item.version
+        prepare = handoff_commands.handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="PrepareWorkerHandoff",
+                target_type="worker_item",
+                actor_type="operator",
+                actor_id="operator",
+                target_id=self.worker_item_ids[key],
+                expected_version=worker_item_version,
+                payload={
+                    "target_worker_id": str(target_worker_id),
+                    "handoff_reason": "exercise result-input handoff reuse",
+                    "handoff_instruction": "continue from the fixed result inputs",
+                    "input_plan": {},
+                    "proposal_ttl_seconds": 900,
+                },
+                idempotency_key=(
+                    f"result-input-handoff-prepare:{self.worker_item_ids[key]}"
+                ),
+                correlation_id=self.ids["root_task"],
+            )
+        )
+        proposal = prepare.data.get("proposal")
+        assert isinstance(proposal, dict)
+        proposal_id = UUID(str(proposal["id"]))
+        proposal_version = int(proposal["version"])
+        proposal_hash = str(proposal["proposal_hash"])
+        confirm = handoff_commands.handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ConfirmWorkerHandoff",
+                target_type="handoff_proposal",
+                actor_type="operator",
+                actor_id="operator",
+                target_id=proposal_id,
+                expected_version=proposal_version,
+                payload={
+                    "proposal_id": str(proposal_id),
+                    "expected_proposal_version": proposal_version,
+                    "expected_proposal_hash": proposal_hash,
+                    "expected_worker_item_version": worker_item_version,
+                },
+                idempotency_key=(
+                    f"result-input-handoff-confirm:{self.worker_item_ids[key]}"
+                ),
+                correlation_id=self.ids["root_task"],
+            )
+        )
+        transition_id = confirm.aggregate_id
+        workspace_handoff = WorkspaceHandoffService(
+            self._capture_workspace_provider,
+            uow_factory=self.uow_factory,
+        )
+        context_service = HandoffContextService(self.uow_factory)
+        coordinator = HandoffCoordinator(
+            uow_factory=self.uow_factory,
+            gateway=self._capture_gateway(),
+            workspace_handoff=workspace_handoff,
+            target_service=HandoffTargetService(self.uow_factory),
+            context_service=context_service,
+            input_transfer=HandoffInputTransferService(self.uow_factory),
+            scheduler=Scheduler(
+                self.uow_factory,
+                LowestCostWorkerPolicy(),
+                self.clock,
+                context_enforcement=True,
+            ),
+            clock=self.clock,
+            owner_id="result-input-handoff-coordinator",
+        )
+        context_worker = ContextPackageWorker(
+            uow_factory=self.uow_factory,
+            catalog=_EmptyCatalog(),
+            owner_id="result-input-handoff-context",
+            lease_seconds=60,
+            clock=self.clock,
+        )
+        for _ in range(40):
+            coordinator.run_once(limit=1)
+            context_worker.run_once(limit=20)
+            with self.uow_factory() as uow:
+                transition = uow.handoff_transitions.get(
+                    transition_id, self.workspace_id
+                )
+                assert transition is not None
+                if transition.status in {
+                    HandoffTransitionStatus.CONVERGED,
+                    HandoffTransitionStatus.BLOCKED,
+                    HandoffTransitionStatus.BLOCKED_UNKNOWN,
+                    HandoffTransitionStatus.FAILED,
+                }:
+                    return transition
+        raise AssertionError("handoff did not reach a terminal state")
+
+    def _capture_gateway(self) -> WorkerGateway:
+        return WorkerGateway(
+            self.uow_factory,
+            adapter_factories={
+                "capture": lambda instance: self._capture_adapters_by_instance[
+                    instance.id
+                ],
+            },
             workspace_factories={
-                "capture-workspace": lambda _instance: workspace_provider
+                "capture-workspace": lambda _instance: self._capture_workspace_provider
             },
             artifact_content_store=self.artifact_store,
             context_materializer=ContextMaterializer(
@@ -752,10 +1272,6 @@ class ResultInputScenario:
             ),
             clock=self.clock,
         )
-        self._capture_adapter = adapter
-        self._capture_adapters_by_key.setdefault(key, []).append(adapter)
-        self._gateway = gateway
-        return gateway.handle(message)
 
     def captured_context(self, key: str) -> ContextMaterialization:
         adapters = self._capture_adapters_by_key.get(key, ())
@@ -770,6 +1286,57 @@ class ResultInputScenario:
         return sum(
             len(adapter.start_calls)
             for adapter in self._capture_adapters_by_key.get(key, ())
+        )
+
+    def send_worker_input(
+        self,
+        key: str,
+        *,
+        text: str,
+        attachment_refs: tuple[str, ...] = (),
+    ) -> object:
+        execution_id = self.latest_execution_id(key)
+        context = self.captured_context(key)
+        with self.uow_factory() as uow:
+            session = uow.sessions.get_active_for_execution(execution_id)
+            snapshot = uow.plans.get_current_for_root(
+                self.ids["root_task"], self.workspace_id
+            )
+            assert session is not None
+            assert snapshot is not None
+            session_version = session.version
+            worker_id = session.worker_id
+        command_id = uuid4()
+        return CommandService(
+            self.uow_factory,
+            (ExecutionInputCommandHandler(self.clock),),
+        ).handle(
+            CommandEnvelope(
+                id=command_id,
+                workspace_id=self.workspace_id,
+                command_type="SendExecutionInput",
+                target_type="execution_session",
+                actor_type="operator",
+                actor_id="operator",
+                target_id=session.id,
+                payload={
+                    "context": {
+                        "worker_item_id": str(self.worker_item_ids[key]),
+                        "plan_generation": snapshot.generation,
+                        "context_version": context.metadata.context_version,
+                        "execution_id": str(execution_id),
+                        "session_id": str(session.id),
+                        "session_version": session_version,
+                        "worker_id": str(worker_id),
+                    },
+                    "client_idempotency_key": f"result-input-intervention:{key}",
+                    "text": text,
+                    "attachment_refs": list(attachment_refs),
+                },
+                expected_version=session_version,
+                idempotency_key=f"result-input-intervention-command:{key}",
+                correlation_id=self.ids["root_task"],
+            )
         )
 
     def retry_envelope(
@@ -944,13 +1511,21 @@ class ResultInputScenario:
             )
 
     def _install_capture_runtime(
-        self, execution_id: UUID, adapter: _CaptureWorkerAdapter
-    ) -> None:
+        self,
+        execution_id: UUID,
+        adapter: _CaptureWorkerAdapter,
+        *,
+        workspace_mode: str = "managed",
+        reuse_workspace_instance: ModuleInstance | None = None,
+    ) -> tuple[UUID, UUID, UUID]:
         workspace_capabilities = WorkspaceProviderCapabilityProfile(
             isolation=SandboxCapability.FILESYSTEM,
             writable=True,
             git_worktree=True,
             stability=StabilityLevel.STABLE,
+            workspace_handoff_versions=(1,),
+            workspace_transfer_modes=(HandoffTransferMode.REUSE_EXACT,),
+            handoff_inspection=True,
         )
         with self.uow_factory() as uow:
             execution = uow.executions.get(execution_id, self.workspace_id)
@@ -976,46 +1551,52 @@ class ResultInputScenario:
                 capabilities=adapter._CAPABILITIES,
                 lifecycle=ModuleLifecycle.ACTIVE,
             )
-            workspace_definition = ModuleDefinition(
-                id=uuid4(),
-                workspace_id=self.workspace_id,
-                module_type="workspace_provider",
-                provider="capture-workspace",
-                interface_version="sidera.workspace-provider.v1",
-                config_schema_version=1,
-                capabilities=workspace_capabilities,
-                lifecycle=ModuleLifecycle.ACTIVE,
-            )
             adapter_instance = ModuleInstance(
                 id=uuid4(),
                 workspace_id=self.workspace_id,
                 definition_id=adapter_definition.id,
-                instance_name=f"result-input-capture-adapter-{execution_id}",
+                instance_name=f"result-input-capture-adapter-{worker.id}",
                 config_version=1,
                 config_namespace="adapter",
-                config={"adapter.mode": "capture"},
+                config={"adapter.mode": workspace_mode},
                 secret_refs=(),
                 lifecycle=ModuleLifecycle.ACTIVE,
             )
-            workspace_instance = ModuleInstance(
-                id=uuid4(),
-                workspace_id=self.workspace_id,
-                definition_id=workspace_definition.id,
-                instance_name=f"result-input-capture-workspace-{execution_id}",
-                config_version=1,
-                config_namespace="workspace",
-                config={
-                    "workspace.repository_ref": "repo://sidera",
-                    "workspace.base_revision": "a" * 40,
-                },
-                secret_refs=(),
-                lifecycle=ModuleLifecycle.ACTIVE,
-            )
+            if reuse_workspace_instance is None:
+                workspace_definition = ModuleDefinition(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    module_type="workspace_provider",
+                    provider="capture-workspace",
+                    interface_version="sidera.workspace-provider.v1",
+                    config_schema_version=1,
+                    capabilities=workspace_capabilities,
+                    lifecycle=ModuleLifecycle.ACTIVE,
+                )
+                workspace_instance = ModuleInstance(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    definition_id=workspace_definition.id,
+                    instance_name=f"result-input-capture-workspace-{worker.id}",
+                    config_version=1,
+                    config_namespace="workspace",
+                    config={
+                        "workspace.repository_ref": "repo://sidera",
+                        "workspace.base_revision": "a" * 40,
+                    },
+                    secret_refs=(),
+                    lifecycle=ModuleLifecycle.ACTIVE,
+                )
+            else:
+                workspace_definition = None
+                workspace_instance = reuse_workspace_instance
             uow.workers.add(worker)
             uow.modules.add_definition(adapter_definition)
-            uow.modules.add_definition(workspace_definition)
+            if workspace_definition is not None:
+                uow.modules.add_definition(workspace_definition)
             uow.modules.add_instance(adapter_instance)
-            uow.modules.add_instance(workspace_instance)
+            if reuse_workspace_instance is None:
+                uow.modules.add_instance(workspace_instance)
             uow.worker_runtime_configurations.add(
                 WorkerRuntimeConfiguration.create(
                     worker_id=worker.id,
@@ -1026,6 +1607,11 @@ class ResultInputScenario:
                     workspace_module_config_version=1,
                 )
             )
+        self._capture_adapters_by_instance[adapter_instance.id] = adapter
+        self._capture_workers_by_adapter_instance[adapter_instance.id] = worker.id
+        if self._capture_workspace_instance is None:
+            self._capture_workspace_instance = workspace_instance
+        return worker.id, adapter_instance.id, workspace_instance.id
 
     def _assignment_message(self, execution_id: UUID) -> OutboxMessage:
         with self.database.session() as session:

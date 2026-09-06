@@ -20,7 +20,11 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV1,
     ContextPurpose,
 )
-from sidera_control_plane.domain.execution import Execution, ExecutionStatus
+from sidera_control_plane.domain.execution import (
+    Execution,
+    ExecutionSessionStatus,
+    ExecutionStatus,
+)
 from sidera_control_plane.domain.execution_requests import ExecutionRequest
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
@@ -83,6 +87,23 @@ class MemoryRepository:
         if value is None or value.workspace_id != workspace_id:
             return None
         return value
+
+    def get_effective_by_execution_lineage(
+        self,
+        execution_lineage_id: UUID,
+        workspace_id: UUID,
+        **_kwargs: object,
+    ) -> Any | None:
+        return next(
+            (
+                value
+                for value in self.values.values()
+                if getattr(value, "workspace_id", None) == workspace_id
+                and getattr(value, "execution_lineage_id", None)
+                == execution_lineage_id
+            ),
+            None,
+        )
 
 
 class BundleRepository(MemoryRepository):
@@ -181,6 +202,18 @@ class MemoryUnitOfWork:
         )
         self.executions = MemoryRepository(
             (fixture.source_execution, fixture.target_execution)
+        )
+        self.sessions = SimpleNamespace(
+            get_any=lambda session_id, workspace_id, **_kwargs: (
+                SimpleNamespace(
+                    id=session_id,
+                    workspace_id=workspace_id,
+                    execution_id=fixture.source_execution.id,
+                    status=ExecutionSessionStatus.CLOSED,
+                )
+                if session_id == fixture.source_facts.checkpoint.source_session_id
+                else None
+            )
         )
         self.workspaces = MemoryRepository((fixture.source_manifest,))
         self.context_packages = PackageRepository((fixture.source_package,))

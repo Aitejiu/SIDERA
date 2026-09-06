@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
 
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
+)
 from sidera_control_plane.application.errors import Conflict, NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.worker_policy import (
@@ -66,6 +70,8 @@ _BLOCKING_CODE_ORDER = (
     "handoff_operation_unknown",
     "handoff_runtime_incompatible",
     "handoff_checkpoint_unsupported",
+    "context_input_selection_scope_invalid",
+    "input_selection_stale",
     "handoff_workspace_incompatible",
     "handoff_trust_boundary_mismatch",
 )
@@ -163,10 +169,22 @@ class HandoffCandidateService:
             workspace_id=workspace_id,
         )
         manifest = uow.workspaces.get_for_execution(execution.id, workspace_id)
+        try:
+            authorization = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError:
+            authorization = None
+            source_authorization_error = True
+        else:
+            source_authorization_error = False
+        source_requires_v2 = bool(
+            authorization is not None
+            and authorization.request.input_selection_id is not None
+        )
         package = uow.context_packages.get_for_consumer(
             ContextPurpose.EXECUTION,
             execution.id,
             workspace_id,
+            manifest_schema_version=2 if source_requires_v2 else 1,
         )
         plan_head = uow.plans.get_head(worker_item.root_task_id, workspace_id)
         plan_transitions = uow.plan_transitions.list_for_root(
@@ -227,6 +245,10 @@ class HandoffCandidateService:
         if source_runtime is None:
             blocking_codes.add("handoff_runtime_incompatible")
         else:
+            if source_authorization_error:
+                blocking_codes.add("context_input_selection_scope_invalid")
+            if source_requires_v2 and getattr(package, "manifest_schema_version", 1) != 2:
+                blocking_codes.add("input_selection_stale")
             if not _source_checkpoint_supported(source_runtime.capability_snapshot):
                 blocking_codes.add("handoff_checkpoint_unsupported")
             if not _source_workspace_ready(manifest, execution, package, worker_item):
@@ -242,6 +264,7 @@ class HandoffCandidateService:
             source_runtime=source_runtime,
             workers=visible_workers,
             resolved_by_worker=resolved_by_worker,
+            source_requires_v2=source_requires_v2,
             now=now,
         )
 
@@ -340,6 +363,7 @@ class HandoffCandidateService:
         source_runtime: ResolvedWorkerRuntime | None,
         workers: tuple[Worker, ...],
         resolved_by_worker: Mapping[UUID, ResolvedWorkerRuntime | None],
+        source_requires_v2: bool,
         now: datetime,
     ) -> tuple[tuple[Worker, HandoffCandidateInspection], ...]:
         evaluated: list[tuple[Worker, HandoffCandidateInspection]] = []
@@ -352,6 +376,7 @@ class HandoffCandidateService:
                 execution=execution,
                 source_runtime=source_runtime,
                 target_runtime=runtime,
+                source_requires_v2=source_requires_v2,
                 now=now,
                 heartbeat_timeout=self._heartbeat_timeout,
             )
@@ -420,6 +445,7 @@ def _target_eligibility(
     execution: Execution,
     source_runtime: ResolvedWorkerRuntime | None,
     target_runtime: ResolvedWorkerRuntime | None,
+    source_requires_v2: bool,
     now: datetime,
     heartbeat_timeout: timedelta,
 ) -> tuple[str | None, dict[str, object]]:
@@ -448,6 +474,8 @@ def _target_eligibility(
     target_adapter = target_runtime.capability_snapshot
     if not isinstance(target_adapter, WorkerAdapterCapabilityProfile):
         return "handoff_runtime_incompatible", workspace_compatibility
+    if source_requires_v2 and 2 not in target_adapter.context_package_versions:
+        return "result_input_adapter_unsupported", workspace_compatibility
     if 1 not in target_adapter.handoff_session_context_versions:
         return "handoff_context_binding_unsupported", workspace_compatibility
     if 1 not in target_adapter.handoff_writer_gate_versions:

@@ -8,7 +8,11 @@ from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    build_derived_execution_context_assembly_request,
     build_execution_context_assembly_request,
+    load_execution_context_selection,
+    resolve_execution_context_authorization,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.context_packages import (
@@ -314,30 +318,76 @@ class HandoffContextService:
             uow.handoff_context_bundles.add_append_only(candidate_bundle)
             bundle = candidate_bundle
 
-        request_candidate = build_execution_context_assembly_request(
-            execution=target_execution,
-            execution_request=target_request,
-            worker_item=worker_item,
-            work_context_revision=context_revision,
-            ttl_seconds=self._context_ttl_seconds,
-            created_at=bundle.created_at,
-            request_id=uuid5(
+        try:
+            authorization = resolve_execution_context_authorization(
+                uow, target_execution
+            )
+            selection = (
+                load_execution_context_selection(uow, authorization.request)
+                if authorization is not None
+                else None
+            )
+            request_id = uuid5(
                 _HANDOFF_CONTEXT_NAMESPACE,
                 f"sidera:handoff-context-request:{current.id}:"
                 f"{current.logical_attempt}:{target_execution.id}",
-            ),
-            idempotency_key=(
+            )
+            idempotency_key = (
                 f"context:handoff:{current.id}:attempt:{current.logical_attempt}:"
-                f"execution:{target_execution.id}:v1"
-            ),
-            additional_fact_scope_refs=("handoff_context_bundle",),
-            additional_budget={
+                f"execution:{target_execution.id}:"
+                + (
+                    f"v2:selection:{selection.selection_hash}"
+                    if selection is not None
+                    else "v1"
+                )
+            )
+            additional_budget = {
                 "handoff_context_bundle_id": str(bundle.id),
                 "handoff_context_bundle_hash": bundle.bundle_hash,
                 "handoff_transition_id": str(current.id),
                 "handoff_logical_attempt": current.logical_attempt,
-            },
-        )
+            }
+            if authorization is None:
+                # Historical handoff fixtures and pre-selection plans have no
+                # source request to inherit. Preserve their explicit v1
+                # contract; a selection-bearing source never reaches here.
+                request_candidate = build_execution_context_assembly_request(
+                    execution=target_execution,
+                    execution_request=target_request,
+                    worker_item=worker_item,
+                    work_context_revision=context_revision,
+                    ttl_seconds=self._context_ttl_seconds,
+                    created_at=bundle.created_at,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    additional_fact_scope_refs=("handoff_context_bundle",),
+                    additional_budget=additional_budget,
+                )
+            else:
+                request_candidate = build_derived_execution_context_assembly_request(
+                    uow=uow,
+                    execution=target_execution,
+                    inheritance_kind="handoff",
+                    source_execution_id=current.source_execution_id,
+                    source_session_id=current.source_session_id,
+                    ttl_seconds=self._context_ttl_seconds,
+                    created_at=bundle.created_at,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    additional_fact_scope_refs=("handoff_context_bundle",),
+                    additional_budget=additional_budget,
+                    work_context_revision=context_revision,
+                )
+        except (ExecutionContextAuthorizationError, ValueError) as exc:
+            raise HandoffContextError(
+                "handoff target input Selection authorization is invalid",
+                code="handoff_context_input_selection_invalid",
+            ) from exc
+        if request_candidate is None:
+            raise HandoffContextError(
+                "handoff target input Selection authority is missing",
+                code="handoff_context_input_selection_invalid",
+            )
         request = uow.context_assemblies.add(request_candidate)
         if current.handoff_context_bundle_id is None:
             previous_version = current.version
@@ -385,10 +435,36 @@ class HandoffContextService:
                     "handoff context Bundle is stale",
                     code="handoff_context_bundle_stale",
                 )
+            target_execution = uow.executions.get(
+                target_execution_id,
+                workspace_id,
+                for_update=True,
+            )
+            if target_execution is None:
+                raise HandoffContextError(
+                    "handoff target execution is missing",
+                    code="handoff_target_execution_missing",
+                )
+            try:
+                authorization = resolve_execution_context_authorization(
+                    uow, target_execution
+                )
+                selection = (
+                    load_execution_context_selection(uow, authorization.request)
+                    if authorization is not None
+                    else None
+                )
+            except (ExecutionContextAuthorizationError, ValueError) as exc:
+                raise HandoffContextError(
+                    "handoff target input Selection authorization is invalid",
+                    code="handoff_context_input_selection_invalid",
+                ) from exc
+            manifest_schema_version = 2 if selection is not None else 1
             assembly = uow.context_assemblies.get_for_consumer(
                 ContextPurpose.EXECUTION,
                 target_execution_id,
                 workspace_id,
+                manifest_schema_version=manifest_schema_version,
                 for_update=True,
             )
             if assembly is None:
@@ -418,6 +494,7 @@ class HandoffContextService:
                 ContextPurpose.EXECUTION,
                 target_execution_id,
                 workspace_id,
+                manifest_schema_version=manifest_schema_version,
                 for_update=True,
             )
             if package is None:
@@ -459,6 +536,22 @@ class HandoffContextService:
                     "handoff target ContextPackage consumer facts are stale",
                     code="handoff_context_package_stale",
                 )
+            if selection is not None:
+                result_input_manifest = getattr(package, "result_input_manifest", None)
+                if (
+                    assembly.manifest_schema_version != 2
+                    or assembly.input_selection_id != selection.id
+                    or assembly.input_selection_hash != selection.selection_hash
+                    or package.manifest_schema_version != 2
+                    or result_input_manifest is None
+                    or result_input_manifest.input_selection_id != selection.id
+                    or result_input_manifest.input_selection_hash
+                    != selection.selection_hash
+                ):
+                    raise HandoffContextError(
+                        "handoff target input Selection package is stale",
+                        code="handoff_context_input_selection_stale",
+                    )
             handoff_facts = package.control_plane_fact_snapshot.get("handoff")
             if (
                 not isinstance(handoff_facts, Mapping)
@@ -525,6 +618,39 @@ class HandoffContextService:
             or package.context_version != source_facts.source_worker_context_version
         ):
             raise HandoffContextError("handoff source ContextPackage facts changed")
+        source_execution = uow.executions.get(
+            transition.source_execution_id,
+            transition.workspace_id,
+        )
+        try:
+            authorization = (
+                resolve_execution_context_authorization(uow, source_execution)
+                if source_execution is not None
+                else None
+            )
+            selection = (
+                load_execution_context_selection(uow, authorization.request)
+                if authorization is not None
+                else None
+            )
+        except (ExecutionContextAuthorizationError, ValueError) as exc:
+            raise HandoffContextError(
+                "handoff source input Selection authorization is invalid",
+                code="handoff_context_source_input_selection_invalid",
+            ) from exc
+        if selection is not None:
+            result_input_manifest = getattr(package, "result_input_manifest", None)
+            if (
+                package.manifest_schema_version != 2
+                or result_input_manifest is None
+                or result_input_manifest.input_selection_id != selection.id
+                or result_input_manifest.input_selection_hash
+                != selection.selection_hash
+            ):
+                raise HandoffContextError(
+                    "handoff source ContextPackage input Selection is stale",
+                    code="handoff_context_source_input_selection_stale",
+                )
         return package
 
     @staticmethod

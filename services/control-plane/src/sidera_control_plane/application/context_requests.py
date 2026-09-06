@@ -100,6 +100,34 @@ def resolve_execution_context_authorization(
                 execution=current,
                 request=request,
             )
+            # Handoff targets intentionally keep an unmanaged request. Their
+            # fixed result-input authority lives on the source lineage, so a
+            # target request without a Selection must continue through its
+            # explicit source execution/session link.
+            if (
+                request.input_selection_id is None
+                and request.source_execution_id is not None
+                and request.source_session_id is not None
+            ):
+                if first_source_execution_id is None:
+                    first_source_execution_id = request.source_execution_id
+                    first_source_session_id = request.source_session_id
+                parent = uow.executions.get(
+                    request.source_execution_id,
+                    execution.workspace_id,
+                )
+                source_session = uow.sessions.get_any(
+                    request.source_session_id,
+                    execution.workspace_id,
+                )
+                _validate_source_link(
+                    child=current,
+                    parent=parent,
+                    source_session=source_session,
+                )
+                assert parent is not None
+                current = parent
+                continue
             request_lineage_id = request.execution_lineage_id or current.lineage_id
             return ExecutionContextAuthorization(
                 request=request,
@@ -172,15 +200,21 @@ def build_derived_execution_context_assembly_request(
     source_session_id: UUID | None,
     ttl_seconds: int,
     created_at: datetime,
+    request_id: UUID | None = None,
+    idempotency_key: str | None = None,
+    additional_fact_scope_refs: Sequence[str] = (),
+    additional_budget: Mapping[str, object] | None = None,
+    work_context_revision: WorkContextRevision | None = None,
 ) -> ContextAssemblyRequest | None:
-    """Build a new consumer package request for retry or continuation."""
+    """Build a new consumer package request for a derived execution."""
 
     authorization = resolve_execution_context_authorization(uow, execution)
     if authorization is None:
         return None
     if not inheritance_kind.strip():
         raise ValueError("execution context inheritance kind is required")
-    if inheritance_kind.strip() == "continuation":
+    clean_kind = inheritance_kind.strip()
+    if clean_kind == "continuation":
         if authorization.source_execution_id != source_execution_id:
             raise ExecutionContextAuthorizationError(
                 "execution context inheritance source execution does not match"
@@ -189,12 +223,27 @@ def build_derived_execution_context_assembly_request(
             raise ExecutionContextAuthorizationError(
                 "execution context inheritance source Session does not match"
             )
-    elif authorization.inherited and (
-        authorization.source_execution_id != source_execution_id
-        or authorization.source_session_id != source_session_id
-    ):
+    elif clean_kind == "handoff":
+        if not authorization.inherited or (
+            authorization.source_execution_id != execution.source_execution_id
+            or authorization.source_session_id != execution.source_session_id
+            or authorization.source_execution_id != source_execution_id
+            or authorization.source_session_id != source_session_id
+        ):
+            raise ExecutionContextAuthorizationError(
+                "execution context handoff source link does not match"
+            )
+    elif clean_kind == "retry":
+        if authorization.inherited and (
+            authorization.source_execution_id != source_execution_id
+            or authorization.source_session_id != source_session_id
+        ):
+            raise ExecutionContextAuthorizationError(
+                "execution context retry source link does not match"
+            )
+    else:
         raise ExecutionContextAuthorizationError(
-            "execution context retry source link does not match"
+            "unsupported execution context inheritance kind"
         )
     if execution.worker_item_id is None:
         raise ExecutionContextAuthorizationError(
@@ -205,31 +254,30 @@ def build_derived_execution_context_assembly_request(
         raise ExecutionContextAuthorizationError(
             "derived execution WorkerItem is unavailable"
         )
-    work_context = uow.work_contexts.get_by_planning_request(
-        authorization.request.planning_request_id,
-        execution.workspace_id,
-    )
-    if work_context is None:
-        work_context = uow.work_contexts.get_by_root_task(
-            authorization.request.root_task_id,
+    revision = work_context_revision
+    if revision is None:
+        work_context = uow.work_contexts.get_by_planning_request(
+            authorization.request.planning_request_id,
             execution.workspace_id,
         )
-    if work_context is None:
-        raise ExecutionContextAuthorizationError(
-            "derived execution WorkContext is unavailable"
-        )
-    revision = uow.work_contexts.get_revision(
-        work_context.current_revision_id,
-        execution.workspace_id,
-    )
+        if work_context is None:
+            work_context = uow.work_contexts.get_by_root_task(
+                authorization.request.root_task_id,
+                execution.workspace_id,
+            )
+        if work_context is not None:
+            revision = uow.work_contexts.get_revision(
+                work_context.current_revision_id,
+                execution.workspace_id,
+            )
     if revision is None:
         raise ExecutionContextAuthorizationError(
             "derived execution WorkContext revision is unavailable"
         )
     selection = load_execution_context_selection(uow, authorization.request)
-    inherited_budget = {
+    inherited_budget: dict[str, object] = {
         "execution_context_inheritance": {
-            "kind": inheritance_kind.strip(),
+            "kind": clean_kind,
             "authorization_request_id": str(authorization.request.id),
             "source_execution_id": str(source_execution_id),
             "source_session_id": (
@@ -238,6 +286,14 @@ def build_derived_execution_context_assembly_request(
             "source_lineage_id": str(authorization.source_lineage_id),
         }
     }
+    if additional_budget:
+        overlap = set(inherited_budget).intersection(additional_budget)
+        if overlap:
+            raise ValueError(
+                "derived execution context budget already owns: "
+                + ", ".join(sorted(overlap))
+            )
+        inherited_budget.update(additional_budget)
     return build_execution_context_assembly_request(
         execution=execution,
         execution_request=authorization.request,
@@ -245,7 +301,12 @@ def build_derived_execution_context_assembly_request(
         work_context_revision=revision,
         ttl_seconds=ttl_seconds,
         created_at=created_at,
-        additional_fact_scope_refs=("execution_context_inheritance",),
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        additional_fact_scope_refs=(
+            "execution_context_inheritance",
+            *additional_fact_scope_refs,
+        ),
         additional_budget=inherited_budget,
         manifest_schema_version=2 if selection is not None else 1,
         input_selection=selection,

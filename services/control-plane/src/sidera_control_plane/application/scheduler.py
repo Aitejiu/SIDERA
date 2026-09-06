@@ -614,10 +614,23 @@ class Scheduler:
         package_hash = transition.target_context_package_hash
         if package_id is None or package_hash is None:
             raise HandoffTargetError("handoff target context package is not ready")
+        try:
+            authorization = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError as exc:
+            raise HandoffTargetError(
+                "handoff target input Selection authorization is invalid"
+            ) from exc
+        manifest_schema_version = (
+            2
+            if authorization is not None
+            and authorization.request.input_selection_id is not None
+            else 1
+        )
         package = uow.context_packages.get_for_consumer(
             ContextPurpose.EXECUTION,
             execution.id,
             execution.workspace_id,
+            manifest_schema_version=manifest_schema_version,
             for_update=True,
         )
         if package is None:

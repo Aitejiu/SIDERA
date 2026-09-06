@@ -9,6 +9,10 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
+)
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.handoff_candidates import (
     HandoffCandidateBlocked,
@@ -147,10 +151,20 @@ def collect_handoff_base(
     if manifest is None:
         raise HandoffBaseInspectionError("source_workspace_changed")
 
+    try:
+        authorization = resolve_execution_context_authorization(uow, execution)
+    except ExecutionContextAuthorizationError as exc:
+        raise HandoffBaseInspectionError("source_context_package_changed") from exc
     package = uow.context_packages.get_for_consumer(
         ContextPurpose.EXECUTION,
         execution.id,
         candidate.workspace_id,
+        manifest_schema_version=(
+            2
+            if authorization is not None
+            and authorization.request.input_selection_id is not None
+            else 1
+        ),
         for_update=lock_runtime,
     )
     if package is None:

@@ -1537,10 +1537,24 @@ class WorkerGateway:
                 code="handoff_source_workspace_not_frozen",
             )
 
+        try:
+            authorization = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError as exc:
+            raise GatewayMessageError(
+                "handoff target input Selection authorization is invalid",
+                code="handoff_context_input_selection_invalid",
+            ) from exc
+        manifest_schema_version = (
+            2
+            if authorization is not None
+            and authorization.request.input_selection_id is not None
+            else 1
+        )
         assembly = uow.context_assemblies.get_for_consumer(
             ContextPurpose.EXECUTION,
             target_execution_id,
             workspace_id,
+            manifest_schema_version=manifest_schema_version,
             for_update=True,
         )
         if assembly is None or assembly.status is not ContextAssemblyStatus.READY:
@@ -1994,10 +2008,23 @@ class WorkerGateway:
                 "handoff source ContextPackage repository is unavailable",
                 code="handoff_context_package_missing",
             )
+        try:
+            authorization = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError as exc:
+            raise GatewayMessageError(
+                "handoff source input Selection authorization is invalid",
+                code="handoff_context_input_selection_invalid",
+            ) from exc
         package = package_repository.get_for_consumer(
             ContextPurpose.EXECUTION,
             execution.id,
             workspace_id,
+            manifest_schema_version=(
+                2
+                if authorization is not None
+                and authorization.request.input_selection_id is not None
+                else 1
+            ),
             for_update=True,
         )
         if package is None:

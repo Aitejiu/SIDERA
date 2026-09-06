@@ -432,6 +432,9 @@ class HandoffUnitOfWork:
         self.subtask = SimpleNamespace(id=execution.task_id, version=1)
         self.worker_items = SimpleNamespace(get=self._get_worker_item)
         self.executions = SimpleNamespace(get=self._get_execution)
+        self.execution_requests = SimpleNamespace(
+            get_effective_by_execution_lineage=lambda *_args, **_kwargs: None
+        )
         self.tasks = SimpleNamespace(get=self._get_task)
         self.sessions = SimpleNamespace(get=self._get_session)
         self.workers = SimpleNamespace(

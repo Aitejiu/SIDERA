@@ -178,8 +178,16 @@ class _ContextPackageRepository:
         self.package = package
         self.acknowledgement = acknowledgement
 
-    def get_for_consumer(self, purpose, consumer_id, workspace_id, *, for_update=False):
-        del workspace_id, for_update
+    def get_for_consumer(
+        self,
+        purpose,
+        consumer_id,
+        workspace_id,
+        *,
+        for_update=False,
+        manifest_schema_version=None,
+    ):
+        del workspace_id, for_update, manifest_schema_version
         if purpose is ContextPurpose.EXECUTION and consumer_id == self.package.consumer_id:
             return self.package
         return None
@@ -207,6 +215,9 @@ class _Uow:
     def __init__(self, fixture):
         self.handoff_transitions = _TransitionRepository(fixture.transition)
         self.executions = _ExecutionRepository((fixture.execution,))
+        self.execution_requests = SimpleNamespace(
+            get_effective_by_execution_lineage=lambda *_args, **_kwargs: None
+        )
         self.sessions = _SessionRepository((fixture.session,))
         self.leases = _Repository((fixture.lease,))
         self.workers = _Repository((fixture.worker,))

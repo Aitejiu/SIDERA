@@ -196,16 +196,21 @@ class HandoffCommandHandler:
         target_worker_id = payload["target_worker_id"]
         target_candidate = _target_candidate(candidates, target_worker_id)
         if target_candidate is None or not target_candidate.eligible:
+            ineligibility_code = (
+                target_candidate.ineligibility_code
+                if target_candidate is not None
+                else "target_not_listed"
+            )
             raise HandoffCommandError(
-                "handoff_target_ineligible",
+                (
+                    ineligibility_code
+                    if ineligibility_code == "result_input_adapter_unsupported"
+                    else "handoff_target_ineligible"
+                ),
                 "requested handoff target is not eligible",
                 details={
                     "target_worker_id": str(target_worker_id),
-                    "ineligibility_code": (
-                        target_candidate.ineligibility_code
-                        if target_candidate is not None
-                        else "target_not_listed"
-                    ),
+                    "ineligibility_code": ineligibility_code,
                 },
             )
 
@@ -259,10 +264,22 @@ class HandoffCommandHandler:
             )
         target_candidate = _target_candidate(candidates, target_worker_id)
         if target_candidate is None or not target_candidate.eligible:
+            ineligibility_code = (
+                target_candidate.ineligibility_code
+                if target_candidate is not None
+                else "target_not_listed"
+            )
             raise HandoffCommandError(
-                "handoff_target_ineligible",
+                (
+                    ineligibility_code
+                    if ineligibility_code == "result_input_adapter_unsupported"
+                    else "handoff_target_ineligible"
+                ),
                 "requested handoff target is not eligible",
-                details={"target_worker_id": str(target_worker_id)},
+                details={
+                    "target_worker_id": str(target_worker_id),
+                    "ineligibility_code": ineligibility_code,
+                },
             )
         try:
             current = collect_handoff_base(

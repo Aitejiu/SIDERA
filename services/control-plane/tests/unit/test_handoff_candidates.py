@@ -286,6 +286,9 @@ class FakeUow:
     ) -> None:
         self.worker_items = SimpleNamespace(get=lambda item_id, workspace_id: worker_item)
         self.executions = FakeExecutions(executions)
+        self.execution_requests = SimpleNamespace(
+            get_effective_by_execution_lineage=lambda *_args, **_kwargs: None
+        )
         self.sessions = FakeSessions(sessions)
         self.workers = FakeWorkers(workers)
         self.worker_runtime_configurations = SimpleNamespace()
@@ -294,7 +297,7 @@ class FakeUow:
             get_for_execution=lambda execution_id, workspace_id: manifest
         )
         self.context_packages = SimpleNamespace(
-            get_for_consumer=lambda purpose, consumer_id, workspace_id: package
+            get_for_consumer=lambda purpose, consumer_id, workspace_id, **_kwargs: package
         )
         self.plans = SimpleNamespace(
             get_head=lambda root_task_id, workspace_id: SimpleNamespace(

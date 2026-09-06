@@ -179,6 +179,7 @@ class CollaborationFacts:
     worker_placements: tuple[CollaborationWorkerPlacementFact, ...] = ()
     execution_bindings: tuple[CollaborationExecutionBindingFact, ...] = ()
     handoff_transitions: tuple[CollaborationHandoffTransitionFact, ...] = ()
+    result_source_requests: tuple[CollaborationRequestFact, ...] = ()
 
 
 class CollaborationProjectionAssembler:
@@ -258,6 +259,11 @@ class CollaborationProjectionAssembler:
             key=lambda item: item.id,
             name="handoff transitions",
         )
+        result_source_request_facts = _stable_unique(
+            facts.result_source_requests,
+            key=lambda item: item.id,
+            name="result source requests",
+        )
         facts_for_dependencies = CollaborationFacts(
             plan_head=facts.plan_head,
             plan_snapshot=facts.plan_snapshot,
@@ -271,6 +277,7 @@ class CollaborationProjectionAssembler:
             worker_placements=placement_facts,
             execution_bindings=binding_facts,
             handoff_transitions=handoff_facts,
+            result_source_requests=result_source_request_facts,
         )
         dependencies = self._dependency_mappings(facts_for_dependencies)
         eligibility = self._eligibility_by_request(
