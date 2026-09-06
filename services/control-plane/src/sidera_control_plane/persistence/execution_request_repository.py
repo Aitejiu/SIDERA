@@ -115,9 +115,17 @@ class ExecutionRequestRepository:
         *,
         for_update: bool = False,
     ) -> ExecutionRequest | None:
-        statement = select(ExecutionRequestModel).where(
-            ExecutionRequestModel.execution_lineage_id == execution_lineage_id,
-            ExecutionRequestModel.workspace_id == workspace_id,
+        statement = (
+            select(ExecutionRequestModel)
+            .where(
+                ExecutionRequestModel.execution_lineage_id == execution_lineage_id,
+                ExecutionRequestModel.workspace_id == workspace_id,
+            )
+            .order_by(
+                ExecutionRequestModel.created_at.asc(),
+                ExecutionRequestModel.id.asc(),
+            )
+            .limit(1)
         )
         if for_update:
             statement = statement.with_for_update()

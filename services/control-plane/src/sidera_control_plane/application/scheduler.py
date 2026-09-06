@@ -11,6 +11,10 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
+)
 from sidera_control_plane.application.handoff_gate import (
     HandoffGateBlocked,
     HandoffGateOperation,
@@ -645,10 +649,18 @@ class Scheduler:
         execution: Execution,
         now: datetime,
     ) -> tuple[ContextPackageManifest | None, SchedulingIssue | None]:
-        execution_request = uow.execution_requests.get_effective_by_execution_lineage(
-            execution.lineage_id,
-            execution.workspace_id,
-        )
+        try:
+            authorization = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError as exc:
+            return None, SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_STALE,
+                reason_details={
+                    "execution_id": str(execution.id),
+                    "authorization_error": str(exc),
+                },
+                requires_operator=True,
+            )
+        execution_request = authorization.request if authorization is not None else None
         manifest_schema_version = (
             2
             if execution_request is not None

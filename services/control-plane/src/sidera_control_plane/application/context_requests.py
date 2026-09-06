@@ -4,11 +4,12 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.collaboration import RuntimeRelease
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
@@ -17,8 +18,16 @@ from sidera_control_plane.domain.context_packages import (
     ContextPurpose,
     ResultInputBudgetV1,
 )
-from sidera_control_plane.domain.execution import Execution
-from sidera_control_plane.domain.execution_requests import ExecutionRequest
+from sidera_control_plane.domain.execution import (
+    TERMINAL_EXECUTION_STATUSES,
+    Execution,
+    ExecutionSession,
+    ExecutionSessionStatus,
+)
+from sidera_control_plane.domain.execution_requests import (
+    ExecutionRequest,
+    ExecutionRequestStatus,
+)
 from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
 from sidera_control_plane.domain.plan_revisions import RevisionBaseDescriptorV1
 from sidera_control_plane.domain.planning import (
@@ -33,6 +42,295 @@ DEFAULT_CONTEXT_MAX_SECTIONS = 16
 DEFAULT_CONTEXT_MAX_CHARS = 64 * 1024
 DEFAULT_CONTEXT_MAX_INPUT_TOKENS = 16 * 1024
 EXECUTION_CONTEXT_PROFILE_NAMESPACE = NAMESPACE_URL
+
+
+class ExecutionContextAuthorizationError(ValueError):
+    """Raised when a derived execution cannot prove its context authority."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionContextAuthorization:
+    request: ExecutionRequest
+    source_execution_id: UUID | None
+    source_session_id: UUID | None
+    source_lineage_id: UUID
+    inherited: bool
+
+
+def resolve_execution_context_authorization(
+    uow: ControlPlaneUnitOfWork,
+    execution: Execution,
+) -> ExecutionContextAuthorization | None:
+    """Resolve context authority through a request or explicit execution links.
+
+    A WorkerItem is deliberately not used as a fallback identity. If the
+    current execution has no request, every parent hop must be represented by
+    its persisted source execution and source session fields.
+    """
+
+    current = execution
+    first_source_execution_id: UUID | None = None
+    first_source_session_id: UUID | None = None
+    visited: set[UUID] = set()
+    for _ in range(64):
+        if current.id in visited:
+            raise ExecutionContextAuthorizationError(
+                "execution context inheritance contains a cycle"
+            )
+        visited.add(current.id)
+        request = uow.execution_requests.get_effective_by_execution_lineage(
+            current.lineage_id,
+            execution.workspace_id,
+        )
+        if request is not None:
+            if request.status is not ExecutionRequestStatus.MATERIALIZED:
+                raise ExecutionContextAuthorizationError(
+                    "execution context request is not materialized"
+                )
+            if request.workspace_id != execution.workspace_id:
+                raise ExecutionContextAuthorizationError(
+                    "execution context request workspace does not match execution"
+                )
+            if request.worker_item_id != execution.worker_item_id:
+                raise ExecutionContextAuthorizationError(
+                    "execution context request WorkerItem does not match execution"
+                )
+            _validate_direct_request_source(
+                uow,
+                execution=current,
+                request=request,
+            )
+            request_lineage_id = request.execution_lineage_id or current.lineage_id
+            return ExecutionContextAuthorization(
+                request=request,
+                source_execution_id=first_source_execution_id,
+                source_session_id=first_source_session_id,
+                source_lineage_id=request_lineage_id,
+                inherited=first_source_execution_id is not None,
+            )
+
+        source_execution_id = current.source_execution_id
+        source_session_id = current.source_session_id
+        if source_execution_id is None and source_session_id is None:
+            return None
+        if source_execution_id is None or source_session_id is None:
+            raise ExecutionContextAuthorizationError(
+                "execution context inheritance source link is incomplete"
+            )
+        parent = uow.executions.get(source_execution_id, execution.workspace_id)
+        source_session = uow.sessions.get_any(
+            source_session_id,
+            execution.workspace_id,
+        )
+        if first_source_execution_id is None:
+            first_source_execution_id = source_execution_id
+            first_source_session_id = source_session_id
+        _validate_source_link(
+            child=current,
+            parent=parent,
+            source_session=source_session,
+        )
+        assert parent is not None
+        current = parent
+    raise ExecutionContextAuthorizationError(
+        "execution context inheritance exceeds the maximum depth"
+    )
+
+
+def load_execution_context_selection(
+    uow: ControlPlaneUnitOfWork,
+    request: ExecutionRequest,
+) -> CollaborationInputSelectionV1 | None:
+    """Load and validate the immutable Selection bound to an execution request."""
+
+    if request.input_selection_id is None:
+        return None
+    selection = uow.input_selections.get(
+        request.workspace_id,
+        request.input_selection_id,
+    )
+    release = uow.collaboration_ledger.get_release_for_request(
+        request.workspace_id,
+        request.id,
+    )
+    if selection is None or release is None:
+        raise ValueError("selection-bound execution is missing its release or Selection")
+    validate_execution_context_selection(
+        execution_request=request,
+        release=release,
+        selection=selection,
+    )
+    return selection
+
+
+def build_derived_execution_context_assembly_request(
+    *,
+    uow: ControlPlaneUnitOfWork,
+    execution: Execution,
+    inheritance_kind: str,
+    source_execution_id: UUID,
+    source_session_id: UUID | None,
+    ttl_seconds: int,
+    created_at: datetime,
+) -> ContextAssemblyRequest | None:
+    """Build a new consumer package request for retry or continuation."""
+
+    authorization = resolve_execution_context_authorization(uow, execution)
+    if authorization is None:
+        return None
+    if not inheritance_kind.strip():
+        raise ValueError("execution context inheritance kind is required")
+    if inheritance_kind.strip() == "continuation":
+        if authorization.source_execution_id != source_execution_id:
+            raise ExecutionContextAuthorizationError(
+                "execution context inheritance source execution does not match"
+            )
+        if authorization.source_session_id != source_session_id:
+            raise ExecutionContextAuthorizationError(
+                "execution context inheritance source Session does not match"
+            )
+    elif authorization.inherited and (
+        authorization.source_execution_id != source_execution_id
+        or authorization.source_session_id != source_session_id
+    ):
+        raise ExecutionContextAuthorizationError(
+            "execution context retry source link does not match"
+        )
+    if execution.worker_item_id is None:
+        raise ExecutionContextAuthorizationError(
+            "derived execution has no WorkerItem for context inheritance"
+        )
+    worker_item = uow.worker_items.get(execution.worker_item_id, execution.workspace_id)
+    if worker_item is None:
+        raise ExecutionContextAuthorizationError(
+            "derived execution WorkerItem is unavailable"
+        )
+    work_context = uow.work_contexts.get_by_planning_request(
+        authorization.request.planning_request_id,
+        execution.workspace_id,
+    )
+    if work_context is None:
+        work_context = uow.work_contexts.get_by_root_task(
+            authorization.request.root_task_id,
+            execution.workspace_id,
+        )
+    if work_context is None:
+        raise ExecutionContextAuthorizationError(
+            "derived execution WorkContext is unavailable"
+        )
+    revision = uow.work_contexts.get_revision(
+        work_context.current_revision_id,
+        execution.workspace_id,
+    )
+    if revision is None:
+        raise ExecutionContextAuthorizationError(
+            "derived execution WorkContext revision is unavailable"
+        )
+    selection = load_execution_context_selection(uow, authorization.request)
+    inherited_budget = {
+        "execution_context_inheritance": {
+            "kind": inheritance_kind.strip(),
+            "authorization_request_id": str(authorization.request.id),
+            "source_execution_id": str(source_execution_id),
+            "source_session_id": (
+                str(source_session_id) if source_session_id is not None else None
+            ),
+            "source_lineage_id": str(authorization.source_lineage_id),
+        }
+    }
+    return build_execution_context_assembly_request(
+        execution=execution,
+        execution_request=authorization.request,
+        worker_item=worker_item,
+        work_context_revision=revision,
+        ttl_seconds=ttl_seconds,
+        created_at=created_at,
+        additional_fact_scope_refs=("execution_context_inheritance",),
+        additional_budget=inherited_budget,
+        manifest_schema_version=2 if selection is not None else 1,
+        input_selection=selection,
+    )
+
+
+def _validate_direct_request_source(
+    uow: ControlPlaneUnitOfWork,
+    *,
+    execution: Execution,
+    request: ExecutionRequest,
+) -> None:
+    request_source_execution_id = request.source_execution_id
+    request_source_session_id = request.source_session_id
+    execution_source_execution_id = execution.source_execution_id
+    execution_source_session_id = execution.source_session_id
+    if (request_source_execution_id, request_source_session_id) != (
+        execution_source_execution_id,
+        execution_source_session_id,
+    ):
+        if any(
+            value is not None
+            for value in (
+                request_source_execution_id,
+                request_source_session_id,
+                execution_source_execution_id,
+                execution_source_session_id,
+            )
+        ):
+            raise ExecutionContextAuthorizationError(
+                "execution context request source link does not match execution"
+            )
+        return
+    if request_source_execution_id is None:
+        return
+    if request_source_session_id is None:
+        raise ExecutionContextAuthorizationError(
+            "execution context request source Session is incomplete"
+        )
+    parent = uow.executions.get(request_source_execution_id, execution.workspace_id)
+    source_session = uow.sessions.get_any(
+        request_source_session_id,
+        execution.workspace_id,
+    )
+    _validate_source_link(
+        child=execution,
+        parent=parent,
+        source_session=source_session,
+    )
+
+
+def _validate_source_link(
+    *,
+    child: Execution,
+    parent: Execution | None,
+    source_session: ExecutionSession | None,
+) -> None:
+    if parent is None or source_session is None:
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance source lineage is unavailable"
+        )
+    if parent.workspace_id != child.workspace_id:
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance crosses workspace"
+        )
+    if parent.worker_item_id != child.worker_item_id:
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance changes WorkerItem"
+        )
+    if source_session.workspace_id != child.workspace_id:
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance Session crosses workspace"
+        )
+    if source_session.execution_id != parent.id:
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance Session does not belong to source execution"
+        )
+    if parent.status not in TERMINAL_EXECUTION_STATUSES:
+        raise ExecutionContextAuthorizationError(
+            "execution context source execution is not terminal"
+        )
+    if source_session.status is ExecutionSessionStatus.ACTIVE:
+        raise ExecutionContextAuthorizationError(
+            "execution context source Session is still active"
+        )
 
 
 def build_planning_context_assembly_request(

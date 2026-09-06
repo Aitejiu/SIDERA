@@ -103,16 +103,19 @@ class ExecutionRepository:
             actual = self._current_version(execution.id, execution.workspace_id)
             raise VersionConflict(previous_version, actual)
 
-    def attempt_exists(self, lineage_id: UUID, attempt: int) -> bool:
-        return (
-            self._session.scalar(
-                select(ExecutionModel.id).where(
-                    ExecutionModel.lineage_id == lineage_id,
-                    ExecutionModel.attempt == attempt,
-                )
-            )
-            is not None
-        )
+    def attempt_exists(
+        self,
+        lineage_id: UUID,
+        attempt: int,
+        workspace_id: UUID | None = None,
+    ) -> bool:
+        filters = [
+            ExecutionModel.lineage_id == lineage_id,
+            ExecutionModel.attempt == attempt,
+        ]
+        if workspace_id is not None:
+            filters.append(ExecutionModel.workspace_id == workspace_id)
+        return self._session.scalar(select(ExecutionModel.id).where(*filters)) is not None
 
     def list_for_lineage(
         self, lineage_id: UUID, workspace_id: UUID

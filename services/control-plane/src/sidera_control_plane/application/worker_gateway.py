@@ -16,6 +16,10 @@ from sidera_control_plane.application.context_materialization import (
     ContextMaterializer,
     build_materialization_audit,
 )
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
+)
 from sidera_control_plane.application.event_ingestor import (
     ArtifactRegistrationReport,
     ArtifactRegistry,
@@ -2581,9 +2585,17 @@ class WorkerGateway:
             return None
         now = self._clock()
         with self._uow_factory() as uow:
-            execution_request = uow.execution_requests.get_effective_by_execution_lineage(
-                context.execution.lineage_id,
-                context.execution.workspace_id,
+            try:
+                authorization = resolve_execution_context_authorization(
+                    uow, context.execution
+                )
+            except ExecutionContextAuthorizationError as exc:
+                raise GatewayMessageError(
+                    "execution context inheritance is invalid",
+                    code="context_input_selection_scope_invalid",
+                ) from exc
+            execution_request = (
+                authorization.request if authorization is not None else None
             )
             manifest_schema_version = (
                 2

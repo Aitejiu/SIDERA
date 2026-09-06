@@ -22,6 +22,8 @@ from sidera_control_plane.application.context_assembly import (
     ContextAssemblyError,
 )
 from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
     validate_execution_context_selection,
 )
 from sidera_control_plane.application.ports import (
@@ -203,15 +205,40 @@ class ContextPackageWorker:
             execution_request_id,
             request.workspace_id,
         )
+        execution = uow.executions.get(request.consumer_id, request.workspace_id)
         release = uow.collaboration_ledger.get_release_for_request(
             request.workspace_id,
             execution_request_id,
         )
-        if execution_request is None or release is None:
+        if execution_request is None or execution is None or release is None:
             raise ContextAssemblyError(
                 "context_input_selection_not_released",
                 "execution context is missing its released input Selection",
             )
+        try:
+            authorization = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError as exc:
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                str(exc),
+            ) from exc
+        if authorization is None or authorization.request.id != execution_request_id:
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                "execution context Selection is not authorized for this consumer",
+            )
+        try:
+            _validate_inheritance_budget(
+                uow,
+                request,
+                execution=execution,
+                authorization=authorization,
+            )
+        except ExecutionContextAuthorizationError as exc:
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                str(exc),
+            ) from exc
         try:
             validate_execution_context_selection(
                 execution_request=execution_request,
@@ -371,6 +398,19 @@ class ContextPackageWorker:
                 for item in dependencies
             ),
         }
+        inheritance = request.budget.get("execution_context_inheritance")
+        if isinstance(inheritance, Mapping):
+            facts["execution_context_inheritance"] = {
+                key: inheritance[key]
+                for key in (
+                    "kind",
+                    "authorization_request_id",
+                    "source_execution_id",
+                    "source_session_id",
+                    "source_lineage_id",
+                )
+                if key in inheritance
+            }
         handoff_facts = self._handoff_facts(uow, request)
         if handoff_facts is not None:
             facts["handoff"] = handoff_facts
@@ -672,6 +712,75 @@ class ContextPackageWorker:
         )
         for event in events:
             uow.events.append_with_outbox(event)
+
+
+def _validate_inheritance_budget(
+    uow: ControlPlaneUnitOfWork,
+    request: ContextAssemblyRequest,
+    *,
+    execution: Any,
+    authorization: Any,
+) -> None:
+    raw = request.budget.get("execution_context_inheritance")
+    if raw is None:
+        if authorization.inherited:
+            raise ExecutionContextAuthorizationError(
+                "inherited execution context is missing its source reference"
+            )
+        return
+    if not isinstance(raw, Mapping):
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance facts are invalid"
+        )
+    if str(raw.get("authorization_request_id")) != str(authorization.request.id):
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance request reference is stale"
+        )
+    if str(raw.get("source_lineage_id")) != str(authorization.source_lineage_id):
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance lineage reference is stale"
+        )
+    kind = raw.get("kind")
+    source_execution_value = raw.get("source_execution_id")
+    if not isinstance(kind, str) or not isinstance(source_execution_value, str):
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance source reference is incomplete"
+        )
+    try:
+        source_execution_id = UUID(source_execution_value)
+    except ValueError as exc:
+        raise ExecutionContextAuthorizationError(
+            "execution context inheritance source execution is invalid"
+        ) from exc
+    if authorization.inherited:
+        if (
+            source_execution_id != authorization.source_execution_id
+            or source_execution_id != execution.source_execution_id
+            or str(raw.get("source_session_id"))
+            != str(authorization.source_session_id)
+            or str(raw.get("source_session_id")) != str(execution.source_session_id)
+        ):
+            raise ExecutionContextAuthorizationError(
+                "execution context inheritance source link is stale"
+            )
+        if kind not in {"continuation", "retry"}:
+            raise ExecutionContextAuthorizationError(
+                "execution context inheritance kind is invalid"
+            )
+        return
+    if kind != "retry" or raw.get("source_session_id") is not None:
+        raise ExecutionContextAuthorizationError(
+            "direct execution retry inheritance facts are invalid"
+        )
+    source = uow.executions.get(source_execution_id, request.workspace_id)
+    if source is None or source.lineage_id != authorization.source_lineage_id:
+        raise ExecutionContextAuthorizationError(
+            "direct execution retry source is not part of the authorized lineage"
+        )
+    if source.worker_item_id != execution.worker_item_id:
+        raise ExecutionContextAuthorizationError(
+            "direct execution retry source changes WorkerItem"
+        )
 
 
 def _budget_uuid(request: ContextAssemblyRequest, key: str) -> UUID:

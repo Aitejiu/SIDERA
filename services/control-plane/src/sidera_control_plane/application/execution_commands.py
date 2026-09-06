@@ -3,6 +3,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    build_derived_execution_context_assembly_request,
+    resolve_execution_context_authorization,
+)
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.handoff_gate import (
     HandoffGateOperation,
@@ -126,12 +131,19 @@ class ExecutionCommandHandler:
     )
 
     def __init__(
-        self, clock: Callable[[], datetime], *, lease_ttl_seconds: int = 30
+        self,
+        clock: Callable[[], datetime],
+        *,
+        lease_ttl_seconds: int = 30,
+        execution_context_ttl_seconds: int = 7_200,
     ) -> None:
         if lease_ttl_seconds <= 0:
             raise ValueError("lease_ttl_seconds must be positive")
+        if execution_context_ttl_seconds < 1:
+            raise ValueError("execution_context_ttl_seconds must be positive")
         self._clock = clock
         self._lease_ttl = timedelta(seconds=lease_ttl_seconds)
+        self._execution_context_ttl_seconds = execution_context_ttl_seconds
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -352,6 +364,18 @@ class ExecutionCommandHandler:
             not_before=_required_datetime(envelope.payload, "not_before"),
             execution_id=uuid4(),
         )
+        try:
+            context_assembly = build_derived_execution_context_assembly_request(
+                uow=uow,
+                execution=continuation,
+                inheritance_kind="continuation",
+                source_execution_id=execution.id,
+                source_session_id=session.id,
+                ttl_seconds=self._execution_context_ttl_seconds,
+                created_at=self._clock(),
+            )
+        except ValueError as exc:
+            raise InvalidTransition(str(exc)) from exc
         events: list[EventData] = []
         if task.status in {TaskStatus.PENDING, TaskStatus.WAITING}:
             previous_task_status = task.status.value
@@ -373,6 +397,8 @@ class ExecutionCommandHandler:
                 )
             )
         uow.executions.add(continuation)
+        if context_assembly is not None:
+            uow.context_assemblies.add(context_assembly)
         events.append(
             _event(
                 envelope,
@@ -408,7 +434,11 @@ class ExecutionCommandHandler:
         if source.attempt >= source.max_attempts:
             raise InvalidTransition("execution retry limit has been reached")
         next_attempt = source.attempt + 1
-        if uow.executions.attempt_exists(source.lineage_id, next_attempt):
+        if uow.executions.attempt_exists(
+            source.lineage_id,
+            next_attempt,
+            envelope.workspace_id,
+        ):
             raise InvalidTransition("execution retry attempt already exists")
 
         task = uow.tasks.get(source.task_id, envelope.workspace_id)
@@ -419,6 +449,23 @@ class ExecutionCommandHandler:
             source.worker_item_id,
             envelope.workspace_id,
         )
+        retry_source_execution_id = source.source_execution_id
+        retry_source_session_id = source.source_session_id
+        try:
+            source_authorization = resolve_execution_context_authorization(uow, source)
+            if source_authorization is not None and source_authorization.inherited:
+                retry_source_execution_id = source.id
+                source_session = uow.sessions.get_latest_for_execution(
+                    source.id,
+                    source.workspace_id,
+                )
+                if source_session is None:
+                    raise ExecutionContextAuthorizationError(
+                        "execution retry source Session is unavailable"
+                    )
+                retry_source_session_id = source_session.id
+        except ValueError as exc:
+            raise InvalidTransition(str(exc)) from exc
         execution = Execution.create(
             execution_id=uuid4(),
             workspace_id=source.workspace_id,
@@ -431,9 +478,29 @@ class ExecutionCommandHandler:
             capability_requirements=source.capability_requirements,
             pinned_worker_id=source.pinned_worker_id,
             not_before=_required_datetime(envelope.payload, "not_before"),
+            source_execution_id=retry_source_execution_id,
+            source_session_id=retry_source_session_id,
+            handoff_transition_id=source.handoff_transition_id,
             adapter_preferences=source.adapter_preferences,
             adapter_forbidden=source.adapter_forbidden,
         )
+        try:
+            context_assembly = build_derived_execution_context_assembly_request(
+                uow=uow,
+                execution=execution,
+                inheritance_kind="retry",
+                source_execution_id=source.id,
+                source_session_id=(
+                    retry_source_session_id
+                    if source_authorization is not None
+                    and source_authorization.inherited
+                    else None
+                ),
+                ttl_seconds=self._execution_context_ttl_seconds,
+                created_at=self._clock(),
+            )
+        except ValueError as exc:
+            raise InvalidTransition(str(exc)) from exc
         events: list[EventData] = []
         if task.status is TaskStatus.WAITING:
             previous_status = task.status.value
@@ -456,6 +523,8 @@ class ExecutionCommandHandler:
             )
 
         uow.executions.add(execution)
+        if context_assembly is not None:
+            uow.context_assemblies.add(context_assembly)
         events.append(
             _event(
                 envelope,

@@ -10,7 +10,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
@@ -127,6 +127,8 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     CollaborationInputSelectionModel,
     CollaborationReleaseProposalModel,
+    CommandModel,
+    ContextAssemblyRequestModel,
     ExecutionModel,
     ExecutionRequestModel,
     OutboxMessageModel,
@@ -334,6 +336,7 @@ class ResultInputScenario:
         self.worker_item_ids: dict[str, UUID] = {}
         self.request_ids: dict[str, UUID] = {}
         self._capture_adapter: _CaptureWorkerAdapter | None = None
+        self._capture_adapters_by_key: dict[str, list[_CaptureWorkerAdapter]] = {}
         self._gateway: WorkerGateway | None = None
         self._runtime = ReferenceCollaborationRuntime(clock=self.clock)
         self._decision_service = CollaborationDecisionService(
@@ -363,6 +366,7 @@ class ResultInputScenario:
         *,
         groups: tuple[dict[str, object], ...] | None = None,
         hard_edges: tuple[tuple[str, str], ...] = (),
+        max_attempts: int = 1,
     ) -> None:
         planner_capability = replace(
             planner_capabilities(), proposal_schema_versions=(5,)
@@ -477,7 +481,11 @@ class ResultInputScenario:
             )
 
         payload = PlanningProposalPayloadV5.from_mapping(
-            _proposal_mapping(groups=groups, hard_edges=hard_edges)
+            _proposal_mapping(
+                groups=groups,
+                hard_edges=hard_edges,
+                max_attempts=max_attempts,
+            )
         )
         with self.uow_factory() as uow:
             stored_request = uow.planning_requests.get(
@@ -567,6 +575,17 @@ class ResultInputScenario:
             key: UUID(str(value)) for key, value in worker_items.items()
         }
         self.request_ids = {key: UUID(str(value)) for key, value in requests.items()}
+
+    def run_to_started_summary(self) -> None:
+        """Drive the existing result-input path to one started consumer."""
+        self.confirm_plan(max_attempts=2)
+        self.complete_source("b", body=b"report-b\n")
+        self.complete_source("c", body=b"report-c\n")
+        self.reconcile()
+        self.activate()
+        self.assemble_context("summary")
+        self.complete_source("a", body=b"report-a\n")
+        self.start_worker("summary")
 
     def complete_source(self, key: str, *, body: bytes, evidence: bool = True) -> UUID:
         self._ensure_source_executions()
@@ -678,13 +697,7 @@ class ResultInputScenario:
                 manifest_schema_version=2,
             )
         if existing is None:
-            result = ContextPackageWorker(
-                uow_factory=self.uow_factory,
-                catalog=_EmptyCatalog(),
-                owner_id=f"result-input-context-{key}",
-                lease_seconds=60,
-                clock=self.clock,
-            ).run_once(limit=20)
+            result = self.run_context_worker(key)
             assert result.ready >= 1
             assert result.failed == 0
             assert result.blocked == 0
@@ -698,6 +711,15 @@ class ResultInputScenario:
             )
         assert isinstance(package, ContextPackageManifestV2)
         return package
+
+    def run_context_worker(self, key: str):
+        return ContextPackageWorker(
+            uow_factory=self.uow_factory,
+            catalog=_EmptyCatalog(),
+            owner_id=f"result-input-context-{key}",
+            lease_seconds=60,
+            clock=self.clock,
+        ).run_once(limit=20)
 
     def start_worker(self, key: str) -> object:
         execution_id = self._execution_id(key)
@@ -731,18 +753,195 @@ class ResultInputScenario:
             clock=self.clock,
         )
         self._capture_adapter = adapter
+        self._capture_adapters_by_key.setdefault(key, []).append(adapter)
         self._gateway = gateway
         return gateway.handle(message)
 
     def captured_context(self, key: str) -> ContextMaterialization:
-        del key
+        adapters = self._capture_adapters_by_key.get(key, ())
+        for adapter in reversed(adapters):
+            if adapter.accepted_contexts:
+                return adapter.accepted_contexts[-1]
         if self._capture_adapter is None or not self._capture_adapter.accepted_contexts:
             raise AssertionError("worker context was not accepted")
         return self._capture_adapter.accepted_contexts[-1]
 
     def start_call_count(self, key: str) -> int:
-        del key
-        return len(self._capture_adapter.start_calls) if self._capture_adapter else 0
+        return sum(
+            len(adapter.start_calls)
+            for adapter in self._capture_adapters_by_key.get(key, ())
+        )
+
+    def retry_envelope(
+        self,
+        key: str,
+        *,
+        idempotency_key: str,
+        command_id: UUID | None = None,
+    ) -> CommandEnvelope:
+        execution_id = self.latest_execution_id(key)
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            assert execution is not None
+            execution_version = execution.version
+        return CommandEnvelope(
+            id=command_id or uuid4(),
+            workspace_id=self.workspace_id,
+            command_type="RetryExecution",
+            target_type="execution",
+            actor_type="operator",
+            actor_id="operator",
+            target_id=execution_id,
+            payload={"not_before": self.now.isoformat()},
+            expected_version=execution_version,
+            idempotency_key=idempotency_key,
+            correlation_id=self.ids["root_task"],
+        )
+
+    def fail_worker(self, key: str) -> None:
+        execution_id = self.latest_execution_id(key)
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            assert execution is not None
+            assert execution.active_lease_id is not None
+            lease = uow.leases.get(execution.active_lease_id, self.workspace_id)
+            session = uow.sessions.get_active_for_execution(execution.id)
+            assert lease is not None
+            assert session is not None
+            worker_id = execution.assigned_worker_id or lease.worker_id
+            execution_version = execution.version
+        CommandService(
+            self.uow_factory,
+            (ExecutionCommandHandler(self.clock),),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ReportExecutionFailed",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(worker_id),
+                target_id=execution.id,
+                payload={
+                    "worker_id": str(worker_id),
+                    "lease_id": str(lease.id),
+                    "fencing_token": lease.fencing_token,
+                    "failure_code": f"scenario_failure:{key}",
+                },
+                expected_version=execution_version,
+                idempotency_key=f"result-input-failed:{execution.id}",
+                correlation_id=self.ids["root_task"],
+            )
+        )
+
+    def retry_worker(self, key: str) -> UUID:
+        result = CommandService(
+            self.uow_factory,
+            (ExecutionCommandHandler(self.clock),),
+        ).handle(
+            self.retry_envelope(
+                key,
+                idempotency_key=(
+                    f"result-input-retry:{self.latest_execution_id(key)}"
+                ),
+            )
+        )
+        return result.aggregate_id
+
+    def continue_worker(self, key: str) -> UUID:
+        execution_id = self.latest_execution_id(key)
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            assert execution is not None
+            session = uow.sessions.get_latest_for_execution(
+                execution.id, self.workspace_id
+            )
+            assert session is not None
+            session_version = session.version
+        result = CommandService(
+            self.uow_factory,
+            (ExecutionCommandHandler(self.clock),),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ContinueExecutionSession",
+                target_type="execution_session",
+                actor_type="operator",
+                actor_id="operator",
+                target_id=session.id,
+                payload={"not_before": self.now.isoformat()},
+                expected_version=session_version,
+                idempotency_key=f"result-input-continue:{session.id}",
+                correlation_id=self.ids["root_task"],
+            )
+        )
+        return result.aggregate_id
+
+    def mutate_context_assembly_budget(
+        self,
+        key: str,
+        mutate: Callable[[dict[str, object]], None],
+    ) -> None:
+        execution_id = self.latest_execution_id(key)
+        with self.database.session() as session:
+            row = session.scalar(
+                select(ContextAssemblyRequestModel).where(
+                    ContextAssemblyRequestModel.workspace_id == self.workspace_id,
+                    ContextAssemblyRequestModel.consumer_id == execution_id,
+                    ContextAssemblyRequestModel.purpose == ContextPurpose.EXECUTION.value,
+                    ContextAssemblyRequestModel.manifest_schema_version == 2,
+                )
+            )
+            assert row is not None
+            budget = deepcopy(dict(row.budget))
+            mutate(budget)
+            session.execute(
+                update(ContextAssemblyRequestModel)
+                .where(
+                    ContextAssemblyRequestModel.id == row.id,
+                    ContextAssemblyRequestModel.workspace_id == self.workspace_id,
+                )
+                .values(budget=budget)
+            )
+            session.commit()
+
+    def remove_execution_source_link(self, key: str) -> None:
+        execution_id = self.latest_execution_id(key)
+        with self.database.session() as session:
+            session.execute(
+                update(ExecutionModel)
+                .where(
+                    ExecutionModel.id == execution_id,
+                    ExecutionModel.workspace_id == self.workspace_id,
+                )
+                .values(source_execution_id=None, source_session_id=None)
+            )
+            session.commit()
+
+    def revoke_package(self, package_id: UUID, *, scope: str = "all_materialization") -> None:
+        with self.uow_factory() as uow:
+            package = uow.context_packages.get(package_id, self.workspace_id)
+            assert package is not None
+            causation_id = uow.session.scalar(
+                select(CommandModel.id)
+                .where(CommandModel.workspace_id == self.workspace_id)
+                .order_by(CommandModel.created_at.desc(), CommandModel.id.desc())
+                .limit(1)
+            )
+            assert causation_id is not None
+            uow.context_packages.revoke(
+                package_id,
+                self.workspace_id,
+                expected_package_hash=package.package_hash,
+                reason="result-input-inheritance-test",
+                scope=scope,
+                now=self.now,
+                actor_type="operator",
+                actor_id="operator",
+                causation_id=causation_id,
+                correlation_id=self.ids["root_task"],
+            )
 
     def _install_capture_runtime(
         self, execution_id: UUID, adapter: _CaptureWorkerAdapter
@@ -791,7 +990,7 @@ class ResultInputScenario:
                 id=uuid4(),
                 workspace_id=self.workspace_id,
                 definition_id=adapter_definition.id,
-                instance_name="result-input-capture-adapter",
+                instance_name=f"result-input-capture-adapter-{execution_id}",
                 config_version=1,
                 config_namespace="adapter",
                 config={"adapter.mode": "capture"},
@@ -802,7 +1001,7 @@ class ResultInputScenario:
                 id=uuid4(),
                 workspace_id=self.workspace_id,
                 definition_id=workspace_definition.id,
-                instance_name="result-input-capture-workspace",
+                instance_name=f"result-input-capture-workspace-{execution_id}",
                 config_version=1,
                 config_namespace="workspace",
                 config={
@@ -854,20 +1053,27 @@ class ResultInputScenario:
         )
 
     def package_ids(self, key: str) -> tuple[UUID, ...]:
-        execution_id = self._execution_id(key)
-        assert execution_id is not None
         values: list[UUID] = []
         with self.uow_factory() as uow:
-            for version in (1, 2):
-                package = uow.context_packages.get_for_consumer(
-                    ContextPurpose.EXECUTION,
-                    execution_id,
-                    self.workspace_id,
-                    manifest_schema_version=version,
-                )
-                if package is not None:
-                    values.append(package.package_id)
+            executions = uow.executions.list_for_worker_item(
+                self.worker_item_ids[key], self.workspace_id
+            )
+            for execution in executions:
+                for version in (1, 2):
+                    package = uow.context_packages.get_for_consumer(
+                        ContextPurpose.EXECUTION,
+                        execution.id,
+                        self.workspace_id,
+                        manifest_schema_version=version,
+                    )
+                    if package is not None:
+                        values.append(package.package_id)
         return tuple(values)
+
+    def latest_execution_id(self, key: str) -> UUID:
+        execution_id = self._execution_id(key)
+        assert execution_id is not None
+        return execution_id
 
     def execution_count(self, key: str) -> int:
         with self.database.session() as session:
@@ -1224,10 +1430,17 @@ class ResultInputScenario:
         worker_item_id = self.worker_item_ids[key]
         with self.database.session() as session:
             return session.scalar(
-                select(ExecutionModel.id).where(
+                select(ExecutionModel.id)
+                .where(
                     ExecutionModel.workspace_id == self.workspace_id,
                     ExecutionModel.worker_item_id == worker_item_id,
                 )
+                .order_by(
+                    ExecutionModel.created_at.desc(),
+                    ExecutionModel.attempt.desc(),
+                    ExecutionModel.id.desc(),
+                )
+                .limit(1)
             )
 
     def _execution_task_id(self, execution_id: UUID) -> UUID:
@@ -1303,6 +1516,7 @@ def _proposal_mapping(
     *,
     groups: tuple[dict[str, object], ...] | None,
     hard_edges: tuple[tuple[str, str], ...],
+    max_attempts: int = 1,
 ) -> dict[str, object]:
     raw = proposal_v5_mapping()
     worker_items = raw["worker_items"]
@@ -1333,6 +1547,8 @@ def _proposal_mapping(
         intent = deepcopy(build_intent)
         intent["worker_item_key"] = key
         intents.append(intent)
+    for intent in intents:
+        intent["max_attempts"] = max_attempts
     summary_intent["activation_dependencies"] = [
         {
             "upstream_worker_item_key": upstream,

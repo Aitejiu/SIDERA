@@ -13,7 +13,7 @@ from sidera_control_plane.application.collaboration_decisions import (
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
-    validate_execution_context_selection,
+    load_execution_context_selection,
 )
 from sidera_control_plane.application.execution_commands import (
     build_continuation_execution,
@@ -412,29 +412,10 @@ class ActivationReconciler:
         uow: ControlPlaneUnitOfWork,
         request: ExecutionRequest,
     ) -> CollaborationInputSelectionV1 | None:
-        if request.input_selection_id is None:
-            return None
-        selection = uow.input_selections.get(
-            request.workspace_id,
-            request.input_selection_id,
-        )
-        release = uow.collaboration_ledger.get_release_for_request(
-            request.workspace_id,
-            request.id,
-        )
-        if selection is None or release is None:
-            raise InvalidTransition(
-                "selection-bound execution is missing its release or Selection"
-            )
         try:
-            validate_execution_context_selection(
-                execution_request=request,
-                release=release,
-                selection=selection,
-            )
+            return load_execution_context_selection(uow, request)
         except ValueError as exc:
             raise InvalidTransition(str(exc)) from exc
-        return selection
 
     def _bind_worker_transition(
         self,

@@ -1629,7 +1629,9 @@ class ExecutionRepositoryPort(Protocol):
     def save(self, execution: Execution, previous_version: int) -> None:
         raise NotImplementedError
 
-    def attempt_exists(self, lineage_id: UUID, attempt: int) -> bool:
+    def attempt_exists(
+        self, lineage_id: UUID, attempt: int, workspace_id: UUID | None = None
+    ) -> bool:
         raise NotImplementedError
 
     def list_for_lineage(
