@@ -553,7 +553,9 @@ class ContextPackageWorker:
     ) -> str:
         code = _error_code(error)
         now = self._clock()
-        temporary = isinstance(error, KnowledgeAdapterError) and error.temporary
+        temporary = bool(getattr(error, "temporary", False)) or (
+            isinstance(error, KnowledgeAdapterError) and error.temporary
+        )
         if temporary and request.attempt < self._max_attempts:
             delay = _RETRY_BACKOFF_SECONDS[min(request.attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)]
             with self._uow_factory() as uow:

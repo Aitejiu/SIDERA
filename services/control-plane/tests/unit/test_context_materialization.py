@@ -544,7 +544,7 @@ def test_v2_materialization_enforces_exact_payload_and_pinned_token_limits() -> 
             too_small_manifest,
             revision,
         )
-    assert token_error.value.code == "context_budget_exceeded"
+    assert token_error.value.code == "result_input_budget_exceeded"
 
 
 def test_owner_audit_requires_capability_and_expected_hash() -> None:

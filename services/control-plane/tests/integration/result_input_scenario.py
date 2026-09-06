@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from sqlalchemy import func, select, update
@@ -42,6 +42,9 @@ from sidera_control_plane.application.collaboration_runtime_resolver import (
 )
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.context_materialization import ContextMaterializer
+from sidera_control_plane.application.context_package_queries import (
+    ContextPackageCommandHandler,
+)
 from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -72,6 +75,7 @@ from sidera_control_plane.application.work_context_commands import (
 )
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
+    GatewayMessageError,
     WorkerGateway,
 )
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
@@ -98,7 +102,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV2,
     ContextPurpose,
 )
-from sidera_control_plane.domain.execution import ExecutionSession
+from sidera_control_plane.domain.execution import ExecutionSession, ExecutionStatus
 from sidera_control_plane.domain.gateway import AdapterSessionHandle
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffInspectionOutcome,
@@ -157,6 +161,7 @@ from sidera_control_plane.persistence.collaboration_fact_store import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
+    ArtifactModel,
     CollaborationInputSelectionModel,
     CollaborationReleaseProposalModel,
     CommandModel,
@@ -171,6 +176,14 @@ from tests.integration.test_proposal_confirmation import planner_capabilities, p
 from tests.unit.result_input_fixtures import proposal_v5_mapping
 
 FROZEN_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+_RESULT_INPUT_GATEWAY_CODES = frozenset(
+    {
+        "result_input_unavailable",
+        "result_input_integrity_failed",
+        "result_input_format_unsupported",
+        "result_input_budget_exceeded",
+    }
+)
 
 
 class _StaticRuntimeResolver:
@@ -250,9 +263,12 @@ class _CaptureWorkerAdapter(FakeWorkerAdapter):
     def __init__(
         self,
         capabilities: WorkerAdapterCapabilityProfile = _CAPTURE_ADAPTER_CAPABILITIES,
+        *,
+        raise_after_start: bool = False,
     ) -> None:
         super().__init__()
         self._CAPABILITIES = capabilities
+        self._raise_after_start = raise_after_start
         self.accepted_contexts: list[ContextMaterialization] = []
         self.start_calls: list[ExecutionSpec] = []
 
@@ -288,6 +304,8 @@ class _CaptureWorkerAdapter(FakeWorkerAdapter):
     ) -> AdapterSessionHandle:
         self.start_calls.append(spec)
         handle = super().start_session(spec, workspace, operation_id=operation_id)
+        if self._raise_after_start:
+            raise RuntimeError("unknown start outcome")
         context = spec.context_package
         if context is not None:
             metadata = context.metadata
@@ -441,6 +459,9 @@ class ResultInputScenario:
         )
         self._artifact_root = tmp_path / "result-input-artifacts"
         self._source_storage_refs: dict[str, str] = {}
+        self._source_artifact_ids: dict[str, UUID] = {}
+        self._unavailable_artifacts: dict[UUID, Path] = {}
+        self._corrupted_artifact_bodies: dict[UUID, bytes] = {}
         self._capture_workspace_provider = _CaptureWorkspaceProvider()
         self._capture_workspace_instance: ModuleInstance | None = None
         self._capture_adapters_by_instance: dict[UUID, _CaptureWorkerAdapter] = {}
@@ -703,14 +724,18 @@ class ResultInputScenario:
 
     def run_to_started_summary(self) -> None:
         """Drive the existing result-input path to one started consumer."""
-        self.confirm_plan(max_attempts=2)
-        self.complete_source("b", body=b"report-b\n")
-        self.complete_source("c", body=b"report-c\n")
-        self.reconcile()
+        self.run_to_released_summary()
         self.activate()
         self.assemble_context("summary")
         self.complete_source("a", body=b"report-a\n")
         self.start_worker("summary")
+
+    def run_to_released_summary(self) -> None:
+        """Create the released summary Selection without consuming its package."""
+        self.confirm_plan(max_attempts=2)
+        self.complete_source("b", body=b"report-b\n")
+        self.complete_source("c", body=b"report-c\n")
+        self.reconcile()
 
     def revise_group(self, *, minimum_count: int) -> object:
         """Submit and confirm a real v5 Revision against the current plan head."""
@@ -991,13 +1016,59 @@ class ResultInputScenario:
             )
         )
         assert len(report.artifacts) == 1
-        return report.artifacts[0].id
+        artifact_id = report.artifacts[0].id
+        self._source_artifact_ids[key] = artifact_id
+        return artifact_id
 
     def remove_source_body(self, key: str) -> None:
-        storage_ref = self._source_storage_refs[key]
-        digest = storage_ref.rsplit("/", 1)[-1]
-        path = self._artifact_root / str(self.workspace_id) / digest[:2] / digest
-        path.unlink()
+        self.make_artifact_unavailable(self._source_artifact_ids[key])
+
+    def make_artifact_unavailable(self, artifact_id: UUID) -> None:
+        path = self._artifact_path(artifact_id)
+        if artifact_id in self._unavailable_artifacts:
+            return
+        if not path.exists():
+            raise AssertionError("artifact body is already unavailable")
+        backup = path.with_name(f".{path.name}.unavailable-{artifact_id}")
+        path.replace(backup)
+        self._unavailable_artifacts[artifact_id] = backup
+
+    def restore_artifact(self, artifact_id: UUID) -> None:
+        path = self._artifact_path(artifact_id)
+        backup = self._unavailable_artifacts.pop(artifact_id, None)
+        if backup is not None:
+            if path.exists():
+                raise AssertionError("artifact body was recreated before restore")
+            backup.replace(path)
+        original = self._corrupted_artifact_bodies.pop(artifact_id, None)
+        if original is not None:
+            path.write_bytes(original)
+
+    def corrupt_artifact(self, artifact_id: UUID, *, body: bytes) -> None:
+        if artifact_id in self._unavailable_artifacts:
+            raise AssertionError("restore the unavailable artifact before corrupting it")
+        path = self._artifact_path(artifact_id)
+        if artifact_id not in self._corrupted_artifact_bodies:
+            self._corrupted_artifact_bodies[artifact_id] = path.read_bytes()
+        path.write_bytes(body)
+
+    def _artifact_path(self, artifact_id: UUID) -> Path:
+        with self.database.session() as session:
+            artifact = session.scalar(
+                select(ArtifactModel).where(
+                    ArtifactModel.workspace_id == self.workspace_id,
+                    ArtifactModel.id == artifact_id,
+                )
+            )
+        assert artifact is not None
+        storage_ref = artifact.storage_ref
+        prefix = f"artifact-local://{self.workspace_id}/"
+        if not storage_ref.startswith(prefix):
+            raise AssertionError("scenario artifact does not use the local store")
+        digest = artifact.content_hash.lower()
+        if storage_ref.rsplit("/", 1)[-1].lower() != digest:
+            raise AssertionError("artifact storage reference hash is stale")
+        return self._artifact_root / str(self.workspace_id) / digest[:2] / digest
 
     def reconcile(self) -> None:
         for _ in range(10):
@@ -1076,25 +1147,101 @@ class ResultInputScenario:
             clock=self.clock,
         ).run_once(limit=20)
 
-    def start_worker(self, key: str) -> object:
+    def retry_context(self, key: str) -> object:
+        execution_id = self.latest_execution_id(key)
+        with self.uow_factory() as uow:
+            assembly = uow.context_assemblies.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                execution_id,
+                self.workspace_id,
+                manifest_schema_version=2,
+            )
+            assert assembly is not None
+        return CommandService(
+            self.uow_factory,
+            (
+                ContextPackageCommandHandler(
+                    local_actor_type="operator",
+                    local_actor_id="result-input-scenario",
+                    clock=self.clock,
+                ),
+            ),
+        ).handle(
+            CommandEnvelope(
+                id=uuid5(
+                    NAMESPACE_URL,
+                    f"result-input-context-retry:{assembly.request_id}:v{assembly.version}",
+                ),
+                workspace_id=self.workspace_id,
+                command_type="RetryContextAssembly",
+                target_type="context_assembly",
+                actor_type="operator",
+                actor_id="result-input-scenario",
+                target_id=assembly.request_id,
+                payload={"request_fingerprint": assembly.request_fingerprint},
+                expected_version=assembly.version,
+                idempotency_key=(
+                    f"result-input-context-retry:{assembly.request_id}:v{assembly.version}"
+                ),
+                correlation_id=self.ids["root_task"],
+            )
+        )
+
+    def start_worker(
+        self,
+        key: str,
+        *,
+        start_outcome_unknown: bool = False,
+        crash_after_context_ack: bool = False,
+    ) -> object:
         execution_id = self._execution_id(key)
         assert execution_id is not None
-        adapter = _CaptureWorkerAdapter()
-        self._install_capture_runtime(execution_id, adapter)
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            binding = uow.bindings.get_for_execution(execution_id, self.workspace_id)
+            assert execution is not None
 
-        scheduled = Scheduler(
-            self.uow_factory,
-            LowestCostWorkerPolicy(),
-            self.clock,
-            context_enforcement=True,
-        ).run_once(limit=20)
-        assert scheduled.assigned == 1
+        if execution.status is ExecutionStatus.QUEUED:
+            adapter = _CaptureWorkerAdapter(
+                raise_after_start=start_outcome_unknown,
+            )
+            self._install_capture_runtime(execution_id, adapter)
+            scheduled = Scheduler(
+                self.uow_factory,
+                LowestCostWorkerPolicy(),
+                self.clock,
+                context_enforcement=True,
+            ).run_once(limit=20)
+            assert scheduled.assigned == 1
+            self._capture_adapters_by_key.setdefault(key, []).append(adapter)
+        elif execution.status is ExecutionStatus.LEASED:
+            if start_outcome_unknown:
+                raise AssertionError("unknown start injection requires a queued execution")
+            assert binding is not None
+            adapter = self._capture_adapters_by_instance.get(binding.adapter_module_id)
+            if adapter is None:
+                raise AssertionError("leased execution capture adapter is unavailable")
+        else:
+            raise AssertionError(
+                f"cannot start result-input execution in {execution.status.value} state"
+            )
+
         message = self._assignment_message(execution_id)
         self._capture_adapter = adapter
-        self._capture_adapters_by_key.setdefault(key, []).append(adapter)
         gateway = self._capture_gateway()
         self._gateway = gateway
-        return gateway.handle(message)
+        if crash_after_context_ack:
+
+            def crash_after_ack(_context: object, _spec: ExecutionSpec) -> object:
+                raise RuntimeError("after context acknowledgement")
+
+            gateway._ensure_workspace = crash_after_ack  # type: ignore[method-assign]
+        try:
+            return gateway.handle(message)
+        except GatewayMessageError as exc:
+            if exc.code in _RESULT_INPUT_GATEWAY_CODES:
+                return exc
+            raise
 
     def handoff_worker(
         self,

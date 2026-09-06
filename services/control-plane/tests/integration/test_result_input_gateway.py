@@ -53,9 +53,8 @@ def test_gateway_does_not_start_when_selected_body_is_unavailable(
     scenario.complete_source("a", body=b"unique-body-a\n")
     scenario.remove_source_body("b")
 
-    with pytest.raises(GatewayError, match="materialization") as caught:
-        scenario.start_worker("summary")
+    result = scenario.start_worker("summary")
 
-    assert caught.value.__cause__ is not None
-    assert getattr(caught.value.__cause__, "code", None) == "result_input_unavailable"
+    assert isinstance(result, GatewayError)
+    assert getattr(result, "code", None) == "result_input_unavailable"
     assert scenario.start_call_count("summary") == 0

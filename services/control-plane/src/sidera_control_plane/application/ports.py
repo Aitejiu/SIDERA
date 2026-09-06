@@ -801,6 +801,9 @@ class ContextPackageRepositoryPort(Protocol):
     ) -> ContextPackageManifest | None:
         raise NotImplementedError
 
+    def next_materialization_attempt(self, package_id: UUID, workspace_id: UUID) -> int:
+        raise NotImplementedError
+
     def add_ack(
         self,
         acknowledgement: ContextAcknowledgement,

@@ -544,6 +544,15 @@ class ContextPackageRepository:
         row = self._session.scalar(statement)
         return self._to_manifest(row) if row is not None else None
 
+    def next_materialization_attempt(self, package_id: UUID, workspace_id: UUID) -> int:
+        latest = self._session.scalar(
+            select(func.max(ContextPackageMaterializationAuditModel.attempt)).where(
+                ContextPackageMaterializationAuditModel.package_id == package_id,
+                ContextPackageMaterializationAuditModel.workspace_id == workspace_id,
+            )
+        )
+        return int(latest or 0) + 1
+
     def add_ack(
         self,
         acknowledgement: ContextAcknowledgement,

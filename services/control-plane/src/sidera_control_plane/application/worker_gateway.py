@@ -45,6 +45,7 @@ from sidera_control_plane.application.ports import (
     WorkerAdapter,
     WorkspaceProvider,
 )
+from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.domain.artifacts import ArtifactCandidate
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
@@ -109,6 +110,10 @@ from sidera_control_plane.domain.modules import (
     StopCapability,
     WorkerAdapterCapabilityProfile,
 )
+from sidera_control_plane.domain.scheduling import (
+    SchedulingBlockReason,
+    SchedulingIssue,
+)
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.workspace import (
@@ -147,9 +152,23 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "context_package_corrupt",
         "context_package_stale",
         "context_hash_mismatch",
+        "result_input_integrity_failed",
+        "result_input_format_unsupported",
+        "result_input_budget_exceeded",
         "handoff_in_progress",
         "handoff_gate_unavailable",
     }
+)
+_RESULT_INPUT_FAILURE_CODES = frozenset(
+    {
+        "result_input_unavailable",
+        "result_input_integrity_failed",
+        "result_input_format_unsupported",
+        "result_input_budget_exceeded",
+    }
+)
+_RESULT_INPUT_SCHEDULING_REASONS = frozenset(
+    SchedulingBlockReason(code) for code in _RESULT_INPUT_FAILURE_CODES
 )
 logger = logging.getLogger(__name__)
 
@@ -569,6 +588,7 @@ class WorkerGateway:
             raise ValueError("context_package_cutover_at must be timezone aware")
         self._context_materializer = context_materializer
         self._context_package_cutover_at = context_package_cutover_at
+        self._scheduling_blocks = SchedulingBlockService()
         self._candidate_submission_service = candidate_submission_service
         self._assignment_lease_ttl_seconds = assignment_lease_ttl_seconds
         self._assignment_lease_renew_interval_seconds = (
@@ -2735,10 +2755,18 @@ class WorkerGateway:
                 caller_request_id=context.execution.id,
             )
         except ContextMaterializationError as exc:
+            if exc.code in _RESULT_INPUT_FAILURE_CODES:
+                self._record_context_materialization_failure(
+                    context,
+                    package,
+                    exc,
+                    now=now,
+                )
+                raise GatewayMessageError(
+                    "execution context materialization failed", code=exc.code
+                ) from exc
             if exc.corrupt:
                 self._mark_context_corrupt(context, package.package_id, exc.code)
-            if exc.temporary:
-                raise GatewayError("execution context materialization is temporary") from exc
             raise GatewayMessageError(
                 "execution context materialization failed", code=exc.code
             ) from exc
@@ -2884,6 +2912,7 @@ class WorkerGateway:
             adapter_module_id=context.binding.adapter_module_id,
             adapter_config_version=context.binding.adapter_config_version,
         )
+        correlation_id = context.causation_id or uuid4()
         command = CommandEnvelope(
             id=uuid5(NAMESPACE_URL, f"sidera.gateway.context-command:{operation_id}"),
             workspace_id=context.execution.workspace_id,
@@ -2900,18 +2929,7 @@ class WorkerGateway:
             },
             expected_version=None,
             idempotency_key=f"gateway-context:{operation_id}",
-            correlation_id=context.causation_id or uuid4(),
-        )
-        audit = build_materialization_audit(
-            package,
-            attempt=context.execution.attempt,
-            outcome=ContextMaterializationOutcome.SUCCEEDED,
-            occurred_at=now,
-            materialization=materialization,
-            audit_id=uuid5(
-                NAMESPACE_URL,
-                f"sidera.gateway.context-audit:{context.execution.id}:{context.execution.attempt}",
-            ),
+            correlation_id=correlation_id,
         )
         with self._uow_factory() as uow:
             item = uow.worker_items.get(
@@ -2924,6 +2942,38 @@ class WorkerGateway:
                     "WorkerItem context changed during acknowledgement",
                     code="context_consumer_stale",
                 )
+            existing_command = uow.commands.find_by_id(
+                context.execution.workspace_id, command.id
+            )
+            existing_ack = uow.context_packages.get_ack(
+                package.package_id,
+                ContextConsumerType.WORKER,
+                context.execution.id,
+                context.execution.workspace_id,
+                for_update=True,
+            )
+            audit_attempt = _materialization_attempt_from_command(existing_command)
+            if audit_attempt is None:
+                audit_attempt = (
+                    context.execution.attempt
+                    if existing_ack is not None
+                    else uow.context_packages.next_materialization_attempt(
+                        package.package_id,
+                        context.execution.workspace_id,
+                    )
+                )
+            audit = build_materialization_audit(
+                package,
+                attempt=audit_attempt,
+                outcome=ContextMaterializationOutcome.SUCCEEDED,
+                occurred_at=now,
+                materialization=materialization,
+                audit_id=uuid5(
+                    NAMESPACE_URL,
+                    f"sidera.gateway.context-audit:{package.package_id}:"
+                    f"{context.execution.id}:{audit_attempt}",
+                ),
+            )
             previous_item_version = item.version
             item.acknowledge_context(
                 expected_context_version=materialization.metadata.context_version or 0,
@@ -2931,7 +2981,13 @@ class WorkerGateway:
             )
             if item.version != previous_item_version:
                 uow.worker_items.save(item, previous_item_version)
-            if uow.commands.find_by_id(context.execution.workspace_id, command.id) is None:
+            unblocked_events = self._resolve_result_input_attention(
+                uow,
+                execution=context.execution,
+                envelope=command,
+                now=now,
+            )
+            if existing_command is None:
                 uow.commands.record_applied(
                     command,
                     hash_request(command),
@@ -2939,7 +2995,8 @@ class WorkerGateway:
                         command_id=command.id,
                         aggregate_id=package.package_id,
                         aggregate_version=1,
-                        event_ids=(),
+                        event_ids=tuple(event.id for event in unblocked_events),
+                        data={"materialization_attempt": audit_attempt},
                     ),
                 )
             uow.context_packages.add_ack(
@@ -2956,6 +3013,137 @@ class WorkerGateway:
                 causation_id=command.id,
                 correlation_id=command.correlation_id,
             )
+            for event in unblocked_events:
+                uow.events.append_with_outbox(event)
+
+    def _record_context_materialization_failure(
+        self,
+        context: _AssignmentContext,
+        package: ContextPackageManifest,
+        error: ContextMaterializationError,
+        *,
+        now: datetime,
+    ) -> None:
+        if error.code not in _RESULT_INPUT_FAILURE_CODES:
+            return
+        correlation_id = context.causation_id or uuid4()
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                context.execution.id,
+                context.execution.workspace_id,
+                for_update=True,
+            )
+            if execution is None:
+                return
+            attempt = uow.context_packages.next_materialization_attempt(
+                package.package_id,
+                context.execution.workspace_id,
+            )
+            command = CommandEnvelope(
+                id=uuid5(
+                    NAMESPACE_URL,
+                    f"sidera.gateway.context-failure:{package.package_id}:"
+                    f"{execution.id}:{attempt}:{error.code}",
+                ),
+                workspace_id=execution.workspace_id,
+                command_type="MaterializeExecutionContext",
+                target_type="context_package",
+                actor_type="system",
+                actor_id="gateway",
+                target_id=package.package_id,
+                payload={
+                    "execution_id": str(execution.id),
+                    "package_id": str(package.package_id),
+                    "attempt": attempt,
+                    "failure_code": error.code,
+                },
+                expected_version=None,
+                idempotency_key=(
+                    f"gateway-context-failure:{package.package_id}:"
+                    f"{execution.id}:{attempt}"
+                ),
+                correlation_id=correlation_id,
+            )
+            audit = build_materialization_audit(
+                package,
+                attempt=attempt,
+                outcome=ContextMaterializationOutcome.FAILED,
+                occurred_at=now,
+                failure_code=error.code,
+                audit_id=uuid5(
+                    NAMESPACE_URL,
+                    f"sidera.gateway.context-failure-audit:{package.package_id}:"
+                    f"{execution.id}:{attempt}",
+                ),
+            )
+            if uow.commands.find_by_id(execution.workspace_id, command.id) is None:
+                uow.commands.record_applied(
+                    command,
+                    hash_request(command),
+                    CommandResult(
+                        command_id=command.id,
+                        aggregate_id=package.package_id,
+                        aggregate_version=1,
+                        event_ids=(),
+                        data={
+                            "attempt": attempt,
+                            "failure_code": error.code,
+                        },
+                    ),
+                )
+            if error.corrupt:
+                uow.context_packages.mark_corrupt(
+                    package.package_id,
+                    execution.workspace_id,
+                    reason=error.code,
+                    now=now,
+                    actor_type="system",
+                    actor_id="gateway",
+                    causation_id=command.id,
+                    correlation_id=correlation_id,
+                )
+            events = self._scheduling_blocks.record(
+                uow,
+                execution=execution,
+                issue=SchedulingIssue(
+                    reason_code=SchedulingBlockReason(error.code),
+                    reason_details={"reason": error.code},
+                    requires_operator=not error.temporary,
+                ),
+                envelope=command,
+                now=now,
+            )
+            uow.context_packages.append_materialization_audit(
+                audit,
+                actor_type="system",
+                actor_id="gateway",
+                causation_id=command.id,
+                correlation_id=correlation_id,
+            )
+            for event in events:
+                uow.events.append_with_outbox(event)
+
+    def _resolve_result_input_attention(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        execution: Execution,
+        envelope: CommandEnvelope,
+        now: datetime,
+    ) -> tuple[EventData, ...]:
+        active = uow.scheduling_blocks.get_active_for_execution(
+            execution.id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        if active is None or active.reason_code not in _RESULT_INPUT_SCHEDULING_REASONS:
+            return ()
+        return self._scheduling_blocks.resolve(
+            uow,
+            execution=execution,
+            envelope=envelope,
+            now=now,
+        )
 
     def _mark_context_corrupt(
         self,
@@ -4771,9 +4959,23 @@ def _config_value(config: Mapping[str, object], namespace: str, name: str) -> ob
     return config.get(f"{namespace}.{name}", config.get(name))
 
 
+def _materialization_attempt_from_command(command: object) -> int | None:
+    result = getattr(command, "result", None)
+    if not isinstance(result, Mapping):
+        return None
+    data = result.get("data")
+    if not isinstance(data, Mapping):
+        return None
+    value = data.get("materialization_attempt")
+    if type(value) is int and value >= 1:
+        return value
+    return None
+
+
 def _failure_code(exc: Exception) -> str:
-    if isinstance(exc, GatewayMessageError) and exc.code:
-        return exc.code
+    raw_code = getattr(exc, "code", None)
+    if isinstance(raw_code, str) and raw_code:
+        return raw_code
     value = str(exc).lower().replace(" ", "_")
     clean = "".join(char if char.isalnum() or char == "_" else "_" for char in value)
     return clean.strip("_")[:100] or type(exc).__name__.lower()
@@ -4814,8 +5016,9 @@ def _log_gateway_error(message: OutboxMessage, error: GatewayError) -> None:
 
 
 def _stable_gateway_error_code(error: GatewayError) -> str:
-    if isinstance(error, GatewayMessageError) and error.code:
-        return error.code
+    raw_code = getattr(error, "code", None)
+    if isinstance(raw_code, str) and raw_code:
+        return raw_code
     if isinstance(error, GatewayRecoveryRequired):
         return "gateway_recovery_required"
     return "gateway_error"

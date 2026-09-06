@@ -181,7 +181,7 @@ class ContextMaterializer:
                 or materialization.input_token_count > manifest.budget.max_input_tokens
             ):
                 raise ContextMaterializationError(
-                    "context_budget_exceeded",
+                    "result_input_budget_exceeded",
                     "Materialized context exceeds its pinned result input budget",
                 )
         return materialization
