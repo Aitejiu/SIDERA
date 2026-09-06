@@ -46,7 +46,7 @@ function workerTab(workerItemId: string): WorkspaceTab {
   return {
     id: `worker-item:${workerItemId}`,
     kind: "worker-item",
-    title: "后端执行 WorkerItem",
+    title: `WorkerItem ${workerItemId.slice(0, 8)}`,
     href: `/workspaces/ws-1/worker-items/${workerItemId}`,
     closeable: true,
   };
@@ -341,6 +341,18 @@ describe("workspace tabs", () => {
     expect(next.navigationHref).toBe("/workspaces/ws-1/tasks");
   });
 
+  it("falls back to the nearest valid tab when a worker's parent was already closed", () => {
+    let state = taskIndex();
+    state = reduceTabs(state, openTab(rootTaskTab("task-1")));
+    state = reduceTabs(state, openTab(workerTab("worker-1")));
+    state = reduceTabs(state, closeTab("root-task:task-1"));
+
+    const next = reduceTabs(state, closeTab("worker-item:worker-1"));
+
+    expect(next.activeTabId).toBe("task-index");
+    expect(next.navigationHref).toBe("/workspaces/ws-1/tasks");
+  });
+
   it("rebuilds a direct deep link without duplicating it", () => {
     const direct = subtaskTab("task-1", "callback-idempotency");
     const state = reduceTabs(
@@ -383,6 +395,13 @@ describe("workspace tabs", () => {
       pathname: "/workspaces/ws-1/tasks/task-1/collaboration",
       search: "",
     })).toEqual(collaborationTab("task-1"));
+  });
+
+  it("maps a WorkerItem direct link to its own semantic tab", () => {
+    expect(semanticTabForLocation("ws-1", {
+      pathname: "/workspaces/ws-1/worker-items/worker-1",
+      search: "",
+    })).toEqual(workerTab("worker-1"));
   });
 
   it("maps the inbox route to its fixed semantic tab", () => {

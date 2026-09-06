@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
+import { collaborationSummaryFixture } from "@/test/resultInputFixtures";
+
 import { CollaborationSummary } from "./CollaborationSummary";
 import type { RootCollaborationSummary } from "./types";
 
@@ -96,5 +98,23 @@ describe("CollaborationSummary", () => {
 
     await user.click(screen.getByRole("button", { name: "打开子任务：验证支付回调" }));
     expect(openSubtask).toHaveBeenCalledWith("payment-callback");
+  });
+
+  it("shows pending approvals and a different blocked subtask together", () => {
+    render(
+      <MemoryRouter>
+        <CollaborationSummary
+          summary={collaborationSummaryFixture()}
+          onOpenSubtask={vi.fn()}
+          rootTaskTitle="技术评估"
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText("待决定 Proposal")).toBeVisible();
+    expect(screen.getByLabelText("协同卡点")).toBeVisible();
+    expect(screen.getByText("技术评估 / 汇总结果")).toBeVisible();
+    expect(screen.getByText("技术评估 / 研究结果输入")).toBeVisible();
+    expect(screen.getByText("等待 Research C 的必要证据")).toBeVisible();
   });
 });

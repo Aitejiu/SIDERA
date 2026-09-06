@@ -253,6 +253,7 @@ describe("SubtaskPage", () => {
     expect(screen.getByText("调度等待")).toBeVisible();
     expect(screen.getByText("2 个候选执行节点暂不可用")).toBeVisible();
     expect(screen.getByText("需要我处理")).toBeVisible();
+    expect(screen.getByText("协同门槛")).toBeVisible();
     expect(screen.getByText(/阻塞于/)).toBeVisible();
     expect(screen.getByText("实现幂等写入和重试策略")).toBeVisible();
     expect(screen.queryByTestId("worker-graph-canvas")).not.toBeInTheDocument();

@@ -138,12 +138,32 @@ const graph = {
       evidence_satisfied: 0,
       evidence_required: 1,
     },
+    {
+      subtask_key: "research-input",
+      task_id: null,
+      kind: "child",
+      title: "研究输入",
+      goal_summary: "提供可选的支付资料输入。",
+      state: "planned",
+      milestone_key: "m1",
+      worker_item_count: 0,
+      running_worker_item_count: 0,
+      attention_worker_item_count: 0,
+      current_action: null,
+      evidence_satisfied: 0,
+      evidence_required: 0,
+    },
   ],
   edges: [
     {
       upstream_subtask_key: "callback-idempotency",
       downstream_subtask_key: "verification",
       kind: "hard",
+    },
+    {
+      upstream_subtask_key: "callback-idempotency",
+      downstream_subtask_key: "research-input",
+      kind: "candidate",
     },
   ],
   milestones: [
@@ -413,7 +433,7 @@ describe("TaskDetailPage", () => {
     renderPage();
 
     const collaboration = await screen.findByRole("region", { name: "协同调度" });
-    expect(within(collaboration).getByText("验收支付链路")).toBeVisible();
+    expect(within(collaboration).getByText("支付重构 / 验收支付链路")).toBeVisible();
     expect(within(collaboration).getByText("等待必要证据")).toBeVisible();
     expect(within(collaboration).getByRole("link", { name: "查看协同记录" })).toHaveAttribute(
       "href",
@@ -543,6 +563,9 @@ describe("TaskDetailPage", () => {
     await user.click(screen.getByRole("tab", { name: "DAG" }));
     expect(await screen.findByRole("region", { name: "任务 DAG" })).toBeVisible();
     expect(await screen.findByText("依赖：callback-idempotency → verification")).toBeVisible();
+    expect(await screen.findByText("候选输入（非阻塞）")).toBeVisible();
+    expect(screen.getByRole("group", { name: "DAG 关系图例" })).toHaveTextContent("硬依赖");
+    expect(screen.getByRole("group", { name: "DAG 关系图例" })).toHaveTextContent("候选 / 非阻塞关系");
   });
 
   it("shows at most eight recent activities before loading the next page", async () => {

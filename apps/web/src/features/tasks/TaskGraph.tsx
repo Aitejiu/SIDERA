@@ -84,9 +84,9 @@ export function TaskGraph({
     animated: false,
     data: edge as unknown as Record<string, unknown>,
     style: {
-      stroke: edge.kind === "informational" ? "#929aa4" : "#2166d1",
-      strokeDasharray: edge.kind === "informational" ? "6 4" : undefined,
-      strokeWidth: edge.kind === "hard" ? 2.5 : 1.5,
+      stroke: isHardEdge(edge.kind) ? "#2166d1" : "#929aa4",
+      strokeDasharray: isHardEdge(edge.kind) ? undefined : "6 4",
+      strokeWidth: isHardEdge(edge.kind) ? 2.5 : 1.5,
     },
   }));
   const onNodeClick: NodeMouseHandler<TaskFlowNode> = (_event, node) => {
@@ -116,15 +116,43 @@ export function TaskGraph({
           <FallbackLayoutNodes layout={layout} onOpen={onOpen} />
         )}
       </div>
+      <div className="task-graph__legend" role="group" aria-label="DAG 关系图例">
+        <span className="task-graph__legend-item">
+          <span className="task-graph__legend-line task-graph__legend-line--hard" aria-hidden="true" />
+          硬依赖
+        </span>
+        <span className="task-graph__legend-item">
+          <span className="task-graph__legend-line task-graph__legend-line--nonblocking" aria-hidden="true" />
+          候选 / 非阻塞关系
+        </span>
+      </div>
       <div className="task-graph__edge-summary" role="group" aria-label="依赖关系">
         {layout.edges.map((edge) => (
           <span key={edge.id} className={`edge-summary edge-summary--${edge.kind}`}>
-            依赖：{edge.source} → {edge.target}
+            <span>依赖：{edge.source} → {edge.target}</span>
+            <strong>{edgeKindLabel(edge.kind)}</strong>
           </span>
         ))}
       </div>
     </div>
   );
+}
+
+function isHardEdge(kind: string): boolean {
+  return kind === "hard";
+}
+
+function edgeKindLabel(kind: string): string {
+  switch (kind) {
+    case "hard":
+      return "硬依赖";
+    case "candidate":
+      return "候选输入（非阻塞）";
+    case "informational":
+      return "非阻塞关系";
+    default:
+      return `${kind}（非阻塞）`;
+  }
 }
 
 function FallbackNodes({

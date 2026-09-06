@@ -22,7 +22,10 @@ export function TaskNode({ data }: NodeProps<TaskFlowNode>) {
         </span>
         <strong>{data.title}</strong>
         <span className="task-flow-node__action">
-          {data.current_action ?? (data.state === "planned" ? "等待物化" : "等待活动")}
+          {data.waiting_details_summary
+            ?? data.waiting_reason
+            ?? data.current_action
+            ?? (data.state === "planned" ? "等待物化" : "等待活动")}
         </span>
         <span className="task-flow-node__meta">
           {data.worker_item_count > 0 ? `${data.worker_item_count} 个 WorkerItem` : "未分配 WorkerItem"}

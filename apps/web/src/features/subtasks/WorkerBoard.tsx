@@ -96,6 +96,7 @@ function WorkerCard({
   onOpen: (workerItemId: string) => void;
 }) {
   const collaborationLabel = workerCollaborationLabel(worker.collaboration_state);
+  const collaborationHeading = workerCollaborationHeading(worker.collaboration_state);
   return (
     <button
       className="worker-board-card"
@@ -118,6 +119,7 @@ function WorkerCard({
       ) : null}
       {collaborationLabel ? (
         <span className="worker-board-card__collaboration">
+          <span className="eyebrow">{collaborationHeading}</span>
           {collaborationLabel}
         </span>
       ) : null}
@@ -143,6 +145,15 @@ function WorkerCard({
       <span className="worker-board-card__chevron" aria-hidden="true"><ArrowRight size={14} /></span>
     </button>
   );
+}
+
+function workerCollaborationHeading(state: string | null | undefined): string {
+  return state === "waiting_dependency"
+    || state === "waiting_artifact"
+    || state === "waiting_evidence"
+    || state === "waiting_release"
+    ? "协同门槛"
+    : "协同状态";
 }
 
 function syncStatusLabel(status: string): string {

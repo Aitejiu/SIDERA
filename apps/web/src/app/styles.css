@@ -1858,7 +1858,36 @@ h1 {
   border-top: 1px solid var(--structure);
 }
 
+.task-graph__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--structure);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.task-graph__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-graph__legend-line {
+  width: 22px;
+  border-top: 2px solid var(--dispatch);
+}
+
+.task-graph__legend-line--nonblocking {
+  border-top-style: dashed;
+  border-top-color: #929aa4;
+}
+
 .edge-summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
   padding: 5px 7px;
   border: 1px dashed #929aa4;
   color: var(--muted);
@@ -1870,6 +1899,12 @@ h1 {
   border-style: solid;
   border-color: var(--dispatch);
   color: var(--dispatch);
+}
+
+.edge-summary strong {
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 600;
 }
 
 .activity-panel {
@@ -13333,6 +13368,8 @@ a.knowledge-table__row:focus-visible {
 }
 
 .worker-board-card__collaboration {
+  display: grid;
+  gap: 2px;
   padding-top: 6px;
   border-top: 1px solid #e5e8eb;
 }
