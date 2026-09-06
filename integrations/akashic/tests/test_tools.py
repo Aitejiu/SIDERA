@@ -202,6 +202,7 @@ def test_submit_schema_exposes_only_business_fields() -> None:
         "sidera_get_planning_status",
         "sidera_get_task_status",
         "sidera_get_collaboration_governance",
+        "sidera_get_worker_result_inputs",
         "sidera_list_inbox",
         "sidera_get_notification_thread",
         "sidera_manage_notification",

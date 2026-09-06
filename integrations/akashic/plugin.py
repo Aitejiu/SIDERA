@@ -613,6 +613,23 @@ class SideraTaskBridge(Plugin):
         )
 
     @tool(
+        name="sidera_get_worker_result_inputs",
+        risk="read-only",
+        always_on=True,
+    )
+    async def sidera_get_worker_result_inputs(
+        self,
+        event: object,
+        worker_item_id: str,
+        execution_request_id: str | None = None,
+    ) -> str:
+        """Read bounded result-input provenance for one WorkerItem."""
+
+        return await self._toolset().sidera_get_worker_result_inputs(
+            event, worker_item_id, execution_request_id
+        )
+
+    @tool(
         name="sidera_list_inbox",
         risk="read-only",
         always_on=True,

@@ -59,7 +59,7 @@ class FakeContext:
         return task
 
 
-def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
+def test_plugin_declares_exact_twenty_six_tools_and_risks() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 
     metadata = [
@@ -67,7 +67,7 @@ def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
         for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
-    assert len(metadata) == 25
+    assert len(metadata) == 26
     assert {item.tool_name for item in metadata} == {
         "sidera_submit_brief",
         "sidera_get_planning_status",
@@ -84,6 +84,7 @@ def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
         "sidera_get_plan_transition",
         "sidera_get_task_status",
         "sidera_get_collaboration_governance",
+        "sidera_get_worker_result_inputs",
         "sidera_list_inbox",
         "sidera_get_notification_thread",
         "sidera_manage_notification",
@@ -101,6 +102,7 @@ def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
         "sidera_get_plan_revision",
         "sidera_get_plan_transition",
         "sidera_get_collaboration_governance",
+        "sidera_get_worker_result_inputs",
         "sidera_list_inbox",
         "sidera_get_notification_thread",
         "sidera_search_knowledge",
@@ -119,6 +121,7 @@ def test_plugin_declares_exact_twenty_five_tools_and_risks() -> None:
         "sidera_get_planning_status",
         "sidera_get_task_status",
         "sidera_get_collaboration_governance",
+        "sidera_get_worker_result_inputs",
         "sidera_list_inbox",
         "sidera_search_knowledge",
         "sidera_get_knowledge_page",
@@ -233,6 +236,18 @@ def test_governance_tool_schemas_expose_only_bounded_business_fields() -> None:
     read_schema = metadata["sidera_get_collaboration_governance"].tool_schema
     assert read_schema is not None
     assert set(read_schema["properties"]) == {"worker_item_id"}
+
+    result_inputs_schema = metadata["sidera_get_worker_result_inputs"].tool_schema
+    assert result_inputs_schema is not None
+    assert set(result_inputs_schema["properties"]) == {
+        "worker_item_id",
+        "execution_request_id",
+    }
+    assert result_inputs_schema["properties"]["worker_item_id"]["type"] == "string"
+    assert (
+        result_inputs_schema["properties"]["execution_request_id"]["type"]
+        == "string"
+    )
 
     pause_schema = metadata["sidera_pause_collaboration_release"].tool_schema
     assert pause_schema is not None

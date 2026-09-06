@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from sidera_task_bridge.contracts import ToolEnvelope
+from sidera_task_bridge.contracts import GovernanceProposalView, ToolEnvelope
 
 
 @pytest.mark.parametrize(
@@ -56,3 +56,64 @@ def test_tool_envelope_json_does_not_include_secret_or_exception_repr() -> None:
     assert "secret" not in encoded.lower()
     assert "RuntimeError" not in encoded
     assert "Traceback" not in encoded
+
+
+def test_governance_proposal_preserves_the_fixed_input_selection_identity() -> None:
+    proposal = GovernanceProposalView.model_validate(
+        {
+            "workspace_id": "00000000-0000-0000-0000-000000000001",
+            "root_task_id": "00000000-0000-0000-0000-000000000020",
+            "subtask_id": None,
+            "subtask_key": "summary",
+            "subtask_title": "Summary",
+            "worker_item_id": "00000000-0000-0000-0000-000000000060",
+            "worker_item_key": "summary",
+            "worker_item_title": "Summarize",
+            "proposal_id": "00000000-0000-0000-0000-000000000061",
+            "status": "pending",
+            "resource_version": 3,
+            "target_request_version": 8,
+            "reason_code": "waiting_release",
+            "summary": "The selected results are ready.",
+            "hold_id": "00000000-0000-0000-0000-000000000062",
+            "hold_resource_version": 4,
+            "governance_mode": "paused",
+            "available_actions": ["approve"],
+            "deep_link": "/workspaces/00000000-0000-0000-0000-000000000001/worker-items/00000000-0000-0000-0000-000000000060",
+            "input_selection_id": "61000000-0000-0000-0000-000000000001",
+            "input_selection_hash": "a" * 64,
+        }
+    )
+
+    assert str(proposal.input_selection_id) == (
+        "61000000-0000-0000-0000-000000000001"
+    )
+    assert proposal.input_selection_hash == "a" * 64
+
+
+def test_governance_proposal_rejects_a_partial_input_selection_identity() -> None:
+    with pytest.raises(ValidationError):
+        GovernanceProposalView.model_validate(
+            {
+                "workspace_id": "00000000-0000-0000-0000-000000000001",
+                "root_task_id": "00000000-0000-0000-0000-000000000020",
+                "subtask_id": None,
+                "subtask_key": "summary",
+                "subtask_title": "Summary",
+                "worker_item_id": "00000000-0000-0000-0000-000000000060",
+                "worker_item_key": "summary",
+                "worker_item_title": "Summarize",
+                "proposal_id": "00000000-0000-0000-0000-000000000061",
+                "status": "pending",
+                "resource_version": 3,
+                "target_request_version": 8,
+                "reason_code": "waiting_release",
+                "summary": "The selected results are ready.",
+                "hold_id": "00000000-0000-0000-0000-000000000062",
+                "hold_resource_version": 4,
+                "governance_mode": "paused",
+                "available_actions": ["approve"],
+                "deep_link": "/worker-items/00000000-0000-0000-0000-000000000060",
+                "input_selection_id": "61000000-0000-0000-0000-000000000001",
+            }
+        )

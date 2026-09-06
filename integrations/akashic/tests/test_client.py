@@ -477,6 +477,54 @@ def test_client_reads_governance_views_and_worker_version() -> None:
     asyncio.run(scenario())
 
 
+def test_client_reads_result_input_view_and_immutable_selection() -> None:
+    async def scenario() -> None:
+        worker_item_id = UUID("00000000-0000-0000-0000-000000000023")
+        request_id = UUID("00000000-0000-0000-0000-000000000024")
+        selection_id = UUID("00000000-0000-0000-0000-000000000025")
+        requests: list[tuple[str, str | None]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request.url.path, request.url.params.get("execution_request_id")))
+            if request.url.path.endswith(f"worker-items/{worker_item_id}/result-inputs"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "schema_version": 1,
+                        "workspace_id": str(WORKSPACE_ID),
+                        "worker_item_id": str(worker_item_id),
+                    },
+                )
+            if request.url.path.endswith(f"input-selections/{selection_id}"):
+                return httpx.Response(
+                    200,
+                    json={"selection_id": str(selection_id)},
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+        client = ControlPlaneClient(
+            make_config(), transport=httpx.MockTransport(handler)
+        )
+        result = await client.get_worker_result_inputs(worker_item_id, request_id)
+        selection = await client.get_input_selection(selection_id)
+        await client.close()
+
+        assert result["schema_version"] == 1
+        assert selection["selection_id"] == str(selection_id)
+        assert requests == [
+            (
+                f"/api/v1/workspaces/{WORKSPACE_ID}/worker-items/{worker_item_id}/result-inputs",
+                str(request_id),
+            ),
+            (
+                f"/api/v1/workspaces/{WORKSPACE_ID}/collaboration/input-selections/{selection_id}",
+                None,
+            ),
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_client_uses_governance_principal_only_for_allowlisted_commands() -> None:
     config = make_config(
         governance_actor_type="local",

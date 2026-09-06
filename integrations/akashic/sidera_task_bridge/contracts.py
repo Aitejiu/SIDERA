@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 ToolOutcome = Literal[
@@ -139,6 +139,20 @@ class GovernanceProposalView(BaseModel):
     # Older Control Plane fixtures omitted these optional audit timestamps.
     created_at: datetime | None = None
     resolved_at: datetime | None = None
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def validate_input_selection_identity(self) -> GovernanceProposalView:
+        if (self.input_selection_id is None) != (
+            self.input_selection_hash is None
+        ):
+            raise ValueError(
+                "input selection id and hash must be provided together"
+            )
+        return self
 
 
 class NotificationSummary(BaseModel):

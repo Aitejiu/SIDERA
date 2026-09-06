@@ -814,6 +814,36 @@ class ControlPlaneClient:
             f"collaboration-governance/proposals/{proposal_id}"
         )
 
+    async def get_worker_result_inputs(
+        self,
+        worker_item_id: UUID,
+        execution_request_id: UUID | None = None,
+    ) -> dict[str, JsonValue]:
+        """Read one bounded WorkerItem result-input view."""
+
+        params = (
+            {"execution_request_id": str(execution_request_id)}
+            if execution_request_id is not None
+            else None
+        )
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"worker-items/{worker_item_id}/result-inputs",
+            params=params,
+        )
+        return self._parse_json_object(response)
+
+    async def get_input_selection(
+        self, selection_id: UUID
+    ) -> dict[str, JsonValue]:
+        """Read one immutable, workspace-scoped input Selection."""
+
+        return await self._get_object(
+            f"/api/v1/workspaces/{self._config.workspace_id}/"
+            f"collaboration/input-selections/{selection_id}"
+        )
+
     async def get_worker_item_workspace(
         self, worker_item_id: UUID
     ) -> dict[str, JsonValue]:

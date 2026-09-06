@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from agent.tools.base import get_current_tool_context
@@ -1189,6 +1189,78 @@ class SideraTaskTools:
                 )
             )
 
+    async def sidera_get_worker_result_inputs(
+        self,
+        event: object,
+        worker_item_id: str,
+        execution_request_id: str | None = None,
+    ) -> str:
+        """Read bounded result-input provenance and delivery state for one WorkerItem."""
+
+        del event
+        parsed_worker_item_id = _parse_uuid(worker_item_id)
+        if parsed_worker_item_id is None:
+            return _encode(_invalid_resource("WorkerItem"))
+        parsed_request_id: UUID | None = None
+        if execution_request_id is not None:
+            parsed_request_id = _parse_uuid(execution_request_id)
+            if parsed_request_id is None:
+                return _encode(_invalid_resource("execution request"))
+        web_url = self._worker_item_url(parsed_worker_item_id)
+        resource_ref = f"worker-item:{parsed_worker_item_id}"
+        try:
+            raw_view = await self._client.get_worker_result_inputs(
+                parsed_worker_item_id, parsed_request_id
+            )
+            data = _result_input_summary(
+                raw_view,
+                expected_workspace_id=self._config.workspace_id,
+                expected_worker_item_id=parsed_worker_item_id,
+            )
+            if data is None:
+                return _encode(
+                    _with_governance_ref(
+                        ToolEnvelope(
+                            outcome="failed",
+                            summary="The control plane returned an invalid result-input view.",
+                            error_code="invalid_control_plane_response",
+                        ),
+                        resource_ref,
+                        web_url,
+                    )
+                )
+            return _encode(
+                ToolEnvelope(
+                    outcome="ok",
+                    summary=_result_input_summary_text(data),
+                    resource_ref=resource_ref,
+                    web_url=web_url,
+                    data=data,
+                )
+            )
+        except TransportUnavailable:
+            return _encode(_with_governance_ref(_unavailable_error(), resource_ref, web_url))
+        except ControlPlaneRejected as exc:
+            return _encode(
+                _with_governance_ref(
+                    _rejected_envelope(exc.code, "WorkerItem result inputs"),
+                    resource_ref,
+                    web_url,
+                )
+            )
+        except (TypeError, ValueError):
+            return _encode(
+                _with_governance_ref(
+                    ToolEnvelope(
+                        outcome="failed",
+                        summary="The control plane returned an invalid result-input view.",
+                        error_code="invalid_control_plane_response",
+                    ),
+                    resource_ref,
+                    web_url,
+                )
+            )
+
     async def sidera_pause_collaboration_release(
         self,
         event: object,
@@ -1506,6 +1578,15 @@ class SideraTaskTools:
                 or worker_proposal != proposal.proposal_id
             ):
                 return _encode(_governance_lineage_conflict())
+            if action == "approve":
+                worker_selection_error = _worker_proposal_selection_preflight(
+                    worker, proposal
+                )
+                if worker_selection_error is not None:
+                    return _encode(worker_selection_error)
+                selection_error = await self._approval_selection_preflight(proposal)
+                if selection_error is not None:
+                    return _encode(selection_error)
             source_error = await self._governance_source_preflight(
                 proposal.root_task_id,
                 resource_ref=proposal_ref,
@@ -1517,6 +1598,11 @@ class SideraTaskTools:
             if action_error is not None:
                 return _encode(action_error)
             payload: dict[str, JsonValue] = {"transport": "main_agent"}
+            if action == "approve" and proposal.input_selection_id is not None:
+                payload["expected_input_selection_id"] = (
+                    str(proposal.input_selection_id)
+                )
+                payload["expected_input_selection_hash"] = proposal.input_selection_hash
             if normalized_reason is not None:
                 payload["reason"] = normalized_reason
             result = await self._dispatcher.execute(
@@ -1579,6 +1665,29 @@ class SideraTaskTools:
                     self._proposal_url(proposal_id),
                 )
             )
+
+    async def _approval_selection_preflight(
+        self, proposal: GovernanceProposalView
+    ) -> ToolEnvelope | None:
+        if proposal.input_selection_id is None:
+            return None
+        try:
+            selection = await self._client.get_input_selection(
+                proposal.input_selection_id
+            )
+        except ControlPlaneRejected as exc:
+            if exc.code == "not_found":
+                return _governance_selection_conflict()
+            raise
+        return _input_selection_preflight(
+            selection,
+            expected_workspace_id=self._config.workspace_id,
+            expected_root_task_id=proposal.root_task_id,
+            expected_worker_item_id=proposal.worker_item_id,
+            expected_request_version=proposal.target_request_version,
+            expected_selection_id=proposal.input_selection_id,
+            expected_selection_hash=proposal.input_selection_hash,
+        )
 
     async def _governance_worker_view(
         self, worker_item_id: UUID
@@ -2234,6 +2343,11 @@ def _governance_read_envelope(
         proposal_id = _parse_uuid(proposal.get("proposal_id"))
         if proposal_id is not None:
             safe_proposal["proposal_id"] = str(proposal_id)
+        input_selection_id = _parse_uuid(proposal.get("input_selection_id"))
+        input_selection_hash = _selection_hash(proposal.get("input_selection_hash"))
+        if input_selection_id is not None and input_selection_hash is not None:
+            safe_proposal["input_selection_id"] = str(input_selection_id)
+            safe_proposal["input_selection_hash"] = input_selection_hash
         for key in ("status", "reason_code"):
             value = _string(proposal.get(key), limit=200)
             if value is not None:
@@ -2281,6 +2395,733 @@ def _governance_read_envelope(
         web_url=web_url,
         data=data,
     )
+
+
+def _result_input_summary(
+    raw: object,
+    *,
+    expected_workspace_id: UUID,
+    expected_worker_item_id: UUID,
+) -> dict[str, JsonValue] | None:
+    """Project the Control Plane result-input view into safe adapter metadata."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    workspace_id = _parse_uuid(raw.get("workspace_id"))
+    root_task_id = _parse_uuid(raw.get("root_task_id"))
+    worker_item_id = _parse_uuid(raw.get("worker_item_id"))
+    schema_version = _positive_int(raw.get("schema_version"))
+    worker_item_key = _string(raw.get("worker_item_key"), limit=200)
+    worker_item_title = _string(raw.get("worker_item_title"), limit=300)
+    if (
+        workspace_id != expected_workspace_id
+        or worker_item_id != expected_worker_item_id
+        or root_task_id is None
+        or schema_version is None
+        or worker_item_key is None
+        or worker_item_title is None
+    ):
+        return None
+
+    request_value = raw.get("request")
+    request: dict[str, JsonValue] | None = None
+    subtask_key: str | None = None
+    if request_value is not None:
+        if not isinstance(request_value, Mapping):
+            return None
+        request_id = _parse_uuid(request_value.get("execution_request_id"))
+        request_worker_id = _parse_uuid(request_value.get("worker_item_id"))
+        request_key = _string(request_value.get("worker_item_key"), limit=200)
+        request_subtask_key = _string(request_value.get("subtask_key"), limit=200)
+        request_version = _positive_int(request_value.get("version"))
+        status = _string(request_value.get("status"), limit=100)
+        gate_mode = _string(request_value.get("collaboration_gate_mode"), limit=100)
+        gate_reason = _string(request_value.get("gate_reason"), limit=300)
+        if (
+            request_id is None
+            or request_worker_id != worker_item_id
+            or request_key is None
+            or request_subtask_key is None
+            or request_version is None
+            or status is None
+            or gate_mode is None
+            or gate_reason is None
+        ):
+            return None
+        subtask_key = request_subtask_key
+        request = {
+            "execution_request_id": str(request_id),
+            "worker_item_id": str(request_worker_id),
+            "worker_item_key": request_key,
+            "subtask_key": request_subtask_key,
+            "version": request_version,
+            "status": status,
+            "collaboration_gate_mode": gate_mode,
+            "gate_reason": gate_reason,
+        }
+
+    groups_value = raw.get("groups")
+    if not isinstance(groups_value, list | tuple):
+        return None
+    groups: list[JsonValue] = []
+    missing: list[JsonValue] = []
+    for group_value in groups_value[:32]:
+        group = _result_input_group(group_value)
+        if group is None:
+            return None
+        groups.append(group)
+        ready_count = cast(int, group["ready_count"])
+        required_count = cast(int, group["required_count"])
+        if (
+            ready_count < required_count
+            or group["reason_code"] is not None
+        ):
+            missing.append(
+                {
+                    "scope": "input_group",
+                    "group_key": group["group_key"],
+                    "title": group["title"],
+                    "reason_code": group["reason_code"],
+                    "missing_artifact_refs": group["missing_artifact_refs"],
+                    "missing_evidence_refs": group["missing_evidence_refs"],
+                }
+            )
+
+    hard_dependencies_value = raw.get("hard_dependencies")
+    if not isinstance(hard_dependencies_value, list | tuple):
+        return None
+    hard_dependencies: list[JsonValue] = []
+    for dependency_value in hard_dependencies_value[:32]:
+        dependency = _result_input_dependency(dependency_value)
+        if dependency is None:
+            return None
+        hard_dependencies.append(dependency)
+        if dependency["ready"] is not True:
+            missing.append(
+                {
+                    "scope": "hard_dependency",
+                    "dependency_key": dependency["dependency_key"],
+                    "upstream_worker_item_key": dependency[
+                        "upstream_worker_item_key"
+                    ],
+                    "reason_code": dependency["reason_code"],
+                    "required_artifact_refs": dependency["required_artifact_refs"],
+                    "required_evidence_refs": dependency["required_evidence_refs"],
+                }
+            )
+
+    governance = _result_input_governance(raw.get("governance"))
+    delivery = _result_input_delivery(raw.get("delivery"))
+    if governance is None or delivery is None:
+        return None
+    if delivery["reason_code"] is not None:
+        missing.append(
+            {
+                "scope": "delivery",
+                "reason_code": delivery["reason_code"],
+                "assembly_status": delivery["assembly_status"],
+                "acknowledgement_status": delivery["acknowledgement_status"],
+            }
+        )
+
+    execution_value = raw.get("execution")
+    execution = (
+        _result_input_execution(execution_value)
+        if execution_value is not None
+        else None
+    )
+    if execution_value is not None and execution is None:
+        return None
+
+    actions_value = raw.get("available_actions")
+    if not isinstance(actions_value, list | tuple):
+        return None
+    actions: list[JsonValue] = []
+    for action_value in actions_value[:8]:
+        action = _result_input_action(action_value)
+        if action is not None:
+            actions.append(action)
+
+    plan_snapshot_id = _parse_uuid(raw.get("plan_snapshot_id"))
+    plan_generation = _positive_int(raw.get("plan_generation"))
+    plan_content_hash = _string(raw.get("plan_content_hash"), limit=64)
+    historical = raw.get("is_historical")
+    if not isinstance(historical, bool):
+        return None
+
+    data: dict[str, JsonValue] = {
+        "schema_version": schema_version,
+        "root_task_id": str(root_task_id),
+        "worker_item_id": str(worker_item_id),
+        "worker_item_key": worker_item_key,
+        "worker_item_title": worker_item_title,
+        "subtask_key": subtask_key,
+        "is_historical": historical,
+        "groups": groups,
+        "hard_dependencies": hard_dependencies,
+        "governance": governance,
+        "delivery": delivery,
+        "execution": execution,
+        "available_actions": actions,
+        "missing": missing,
+        "next_action": _result_input_next_action(
+            missing=missing,
+            governance=governance,
+            delivery=delivery,
+            execution=execution,
+            actions=actions,
+            historical=historical,
+        ),
+    }
+    if request is not None:
+        data["request"] = request
+    if plan_snapshot_id is not None:
+        data["plan_snapshot_id"] = str(plan_snapshot_id)
+    if plan_generation is not None:
+        data["plan_generation"] = plan_generation
+    if plan_content_hash is not None:
+        data["plan_content_hash"] = plan_content_hash
+    return data
+
+
+def _result_input_group(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    group_key = _string(value.get("group_key"), limit=200)
+    title = _string(value.get("title"), limit=300)
+    mode = _string(value.get("mode"), limit=100)
+    required_count = _non_negative_int(value.get("required_count"))
+    ready_count = _non_negative_int(value.get("ready_count"))
+    minimum_count = value.get("minimum_count")
+    if minimum_count is not None:
+        minimum_count = _non_negative_int(minimum_count)
+    reason_code = _string(value.get("reason_code"), limit=200)
+    if (
+        group_key is None
+        or title is None
+        or mode is None
+        or required_count is None
+        or ready_count is None
+        or (value.get("minimum_count") is not None and minimum_count is None)
+    ):
+        return None
+    candidates_value = value.get("candidates")
+    selected_value = value.get("selected_sources")
+    if not isinstance(candidates_value, list | tuple) or not isinstance(
+        selected_value, list | tuple
+    ):
+        return None
+    candidate_views: list[dict[str, JsonValue]] = []
+    for candidate_value in candidates_value[:32]:
+        candidate = _result_input_candidate(candidate_value)
+        if candidate is None:
+            return None
+        candidate_views.append(candidate)
+    candidates = cast(list[JsonValue], candidate_views)
+    selected_views: list[dict[str, JsonValue]] = []
+    for source_value in selected_value[:32]:
+        source = _result_input_source(source_value)
+        if source is None:
+            return None
+        selected_views.append(source)
+    selected_sources = cast(list[JsonValue], selected_views)
+    missing_artifacts: list[JsonValue] = []
+    missing_evidence: list[JsonValue] = []
+    for candidate in candidate_views:
+        if candidate["ready"] is True:
+            continue
+        missing_artifacts.extend(
+            item
+            for item in cast(list[JsonValue], candidate["missing_artifact_refs"])
+            if item not in missing_artifacts
+        )
+        missing_evidence.extend(
+            item
+            for item in cast(list[JsonValue], candidate["missing_evidence_refs"])
+            if item not in missing_evidence
+        )
+    selection_id = _parse_uuid(value.get("selection_id"))
+    selection_hash = _selection_hash(value.get("selection_hash"))
+    if (value.get("selection_id") is not None and selection_id is None) or (
+        value.get("selection_hash") is not None and selection_hash is None
+    ):
+        return None
+    if (selection_id is None) != (selection_hash is None):
+        return None
+    return {
+        "group_key": group_key,
+        "title": title,
+        "mode": mode,
+        "minimum_count": minimum_count,
+        "required_count": required_count,
+        "ready_count": ready_count,
+        "reason_code": reason_code,
+        "candidate_count": len(candidates),
+        "selected_count": len(selected_sources),
+        "candidates": candidates,
+        "selected_sources": selected_sources,
+        "selection_id": str(selection_id) if selection_id is not None else None,
+        "selection_hash": selection_hash,
+        "missing_artifact_refs": missing_artifacts[:32],
+        "missing_evidence_refs": missing_evidence[:32],
+    }
+
+
+def _result_input_candidate(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    key = _string(value.get("worker_item_key"), limit=200)
+    title = _string(value.get("worker_item_title"), limit=300)
+    priority = _positive_int(value.get("priority"))
+    ready = value.get("ready")
+    retry_possible = value.get("retry_possible")
+    outcome_unknown = value.get("outcome_unknown")
+    path = _bounded_strings(value.get("subtask_path"), limit=16)
+    if (
+        key is None
+        or title is None
+        or priority is None
+        or not isinstance(ready, bool)
+        or not isinstance(retry_possible, bool)
+        or not isinstance(outcome_unknown, bool)
+        or not isinstance(value.get("subtask_path"), list | tuple)
+    ):
+        return None
+    worker_id = _optional_uuid(value.get("worker_item_id"))
+    if value.get("worker_item_id") is not None and worker_id is None:
+        return None
+    request_id = _optional_uuid(value.get("execution_request_id"))
+    execution_id = _optional_uuid(value.get("execution_id"))
+    attempt = _optional_positive_int(value.get("attempt"))
+    if value.get("attempt") is not None and attempt is None:
+        return None
+    artifacts = _result_input_artifacts(value.get("artifacts"))
+    evidence = _result_input_evidence(value.get("evidence"))
+    if artifacts is None or evidence is None:
+        return None
+    return {
+        "worker_item_key": key,
+        "worker_item_id": str(worker_id) if worker_id is not None else None,
+        "worker_item_title": title,
+        "subtask_key": _string(value.get("subtask_key"), limit=200),
+        "subtask_path": path,
+        "priority": priority,
+        "ready": ready,
+        "reason_code": _string(value.get("reason_code"), limit=200),
+        "missing_artifact_refs": _bounded_strings(
+            value.get("missing_artifact_refs"), limit=32
+        ),
+        "missing_evidence_refs": _bounded_strings(
+            value.get("missing_evidence_refs"), limit=32
+        ),
+        "retry_possible": retry_possible,
+        "outcome_unknown": outcome_unknown,
+        "execution_request_id": (
+            str(request_id) if request_id is not None else None
+        ),
+        "execution_id": str(execution_id) if execution_id is not None else None,
+        "attempt": attempt,
+        "execution_status": _string(value.get("execution_status"), limit=100),
+        "artifacts": artifacts,
+        "evidence": evidence,
+    }
+
+
+def _result_input_source(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    worker_id = _parse_uuid(value.get("worker_item_id"))
+    request_id = _parse_uuid(value.get("effective_request_id"))
+    lineage_id = _parse_uuid(value.get("effective_lineage_id"))
+    execution_id = _parse_uuid(value.get("effective_execution_id"))
+    key = _string(value.get("worker_item_key"), limit=200)
+    title = _string(value.get("worker_item_title"), limit=300)
+    attempt = _positive_int(value.get("attempt"))
+    priority = _positive_int(value.get("priority"))
+    basis_hash = _string(value.get("source_basis_hash"), limit=64)
+    path = _bounded_strings(value.get("subtask_path"), limit=16)
+    inheritance_refs = _bounded_strings(value.get("inheritance_refs"), limit=32)
+    if (
+        worker_id is None
+        or request_id is None
+        or lineage_id is None
+        or execution_id is None
+        or key is None
+        or title is None
+        or attempt is None
+        or priority is None
+        or basis_hash is None
+        or not isinstance(value.get("subtask_path"), list | tuple)
+        or not isinstance(value.get("inheritance_refs"), list | tuple)
+    ):
+        return None
+    artifacts = _result_input_artifacts(value.get("artifacts"))
+    evidence = _result_input_evidence(value.get("evidence"))
+    if artifacts is None or evidence is None:
+        return None
+    return {
+        "worker_item_key": key,
+        "worker_item_id": str(worker_id),
+        "worker_item_title": title,
+        "subtask_key": _string(value.get("subtask_key"), limit=200),
+        "subtask_path": path,
+        "effective_request_id": str(request_id),
+        "effective_lineage_id": str(lineage_id),
+        "effective_execution_id": str(execution_id),
+        "attempt": attempt,
+        "priority": priority,
+        "inheritance_refs": inheritance_refs,
+        "source_basis_hash": basis_hash,
+        "artifacts": artifacts,
+        "evidence": evidence,
+    }
+
+
+def _result_input_artifacts(value: object) -> list[JsonValue] | None:
+    if not isinstance(value, list | tuple):
+        return None
+    result: list[JsonValue] = []
+    for item in value[:32]:
+        if not isinstance(item, Mapping):
+            return None
+        artifact_id = _parse_uuid(item.get("artifact_id"))
+        artifact_type = _string(item.get("artifact_type"), limit=128)
+        content_hash = _string(item.get("content_hash"), limit=128)
+        size_bytes = _non_negative_int(item.get("size_bytes"))
+        media_type = _string(item.get("media_type"), limit=128)
+        if (
+            artifact_id is None
+            or artifact_type is None
+            or content_hash is None
+            or size_bytes is None
+            or media_type is None
+        ):
+            return None
+        result.append(
+            {
+                "artifact_id": str(artifact_id),
+                "artifact_type": artifact_type,
+                "content_hash": content_hash,
+                "size_bytes": size_bytes,
+                "media_type": media_type,
+            }
+        )
+    return result
+
+
+def _result_input_evidence(value: object) -> list[JsonValue] | None:
+    if not isinstance(value, list | tuple):
+        return None
+    result: list[JsonValue] = []
+    for item in value[:32]:
+        if not isinstance(item, Mapping):
+            return None
+        evidence_id = _parse_uuid(item.get("evidence_id"))
+        criterion = _string(item.get("acceptance_criterion_ref"), limit=300)
+        artifact_ids = _uuid_strings(item.get("artifact_ids"), limit=32)
+        if evidence_id is None or criterion is None or artifact_ids is None:
+            return None
+        result.append(
+            {
+                "evidence_id": str(evidence_id),
+                "acceptance_criterion_ref": criterion,
+                "artifact_ids": artifact_ids,
+            }
+        )
+    return result
+
+
+def _result_input_dependency(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    dependency_key = _string(value.get("dependency_key"), limit=200)
+    upstream_request_id = _parse_uuid(value.get("upstream_request_id"))
+    upstream_key = _string(value.get("upstream_worker_item_key"), limit=200)
+    upstream_title = _string(value.get("upstream_worker_item_title"), limit=300)
+    ready = value.get("ready")
+    if (
+        dependency_key is None
+        or upstream_request_id is None
+        or upstream_key is None
+        or upstream_title is None
+        or not isinstance(ready, bool)
+    ):
+        return None
+    upstream_worker_id = _optional_uuid(value.get("upstream_worker_item_id"))
+    if value.get("upstream_worker_item_id") is not None and upstream_worker_id is None:
+        return None
+    artifact_refs = _bounded_strings(value.get("required_artifact_refs"), limit=32)
+    evidence_refs = _bounded_strings(value.get("required_evidence_refs"), limit=32)
+    if not isinstance(value.get("required_artifact_refs"), list | tuple) or not isinstance(
+        value.get("required_evidence_refs"), list | tuple
+    ):
+        return None
+    selected_value = value.get("selected_source")
+    selected = (
+        _result_input_source(selected_value) if selected_value is not None else None
+    )
+    if selected_value is not None and selected is None:
+        return None
+    return {
+        "dependency_key": dependency_key,
+        "upstream_request_id": str(upstream_request_id),
+        "upstream_worker_item_id": (
+            str(upstream_worker_id) if upstream_worker_id is not None else None
+        ),
+        "upstream_worker_item_key": upstream_key,
+        "upstream_worker_item_title": upstream_title,
+        "required_artifact_refs": artifact_refs,
+        "required_evidence_refs": evidence_refs,
+        "ready": ready,
+        "reason_code": _string(value.get("reason_code"), limit=200),
+        "selected_source": selected,
+    }
+
+
+def _result_input_governance(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    enabled = value.get("enabled")
+    if not isinstance(enabled, bool):
+        return None
+    fields: dict[str, JsonValue] = {
+        "enabled": enabled,
+        "state": _string(value.get("state"), limit=100) or "unknown",
+        "waiting_summary": _string(value.get("waiting_summary"), limit=500),
+        "governance_mode": _string(value.get("governance_mode"), limit=100)
+        or "unknown",
+        "release_state": _string(value.get("release_state"), limit=100) or "unknown",
+        "attention_state": _string(value.get("attention_state"), limit=100) or "none",
+    }
+    for key in ("active_hold_id", "active_proposal_id", "active_proposal_input_selection_id"):
+        parsed = _optional_uuid(value.get(key))
+        if value.get(key) is not None and parsed is None:
+            return None
+        fields[key] = str(parsed) if parsed is not None else None
+    for key in ("hold_resource_version", "active_proposal_version"):
+        version = _optional_positive_int(value.get(key))
+        if value.get(key) is not None and version is None:
+            return None
+        fields[key] = version
+    selection_hash = _selection_hash(value.get("active_proposal_input_selection_hash"))
+    if (
+        value.get("active_proposal_input_selection_hash") is not None
+        and selection_hash is None
+    ):
+        return None
+    fields["active_proposal_input_selection_hash"] = selection_hash
+    action_names = value.get("available_action_names")
+    if not isinstance(action_names, list | tuple):
+        return None
+    fields["available_action_names"] = [
+        item
+        for item in _bounded_strings(action_names, limit=8)
+        if item in _GOVERNANCE_ACTIONS
+    ]
+    history_value = value.get("history")
+    if not isinstance(history_value, list | tuple):
+        return None
+    history: list[JsonValue] = []
+    for item in history_value[:20]:
+        if not isinstance(item, Mapping):
+            return None
+        resource_id = _parse_uuid(item.get("resource_id"))
+        kind = _string(item.get("kind"), limit=100)
+        status = _string(item.get("status"), limit=100)
+        summary = _string(item.get("summary"), limit=500)
+        occurred_at = _string(item.get("occurred_at"), limit=64)
+        if (
+            resource_id is None
+            or kind is None
+            or status is None
+            or summary is None
+            or occurred_at is None
+        ):
+            return None
+        history.append(
+            {
+                "kind": kind,
+                "resource_id": str(resource_id),
+                "status": status,
+                "summary": summary,
+                "occurred_at": occurred_at,
+                "result_code": _string(item.get("result_code"), limit=128),
+                "proposal_id": (
+                    str(_optional_uuid(item.get("proposal_id")))
+                    if _optional_uuid(item.get("proposal_id")) is not None
+                    else None
+                ),
+                "resolution_action": _string(
+                    item.get("resolution_action"), limit=64
+                ),
+                "resolution_result": _string(
+                    item.get("resolution_result"), limit=64
+                ),
+            }
+        )
+    fields["history"] = history
+    return fields
+
+
+def _result_input_delivery(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    consumer_type = _string(value.get("consumer_type"), limit=100)
+    acknowledgement = _string(value.get("acknowledgement_status"), limit=100)
+    if consumer_type is None or acknowledgement is None:
+        return None
+    result: dict[str, JsonValue] = {
+        "consumer_type": consumer_type,
+        "acknowledgement_status": acknowledgement,
+        "reason_code": _string(value.get("reason_code"), limit=200),
+    }
+    for key in (
+        "consumer_id",
+        "package_id",
+        "assembly_request_id",
+    ):
+        parsed = _optional_uuid(value.get(key))
+        if value.get(key) is not None and parsed is None:
+            return None
+        result[key] = str(parsed) if parsed is not None else None
+    for key in (
+        "context_version",
+        "assembly_attempt",
+        "assembly_version",
+        "materialization_attempt",
+    ):
+        number = _optional_non_negative_int(value.get(key))
+        if value.get(key) is not None and number is None:
+            return None
+        result[key] = number
+    for key, limit in (
+        ("package_hash", 128),
+        ("package_status", 100),
+        ("assembly_status", 100),
+        ("assembly_request_fingerprint", 128),
+        ("materialization_outcome", 100),
+        ("materialization_failure_code", 200),
+        ("acknowledged_package_hash", 128),
+    ):
+        result[key] = _string(value.get(key), limit=limit)
+    for key in ("materialization_occurred_at", "acknowledged_at"):
+        result[key] = _string(value.get(key), limit=64)
+    return result
+
+
+def _result_input_execution(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    request_id = _parse_uuid(value.get("execution_request_id"))
+    request_version = _positive_int(value.get("request_version"))
+    if request_id is None or request_version is None:
+        return None
+    result: dict[str, JsonValue] = {
+        "execution_request_id": str(request_id),
+        "request_status": _string(value.get("request_status"), limit=100) or "unknown",
+        "request_version": request_version,
+        "collaboration_gate_mode": _string(
+            value.get("collaboration_gate_mode"), limit=100
+        )
+        or "unknown",
+        "gate_reason": _string(value.get("gate_reason"), limit=300) or "unknown",
+        "status": _string(value.get("status"), limit=100),
+        "failure_code": _string(value.get("failure_code"), limit=200),
+        "attempt": _optional_positive_int(value.get("attempt")),
+        "release_status": _string(value.get("release_status"), limit=100)
+        or "unknown",
+        "started_at": _string(value.get("started_at"), limit=64),
+        "finished_at": _string(value.get("finished_at"), limit=64),
+        "released_at": _string(value.get("released_at"), limit=64),
+    }
+    for key in ("execution_id", "lineage_id"):
+        parsed = _optional_uuid(value.get(key))
+        if value.get(key) is not None and parsed is None:
+            return None
+        result[key] = str(parsed) if parsed is not None else None
+    if value.get("attempt") is not None and result["attempt"] is None:
+        return None
+    return result
+
+
+def _result_input_action(value: object) -> dict[str, JsonValue] | None:
+    if not isinstance(value, Mapping):
+        return None
+    action = _string(value.get("action"), limit=100)
+    command_type = _string(value.get("command_type"), limit=150)
+    target_type = _string(value.get("target_type"), limit=150)
+    target_id = _parse_uuid(value.get("target_id"))
+    if action is None or command_type is None or target_type is None or target_id is None:
+        return None
+    result: dict[str, JsonValue] = {
+        "action": action,
+        "command_type": command_type,
+        "target_type": target_type,
+        "target_id": str(target_id),
+    }
+    for key in ("expected_version", "expected_plan_generation"):
+        number = _optional_positive_int(value.get(key))
+        if value.get(key) is not None and number is None:
+            return None
+        result[key] = number
+    fingerprint = _string(value.get("expected_fingerprint"), limit=128)
+    if value.get("expected_fingerprint") is not None and fingerprint is None:
+        return None
+    result["expected_fingerprint"] = fingerprint
+    selection_id = _optional_uuid(value.get("expected_input_selection_id"))
+    if value.get("expected_input_selection_id") is not None and selection_id is None:
+        return None
+    selection_hash = _selection_hash(value.get("expected_input_selection_hash"))
+    if value.get("expected_input_selection_hash") is not None and selection_hash is None:
+        return None
+    if (selection_id is None) != (selection_hash is None):
+        return None
+    result["expected_input_selection_id"] = (
+        str(selection_id) if selection_id is not None else None
+    )
+    result["expected_input_selection_hash"] = selection_hash
+    return result
+
+
+def _result_input_next_action(
+    *,
+    missing: list[JsonValue],
+    governance: Mapping[str, JsonValue],
+    delivery: Mapping[str, JsonValue],
+    execution: Mapping[str, JsonValue] | None,
+    actions: list[JsonValue],
+    historical: bool,
+) -> str:
+    if missing:
+        return "resolve_input_blocker"
+    action_names = governance.get("available_action_names")
+    if (
+        not historical
+        and isinstance(action_names, list)
+        and "approve" in action_names
+        and governance.get("active_proposal_id") is not None
+    ):
+        return "review_release_proposal"
+    if delivery.get("acknowledgement_status") != "acknowledged":
+        return "wait_for_result_delivery"
+    if execution is not None and execution.get("status") is None:
+        return "wait_for_execution"
+    if actions:
+        first = actions[0]
+        if isinstance(first, Mapping):
+            action = first.get("action")
+            if isinstance(action, str):
+                return action
+    return "monitor_worker_item"
+
+
+def _result_input_summary_text(data: Mapping[str, JsonValue]) -> str:
+    missing = data.get("missing")
+    if isinstance(missing, list) and missing:
+        return "Worker result inputs are blocked by one or more reported prerequisites."
+    if data.get("next_action") == "review_release_proposal":
+        return "Worker result inputs are ready; the release Proposal needs review."
+    return "Worker result input status loaded."
 
 
 def _governance_mapping(value: object) -> Mapping[str, JsonValue]:
@@ -2353,6 +3194,61 @@ def _active_proposal_id(governance: Mapping[str, JsonValue]) -> UUID | None:
     if not isinstance(proposal, Mapping):
         return None
     return _parse_uuid(proposal.get("proposal_id"))
+
+
+def _worker_proposal_selection_preflight(
+    view: GovernanceWorkerItemView, proposal: GovernanceProposalView
+) -> ToolEnvelope | None:
+    """Reject a governance view that disagrees with the exact Proposal view."""
+
+    active = _governance_mapping(view.governance).get("active_proposal")
+    if not isinstance(active, Mapping):
+        return None
+    raw_id = active.get("input_selection_id")
+    raw_hash = active.get("input_selection_hash")
+    if raw_id is None and raw_hash is None:
+        return None
+    active_id = _parse_uuid(raw_id)
+    active_hash = _selection_hash(raw_hash)
+    if (
+        active_id is None
+        or active_hash is None
+        or proposal.input_selection_id != active_id
+        or proposal.input_selection_hash != active_hash
+    ):
+        return _governance_selection_conflict()
+    return None
+
+
+def _input_selection_preflight(
+    raw: object,
+    *,
+    expected_workspace_id: UUID,
+    expected_root_task_id: UUID,
+    expected_worker_item_id: UUID,
+    expected_request_version: int,
+    expected_selection_id: UUID,
+    expected_selection_hash: str | None,
+) -> ToolEnvelope | None:
+    if not isinstance(raw, Mapping):
+        return _governance_selection_conflict()
+    selection_id = _parse_uuid(raw.get("selection_id"))
+    workspace_id = _parse_uuid(raw.get("workspace_id"))
+    root_task_id = _parse_uuid(raw.get("root_task_id"))
+    target_worker_item_id = _parse_uuid(raw.get("target_worker_item_id"))
+    target_request_version = _positive_int(raw.get("target_request_version"))
+    selection_hash = _selection_hash(raw.get("selection_hash"))
+    if (
+        selection_id != expected_selection_id
+        or workspace_id != expected_workspace_id
+        or root_task_id != expected_root_task_id
+        or target_worker_item_id != expected_worker_item_id
+        or target_request_version != expected_request_version
+        or selection_hash is None
+        or expected_selection_hash != selection_hash
+    ):
+        return _governance_selection_conflict()
+    return None
 
 
 def _valid_positive_int(value: object) -> bool:
@@ -2456,6 +3352,14 @@ def _governance_proposal_not_pending() -> ToolEnvelope:
     )
 
 
+def _governance_selection_conflict() -> ToolEnvelope:
+    return ToolEnvelope(
+        outcome="conflict",
+        summary="The fixed input Selection is no longer current; reload and confirm again.",
+        error_code="input_selection_conflict",
+    )
+
+
 def _governance_lineage_conflict() -> ToolEnvelope:
     return ToolEnvelope(
         outcome="conflict",
@@ -2554,6 +3458,51 @@ def _string(value: object, *, limit: int = 200) -> str | None:
 
 def _positive_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _optional_positive_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return _positive_int(value)
+
+
+def _non_negative_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _optional_non_negative_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return _non_negative_int(value)
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    return _parse_uuid(value)
+
+
+def _uuid_strings(value: object, *, limit: int) -> list[JsonValue] | None:
+    if not isinstance(value, list | tuple):
+        return None
+    result: list[JsonValue] = []
+    for item in value[:limit]:
+        parsed = _parse_uuid(item)
+        if parsed is None:
+            return None
+        result.append(str(parsed))
+    return result
+
+
+def _selection_hash(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         return None
     return value
 
