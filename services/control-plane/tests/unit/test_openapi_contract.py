@@ -20,6 +20,8 @@ EXPECTED_PATHS = {
     "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/result-inputs",
+    "/api/v1/workspaces/{workspace_id}/collaboration/input-selections/{selection_id}",
     "/api/v1/workers",
     "/api/v1/workers/{worker_id}",
     "/api/v1/executions",
@@ -70,6 +72,8 @@ EXPECTED_TYPED_RESPONSES = {
     "/api/v1/tasks/{root_task_id}/subtasks/{subtask_key}": "SubtaskWorkspaceProjectionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace": "WorkerWorkspaceProjectionResponse",
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity": "WorkerItemActivityPageResponse",
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/result-inputs": "WorkerResultInputsResponse",
+    "/api/v1/workspaces/{workspace_id}/collaboration/input-selections/{selection_id}": "InputSelectionResponse",
     "/api/v1/workers/{worker_id}": "WorkerResponse",
     "/api/v1/executions/{execution_id}": "ExecutionResponse",
     "/api/v1/workspaces/{workspace_id}/planning-requests/{planning_request_id}/work-context": "WorkContextDetailResponse",
@@ -265,6 +269,22 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         assert schema_name in schemas
         assert schemas[schema_name]["type"] == "object"
         assert schemas[schema_name]["additionalProperties"] is False
+
+    approval_schema = schemas["ApproveCollaborationReleaseProposalPayload"]
+    assert {
+        "expected_input_selection_id",
+        "expected_input_selection_hash",
+    } <= approval_schema["properties"].keys()
+    assert {
+        "PlanningInputGroupResponse",
+        "PlanningInputGroupCandidateResponse",
+        "PlanningInputGroupRequirementsResponse",
+    } <= schemas.keys()
+    assert schemas["PlanningCollaborationResponse"]["properties"]["input_groups"] == {
+        "items": {"$ref": "#/components/schemas/PlanningInputGroupResponse"},
+        "title": "Input Groups",
+        "type": "array",
+    }
 
     assert EXPECTED_PLANNING_RESPONSE_SCHEMAS <= schemas.keys()
     for schema_name in EXPECTED_PLANNING_RESPONSE_SCHEMAS:

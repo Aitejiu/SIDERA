@@ -10,6 +10,7 @@ export type PlanningRunPage = components["schemas"]["PlanningRunPageResponse"];
 export type PlanningRun = components["schemas"]["PlanningRunResponse"];
 export type PlanningClarificationPage = components["schemas"]["PlanningClarificationPageResponse"];
 export type PlanningProposal = components["schemas"]["PlanningProposalResponse"];
+export type PlanningInputGroup = components["schemas"]["PlanningInputGroupResponse"];
 export type PlanningMaterialization = components["schemas"]["PlanningMaterializationResponse"];
 export type RevisionDiff = components["schemas"]["RevisionDiffResponse"];
 export type SubmitPlanningRequestPayload = components["schemas"]["SubmitPlanningRequestPayload"];

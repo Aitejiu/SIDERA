@@ -7,6 +7,7 @@ from typing import Protocol
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.domain.result_inputs import InputGroupInvalid, InputGroupV1
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ class PlanningCollaborationView:
     provider: str | None
     runtime_interface: str | None
     runtime_config_version: int | None
+    input_groups: tuple[InputGroupV1, ...] = ()
 
     @classmethod
     def from_request_mapping(
@@ -146,6 +148,9 @@ class PlanningCollaborationView:
             provider=safe_provider,
             runtime_interface=runtime_interface,
             runtime_config_version=runtime_config_version,
+            input_groups=_safe_input_groups(
+                request_mapping.get("input_groups") if mode == "enabled" else None
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -156,6 +161,7 @@ class PlanningCollaborationView:
             "provider": self.provider,
             "runtime_interface": self.runtime_interface,
             "runtime_config_version": self.runtime_config_version,
+            "input_groups": [item.to_mapping() for item in self.input_groups],
         }
 
 
@@ -280,6 +286,20 @@ def _safe_text(value: object) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _safe_input_groups(value: object) -> tuple[InputGroupV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    groups: list[InputGroupV1] = []
+    for item in value[:32]:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            groups.append(InputGroupV1.from_mapping(item))
+        except InputGroupInvalid:
+            continue
+    return tuple(groups)
 
 
 class PlanningQueryStore(Protocol):

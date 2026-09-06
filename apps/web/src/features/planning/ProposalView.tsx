@@ -6,6 +6,7 @@ import { ProposalArchitectureBoard } from "./ProposalArchitectureBoard";
 import { ProposalDecisionSummary } from "./ProposalDecisionSummary";
 import { ProposalDiff } from "./ProposalDiff";
 import { ProposalGraph } from "./ProposalGraph";
+import { ProposalInputGroups } from "./ProposalInputGroups";
 import { normalizePlanningProposal } from "./proposalTypes";
 
 type ProposalViewMode = "architecture" | "graph" | "diff";
@@ -58,7 +59,12 @@ export function ProposalView({
         aria-labelledby={`proposal-tab-${mode}`}
         tabIndex={0}
       >
-        {mode === "architecture" ? <ProposalArchitectureBoard model={model} /> : null}
+        {mode === "architecture" ? (
+          <>
+            <ProposalInputGroups groups={model.inputGroups} />
+            <ProposalArchitectureBoard model={model} />
+          </>
+        ) : null}
         {mode === "graph" ? <ProposalGraph model={model} /> : null}
         {mode === "diff" ? <ProposalDiff model={model} /> : null}
       </div>

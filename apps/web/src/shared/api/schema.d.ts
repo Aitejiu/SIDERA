@@ -599,6 +599,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/collaboration/input-selections/{selection_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collaboration Input Selection */
+        get: operations["get_collaboration_input_selection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/commands/{command_id}": {
         parameters: {
             query?: never;
@@ -1348,6 +1365,23 @@ export interface paths {
         };
         /** List Worker Item Knowledge Submissions */
         get: operations["list_worker_item_knowledge_submissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/result-inputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Worker Result Inputs */
+        get: operations["get_worker_result_inputs"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2351,6 +2385,13 @@ export interface components {
             metadata: components["schemas"]["MaterializationMetadataResponse"];
             /** Project Knowledge */
             project_knowledge: components["schemas"]["MaterializationKnowledgeResponse"][];
+            /**
+             * Result Inputs
+             * @default []
+             */
+            result_inputs: {
+                [key: string]: unknown;
+            }[];
             /** Schema Version */
             schema_version: number;
             system_constraints: components["schemas"]["MaterializationSystemConstraintsResponse"];
@@ -2556,6 +2597,8 @@ export interface components {
             idempotency_key: string;
             /** Knowledge Refs */
             knowledge_refs: components["schemas"]["ContextPackageKnowledgeRefResponse"][];
+            /** Manifest Schema Version */
+            manifest_schema_version: number;
             /** Materialization Audits */
             materialization_audits: components["schemas"]["ContextPackageMaterializationAuditResponse"][];
             /** Materialized At */
@@ -2569,6 +2612,10 @@ export interface components {
             package_id: string;
             /** Purpose */
             purpose: string;
+            /** Result Input Manifest */
+            result_input_manifest: {
+                [key: string]: unknown;
+            } | null;
             /** Revocation Reason */
             revocation_reason: string | null;
             /** Revocation Scope */
@@ -3543,6 +3590,141 @@ export interface components {
             target_manifest_version: number | null;
             /** Transfer Mode */
             transfer_mode: string;
+        };
+        /** InputSelectionConsumerResponse */
+        InputSelectionConsumerResponse: {
+            /** Acknowledged At */
+            acknowledged_at: string | null;
+            /** Acknowledgement Status */
+            acknowledgement_status: string;
+            /** Assembly Attempt */
+            assembly_attempt: number | null;
+            /** Assembly Request Id */
+            assembly_request_id: string | null;
+            /** Assembly Status */
+            assembly_status: string | null;
+            /** Assembly Version */
+            assembly_version: number | null;
+            /**
+             * Consumer Id
+             * Format: uuid
+             */
+            consumer_id: string;
+            /** Consumer Type */
+            consumer_type: string;
+            /** Context Version */
+            context_version: number | null;
+            /** Execution Request Id */
+            execution_request_id: string | null;
+            /** Materialization Attempt */
+            materialization_attempt: number | null;
+            /** Materialization Failure Code */
+            materialization_failure_code: string | null;
+            /** Materialization Outcome */
+            materialization_outcome: string | null;
+            /** Package Hash */
+            package_hash: string | null;
+            /** Package Id */
+            package_id: string | null;
+            /** Package Status */
+            package_status: string | null;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+        };
+        /** InputSelectionGroupResponse */
+        InputSelectionGroupResponse: {
+            /** Group Key */
+            group_key: string;
+            /** Rule Hash */
+            rule_hash: string;
+            /** Sources */
+            sources: components["schemas"]["ResultInputSelectedSourceResponse"][];
+        };
+        /** InputSelectionHardInputResponse */
+        InputSelectionHardInputResponse: {
+            /** Dependency Key */
+            dependency_key: string;
+            /** Rule Hash */
+            rule_hash: string;
+            source: components["schemas"]["ResultInputSelectedSourceResponse"];
+        };
+        /** InputSelectionResponse */
+        InputSelectionResponse: {
+            /** Consumers */
+            consumers: components["schemas"]["InputSelectionConsumerResponse"][];
+            /** Consumers Truncated */
+            consumers_truncated: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Decision Id
+             * Format: uuid
+             */
+            decision_id: string;
+            /** Groups */
+            groups: components["schemas"]["InputSelectionGroupResponse"][];
+            /** Hard Inputs */
+            hard_inputs: components["schemas"]["InputSelectionHardInputResponse"][];
+            /**
+             * Intent Id
+             * Format: uuid
+             */
+            intent_id: string;
+            /** Plan Content Hash */
+            plan_content_hash: string;
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /** Projection Hash */
+            projection_hash: string;
+            /**
+             * Projection Snapshot Id
+             * Format: uuid
+             */
+            projection_snapshot_id: string;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Schema Version */
+            schema_version: number;
+            /** Selection Hash */
+            selection_hash: string;
+            /**
+             * Selection Id
+             * Format: uuid
+             */
+            selection_id: string;
+            /**
+             * Target Execution Request Id
+             * Format: uuid
+             */
+            target_execution_request_id: string;
+            /** Target Request Version */
+            target_request_version: number;
+            /**
+             * Target Worker Item Id
+             * Format: uuid
+             */
+            target_worker_item_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** KnowledgeRevisionRefPayload */
         KnowledgeRevisionRefPayload: {
@@ -4794,6 +4976,8 @@ export interface components {
         PlanningCollaborationResponse: {
             /** Default Strategy */
             default_strategy: string | null;
+            /** Input Groups */
+            input_groups: components["schemas"]["PlanningInputGroupResponse"][];
             /** Mode */
             mode: string;
             /** Provider */
@@ -4824,6 +5008,42 @@ export interface components {
             gate_wait_seconds: number;
             /** Ready */
             ready: number;
+        };
+        /** PlanningInputGroupCandidateResponse */
+        PlanningInputGroupCandidateResponse: {
+            /** Priority */
+            priority: number;
+            /** Worker Item Key */
+            worker_item_key: string;
+        };
+        /** PlanningInputGroupRequirementsResponse */
+        PlanningInputGroupRequirementsResponse: {
+            /** Evidence Status */
+            evidence_status: string;
+            /** Execution Status */
+            execution_status: string;
+            /** Required Artifact Refs */
+            required_artifact_refs: string[];
+            /** Required Evidence Refs */
+            required_evidence_refs: string[];
+        };
+        /** PlanningInputGroupResponse */
+        PlanningInputGroupResponse: {
+            /** Candidates */
+            candidates: components["schemas"]["PlanningInputGroupCandidateResponse"][];
+            /** Consumer Worker Item Key */
+            consumer_worker_item_key: string;
+            /** Group Key */
+            group_key: string;
+            /** Minimum Count */
+            minimum_count: number | null;
+            /** Mode */
+            mode: string;
+            requirements: components["schemas"]["PlanningInputGroupRequirementsResponse"];
+            /** Selection Strategy */
+            selection_strategy: string;
+            /** Title */
+            title: string;
         };
         /** PlanningLatencyMetricsResponse */
         PlanningLatencyMetricsResponse: {
@@ -5515,6 +5735,348 @@ export interface components {
             expected_status: "exhausted";
             /** Reason */
             reason: string;
+        };
+        /** ResultInputActionResponse */
+        ResultInputActionResponse: {
+            /** Action */
+            action: string;
+            /** Command Type */
+            command_type: string;
+            /** Expected Fingerprint */
+            expected_fingerprint: string | null;
+            /** Expected Input Selection Hash */
+            expected_input_selection_hash: string | null;
+            /** Expected Input Selection Id */
+            expected_input_selection_id: string | null;
+            /** Expected Plan Generation */
+            expected_plan_generation: number | null;
+            /** Expected Version */
+            expected_version: number | null;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /** Target Type */
+            target_type: string;
+        };
+        /** ResultInputArtifactResponse */
+        ResultInputArtifactResponse: {
+            /**
+             * Artifact Id
+             * Format: uuid
+             */
+            artifact_id: string;
+            /** Artifact Type */
+            artifact_type: string;
+            /** Content Hash */
+            content_hash: string;
+            /** Media Type */
+            media_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
+        /** ResultInputCandidateResponse */
+        ResultInputCandidateResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["ResultInputArtifactResponse"][];
+            /** Attempt */
+            attempt: number | null;
+            /** Evidence */
+            evidence: components["schemas"]["ResultInputEvidenceResponse"][];
+            /** Execution Id */
+            execution_id: string | null;
+            /** Execution Request Id */
+            execution_request_id: string | null;
+            /** Execution Status */
+            execution_status: string | null;
+            /** Missing Artifact Refs */
+            missing_artifact_refs: string[];
+            /** Missing Evidence Refs */
+            missing_evidence_refs: string[];
+            /** Outcome Unknown */
+            outcome_unknown: boolean;
+            /** Priority */
+            priority: number;
+            /** Ready */
+            ready: boolean;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Retry Possible */
+            retry_possible: boolean;
+            /** Subtask Key */
+            subtask_key: string | null;
+            /** Subtask Path */
+            subtask_path: string[];
+            /** Worker Item Id */
+            worker_item_id: string | null;
+            /** Worker Item Key */
+            worker_item_key: string;
+            /** Worker Item Title */
+            worker_item_title: string;
+        };
+        /** ResultInputDeliveryResponse */
+        ResultInputDeliveryResponse: {
+            /** Acknowledged At */
+            acknowledged_at: string | null;
+            /** Acknowledged Package Hash */
+            acknowledged_package_hash: string | null;
+            /** Acknowledgement Status */
+            acknowledgement_status: string;
+            /** Assembly Attempt */
+            assembly_attempt: number | null;
+            /** Assembly Request Fingerprint */
+            assembly_request_fingerprint: string | null;
+            /** Assembly Request Id */
+            assembly_request_id: string | null;
+            /** Assembly Status */
+            assembly_status: string | null;
+            /** Assembly Version */
+            assembly_version: number | null;
+            /** Consumer Id */
+            consumer_id: string | null;
+            /** Consumer Type */
+            consumer_type: string;
+            /** Context Version */
+            context_version: number | null;
+            /** Materialization Attempt */
+            materialization_attempt: number | null;
+            /** Materialization Failure Code */
+            materialization_failure_code: string | null;
+            /** Materialization Occurred At */
+            materialization_occurred_at: string | null;
+            /** Materialization Outcome */
+            materialization_outcome: string | null;
+            /** Package Hash */
+            package_hash: string | null;
+            /** Package Id */
+            package_id: string | null;
+            /** Package Status */
+            package_status: string | null;
+            /** Reason Code */
+            reason_code: string | null;
+        };
+        /** ResultInputEvidenceResponse */
+        ResultInputEvidenceResponse: {
+            /** Acceptance Criterion Ref */
+            acceptance_criterion_ref: string;
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /**
+             * Evidence Id
+             * Format: uuid
+             */
+            evidence_id: string;
+        };
+        /** ResultInputExecutionResponse */
+        ResultInputExecutionResponse: {
+            /** Attempt */
+            attempt: number | null;
+            /** Collaboration Gate Mode */
+            collaboration_gate_mode: string;
+            /** Execution Id */
+            execution_id: string | null;
+            /**
+             * Execution Request Id
+             * Format: uuid
+             */
+            execution_request_id: string;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Gate Reason */
+            gate_reason: string;
+            /** Lineage Id */
+            lineage_id: string | null;
+            /** Release Status */
+            release_status: string;
+            /** Released At */
+            released_at: string | null;
+            /** Request Status */
+            request_status: string;
+            /** Request Version */
+            request_version: number;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string | null;
+        };
+        /** ResultInputGovernanceHistoryResponse */
+        ResultInputGovernanceHistoryResponse: {
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Proposal Id */
+            proposal_id: string | null;
+            /** Resolution Action */
+            resolution_action: string | null;
+            /** Resolution Result */
+            resolution_result: string | null;
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /** Result Code */
+            result_code: string | null;
+            /** Status */
+            status: string;
+            /** Summary */
+            summary: string;
+        };
+        /** ResultInputGovernanceResponse */
+        ResultInputGovernanceResponse: {
+            /** Active Hold Id */
+            active_hold_id: string | null;
+            /** Active Proposal Id */
+            active_proposal_id: string | null;
+            /** Active Proposal Input Selection Hash */
+            active_proposal_input_selection_hash: string | null;
+            /** Active Proposal Input Selection Id */
+            active_proposal_input_selection_id: string | null;
+            /** Active Proposal Version */
+            active_proposal_version: number | null;
+            /** Attention State */
+            attention_state: string;
+            /** Available Action Names */
+            available_action_names: string[];
+            /** Enabled */
+            enabled: boolean;
+            /** Governance Mode */
+            governance_mode: string;
+            /** History */
+            history: components["schemas"]["ResultInputGovernanceHistoryResponse"][];
+            /** Hold Resource Version */
+            hold_resource_version: number | null;
+            /** Release State */
+            release_state: string;
+            /** State */
+            state: string;
+            /** Waiting Summary */
+            waiting_summary: string | null;
+        };
+        /** ResultInputGroupResponse */
+        ResultInputGroupResponse: {
+            /** Candidates */
+            candidates: components["schemas"]["ResultInputCandidateResponse"][];
+            /** Group Key */
+            group_key: string;
+            /** Minimum Count */
+            minimum_count: number | null;
+            /** Mode */
+            mode: string;
+            /** Ready Count */
+            ready_count: number;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Required Count */
+            required_count: number;
+            /** Selected Sources */
+            selected_sources: components["schemas"]["ResultInputSelectedSourceResponse"][];
+            /** Selection Hash */
+            selection_hash: string | null;
+            /** Selection Id */
+            selection_id: string | null;
+            /** Title */
+            title: string;
+        };
+        /** ResultInputHardDependencyResponse */
+        ResultInputHardDependencyResponse: {
+            /** Dependency Key */
+            dependency_key: string;
+            /** Ready */
+            ready: boolean;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Required Artifact Refs */
+            required_artifact_refs: string[];
+            /** Required Evidence Refs */
+            required_evidence_refs: string[];
+            selected_source: components["schemas"]["ResultInputSelectedSourceResponse"] | null;
+            /**
+             * Upstream Request Id
+             * Format: uuid
+             */
+            upstream_request_id: string;
+            /** Upstream Worker Item Id */
+            upstream_worker_item_id: string | null;
+            /** Upstream Worker Item Key */
+            upstream_worker_item_key: string;
+            /** Upstream Worker Item Title */
+            upstream_worker_item_title: string;
+        };
+        /** ResultInputRequestResponse */
+        ResultInputRequestResponse: {
+            /** Collaboration Gate Mode */
+            collaboration_gate_mode: string;
+            /**
+             * Execution Request Id
+             * Format: uuid
+             */
+            execution_request_id: string;
+            /** Gate Reason */
+            gate_reason: string;
+            /** Status */
+            status: string;
+            /** Subtask Key */
+            subtask_key: string;
+            /** Version */
+            version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Key */
+            worker_item_key: string;
+        };
+        /** ResultInputSelectedSourceResponse */
+        ResultInputSelectedSourceResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["ResultInputArtifactResponse"][];
+            /** Attempt */
+            attempt: number;
+            /**
+             * Effective Execution Id
+             * Format: uuid
+             */
+            effective_execution_id: string;
+            /**
+             * Effective Lineage Id
+             * Format: uuid
+             */
+            effective_lineage_id: string;
+            /**
+             * Effective Request Id
+             * Format: uuid
+             */
+            effective_request_id: string;
+            /** Evidence */
+            evidence: components["schemas"]["ResultInputEvidenceResponse"][];
+            /** Inheritance Refs */
+            inheritance_refs: string[];
+            /** Priority */
+            priority: number;
+            /** Source Basis Hash */
+            source_basis_hash: string;
+            /** Subtask Key */
+            subtask_key: string | null;
+            /** Subtask Path */
+            subtask_path: string[];
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Key */
+            worker_item_key: string;
+            /** Worker Item Title */
+            worker_item_title: string;
         };
         /** ResumeAutomaticCollaborationPayload */
         ResumeAutomaticCollaborationPayload: {
@@ -7673,6 +8235,48 @@ export interface components {
             workspace_id: string;
             workspace_module_summary: components["schemas"]["ModuleSummaryResponse"] | null;
         };
+        /** WorkerResultInputsResponse */
+        WorkerResultInputsResponse: {
+            /** Available Actions */
+            available_actions: components["schemas"]["ResultInputActionResponse"][];
+            delivery: components["schemas"]["ResultInputDeliveryResponse"];
+            execution: components["schemas"]["ResultInputExecutionResponse"] | null;
+            governance: components["schemas"]["ResultInputGovernanceResponse"];
+            /** Groups */
+            groups: components["schemas"]["ResultInputGroupResponse"][];
+            /** Hard Dependencies */
+            hard_dependencies: components["schemas"]["ResultInputHardDependencyResponse"][];
+            /** Is Historical */
+            is_historical: boolean;
+            /** Plan Content Hash */
+            plan_content_hash: string | null;
+            /** Plan Generation */
+            plan_generation: number | null;
+            /** Plan Snapshot Id */
+            plan_snapshot_id: string | null;
+            request: components["schemas"]["ResultInputRequestResponse"] | null;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Schema Version */
+            schema_version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Key */
+            worker_item_key: string;
+            /** Worker Item Title */
+            worker_item_title: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
         /** WorkerRuntimeProjectionResponse */
         WorkerRuntimeProjectionResponse: {
             /** Adapter Type */
@@ -9085,6 +9689,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CollaborationMetricsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_collaboration_input_selection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                selection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InputSelectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -10547,6 +11183,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KnowledgeSubmissionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_worker_result_inputs: {
+        parameters: {
+            query?: {
+                execution_request_id?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerResultInputsResponse"];
                 };
             };
             /** @description Validation Error */

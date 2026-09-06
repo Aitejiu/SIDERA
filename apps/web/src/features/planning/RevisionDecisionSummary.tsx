@@ -1,6 +1,8 @@
 import { AlertTriangle, ArrowUpRight } from "lucide-react";
 
 import type { RevisionDiff } from "./types";
+import { ProposalInputGroups } from "./ProposalInputGroups";
+import { normalizeRevisionInputGroups } from "./proposalTypes";
 
 const riskLabels: Record<string, string> = {
   worker_context_patch: "Worker 上下文需要重新同步",
@@ -20,6 +22,12 @@ export function RevisionDecisionSummary({
 }) {
   const understanding = rootDescription?.trim() || `本次调整作用于 ${rootTitle} 的活动执行结构。`;
   const targetGeneration = diff.target_descriptor_preview.target_generation;
+  const inputGroups = normalizeRevisionInputGroups(
+    diff.input_group_changes,
+    diff.worker_item_changes,
+    diff.worker_dependency_changes,
+    rootTitle,
+  );
 
   return (
     <section className="revision-review__decision" aria-labelledby="revision-decision-title">
@@ -61,6 +69,28 @@ export function RevisionDecisionSummary({
           ) : <p>规划器未标记额外风险。</p>}
         </div>
       </div>
+      {inputGroups.before.length > 0 || inputGroups.after.length > 0 ? (
+        <div className="revision-review__input-groups">
+          <div className="revision-review__input-groups-heading">
+            <span className="revision-review__label">输入规则变更</span>
+            <p>以下 before / after 来自本次 Revision，确认时沿用当前 Proposal 版本。</p>
+          </div>
+          <ProposalInputGroups
+            groups={inputGroups.before}
+            heading="变更前输入规则"
+            ariaLabel="变更前结果输入规则"
+            showEmpty
+            emptyMessage="变更前没有声明输入组。"
+          />
+          <ProposalInputGroups
+            groups={inputGroups.after}
+            heading="变更后输入规则"
+            ariaLabel="变更后结果输入规则"
+            showEmpty
+            emptyMessage="变更后没有声明输入组。"
+          />
+        </div>
+      ) : null}
     </section>
   );
 }

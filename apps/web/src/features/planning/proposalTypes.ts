@@ -1,4 +1,4 @@
-import type { PlanningProposal } from "./types";
+import type { PlanningInputGroup, PlanningProposal, RevisionDiff } from "./types";
 
 export interface ProposalRootTask {
   title: string;
@@ -77,6 +77,35 @@ export interface ProposalDiffSummary {
   blockedWorkerItemKeys: string[];
 }
 
+export interface InputGroupSourceDisplay {
+  workerItemKey: string;
+  workerItemTitle: string;
+  subtaskPath: string[];
+  priority: number;
+}
+
+export interface InputGroupHardDependencyDisplay {
+  upstreamWorkerItemKey: string;
+  upstreamWorkerItemTitle: string;
+  requiredArtifactRefs: string[];
+  requiredEvidenceRefs: string[];
+}
+
+export interface InputGroupDisplay {
+  groupKey: string;
+  title: string;
+  consumerWorkerItemKey: string;
+  consumerSubtaskPath: string[];
+  mode: string;
+  minimumCount: number | null;
+  requiredCount: number;
+  selectionStrategy: string;
+  candidates: InputGroupSourceDisplay[];
+  requiredArtifactRefs: string[];
+  requiredEvidenceRefs: string[];
+  hardDependencies: InputGroupHardDependencyDisplay[];
+}
+
 export interface ProposalViewModel {
   rootTask: ProposalRootTask;
   subtasks: ProposalSubtask[];
@@ -86,6 +115,7 @@ export interface ProposalViewModel {
   decisionSummary: ProposalDecisionSummary;
   impactPolicy: ProposalImpactPolicy;
   diff: ProposalDiffSummary;
+  inputGroups: InputGroupDisplay[];
 }
 
 export function normalizePlanningProposal(proposal: PlanningProposal): ProposalViewModel {
@@ -122,6 +152,22 @@ export function normalizePlanningProposal(proposal: PlanningProposal): ProposalV
       readiness: readyKeys.has(key) ? "ready" : blockedKeys.has(key) ? "blocked" : "unknown",
     } as ProposalWorkerItem;
   });
+  const workerByKey = new Map(workers.map((worker) => [worker.key, worker]));
+  const subtasksByKey = new Map(subtasks.map((subtask) => [subtask.key, subtask]));
+  const workerDependencies = recordList(display.worker_item_dependencies).map((item) => ({
+    upstreamWorkerItemKey: stringValue(item.upstream_worker_item_key, "unknown"),
+    downstreamWorkerItemKey: stringValue(item.downstream_worker_item_key, "unknown"),
+    kind: stringValue(item.kind, "hard"),
+    requiredArtifactRefs: stringList(item.required_artifact_refs),
+  }));
+  const inputGroups = (proposal.collaboration?.input_groups ?? []).map((group) => (
+    normalizePlanningInputGroup(group, {
+      rootTitle: stringValue(root.title, "根任务"),
+      workersByKey: workerByKey,
+      subtasksByKey,
+      workerDependencies,
+    })
+  ));
 
   const summary = record(display.decision_summary);
   const impact = record(display.impact_policy);
@@ -140,12 +186,7 @@ export function normalizePlanningProposal(proposal: PlanningProposal): ProposalV
       requiredEvidenceRefs: stringList(item.required_evidence_refs),
       enforcement: stringValue(item.enforcement, "gate"),
     })),
-    workerItemDependencies: recordList(display.worker_item_dependencies).map((item) => ({
-      upstreamWorkerItemKey: stringValue(item.upstream_worker_item_key, "unknown"),
-      downstreamWorkerItemKey: stringValue(item.downstream_worker_item_key, "unknown"),
-      kind: stringValue(item.kind, "hard"),
-      requiredArtifactRefs: stringList(item.required_artifact_refs),
-    })),
+    workerItemDependencies: workerDependencies,
     decisionSummary: {
       understanding: stringValue(summary.understanding, "规划器没有返回理解摘要。"),
       assumptions: stringList(summary.assumptions),
@@ -173,7 +214,160 @@ export function normalizePlanningProposal(proposal: PlanningProposal): ProposalV
       immediatelyReadyWorkerItemKeys: stringList(derivedDiff.immediately_ready_worker_item_keys),
       blockedWorkerItemKeys: stringList(derivedDiff.blocked_worker_item_keys),
     },
+    inputGroups,
   };
+}
+
+export function normalizeRevisionInputGroups(
+  changes: RevisionDiff["input_group_changes"] = [],
+  workerChanges: RevisionDiff["worker_item_changes"] = [],
+  dependencyChanges: RevisionDiff["worker_dependency_changes"] = [],
+  rootTitle: string,
+): { before: InputGroupDisplay[]; after: InputGroupDisplay[] } {
+  const workerPaths = new Map(
+    workerChanges.map((change) => [change.target_worker_item_key, change.path]),
+  );
+  const normalize = (value: unknown, change: RevisionDiff["input_group_changes"][number]) =>
+    normalizeRawInputGroup(value, {
+      groupKey: change.group_key,
+      consumerWorkerItemKey: change.consumer_worker_item_key,
+      rootTitle,
+      workerPaths,
+      dependencyChanges,
+    });
+
+  return {
+    before: changes.flatMap((change) => {
+      const group = normalize(change.before, change);
+      return group === null ? [] : [group];
+    }),
+    after: changes.flatMap((change) => {
+      const group = normalize(change.after, change);
+      return group === null ? [] : [group];
+    }),
+  };
+}
+
+function normalizePlanningInputGroup(
+  group: PlanningInputGroup,
+  context: {
+    rootTitle: string;
+    workersByKey: Map<string, ProposalWorkerItem>;
+    subtasksByKey: Map<string, ProposalSubtask>;
+    workerDependencies: ProposalWorkerDependency[];
+  },
+): InputGroupDisplay {
+  const consumer = context.workersByKey.get(group.consumer_worker_item_key);
+  const consumerSubtask = consumer === undefined
+    ? undefined
+    : context.subtasksByKey.get(consumer.subtaskKey);
+  const candidates = group.candidates.map((candidate) => {
+    const worker = context.workersByKey.get(candidate.worker_item_key);
+    const subtask = worker === undefined ? undefined : context.subtasksByKey.get(worker.subtaskKey);
+    return {
+      workerItemKey: candidate.worker_item_key,
+      workerItemTitle: worker?.title ?? candidate.worker_item_key,
+      subtaskPath: [context.rootTitle, ...(subtask === undefined ? [] : [subtask.title])],
+      priority: candidate.priority,
+    };
+  });
+  const hardDependencies = context.workerDependencies
+    .filter((dependency) => (
+      dependency.downstreamWorkerItemKey === group.consumer_worker_item_key
+      && dependency.kind === "hard"
+    ))
+    .map((dependency) => {
+      const worker = context.workersByKey.get(dependency.upstreamWorkerItemKey);
+      return {
+        upstreamWorkerItemKey: dependency.upstreamWorkerItemKey,
+        upstreamWorkerItemTitle: worker?.title ?? dependency.upstreamWorkerItemKey,
+        requiredArtifactRefs: dependency.requiredArtifactRefs,
+        requiredEvidenceRefs: [],
+      };
+    });
+  return {
+    groupKey: group.group_key,
+    title: group.title,
+    consumerWorkerItemKey: group.consumer_worker_item_key,
+    consumerSubtaskPath: [
+      context.rootTitle,
+      ...(consumerSubtask === undefined ? [] : [consumerSubtask.title]),
+    ],
+    mode: group.mode,
+    minimumCount: group.minimum_count,
+    requiredCount: group.mode === "all" ? candidates.length : group.minimum_count ?? candidates.length,
+    selectionStrategy: group.selection_strategy,
+    candidates,
+    requiredArtifactRefs: group.requirements.required_artifact_refs,
+    requiredEvidenceRefs: group.requirements.required_evidence_refs,
+    hardDependencies,
+  };
+}
+
+function normalizeRawInputGroup(
+  value: unknown,
+  context: {
+    groupKey: string;
+    consumerWorkerItemKey: string;
+    rootTitle: string;
+    workerPaths: Map<string, string>;
+    dependencyChanges: RevisionDiff["worker_dependency_changes"];
+  },
+): InputGroupDisplay | null {
+  const group = record(value);
+  const rawCandidates = recordList(group.candidates);
+  if (rawCandidates.length === 0) return null;
+  const consumerPath = pathForWorker(
+    context.workerPaths.get(context.consumerWorkerItemKey),
+    context.rootTitle,
+    context.consumerWorkerItemKey,
+  );
+  const candidates = rawCandidates.map((candidate, index) => {
+    const key = stringValue(candidate.worker_item_key, `source-${index + 1}`);
+    const path = pathForWorker(context.workerPaths.get(key), context.rootTitle, key);
+    return {
+      workerItemKey: key,
+      workerItemTitle: path.at(-1) ?? key,
+      subtaskPath: path.length > 1 ? path.slice(0, -1) : path,
+      priority: numberValue(candidate.priority, index + 1),
+    };
+  });
+  const requirements = record(group.requirements);
+  const mode = stringValue(group.mode, "all");
+  return {
+    groupKey: stringValue(group.group_key, context.groupKey),
+    title: stringValue(group.title, context.groupKey),
+    consumerWorkerItemKey: stringValue(
+      group.consumer_worker_item_key,
+      context.consumerWorkerItemKey,
+    ),
+    consumerSubtaskPath: consumerPath.length > 1 ? consumerPath.slice(0, -1) : consumerPath,
+    mode,
+    minimumCount: numberOrNull(group.minimum_count),
+    requiredCount: mode === "all"
+      ? candidates.length
+      : numberOrNull(group.minimum_count) ?? candidates.length,
+    selectionStrategy: stringValue(group.selection_strategy, "plan_order"),
+    candidates,
+    requiredArtifactRefs: stringList(requirements.required_artifact_refs),
+    requiredEvidenceRefs: stringList(requirements.required_evidence_refs),
+    hardDependencies: context.dependencyChanges
+      .filter((dependency) => (
+        dependency.downstream_key === context.consumerWorkerItemKey
+        && dependency.dependency_kind === "hard"
+      ))
+      .map((dependency) => ({
+        upstreamWorkerItemKey: dependency.upstream_key,
+        upstreamWorkerItemTitle: dependency.upstream_path.split(" / ").at(-1) ?? dependency.upstream_key,
+        requiredArtifactRefs: [],
+        requiredEvidenceRefs: [],
+      })),
+  };
+}
+
+function pathForWorker(path: string | undefined, rootTitle: string, fallback: string): string[] {
+  if (path === undefined || path.trim() === "") return [rootTitle, fallback];
+  return path.split(" / ").map((part) => part.trim()).filter(Boolean);
 }
 
 function record(value: unknown): Record<string, unknown> {

@@ -121,7 +121,30 @@ const proposal = {
       failure_policy: "block_downstream",
       manual_gate: true,
       revision_operation: null,
-    },
+      },
+  },
+  collaboration: {
+    mode: "enabled",
+    default_strategy: "all_required",
+    subtask_overrides: [],
+    provider: "reference",
+    runtime_interface: "collaboration-runtime.v1",
+    runtime_config_version: 1,
+    input_groups: [{
+      group_key: "page-structure",
+      title: "页面结构结果",
+      consumer_worker_item_key: "execute-worker",
+      candidates: [{ worker_item_key: "prepare-worker", priority: 1 }],
+      requirements: {
+        execution_status: "succeeded",
+        required_artifact_refs: ["artifact_type:page"],
+        required_evidence_refs: ["acceptance:page-structure"],
+        evidence_status: "candidate",
+      },
+      mode: "all",
+      minimum_count: null,
+      selection_strategy: "plan_order",
+    }],
   },
 } as unknown as PlanningProposal;
 
@@ -145,7 +168,9 @@ describe("ProposalView", () => {
     expect(screen.getByText("方案理解")).toBeVisible();
     expect(screen.getByText("先交付一个可审阅、可确认的 Task First 方案。")).toBeVisible();
     expect(screen.getByText("准备页面")).toBeVisible();
-    expect(screen.getByText("状态编排 Worker")).toBeVisible();
+    expect(screen.getAllByText("状态编排 Worker").length).toBeGreaterThan(0);
+    expect(screen.getByText("页面结构结果")).toBeVisible();
+    expect(screen.getByText("全部 1 / 1")).toBeVisible();
     expect(screen.queryByTestId("proposal-graph-canvas")).not.toBeInTheDocument();
   });
 

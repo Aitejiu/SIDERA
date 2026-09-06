@@ -105,6 +105,7 @@ from sidera_control_plane.collaboration_readiness import ReadinessReport
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import ContextPackageManifestV2
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.result_inputs import InputGroupCandidateV1, InputGroupV1
 from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
 from sidera_control_plane.notification_readiness import NotificationReadinessReport
 
@@ -3106,6 +3107,7 @@ class PlanningCollaborationResponse(BaseModel):
     provider: str | None
     runtime_interface: str | None
     runtime_config_version: int | None
+    input_groups: tuple["PlanningInputGroupResponse", ...]
 
     @classmethod
     def from_view(
@@ -3118,6 +3120,73 @@ class PlanningCollaborationResponse(BaseModel):
             provider=view.provider,
             runtime_interface=view.runtime_interface,
             runtime_config_version=view.runtime_config_version,
+            input_groups=tuple(
+                PlanningInputGroupResponse.from_view(item)
+                for item in view.input_groups
+            ),
+        )
+
+
+class PlanningInputGroupCandidateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_item_key: str
+    priority: int
+
+    @classmethod
+    def from_view(cls, candidate: InputGroupCandidateV1) -> "PlanningInputGroupCandidateResponse":
+        return cls(
+            worker_item_key=candidate.worker_item_key,
+            priority=candidate.priority,
+        )
+
+
+class PlanningInputGroupRequirementsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_status: str
+    required_artifact_refs: tuple[str, ...]
+    required_evidence_refs: tuple[str, ...]
+    evidence_status: str
+
+    @classmethod
+    def from_view(
+        cls, group: InputGroupV1
+    ) -> "PlanningInputGroupRequirementsResponse":
+        return cls(
+            execution_status=group.requirements.execution_status.value,
+            required_artifact_refs=group.requirements.required_artifact_refs,
+            required_evidence_refs=group.requirements.required_evidence_refs,
+            evidence_status=group.requirements.evidence_status.value,
+        )
+
+
+class PlanningInputGroupResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    group_key: str
+    title: str
+    consumer_worker_item_key: str
+    candidates: tuple[PlanningInputGroupCandidateResponse, ...]
+    requirements: PlanningInputGroupRequirementsResponse
+    mode: str
+    minimum_count: int | None
+    selection_strategy: str
+
+    @classmethod
+    def from_view(cls, group: InputGroupV1) -> "PlanningInputGroupResponse":
+        return cls(
+            group_key=group.group_key,
+            title=group.title,
+            consumer_worker_item_key=group.consumer_worker_item_key,
+            candidates=tuple(
+                PlanningInputGroupCandidateResponse.from_view(candidate)
+                for candidate in group.candidates
+            ),
+            requirements=PlanningInputGroupRequirementsResponse.from_view(group),
+            mode=group.mode.value,
+            minimum_count=group.minimum_count,
+            selection_strategy=group.selection_strategy.value,
         )
 
 

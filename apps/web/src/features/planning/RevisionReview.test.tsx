@@ -65,9 +65,51 @@ const revisionDiff: RevisionDiff = {
     provider: null,
     runtime_interface: null,
     runtime_config_version: null,
+    input_groups: [],
   },
   collaboration_policy_changes: [],
-  input_group_changes: [],
+  input_group_changes: [{
+    consumer_worker_item_key: "review",
+    group_key: "research",
+    reason: "提高汇总前的结果门槛",
+    before: {
+      group_key: "research",
+      title: "Research reports",
+      consumer_worker_item_key: "review",
+      candidates: [
+        { worker_item_key: "backend", priority: 1 },
+        { worker_item_key: "review", priority: 2 },
+      ],
+      requirements: {
+        execution_status: "succeeded",
+        required_artifact_refs: ["artifact_type:report"],
+        required_evidence_refs: ["acceptance:research-complete"],
+        evidence_status: "candidate",
+      },
+      mode: "at_least",
+      minimum_count: 1,
+      selection_strategy: "plan_order",
+    },
+    after: {
+      group_key: "research",
+      title: "Research reports",
+      consumer_worker_item_key: "review",
+      candidates: [
+        { worker_item_key: "backend", priority: 1 },
+        { worker_item_key: "review", priority: 2 },
+        { worker_item_key: "telemetry", priority: 3 },
+      ],
+      requirements: {
+        execution_status: "succeeded",
+        required_artifact_refs: ["artifact_type:report"],
+        required_evidence_refs: ["acceptance:research-complete"],
+        evidence_status: "candidate",
+      },
+      mode: "at_least",
+      minimum_count: 2,
+      selection_strategy: "plan_order",
+    },
+  }],
   root_changes: [{
     field_path: "acceptance_criteria",
     before: ["旧验收"],
@@ -246,6 +288,11 @@ describe("Revision review", () => {
     expect(screen.getByText("把支付回调改造成可恢复、可观测的执行链。")).toBeVisible();
     expect(screen.getByText("Worker 上下文需要重新同步")).toBeVisible();
     expect(screen.getByText("依赖关系发生变化")).toBeVisible();
+    expect(screen.getByText("变更前输入规则")).toBeVisible();
+    expect(screen.getByText("变更后输入规则")).toBeVisible();
+    expect(screen.getByText("至少 1 / 2")).toBeVisible();
+    expect(screen.getByText("至少 2 / 3")).toBeVisible();
+    expect(screen.getAllByText("Research reports")).toHaveLength(2);
     expect(dagToggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("revision-dag-change-canvas")).not.toBeInTheDocument();
   });
