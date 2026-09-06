@@ -4636,6 +4636,7 @@ class ContextMaterializationResponse(BaseModel):
     control_plane_facts: dict[str, Any]
     project_knowledge: tuple[MaterializationKnowledgeResponse, ...]
     artifact_and_evidence_refs: tuple[MaterializedContextRefResponse, ...]
+    result_inputs: tuple[dict[str, Any], ...] = ()
     total_byte_count: int
     input_token_count: int
 

@@ -10,15 +10,24 @@ from sidera_control_plane.application.ports import (
     ExactSectionRef,
     KnowledgeCatalogPort,
     KnowledgeSourceMetadata,
+    ResultInputContentPort,
+)
+from sidera_control_plane.application.result_input_delivery import (
+    ResultInputDeliveryError,
+    materialize_result_inputs,
 )
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
+    ContextMaterialization,
     ContextMaterializationAudit,
     ContextMaterializationMode,
     ContextMaterializationOutcome,
     ContextMaterializationV1,
+    ContextMaterializationV2,
     ContextMetadata,
+    ContextPackageManifest,
     ContextPackageManifestV1,
+    ContextPackageManifestV2,
     ContextPackageStatus,
     ContextPurpose,
     ContextRevocationScope,
@@ -61,15 +70,17 @@ class ContextMaterializer:
         catalog: KnowledgeCatalogPort,
         *,
         max_payload_bytes: int = MAX_CONTEXT_PAYLOAD_BYTES,
+        result_input_content: ResultInputContentPort | None = None,
     ) -> None:
         if max_payload_bytes < 1:
             raise ValueError("Context materialization payload limit must be positive")
         self._catalog = catalog
         self._max_payload_bytes = max_payload_bytes
+        self._result_input_content = result_input_content
 
     def materialize(
         self,
-        manifest: ContextPackageManifestV1 | None,
+        manifest: ContextPackageManifest | None,
         work_context_revision: WorkContextRevision | None,
         *,
         mode: ContextMaterializationMode,
@@ -82,7 +93,7 @@ class ContextMaterializer:
         now: datetime | None = None,
         correlation_id: UUID,
         caller_request_id: UUID,
-    ) -> ContextMaterializationV1:
+    ) -> ContextMaterialization:
         try:
             normalized_mode = ContextMaterializationMode(mode)
         except (TypeError, ValueError) as exc:
@@ -162,11 +173,22 @@ class ContextMaterializer:
                 "context_budget_exceeded",
                 "Materialized context exceeds the hard payload limit",
             )
+        if isinstance(materialization, ContextMaterializationV2):
+            assert isinstance(manifest, ContextPackageManifestV2)
+            result_budget = manifest.result_input_manifest.budget
+            if (
+                materialization.total_byte_count > result_budget.max_payload_bytes
+                or materialization.input_token_count > manifest.budget.max_input_tokens
+            ):
+                raise ContextMaterializationError(
+                    "context_budget_exceeded",
+                    "Materialized context exceeds its pinned result input budget",
+                )
         return materialization
 
     @staticmethod
     def _validate_access(
-        manifest: ContextPackageManifestV1,
+        manifest: ContextPackageManifest,
         mode: ContextMaterializationMode,
         *,
         workspace_id: UUID,
@@ -239,7 +261,7 @@ class ContextMaterializer:
 
     @staticmethod
     def _validate_revision(
-        manifest: ContextPackageManifestV1,
+        manifest: ContextPackageManifest,
         revision: WorkContextRevision | None,
         workspace_id: UUID,
     ) -> None:
@@ -389,74 +411,112 @@ class ContextMaterializer:
             )
         return tuple(sorted(result, key=lambda item: item.ordinal))
 
-    @staticmethod
     def _assemble(
-        manifest: ContextPackageManifestV1,
+        self,
+        manifest: ContextPackageManifest,
         revision: WorkContextRevision,
         project_knowledge: Sequence[ProjectKnowledgeSection],
-    ) -> ContextMaterializationV1:
+    ) -> ContextMaterialization:
         snapshot = revision.snapshot
-        return ContextMaterializationV1(
-            metadata=ContextMetadata(
-                package_id=manifest.package_id,
-                package_hash=manifest.package_hash,
-                purpose=manifest.purpose,
-                consumer_type=manifest.consumer_type,
-                consumer_id=manifest.consumer_id,
-                context_version=manifest.context_version,
-                expires_at=manifest.expires_at,
-            ),
-            system_constraints=SystemConstraintSection(
-                objective=snapshot.objective,
-                constraints=snapshot.constraints,
-                acceptance_criteria=snapshot.acceptance_criteria,
-            ),
-            work_context=WorkContextSection(
-                revision_id=revision.revision_id,
-                revision_number=revision.revision_number,
-                content_hash=revision.content_hash,
-                snapshot_schema_version=snapshot.schema_version,
-                requested_outputs=snapshot.requested_outputs,
-                clarification_decisions=snapshot.clarification_decisions,
-                accepted_decisions=snapshot.accepted_decisions,
-                unresolved_questions=snapshot.unresolved_questions,
-                checkpoint_refs=snapshot.checkpoint_refs,
-                missing_fact_codes=snapshot.missing_fact_codes,
-            ),
-            control_plane_facts=ControlPlaneFactSection(
-                facts=manifest.control_plane_fact_snapshot,
-            ),
+        metadata = ContextMetadata(
+            package_id=manifest.package_id,
+            package_hash=manifest.package_hash,
+            purpose=manifest.purpose,
+            consumer_type=manifest.consumer_type,
+            consumer_id=manifest.consumer_id,
+            context_version=manifest.context_version,
+            expires_at=manifest.expires_at,
+        )
+        system_constraints = SystemConstraintSection(
+            objective=snapshot.objective,
+            constraints=snapshot.constraints,
+            acceptance_criteria=snapshot.acceptance_criteria,
+        )
+        work_context = WorkContextSection(
+            revision_id=revision.revision_id,
+            revision_number=revision.revision_number,
+            content_hash=revision.content_hash,
+            snapshot_schema_version=snapshot.schema_version,
+            requested_outputs=snapshot.requested_outputs,
+            clarification_decisions=snapshot.clarification_decisions,
+            accepted_decisions=snapshot.accepted_decisions,
+            unresolved_questions=snapshot.unresolved_questions,
+            checkpoint_refs=snapshot.checkpoint_refs,
+            missing_fact_codes=snapshot.missing_fact_codes,
+        )
+        control_plane_facts = ControlPlaneFactSection(
+            facts=manifest.control_plane_fact_snapshot,
+        )
+        artifact_and_evidence_refs = tuple(
+            [
+                TypedContextRef(
+                    category="artifact",
+                    ref_id=item.ref_id,
+                    ref_type=item.ref_type,
+                    ordinal=item.ordinal,
+                )
+                for item in manifest.artifact_refs
+            ]
+            + [
+                TypedContextRef(
+                    category="evidence",
+                    ref_id=item.ref_id,
+                    ref_type=item.ref_type,
+                    ordinal=item.ordinal,
+                )
+                for item in manifest.evidence_refs
+            ]
+        )
+        if not isinstance(manifest, ContextPackageManifestV2):
+            return ContextMaterializationV1(
+                metadata=metadata,
+                system_constraints=system_constraints,
+                work_context=work_context,
+                control_plane_facts=control_plane_facts,
+                project_knowledge=tuple(project_knowledge),
+                artifact_and_evidence_refs=artifact_and_evidence_refs,
+            )
+        if manifest.result_input_manifest.artifacts and self._result_input_content is None:
+            raise ContextMaterializationError(
+                "result_input_unavailable",
+                "Result input content port is not configured",
+                temporary=True,
+            )
+        try:
+            result_inputs = (
+                materialize_result_inputs(
+                    workspace_id=manifest.workspace_id,
+                    manifest=manifest.result_input_manifest,
+                    content_port=self._result_input_content,
+                )
+                if self._result_input_content is not None
+                else ()
+            )
+        except ResultInputDeliveryError as exc:
+            raise ContextMaterializationError(
+                exc.code,
+                str(exc),
+                temporary=exc.temporary,
+                corrupt=exc.corrupt,
+            ) from exc
+        return ContextMaterializationV2(
+            metadata=metadata,
+            system_constraints=system_constraints,
+            work_context=work_context,
+            control_plane_facts=control_plane_facts,
             project_knowledge=tuple(project_knowledge),
-            artifact_and_evidence_refs=tuple(
-                [
-                    TypedContextRef(
-                        category="artifact",
-                        ref_id=item.ref_id,
-                        ref_type=item.ref_type,
-                        ordinal=item.ordinal,
-                    )
-                    for item in manifest.artifact_refs
-                ]
-                + [
-                    TypedContextRef(
-                        category="evidence",
-                        ref_id=item.ref_id,
-                        ref_type=item.ref_type,
-                        ordinal=item.ordinal,
-                    )
-                    for item in manifest.evidence_refs
-                ]
-            ),
+            artifact_and_evidence_refs=artifact_and_evidence_refs,
+            result_inputs=result_inputs,
         )
 
 
 def build_materialization_audit(
-    manifest: ContextPackageManifestV1,
+    manifest: ContextPackageManifest,
     *,
     attempt: int,
     outcome: ContextMaterializationOutcome,
     occurred_at: datetime,
-    materialization: ContextMaterializationV1 | None = None,
+    materialization: ContextMaterialization | None = None,
     failure_code: str | None = None,
     audit_id: UUID | None = None,
 ) -> ContextMaterializationAudit:
@@ -465,6 +525,8 @@ def build_materialization_audit(
         if materialization is None:
             raise ValueError("successful materialization audit requires a payload")
         section_count = len(materialization.project_knowledge)
+        if isinstance(materialization, ContextMaterializationV2):
+            section_count += len(materialization.result_inputs)
         byte_count = materialization.total_byte_count
         input_token_count = materialization.input_token_count
         normalized_failure_code = None

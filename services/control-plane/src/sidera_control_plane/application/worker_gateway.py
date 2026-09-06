@@ -50,6 +50,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationMode,
     ContextMaterializationOutcome,
     ContextMaterializationV1,
+    ContextMaterializationV2,
     ContextPackageManifestV1,
     ContextPackageStatus,
     ContextPurpose,
@@ -126,6 +127,7 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "runtime_capability_mismatch",
         "context_adapter_unsupported",
         "context_adapter_rejected",
+        "context_materialization_v2_not_supported",
         "context_acknowledgement_mismatch",
         "context_acknowledgement_persistence_failed",
         "context_reference_not_found",
@@ -2681,6 +2683,11 @@ class WorkerGateway:
             raise GatewayMessageError(
                 "execution context materialization failed", code=exc.code
             ) from exc
+        if isinstance(materialization, ContextMaterializationV2):
+            raise GatewayMessageError(
+                "worker Gateway does not consume context package v2 yet",
+                code="context_materialization_v2_not_supported",
+            )
 
         accept_context = getattr(adapter, "accept_context", None)
         if not callable(accept_context):

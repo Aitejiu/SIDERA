@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from io import BytesIO
+from typing import BinaryIO
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,6 +21,7 @@ from sidera_control_plane.application.ports import (
     ExactSectionBody,
     ExactSectionRef,
     KnowledgeSourceMetadata,
+    ResultInputContentPort,
     SearchHit,
 )
 from sidera_control_plane.domain.context_packages import (
@@ -25,8 +29,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
     ContextMaterializationMode,
     ContextMaterializationOutcome,
+    ContextMaterializationV2,
     ContextPackageKnowledgeRef,
     ContextPackageManifestV1,
+    ContextPackageManifestV2,
     ContextPackageStatus,
     ContextPurpose,
     ContextRevocationScope,
@@ -41,6 +47,7 @@ from sidera_control_plane.domain.work_context import (
     WorkContextSnapshotV1,
     WorkReference,
 )
+from tests.unit.result_input_fixtures import result_input_manifest
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -106,6 +113,22 @@ class FailingCatalog(FakeCatalog):
             "temporary",
             temporary=True,
         )
+
+
+class MemoryResultInputContentPort(ResultInputContentPort):
+    def __init__(self, contents: dict[UUID, bytes]) -> None:
+        self.contents = contents
+
+    def open_exact(
+        self,
+        *,
+        workspace_id: UUID,
+        artifact_id: UUID,
+        expected_hash: str,
+        expected_size_bytes: int,
+    ) -> BinaryIO:
+        del workspace_id, expected_hash, expected_size_bytes
+        return BytesIO(self.contents[artifact_id])
 
 
 def _revision(*, knowledge_ref: KnowledgeRevisionRef | None = None) -> WorkContextRevision:
@@ -233,6 +256,40 @@ def _manifest(
 def _materializer(catalog: FakeCatalog | None = None) -> tuple[ContextMaterializer, FakeCatalog]:
     selected = catalog or FakeCatalog()
     return ContextMaterializer(selected), selected
+
+
+def _v2_manifest_with_body(
+    revision: WorkContextRevision, body: bytes = b"result\n"
+) -> tuple[ContextPackageManifestV2, dict[UUID, bytes]]:
+    legacy = _manifest(revision)
+    result_manifest = result_input_manifest()
+    artifact = replace(
+        result_manifest.artifacts[0],
+        content_hash=sha256(body).hexdigest(),
+        size_bytes=len(body),
+    )
+    result_manifest = replace(result_manifest, artifacts=(artifact,), evidence=())
+    manifest = ContextPackageManifestV2(
+        package_id=legacy.package_id,
+        workspace_id=legacy.workspace_id,
+        purpose=legacy.purpose,
+        consumer_type=legacy.consumer_type,
+        consumer_id=legacy.consumer_id,
+        worker_item_id=legacy.worker_item_id,
+        work_context_revision_id=legacy.work_context_revision_id,
+        context_version=legacy.context_version,
+        control_plane_fact_snapshot=legacy.control_plane_fact_snapshot,
+        knowledge_refs=legacy.knowledge_refs,
+        artifact_refs=legacy.artifact_refs,
+        evidence_refs=legacy.evidence_refs,
+        budget=legacy.budget,
+        expires_at=legacy.expires_at,
+        idempotency_key=legacy.idempotency_key,
+        status=legacy.status,
+        created_at=legacy.created_at,
+        result_input_manifest=result_manifest,
+    )
+    return manifest, {artifact.artifact_id: body}
 
 
 def _run(materializer: ContextMaterializer, manifest, revision, **kwargs):
@@ -424,6 +481,70 @@ def test_hard_payload_limit_blocks_before_returning_a_large_body() -> None:
         _run(materializer, manifest, revision)
 
     assert exc_info.value.code == "context_budget_exceeded"
+
+
+def test_v2_materialization_enforces_exact_payload_and_pinned_token_limits() -> None:
+    revision = _revision()
+    manifest, contents = _v2_manifest_with_body(revision)
+    port = MemoryResultInputContentPort(contents)
+    probe = _run(
+        ContextMaterializer(FakeCatalog(), result_input_content=port),
+        manifest,
+        revision,
+    )
+    assert isinstance(probe, ContextMaterializationV2)
+
+    exact_payload = _run(
+        ContextMaterializer(
+            FakeCatalog(),
+            max_payload_bytes=probe.total_byte_count,
+            result_input_content=port,
+        ),
+        manifest,
+        revision,
+    )
+    assert exact_payload.total_byte_count == probe.total_byte_count
+
+    with pytest.raises(ContextMaterializationError) as payload_error:
+        _run(
+            ContextMaterializer(
+                FakeCatalog(),
+                max_payload_bytes=probe.total_byte_count - 1,
+                result_input_content=port,
+            ),
+            manifest,
+            revision,
+        )
+    assert payload_error.value.code == "context_budget_exceeded"
+
+    pinned_manifest = replace(
+        manifest,
+        budget=replace(
+            manifest.budget,
+            max_input_tokens=probe.input_token_count,
+        ),
+    )
+    exact_tokens = _run(
+        ContextMaterializer(FakeCatalog(), result_input_content=port),
+        pinned_manifest,
+        revision,
+    )
+    assert exact_tokens.input_token_count <= pinned_manifest.budget.max_input_tokens
+
+    too_small_manifest = replace(
+        pinned_manifest,
+        budget=replace(
+            pinned_manifest.budget,
+            max_input_tokens=max(exact_tokens.input_token_count - 1, 1),
+        ),
+    )
+    with pytest.raises(ContextMaterializationError) as token_error:
+        _run(
+            ContextMaterializer(FakeCatalog(), result_input_content=port),
+            too_small_manifest,
+            revision,
+        )
+    assert token_error.value.code == "context_budget_exceeded"
 
 
 def test_owner_audit_requires_capability_and_expected_hash() -> None:

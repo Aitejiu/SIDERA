@@ -3,7 +3,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import TracebackType
-from typing import Literal, Protocol, Self
+from typing import BinaryIO, Literal, Protocol, Self
 from uuid import UUID
 
 from sidera_control_plane.application.collaboration_projection import CollaborationFacts
@@ -1918,6 +1918,19 @@ class ArtifactContentWriter(Protocol):
         expected_hash: str,
         content: bytes,
     ) -> str:
+        raise NotImplementedError
+
+
+class ResultInputContentPort(Protocol):
+    def open_exact(
+        self,
+        *,
+        workspace_id: UUID,
+        artifact_id: UUID,
+        expected_hash: str,
+        expected_size_bytes: int,
+    ) -> BinaryIO:
+        """Open one authorized artifact without accepting a storage reference."""
         raise NotImplementedError
 
 

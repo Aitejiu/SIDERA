@@ -389,6 +389,7 @@ def get_context_package_query_service(
         actor_type=settings.local_actor_type,
         actor_id=settings.local_actor_id,
         clock=lambda: datetime.now(UTC),
+        result_input_content=get_artifact_content_service(database, settings),
     )
 
 

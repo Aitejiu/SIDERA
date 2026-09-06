@@ -13,6 +13,7 @@ from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
+from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
@@ -136,16 +137,24 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             "git-worktree": lambda _instance: workspace_manager,
             "git_worktree": lambda _instance: workspace_manager,
         }
+        artifact_content_store = LocalArtifactContentStore(
+            settings.artifact_root,
+            max_bytes=settings.artifact_max_bytes,
+        )
+        artifact_content_service = ArtifactContentService(
+            database,
+            artifact_content_store,
+        )
         worker_gateway = WorkerGateway(
             lambda: SqlAlchemyUnitOfWork(database),
             adapter_factories=adapter_factories,
             workspace_factories=workspace_factories,
             spec_factory=ConfiguredExecutionSpecFactory(),
-            artifact_content_store=LocalArtifactContentStore(
-                settings.artifact_root,
-                max_bytes=settings.artifact_max_bytes,
+            artifact_content_store=artifact_content_store,
+            context_materializer=ContextMaterializer(
+                catalog,
+                result_input_content=artifact_content_service,
             ),
-            context_materializer=ContextMaterializer(catalog),
             context_package_cutover_at=settings.context_package_cutover_at,
             candidate_submission_service=KnowledgeCandidateSubmissionService(
                 FileCandidateProposalSpool(

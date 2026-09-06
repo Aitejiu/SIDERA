@@ -169,6 +169,33 @@ class ArtifactContentService(ArtifactContentProvider):
             ) from exc
         return BytesIO(content)
 
+    def open_exact(
+        self,
+        *,
+        workspace_id: UUID,
+        artifact_id: UUID,
+        expected_hash: str,
+        expected_size_bytes: int,
+    ) -> BinaryIO:
+        """Open content only when the persisted artifact metadata matches exactly."""
+        artifact = self._get_artifact(workspace_id, artifact_id)
+        if (
+            type(expected_size_bytes) is not int
+            or expected_size_bytes < 0
+            or artifact.size_bytes != expected_size_bytes
+            or artifact.content_hash.lower() != expected_hash.lower()
+        ):
+            raise ArtifactIntegrityFailed(
+                "artifact content metadata does not match the authorized descriptor"
+            )
+        return self.open_stream(
+            workspace_id,
+            artifact_id,
+            "system",
+            "result-input-delivery",
+            None,
+        )
+
     def create_download_token(
         self,
         workspace_id: UUID,
