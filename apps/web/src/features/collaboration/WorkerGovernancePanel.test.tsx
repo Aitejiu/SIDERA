@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
+import { workerResultInputsFixture } from "@/test/resultInputFixtures";
 
 import { WorkerGovernancePanel, type WorkerGovernancePanelProps } from "./WorkerGovernancePanel";
 import type { WorkerCollaborationSummary } from "./types";
@@ -265,6 +266,61 @@ describe("WorkerGovernancePanel", () => {
         payload: { reason: "人工审查已结束", transport: "web" },
       },
     ]);
+  });
+
+  it("binds approval to the current fixed input Selection", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+    const proposal = {
+      created_at: "2026-09-04T08:00:00Z",
+      proposal_id: PROPOSAL_ID,
+      reason_code: "upstream_evidence_ready",
+      resolved_at: null,
+      resource_version: 8,
+      status: "pending" as const,
+      summary: "上游证据已齐，请确认是否放行回调实现",
+      target_request_version: 3,
+      input_selection_id: "61000000-0000-0000-0000-000000000001",
+      input_selection_hash: "a".repeat(64),
+    };
+    server.use(
+      http.post("/api/v1/commands", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json(commandResponse);
+      }),
+    );
+    render(
+      <WorkerGovernancePanel
+        {...makeProps(makeCollaboration({
+          active_proposal: proposal,
+          available_actions: ["approve"],
+          attention_state: "decision_required",
+          proposal_summary: proposal.summary,
+          release_state: "proposed",
+        }))}
+        resultInputs={workerResultInputsFixture()}
+      />,
+    );
+
+    const panel = screen.getByRole("region", { name: "协同放行控制" });
+    await user.click(within(panel).getByRole("button", { name: "批准 Proposal" }));
+    const dialog = screen.getByRole("dialog", { name: "批准协同放行" });
+    expect(within(dialog).getByText("Selection 61000000 · Proposal V8")).toBeVisible();
+    expect(within(dialog).getByText(/Research A · 技术评估 \/ 研究 A/)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "批准这次放行" }));
+
+    await screen.findByRole("region", { name: "协同放行控制" });
+    expect(requestBody).toMatchObject({
+      command_type: "ApproveCollaborationReleaseProposal",
+      target_id: PROPOSAL_ID,
+      expected_version: 8,
+      payload: {
+        reason: null,
+        transport: "web",
+        expected_input_selection_id: "61000000-0000-0000-0000-000000000001",
+        expected_input_selection_hash: "a".repeat(64),
+      },
+    });
   });
 
   it("keeps the dialog disabled while pending and refreshes after a version conflict", async () => {

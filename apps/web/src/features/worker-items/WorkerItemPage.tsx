@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CircleAlert, GitBranch, RefreshCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
@@ -19,6 +19,12 @@ import { subtaskWorkspaceQueryKey } from "../subtasks/api";
 import { collaborationDecisionsQueryKey, collaborationDetailQueryKey } from "../collaboration/api";
 import { planningRequestsQueryKey } from "../planning/api";
 import { executionQueryKey, getExecution } from "../trace/api";
+import {
+  executeResultInputAction,
+  getWorkerResultInputs,
+  workerResultInputsQueryKey,
+} from "../result-inputs/api";
+import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
 import {
   getHandoffCandidates,
   getWorkerItemWorkspace,
@@ -43,6 +49,7 @@ export function WorkerItemPage() {
     workspaceId: string;
     workerItemId: string;
   }>();
+  const navigate = useNavigate();
   const location = useLocation();
   const stream = useWorkspaceStreamOptional();
   const queryClient = useQueryClient();
@@ -88,6 +95,12 @@ export function WorkerItemPage() {
     queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
     enabled: Boolean(workspaceId && executionId),
   });
+  const resultInputsQuery = useQuery({
+    queryKey: workerResultInputsQueryKey(workspaceId, workerItemId),
+    queryFn: ({ signal }) => getWorkerResultInputs(workspaceId, workerItemId, { signal }),
+    enabled: Boolean(workspaceId && workerItemId),
+    retry: false,
+  });
   useEffect(() => {
     const cursor = workspaceQuery.data?.last_change_cursor;
     if (stream !== null && cursor !== undefined) {
@@ -108,6 +121,7 @@ export function WorkerItemPage() {
       workerActivityQueryKey(workspaceId, workerItemId),
       taskOverviewQueryKey(workspaceId),
       planningRequestsQueryKey(workspaceId, true),
+      workerResultInputsQueryKey(workspaceId, workerItemId),
     ];
     if (rootTaskId) {
       queryKeys.push(
@@ -158,6 +172,16 @@ export function WorkerItemPage() {
             handoffCandidatesPending={handoffCandidatesQuery.isPending}
             handoffCandidatesError={handoffCandidatesQuery.error}
             onRefreshHandoffCandidates={() => handoffCandidatesQuery.refetch()}
+            resultInputs={resultInputsQuery.data}
+            resultInputsLoading={resultInputsQuery.isPending}
+            resultInputsError={resultInputsQuery.isError}
+            onRetryResultInputs={() => void resultInputsQuery.refetch()}
+            onOpenWorkerItem={(targetWorkerItemId) => navigate(
+              `/workspaces/${encodeURIComponent(workspaceId)}/worker-items/${encodeURIComponent(targetWorkerItemId)}`,
+            )}
+            onOpenArtifact={(artifactId) => navigate(
+              `/workspaces/${encodeURIComponent(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}`,
+            )}
           />
         ) : null}
       </AsyncState>
@@ -182,6 +206,12 @@ function WorkerItemContent({
   handoffCandidatesPending,
   handoffCandidatesError,
   onRefreshHandoffCandidates,
+  resultInputs,
+  resultInputsLoading,
+  resultInputsError,
+  onRetryResultInputs,
+  onOpenWorkerItem,
+  onOpenArtifact,
 }: {
   workspace: WorkerWorkspace;
   activity: readonly WorkerActivity[];
@@ -199,9 +229,19 @@ function WorkerItemContent({
   handoffCandidatesPending: boolean;
   handoffCandidatesError: unknown;
   onRefreshHandoffCandidates: () => Promise<unknown>;
+  resultInputs: WorkerResultInputsView | undefined;
+  resultInputsLoading: boolean;
+  resultInputsError: boolean;
+  onRetryResultInputs: () => void;
+  onOpenWorkerItem: (workerItemId: string) => void;
+  onOpenArtifact: (artifactId: string) => void;
 }) {
   const [traceDescriptor, setTraceDescriptor] = useState<NonNullable<WorkerActivity["trace_descriptor"]> | null>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [resultInputActionState, setResultInputActionState] = useState<{
+    status: "idle" | "submitting" | "success" | "error";
+    message: string | null;
+  }>({ status: "idle", message: null });
   const workerStatus = statusFor(workspace.worker_item.status);
   const timelineActivity = useMemo(
     () => enrichWorkerActivities(activity, workspace),
@@ -210,6 +250,20 @@ function WorkerItemContent({
   const handoffAvailable = workspace.active_handoff == null
     && workspace.can_intervene
     && handoffCandidates?.candidates.some((candidate) => candidate.eligible) === true;
+  const handleResultInputAction = async (action: ResultInputAction) => {
+    if (resultInputActionState.status === "submitting") return;
+    setResultInputActionState({ status: "submitting", message: null });
+    try {
+      await executeResultInputAction(workspace.workspace_id, action);
+      await onRefresh();
+      setResultInputActionState({ status: "success", message: `${actionLabel(action)}已提交，正在等待控制面刷新。` });
+    } catch (error) {
+      setResultInputActionState({
+        status: "error",
+        message: error instanceof Error ? error.message : "结果输入操作未能提交，请刷新后重试。",
+      });
+    }
+  };
   return (
     <>
       <div className="breadcrumb worker-item-page__breadcrumb">
@@ -286,6 +340,14 @@ function WorkerItemContent({
           onRefresh={onRefresh}
           handoffAvailable={handoffAvailable}
           onOpenHandoff={() => setHandoffOpen(true)}
+          resultInputs={resultInputs}
+          resultInputsLoading={resultInputsLoading}
+          resultInputsError={resultInputsError}
+          onRetryResultInputs={onRetryResultInputs}
+          onOpenWorkerItem={onOpenWorkerItem}
+          onOpenArtifact={onOpenArtifact}
+          onResultInputAction={(action) => void handleResultInputAction(action)}
+          resultInputActionState={resultInputActionState}
         />
       </div>
       {handoffOpen ? (
@@ -635,6 +697,10 @@ function activityOrder(kind: string): number {
   if (kind === "plan.continuation") return 4;
   if (kind === "plan.recovery") return 5;
   return 0;
+}
+
+function actionLabel(action: ResultInputAction): string {
+  return action.command_type === "RetryContextAssembly" ? "上下文组装重试" : action.action;
 }
 
 function generationLabel(sync: WorkerPlanSync): string {

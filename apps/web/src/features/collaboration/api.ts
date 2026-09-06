@@ -71,13 +71,22 @@ export async function approveCollaborationRelease(
   proposalId: string,
   expectedProposalVersion: number,
   reason: string | null,
+  expectedInputSelection?: {
+    id: string | null | undefined;
+    hash: string | null | undefined;
+  },
 ): Promise<CommandResponse> {
+  const payload: Record<string, unknown> = { reason, transport: "web" };
+  if (expectedInputSelection?.id && expectedInputSelection.hash) {
+    payload.expected_input_selection_id = expectedInputSelection.id;
+    payload.expected_input_selection_hash = expectedInputSelection.hash;
+  }
   return executeGovernanceCommand(workspaceId, {
     commandType: "ApproveCollaborationReleaseProposal",
     targetType: "collaboration_release_proposal",
     targetId: proposalId,
     expectedVersion: expectedProposalVersion,
-    payload: { reason, transport: "web" },
+    payload,
   });
 }
 

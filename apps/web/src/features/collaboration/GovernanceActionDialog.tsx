@@ -10,12 +10,14 @@ import {
 import { createPortal } from "react-dom";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
+import type { WorkerResultInputsView } from "../result-inputs/api";
 import type { ActiveCollaborationProposal, GovernanceAction } from "./types";
 
 export interface GovernanceActionDialogProps {
   action: GovernanceAction;
   taskPath: string;
   proposal: ActiveCollaborationProposal | null;
+  resultInputs?: WorkerResultInputsView;
   errorMessage: string | null;
   isSubmitting: boolean;
   onClose: () => void;
@@ -75,6 +77,7 @@ export function GovernanceActionDialog({
   action,
   taskPath,
   proposal,
+  resultInputs,
   errorMessage,
   isSubmitting,
   onClose,
@@ -151,6 +154,13 @@ export function GovernanceActionDialog({
           </div>
         ) : null}
 
+        {action === "approve" && proposal?.input_selection_id && proposal.input_selection_hash ? (
+          <FixedInputSelection
+            proposal={proposal}
+            resultInputs={resultInputs}
+          />
+        ) : null}
+
         {action === "pause" ? (
           <div className="governance-dialog__warning" role="note">
             <CircleAlert size={15} aria-hidden="true" />
@@ -199,5 +209,33 @@ export function GovernanceActionDialog({
       </section>
     </div>,
     document.body,
+  );
+}
+
+function FixedInputSelection({
+  proposal,
+  resultInputs,
+}: {
+  proposal: ActiveCollaborationProposal;
+  resultInputs: WorkerResultInputsView | undefined;
+}) {
+  const selectionId = proposal.input_selection_id;
+  const selectionHash = proposal.input_selection_hash;
+  if (!selectionId || !selectionHash) return null;
+  const sources = resultInputs?.groups
+    .flatMap((group) => group.selected_sources)
+    .filter((source, index, all) => all.findIndex((item) => item.worker_item_key === source.worker_item_key) === index) ?? [];
+  return (
+    <div className="governance-dialog__input-selection">
+      <span className="eyebrow">FIXED INPUT SELECTION</span>
+      <strong>Selection {selectionId.slice(0, 8)} · Proposal V{proposal.resource_version}</strong>
+      <code>{selectionHash.slice(0, 12)}…</code>
+      <span>批准时会重新校验这个 Selection；来源完成变化不会自动替换本次采用结果。</span>
+      {sources.length > 0 ? (
+        <ul>
+          {sources.map((source) => <li key={source.worker_item_key}>{source.worker_item_title} · {source.subtask_path.join(" / ")}</li>)}
+        </ul>
+      ) : <span>当前弹窗未加载来源明细，仅显示固定 Selection 引用。</span>}
+    </div>
   );
 }

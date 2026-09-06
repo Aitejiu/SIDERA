@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
+import { workerResultInputsFixture } from "@/test/resultInputFixtures";
 
 import { WorkerItemPage } from "./WorkerItemPage";
 
@@ -463,6 +464,10 @@ describe("WorkerItemPage", () => {
         () => HttpResponse.json(workspace),
       ),
       http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/result-inputs`,
+        () => HttpResponse.json(workerResultInputsFixture()),
+      ),
+      http.get(
         `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/handoff-candidates`,
         () => HttpResponse.json(handoffCandidates),
       ),
@@ -551,7 +556,67 @@ describe("WorkerItemPage", () => {
     expect(screen.getByText("执行尝试 #2")).toBeVisible();
     expect(screen.getByText("当前执行已绑定；更换节点需要停止并创建新的执行尝试")).toBeVisible();
     expect(screen.getByText("运行回调测试")).toBeVisible();
+    expect(await screen.findByRole("region", { name: "结果输入" })).toBeVisible();
+    expect(screen.getByText("Research reports")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
+  });
+
+  it("keeps result input loading separate from the central workspace", async () => {
+    let resolveResultInputs: ((response: Response) => void) | undefined;
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/result-inputs`,
+        () => new Promise((resolve) => {
+          resolveResultInputs = resolve;
+        }),
+      ),
+    );
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "结果输入" })).toHaveTextContent("读取结果输入事实");
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
+
+    resolveResultInputs?.(HttpResponse.json(workerResultInputsFixture()));
+    expect(await screen.findByRole("region", { name: "结果输入" })).toBeVisible();
+  });
+
+  it("allows the result input section to collapse without changing the WorkerItem route", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("region", { name: "结果输入" });
+    const details = document.querySelector("details.worker-item-sidebar__collapsible");
+    if (!(details instanceof HTMLDetailsElement)) throw new Error("expected a collapsible result input section");
+    expect(details.open).toBe(true);
+    const summary = details.querySelector("summary");
+    if (!(summary instanceof HTMLElement)) throw new Error("expected a result input summary");
+    await user.click(summary);
+    expect(details.open).toBe(false);
+    expect(window.location.pathname).toBe(`/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}`);
+  });
+
+  it("keeps the central WorkerItem workspace usable when result inputs fail", async () => {
+    server.use(
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/result-inputs`,
+        () => HttpResponse.json({ detail: "暂时不可用" }, { status: 503 }),
+      ),
+    );
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(await screen.findByRole("alert", { name: "结果输入" })).toHaveTextContent("结果输入暂不可用");
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
+  });
+
+  it("opens fixed source and artifact routes from the WorkerItem sidebar", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const panel = await screen.findByRole("region", { name: "结果输入" });
+    await user.click(within(panel).getByRole("button", { name: "查看来源 WorkerItem：Research A" }));
+    expect(window.location.pathname).toBe(`/workspaces/${WORKSPACE_ID}/worker-items/61000000-0000-0000-0000-000000000011`);
   });
 
   it("opens the handoff chooser in the current WorkerItem tab only when a target is eligible", async () => {
@@ -611,7 +676,7 @@ describe("WorkerItemPage", () => {
     renderPage();
 
     expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
-    expect(screen.getByText("等待协同放行")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "协同状态" })).getByText("等待协同放行")).toBeVisible();
     expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeDisabled();
     expect(screen.getByRole("link", { name: "查看上游：支付实现" })).toHaveAttribute(

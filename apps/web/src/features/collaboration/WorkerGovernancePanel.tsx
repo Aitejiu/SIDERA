@@ -12,6 +12,7 @@ import { useState } from "react";
 import { ApiProblem } from "@/shared/api/client";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
+import type { WorkerResultInputsView } from "../result-inputs/api";
 import {
   approveCollaborationRelease,
   pauseCollaborationRelease,
@@ -35,6 +36,7 @@ export interface WorkerGovernancePanelProps {
   taskPath: string;
   canIntervene: boolean;
   collaboration: WorkerCollaborationSummary | null | undefined;
+  resultInputs?: WorkerResultInputsView;
   onRefresh: () => Promise<void>;
 }
 
@@ -58,6 +60,7 @@ export function WorkerGovernancePanel({
   targetPlanGeneration,
   taskPath,
   collaboration,
+  resultInputs,
   onRefresh,
 }: WorkerGovernancePanelProps) {
   const [activeAction, setActiveAction] = useState<GovernanceAction | null>(null);
@@ -98,7 +101,16 @@ export function WorkerGovernancePanel({
           reason || null,
         );
       } else if (activeAction === "approve" && proposal !== null) {
-        await approveCollaborationRelease(workspaceId, proposal.proposal_id, proposal.resource_version, reason || null);
+        await approveCollaborationRelease(
+          workspaceId,
+          proposal.proposal_id,
+          proposal.resource_version,
+          reason || null,
+          {
+            id: proposal.input_selection_id,
+            hash: proposal.input_selection_hash,
+          },
+        );
       } else if (activeAction === "reject" && proposal !== null) {
         await rejectCollaborationRelease(workspaceId, proposal.proposal_id, proposal.resource_version, reason || null);
       } else if (activeAction === "resume_automatic" && collaboration.active_hold_id && collaboration.hold_resource_version !== null && collaboration.hold_resource_version !== undefined) {
@@ -185,6 +197,7 @@ export function WorkerGovernancePanel({
           action={activeAction}
           taskPath={taskPath}
           proposal={proposal}
+          {...(resultInputs === undefined ? {} : { resultInputs })}
           errorMessage={errorMessage}
           isSubmitting={isSubmitting}
           onClose={closeAction}

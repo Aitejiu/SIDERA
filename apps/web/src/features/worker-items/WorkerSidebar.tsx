@@ -3,12 +3,14 @@ import {
   ArrowRight,
   ArrowRightLeft,
   CheckCircle2,
+  ChevronDown,
   CircleAlert,
   GitBranch,
   Gauge,
   History,
   PackageCheck,
   Puzzle,
+  RefreshCcw,
   Route,
   ServerCog,
   ShieldCheck,
@@ -20,6 +22,8 @@ import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 import { workerCollaborationLabel } from "../collaboration/types";
 import { WorkerGovernancePanel } from "../collaboration/WorkerGovernancePanel";
 import { WorkerContextSummary } from "../context/WorkerContextSummary";
+import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
+import { ResultInputPanel } from "../result-inputs/ResultInputPanel";
 import { ExecutionRoutingPanel } from "./ExecutionRoutingPanel";
 import type { WorkerItemCollaborationSummary, WorkerPlacement, WorkerWorkspace } from "./types";
 
@@ -30,6 +34,14 @@ export function WorkerSidebar({
   onRefresh,
   handoffAvailable,
   onOpenHandoff,
+  resultInputs,
+  resultInputsLoading,
+  resultInputsError,
+  onRetryResultInputs,
+  onOpenWorkerItem,
+  onOpenArtifact,
+  onResultInputAction,
+  resultInputActionState,
 }: {
   workspace: WorkerWorkspace;
   taskTitle: string;
@@ -37,6 +49,17 @@ export function WorkerSidebar({
   onRefresh: () => Promise<void>;
   handoffAvailable: boolean;
   onOpenHandoff: () => void;
+  resultInputs: WorkerResultInputsView | undefined;
+  resultInputsLoading: boolean;
+  resultInputsError: boolean;
+  onRetryResultInputs: () => void;
+  onOpenWorkerItem: (workerItemId: string) => void;
+  onOpenArtifact: (artifactId: string) => void;
+  onResultInputAction: (action: ResultInputAction) => void;
+  resultInputActionState: {
+    status: "idle" | "submitting" | "success" | "error";
+    message: string | null;
+  };
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
   const currentExecution = workspace.execution_history[0] ?? null;
@@ -53,6 +76,46 @@ export function WorkerSidebar({
 
       {workspace.collaboration ? <WorkerCollaborationSection collaboration={workspace.collaboration} /> : null}
 
+      <details className="worker-item-sidebar__collapsible" open>
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title"><GitBranch size={15} aria-hidden="true" />结果输入</span>
+          <span className="mono-label">{resultInputSummary(resultInputs, resultInputsLoading, resultInputsError)}</span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+        <div className="worker-item-sidebar__collapsible-body">
+          {resultInputsLoading ? (
+            <section className="result-input-panel result-input-panel--state worker-item-sidebar__section" aria-label="结果输入" role="status">
+              <span className="eyebrow">RESULT INPUTS</span>
+              <strong>读取结果输入事实</strong>
+            </section>
+          ) : null}
+          {resultInputsError ? (
+            <section className="result-input-panel result-input-panel--state worker-item-sidebar__section" aria-label="结果输入" role="alert">
+              <span className="eyebrow">RESULT INPUTS</span>
+              <strong>结果输入暂不可用</strong>
+              <span>中央 Worker 工作区仍可继续查看。</span>
+              <button className="quiet-button" type="button" onClick={onRetryResultInputs}>
+                <RefreshCcw size={14} aria-hidden="true" />重试读取结果输入
+              </button>
+            </section>
+          ) : null}
+          {resultInputs ? (
+            <ResultInputPanel
+              view={resultInputs}
+              onOpenWorkerItem={onOpenWorkerItem}
+              onOpenArtifact={onOpenArtifact}
+              onAction={onResultInputAction}
+            />
+          ) : null}
+          {resultInputActionState.message ? (
+            <div className={`result-input-panel__action-state result-input-panel__action-state--${resultInputActionState.status}`} role={resultInputActionState.status === "error" ? "alert" : "status"}>
+              {resultInputActionState.status === "error" ? <CircleAlert size={14} aria-hidden="true" /> : <CheckCircle2 size={14} aria-hidden="true" />}
+              <span>{resultInputActionState.message}</span>
+            </div>
+          ) : null}
+        </div>
+      </details>
+
       <WorkerGovernancePanel
         workspaceId={workspace.workspace_id}
         workerItemId={workerItem.id}
@@ -61,6 +124,7 @@ export function WorkerSidebar({
         taskPath={`${taskTitle} / ${subtaskTitle} / ${workerItem.title}`}
         canIntervene={workspace.can_intervene}
         collaboration={workspace.collaboration}
+        {...(resultInputs === undefined ? {} : { resultInputs })}
         onRefresh={onRefresh}
       />
 
@@ -236,6 +300,19 @@ function WorkerCollaborationSection({
 
 function collaborationStatusKind(state: WorkerItemCollaborationSummary["state"]): StatusMarkKind {
   return state === "materialized" ? "running" : "planned";
+}
+
+function resultInputSummary(
+  resultInputs: WorkerResultInputsView | undefined,
+  isLoading: boolean,
+  isError: boolean,
+): string {
+  if (isLoading) return "读取中";
+  if (isError) return "读取失败";
+  if (resultInputs === undefined) return "等待数据";
+  if (resultInputs.is_historical) return "历史执行";
+  const selectedCount = resultInputs.groups.reduce((count, group) => count + group.selected_sources.length, 0);
+  return `${selectedCount} 份固定来源`;
 }
 
 function PlacementRow({ placement }: { placement: WorkerPlacement }) {
