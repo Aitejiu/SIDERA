@@ -103,6 +103,7 @@ from sidera_control_plane.application.work_context_queries import (
 )
 from sidera_control_plane.collaboration_readiness import ReadinessReport
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.context_packages import ContextPackageManifestV2
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.work_context import WorkContextSnapshotV1
 from sidera_control_plane.notification_readiness import NotificationReadinessReport
@@ -4344,6 +4345,8 @@ class ContextPackageResponse(BaseModel):
     work_context_revision_number: int
     work_context_content_hash: str
     context_version: int | None
+    manifest_schema_version: int
+    result_input_manifest: dict[str, Any] | None
     control_plane_fact_snapshot: dict[str, Any]
     knowledge_refs: tuple[ContextPackageKnowledgeRefResponse, ...]
     artifact_refs: tuple[ContextPackageReferenceResponse, ...]
@@ -4376,6 +4379,12 @@ class ContextPackageResponse(BaseModel):
             work_context_revision_number=view.work_context_revision_number,
             work_context_content_hash=view.work_context_content_hash,
             context_version=manifest.context_version,
+            manifest_schema_version=manifest.manifest_schema_version,
+            result_input_manifest=(
+                jsonable_encoder(manifest.result_input_manifest.to_mapping())
+                if isinstance(manifest, ContextPackageManifestV2)
+                else None
+            ),
             control_plane_fact_snapshot=jsonable_encoder(
                 manifest.control_plane_fact_snapshot
             ),

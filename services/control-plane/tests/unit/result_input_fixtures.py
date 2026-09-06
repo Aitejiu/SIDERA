@@ -153,6 +153,18 @@ def selection_mapping() -> dict[str, object]:
     return deepcopy(_SELECTION_MAPPING)
 
 
+def result_input_manifest():
+    """Build a typed result-input delivery manifest from the selection fixture."""
+
+    from sidera_control_plane.domain.context_packages import ResultInputManifestV1
+    from sidera_control_plane.domain.input_selections import (
+        CollaborationInputSelectionV1,
+    )
+
+    selection = CollaborationInputSelectionV1.from_mapping(selection_mapping())
+    return ResultInputManifestV1.from_selection(selection)
+
+
 def effective_source_facts(*, request_case: str):
     from sidera_control_plane.application.collaboration_projection import (
         CollaborationArtifactFact,

@@ -236,8 +236,11 @@ def test_r5_3_schema_has_immutable_refs_tenant_safe_fks_and_operational_checks(
             "uq_work_contexts_planning_request",
             "uq_work_contexts_identity",
         } <= context_uniques
-        assert "uq_context_packages_purpose_consumer" in package_uniques
-        assert "uq_context_assembly_requests_purpose_consumer" in assembly_uniques
+        assert "uq_context_packages_purpose_consumer_protocol" in package_uniques
+        assert (
+            "uq_context_assembly_requests_purpose_consumer_protocol"
+            in assembly_uniques
+        )
         assert "uq_work_context_revisions_context_revision" in revision_uniques
 
         assert (
@@ -327,4 +330,4 @@ def test_r5_3_schema_uses_one_head(database: Database) -> None:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0026_r6_3_4_result_inputs"
+    assert version == "0027_r6_3_4_result_input_context"

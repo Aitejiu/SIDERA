@@ -352,7 +352,7 @@ def test_r6_3_3_schema_survives_current_revision(database: Database) -> None:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0026_r6_3_4_result_inputs"
+    assert version == "0027_r6_3_4_result_input_context"
 
 
 def test_r6_3_3_migration_downgrade_is_forward_only() -> None:

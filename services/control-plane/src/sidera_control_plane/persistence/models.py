@@ -4256,6 +4256,14 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
             name="ck_context_assembly_requests_consumer_fields",
         ),
         CheckConstraint(
+            "(manifest_schema_version = 1 AND input_selection_id IS NULL "
+            "AND input_selection_hash IS NULL AND result_input_budget IS NULL) OR "
+            "(manifest_schema_version = 2 AND input_selection_id IS NOT NULL "
+            "AND input_selection_hash ~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(result_input_budget) = 'object')",
+            name="ck_context_assembly_requests_manifest_protocol",
+        ),
+        CheckConstraint(
             "status IN ('queued', 'assembling', 'ready', 'blocked', 'retry_wait', 'failed')",
             name="ck_context_assembly_requests_status",
         ),
@@ -4305,13 +4313,23 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
             ondelete="RESTRICT",
             name="fk_context_assembly_requests_context_revision",
         ),
+        ForeignKeyConstraint(
+            ["input_selection_id", "workspace_id"],
+            [
+                "collaboration_input_selections.id",
+                "collaboration_input_selections.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_context_assembly_requests_input_selection_workspace",
+        ),
         UniqueConstraint(
             "id", "workspace_id", name="uq_context_assembly_requests_identity"
         ),
         UniqueConstraint(
             "purpose",
             "consumer_id",
-            name="uq_context_assembly_requests_purpose_consumer",
+            "manifest_schema_version",
+            name="uq_context_assembly_requests_purpose_consumer_protocol",
         ),
         Index(
             "ix_context_assembly_requests_claimable",
@@ -4334,6 +4352,14 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
     context_version: Mapped[int | None] = mapped_column(Integer)
+    manifest_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    input_selection_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    input_selection_hash: Mapped[str | None] = mapped_column(String(64))
+    result_input_budget: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     knowledge_search_scope: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
     )
@@ -4392,6 +4418,12 @@ class ContextPackageModel(TimestampMixin, Base):
             name="ck_context_packages_budget_object",
         ),
         CheckConstraint(
+            "(manifest_schema_version = 1 AND result_input_manifest IS NULL) OR "
+            "(manifest_schema_version = 2 "
+            "AND jsonb_typeof(result_input_manifest) = 'object')",
+            name="ck_context_packages_manifest_protocol",
+        ),
+        CheckConstraint(
             "package_hash ~ '^[0-9a-f]{64}$'",
             name="ck_context_packages_manifest_hash",
         ),
@@ -4438,7 +4470,8 @@ class ContextPackageModel(TimestampMixin, Base):
         UniqueConstraint(
             "purpose",
             "consumer_id",
-            name="uq_context_packages_purpose_consumer",
+            "manifest_schema_version",
+            name="uq_context_packages_purpose_consumer_protocol",
         ),
         Index(
             "ix_context_packages_workspace_status_expiry",
@@ -4465,6 +4498,12 @@ class ContextPackageModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
     context_version: Mapped[int | None] = mapped_column(Integer)
+    manifest_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    result_input_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     control_plane_fact_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
     )

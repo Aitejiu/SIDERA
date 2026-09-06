@@ -20,7 +20,7 @@ from sidera_control_plane.application.context_package_queries import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextMaterializationAudit,
-    ContextPackageManifestV1,
+    ContextPackageManifest,
     ContextPurpose,
 )
 from sidera_control_plane.domain.errors import ValidationError
@@ -64,6 +64,8 @@ class SqlAlchemyContextPackageQueryStore:
         purpose: ContextPurpose,
         consumer_id: UUID,
         workspace_id: UUID,
+        *,
+        manifest_schema_version: int = 1,
     ) -> ContextPackageView | None:
         with self._database.session() as session:
             row = session.scalar(
@@ -71,6 +73,7 @@ class SqlAlchemyContextPackageQueryStore:
                     ContextPackageModel.workspace_id == workspace_id,
                     ContextPackageModel.purpose == ContextPurpose(purpose).value,
                     ContextPackageModel.consumer_id == consumer_id,
+                    ContextPackageModel.manifest_schema_version == manifest_schema_version,
                 )
             )
             return _package_view(session, row) if row is not None else None
@@ -148,7 +151,7 @@ class SqlAlchemyContextPackageQueryStore:
 
     def materialization_input(
         self, package_id: UUID, workspace_id: UUID
-    ) -> tuple[ContextPackageManifestV1, WorkContextRevision] | None:
+    ) -> tuple[ContextPackageManifest, WorkContextRevision] | None:
         with self._database.session() as session:
             package = ContextPackageRepository(session).get(package_id, workspace_id)
             if package is None:

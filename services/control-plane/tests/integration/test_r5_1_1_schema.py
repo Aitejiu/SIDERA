@@ -186,4 +186,4 @@ def test_r5_1_1_schema_remains_present_after_r5_3_upgrade(
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        assert version == "0026_r6_3_4_result_inputs"
+        assert version == "0027_r6_3_4_result_input_context"

@@ -13,6 +13,14 @@ from typing import cast
 from uuid import UUID
 
 from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+    InputSelectionSourceV1,
+)
+from sidera_control_plane.domain.result_inputs import (
+    ResultInputArtifact,
+    ResultInputEvidence,
+)
 from sidera_control_plane.domain.work_context import (
     AcceptedDecision,
     ClarificationDecision,
@@ -524,6 +532,690 @@ class ContextBudgetV1:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultInputBudgetV1:
+    max_artifact_bytes: int = 32_768
+    max_total_artifact_bytes: int = 131_072
+    max_artifact_count: int = 128
+    max_payload_bytes: int = 262_144
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValidationError("unsupported result input budget schema_version")
+        for name in (
+            "max_artifact_bytes",
+            "max_total_artifact_bytes",
+            "max_artifact_count",
+            "max_payload_bytes",
+        ):
+            _positive(getattr(self, name), f"result input budget {name}")
+        if self.max_total_artifact_bytes < self.max_artifact_bytes:
+            raise ValidationError(
+                "result input budget total bytes cannot be below artifact bytes"
+            )
+        if self.max_payload_bytes < self.max_total_artifact_bytes:
+            raise ValidationError(
+                "result input budget payload bytes cannot be below total bytes"
+            )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputBudgetV1:
+        mapping = _result_input_mapping(
+            value,
+            "result input budget",
+            {
+                "schema_version",
+                "max_artifact_bytes",
+                "max_total_artifact_bytes",
+                "max_artifact_count",
+                "max_payload_bytes",
+            },
+        )
+        return cls(
+            schema_version=_result_positive_int(
+                mapping["schema_version"], "schema_version"
+            ),
+            max_artifact_bytes=_result_positive_int(
+                mapping["max_artifact_bytes"], "max_artifact_bytes"
+            ),
+            max_total_artifact_bytes=_result_positive_int(
+                mapping["max_total_artifact_bytes"], "max_total_artifact_bytes"
+            ),
+            max_artifact_count=_result_positive_int(
+                mapping["max_artifact_count"], "max_artifact_count"
+            ),
+            max_payload_bytes=_result_positive_int(
+                mapping["max_payload_bytes"], "max_payload_bytes"
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "max_artifact_bytes": self.max_artifact_bytes,
+            "max_total_artifact_bytes": self.max_total_artifact_bytes,
+            "max_artifact_count": self.max_artifact_count,
+            "max_payload_bytes": self.max_payload_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputSourceProvenanceV1:
+    worker_item_key: str
+    worker_item_id: UUID
+    subtask_path: tuple[str, ...]
+    effective_request_id: UUID
+    allowed_lineage_ids: tuple[UUID, ...]
+    effective_lineage_id: UUID
+    effective_execution_id: UUID
+    attempt: int
+    inheritance_refs: tuple[str, ...]
+    priority: int
+    source_basis_hash: str
+
+    @classmethod
+    def from_selection_source(
+        cls, source: InputSelectionSourceV1
+    ) -> ResultInputSourceProvenanceV1:
+        if not isinstance(source, InputSelectionSourceV1):
+            raise ValidationError("result input source provenance requires a selection source")
+        return cls(
+            worker_item_key=source.worker_item_key,
+            worker_item_id=source.worker_item_id,
+            subtask_path=source.subtask_path,
+            effective_request_id=source.effective_request_id,
+            allowed_lineage_ids=source.allowed_lineage_ids,
+            effective_lineage_id=source.effective_lineage_id,
+            effective_execution_id=source.effective_execution_id,
+            attempt=source.attempt,
+            inheritance_refs=source.inheritance_refs,
+            priority=source.priority,
+            source_basis_hash=source.source_basis_hash,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputSourceProvenanceV1:
+        mapping = _result_input_mapping(
+            value,
+            "result input source provenance",
+            {
+                "worker_item_key",
+                "worker_item_id",
+                "subtask_path",
+                "effective_request_id",
+                "allowed_lineage_ids",
+                "effective_lineage_id",
+                "effective_execution_id",
+                "attempt",
+                "inheritance_refs",
+                "priority",
+                "source_basis_hash",
+            },
+        )
+        return cls(
+            worker_item_key=_result_text(mapping["worker_item_key"], "worker_item_key"),
+            worker_item_id=_result_uuid(mapping["worker_item_id"], "worker_item_id"),
+            subtask_path=_result_text_array(mapping["subtask_path"], "subtask_path"),
+            effective_request_id=_result_uuid(
+                mapping["effective_request_id"], "effective_request_id"
+            ),
+            allowed_lineage_ids=_result_uuid_array(
+                mapping["allowed_lineage_ids"], "allowed_lineage_ids"
+            ),
+            effective_lineage_id=_result_uuid(
+                mapping["effective_lineage_id"], "effective_lineage_id"
+            ),
+            effective_execution_id=_result_uuid(
+                mapping["effective_execution_id"], "effective_execution_id"
+            ),
+            attempt=_result_positive_int(mapping["attempt"], "attempt"),
+            inheritance_refs=_result_text_array(
+                mapping["inheritance_refs"], "inheritance_refs", allow_empty=True
+            ),
+            priority=_result_positive_int(mapping["priority"], "priority"),
+            source_basis_hash=_result_hash(
+                mapping["source_basis_hash"], "source_basis_hash"
+            ),
+        )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "worker_item_key", _result_text(self.worker_item_key, "worker_item_key"))
+        _result_uuid(self.worker_item_id, "worker_item_id")
+        object.__setattr__(self, "subtask_path", _result_text_array(self.subtask_path, "subtask_path"))
+        _result_uuid(self.effective_request_id, "effective_request_id")
+        object.__setattr__(
+            self,
+            "allowed_lineage_ids",
+            _result_uuid_array(self.allowed_lineage_ids, "allowed_lineage_ids"),
+        )
+        _result_uuid(self.effective_lineage_id, "effective_lineage_id")
+        if self.effective_lineage_id not in self.allowed_lineage_ids:
+            raise ValidationError(
+                "effective_lineage_id must be present in allowed_lineage_ids"
+            )
+        _result_uuid(self.effective_execution_id, "effective_execution_id")
+        _positive(self.attempt, "result input source attempt")
+        object.__setattr__(
+            self,
+            "inheritance_refs",
+            _result_text_array(self.inheritance_refs, "inheritance_refs", allow_empty=True),
+        )
+        _positive(self.priority, "result input source priority")
+        object.__setattr__(
+            self,
+            "source_basis_hash",
+            _result_hash(self.source_basis_hash, "source_basis_hash"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "worker_item_key": self.worker_item_key,
+            "worker_item_id": str(self.worker_item_id),
+            "subtask_path": list(self.subtask_path),
+            "effective_request_id": str(self.effective_request_id),
+            "allowed_lineage_ids": [str(item) for item in self.allowed_lineage_ids],
+            "effective_lineage_id": str(self.effective_lineage_id),
+            "effective_execution_id": str(self.effective_execution_id),
+            "attempt": self.attempt,
+            "inheritance_refs": list(self.inheritance_refs),
+            "priority": self.priority,
+            "source_basis_hash": self.source_basis_hash,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputGroupManifestV1:
+    group_key: str
+    rule_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "group_key", _result_text(self.group_key, "group_key"))
+        object.__setattr__(self, "rule_hash", _result_hash(self.rule_hash, "rule_hash"))
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputGroupManifestV1:
+        mapping = _result_input_mapping(value, "result input group", {"group_key", "rule_hash"})
+        return cls(
+            group_key=_result_text(mapping["group_key"], "group_key"),
+            rule_hash=_result_hash(mapping["rule_hash"], "rule_hash"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"group_key": self.group_key, "rule_hash": self.rule_hash}
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputHardInputManifestV1:
+    dependency_key: str
+    rule_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "dependency_key", _result_text(self.dependency_key, "dependency_key")
+        )
+        object.__setattr__(self, "rule_hash", _result_hash(self.rule_hash, "rule_hash"))
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputHardInputManifestV1:
+        mapping = _result_input_mapping(
+            value, "result input hard input", {"dependency_key", "rule_hash"}
+        )
+        return cls(
+            dependency_key=_result_text(mapping["dependency_key"], "dependency_key"),
+            rule_hash=_result_hash(mapping["rule_hash"], "rule_hash"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"dependency_key": self.dependency_key, "rule_hash": self.rule_hash}
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputArtifactManifestV1:
+    artifact_id: UUID
+    artifact_type: str
+    content_hash: str
+    size_bytes: int
+    media_type: str
+    sources: tuple[ResultInputSourceProvenanceV1, ...]
+    group_keys: tuple[str, ...]
+    hard_refs: tuple[str, ...]
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputArtifactManifestV1:
+        mapping = _result_input_mapping(
+            value,
+            "result input artifact manifest",
+            {
+                "artifact_id",
+                "artifact_type",
+                "content_hash",
+                "size_bytes",
+                "media_type",
+                "sources",
+                "group_keys",
+                "hard_refs",
+            },
+        )
+        return cls(
+            artifact_id=_result_uuid(mapping["artifact_id"], "artifact_id"),
+            artifact_type=_result_text(mapping["artifact_type"], "artifact_type"),
+            content_hash=_result_hash(mapping["content_hash"], "content_hash"),
+            size_bytes=_result_non_negative_int(mapping["size_bytes"], "size_bytes"),
+            media_type=_result_text(mapping["media_type"], "media_type"),
+            sources=_result_sources(mapping["sources"]),
+            group_keys=_result_text_array(mapping["group_keys"], "group_keys", allow_empty=True),
+            hard_refs=_result_text_array(mapping["hard_refs"], "hard_refs", allow_empty=True),
+        )
+
+    @classmethod
+    def from_artifact(
+        cls,
+        artifact: ResultInputArtifact,
+        *,
+        sources: tuple[ResultInputSourceProvenanceV1, ...],
+        group_keys: tuple[str, ...],
+        hard_refs: tuple[str, ...],
+    ) -> ResultInputArtifactManifestV1:
+        return cls(
+            artifact_id=artifact.artifact_id,
+            artifact_type=artifact.artifact_type.value,
+            content_hash=artifact.content_hash,
+            size_bytes=artifact.size_bytes,
+            media_type=artifact.media_type,
+            sources=sources,
+            group_keys=group_keys,
+            hard_refs=hard_refs,
+        )
+
+    def __post_init__(self) -> None:
+        _result_uuid(self.artifact_id, "artifact_id")
+        object.__setattr__(self, "artifact_type", _result_text(self.artifact_type, "artifact_type"))
+        object.__setattr__(self, "content_hash", _result_hash(self.content_hash, "content_hash"))
+        _result_non_negative_int(self.size_bytes, "size_bytes")
+        object.__setattr__(self, "media_type", _result_text(self.media_type, "media_type"))
+        object.__setattr__(self, "sources", _result_sources(self.sources))
+        object.__setattr__(self, "group_keys", _result_text_array(self.group_keys, "group_keys", allow_empty=True))
+        object.__setattr__(self, "hard_refs", _result_text_array(self.hard_refs, "hard_refs", allow_empty=True))
+        if not self.sources:
+            raise ValidationError("result input artifact must retain source provenance")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "artifact_id": str(self.artifact_id),
+            "artifact_type": self.artifact_type,
+            "content_hash": self.content_hash,
+            "size_bytes": self.size_bytes,
+            "media_type": self.media_type,
+            "sources": [item.to_mapping() for item in self.sources],
+            "group_keys": list(self.group_keys),
+            "hard_refs": list(self.hard_refs),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputEvidenceManifestV1:
+    evidence_id: UUID
+    acceptance_criterion_ref: str
+    artifact_ids: tuple[UUID, ...]
+    sources: tuple[ResultInputSourceProvenanceV1, ...]
+    group_keys: tuple[str, ...]
+    hard_refs: tuple[str, ...]
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputEvidenceManifestV1:
+        mapping = _result_input_mapping(
+            value,
+            "result input evidence manifest",
+            {
+                "evidence_id",
+                "acceptance_criterion_ref",
+                "artifact_ids",
+                "sources",
+                "group_keys",
+                "hard_refs",
+            },
+        )
+        return cls(
+            evidence_id=_result_uuid(mapping["evidence_id"], "evidence_id"),
+            acceptance_criterion_ref=_result_text(
+                mapping["acceptance_criterion_ref"], "acceptance_criterion_ref"
+            ),
+            artifact_ids=_result_uuid_array(mapping["artifact_ids"], "artifact_ids"),
+            sources=_result_sources(mapping["sources"]),
+            group_keys=_result_text_array(mapping["group_keys"], "group_keys", allow_empty=True),
+            hard_refs=_result_text_array(mapping["hard_refs"], "hard_refs", allow_empty=True),
+        )
+
+    def __post_init__(self) -> None:
+        _result_uuid(self.evidence_id, "evidence_id")
+        object.__setattr__(
+            self,
+            "acceptance_criterion_ref",
+            _result_text(self.acceptance_criterion_ref, "acceptance_criterion_ref"),
+        )
+        object.__setattr__(self, "artifact_ids", _result_uuid_array(self.artifact_ids, "artifact_ids"))
+        object.__setattr__(self, "sources", _result_sources(self.sources))
+        object.__setattr__(self, "group_keys", _result_text_array(self.group_keys, "group_keys", allow_empty=True))
+        object.__setattr__(self, "hard_refs", _result_text_array(self.hard_refs, "hard_refs", allow_empty=True))
+        if not self.sources:
+            raise ValidationError("result input evidence must retain source provenance")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "evidence_id": str(self.evidence_id),
+            "acceptance_criterion_ref": self.acceptance_criterion_ref,
+            "artifact_ids": [str(item) for item in self.artifact_ids],
+            "sources": [item.to_mapping() for item in self.sources],
+            "group_keys": list(self.group_keys),
+            "hard_refs": list(self.hard_refs),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResultInputManifestV1:
+    input_selection_id: UUID
+    input_selection_hash: str
+    groups: tuple[ResultInputGroupManifestV1, ...]
+    hard_inputs: tuple[ResultInputHardInputManifestV1, ...]
+    artifacts: tuple[ResultInputArtifactManifestV1, ...]
+    evidence: tuple[ResultInputEvidenceManifestV1, ...]
+    budget: ResultInputBudgetV1
+    schema_version: int = 1
+    delivery_mode: str = "bounded_text_v1"
+
+    @classmethod
+    def from_selection(
+        cls, selection: CollaborationInputSelectionV1
+    ) -> ResultInputManifestV1:
+        if not isinstance(selection, CollaborationInputSelectionV1):
+            raise ValidationError("result input manifest requires a typed selection")
+
+        group_values = tuple(
+            ResultInputGroupManifestV1(group_key=item.group_key, rule_hash=item.rule_hash)
+            for item in selection.groups
+        )
+        hard_values = tuple(
+            ResultInputHardInputManifestV1(
+                dependency_key=item.dependency_key, rule_hash=item.rule_hash
+            )
+            for item in selection.hard_inputs
+        )
+        artifact_rows: dict[
+            UUID,
+            tuple[
+                ResultInputArtifact,
+                set[str],
+                set[str],
+                list[ResultInputSourceProvenanceV1],
+            ],
+        ] = {}
+        evidence_rows: dict[
+            UUID,
+            tuple[
+                ResultInputEvidence,
+                set[str],
+                set[str],
+                list[ResultInputSourceProvenanceV1],
+            ],
+        ] = {}
+
+        def add_source(
+            source: InputSelectionSourceV1,
+            *,
+            group_key: str | None = None,
+            hard_ref: str | None = None,
+        ) -> None:
+            provenance = ResultInputSourceProvenanceV1.from_selection_source(source)
+            for artifact in source.artifacts:
+                row = artifact_rows.get(artifact.artifact_id)
+                if row is None:
+                    row = (artifact, set(), set(), [])
+                    artifact_rows[artifact.artifact_id] = row
+                elif row[0] != artifact:
+                    raise ValidationError(
+                        "same artifact ID has conflicting result input artifact hash or metadata"
+                    )
+                if group_key is not None:
+                    row[1].add(group_key)
+                if hard_ref is not None:
+                    row[2].add(hard_ref)
+                if provenance not in row[3]:
+                    row[3].append(provenance)
+            for evidence in source.evidence:
+                row = evidence_rows.get(evidence.evidence_id)
+                if row is None:
+                    row = (evidence, set(), set(), [])
+                    evidence_rows[evidence.evidence_id] = row
+                elif row[0] != evidence:
+                    raise ValidationError(
+                        "same evidence ID has conflicting result input evidence metadata"
+                    )
+                if group_key is not None:
+                    row[1].add(group_key)
+                if hard_ref is not None:
+                    row[2].add(hard_ref)
+                if provenance not in row[3]:
+                    row[3].append(provenance)
+
+        for group in selection.groups:
+            for source in group.sources:
+                add_source(source, group_key=group.group_key)
+        for hard_input in selection.hard_inputs:
+            add_source(hard_input.source, hard_ref=hard_input.dependency_key)
+
+        artifacts = tuple(
+            ResultInputArtifactManifestV1.from_artifact(
+                row[0],
+                sources=tuple(sorted(row[3], key=_result_source_sort_key)),
+                group_keys=tuple(sorted(row[1])),
+                hard_refs=tuple(sorted(row[2])),
+            )
+            for row in sorted(artifact_rows.values(), key=lambda item: str(item[0].artifact_id))
+        )
+        evidence = tuple(
+            ResultInputEvidenceManifestV1(
+                evidence_id=row[0].evidence_id,
+                acceptance_criterion_ref=row[0].acceptance_criterion_ref,
+                artifact_ids=row[0].artifact_ids,
+                sources=tuple(sorted(row[3], key=_result_source_sort_key)),
+                group_keys=tuple(sorted(row[1])),
+                hard_refs=tuple(sorted(row[2])),
+            )
+            for row in sorted(evidence_rows.values(), key=lambda item: str(item[0].evidence_id))
+        )
+        return cls(
+            input_selection_id=selection.id,
+            input_selection_hash=selection.selection_hash,
+            groups=group_values,
+            hard_inputs=hard_values,
+            artifacts=artifacts,
+            evidence=evidence,
+            budget=ResultInputBudgetV1(),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ResultInputManifestV1:
+        mapping = _result_input_mapping(
+            value,
+            "result input manifest",
+            {
+                "schema_version",
+                "input_selection_id",
+                "input_selection_hash",
+                "delivery_mode",
+                "groups",
+                "hard_inputs",
+                "artifacts",
+                "evidence",
+                "budget",
+            },
+        )
+        return cls(
+            schema_version=_result_positive_int(mapping["schema_version"], "schema_version"),
+            input_selection_id=_result_uuid(
+                mapping["input_selection_id"], "input_selection_id"
+            ),
+            input_selection_hash=_result_hash(
+                mapping["input_selection_hash"], "input_selection_hash"
+            ),
+            delivery_mode=_result_text(mapping["delivery_mode"], "delivery_mode"),
+            groups=_result_groups(mapping["groups"]),
+            hard_inputs=_result_hard_inputs(mapping["hard_inputs"]),
+            artifacts=_result_artifacts(mapping["artifacts"]),
+            evidence=_result_evidence(mapping["evidence"]),
+            budget=ResultInputBudgetV1.from_mapping(mapping["budget"]),
+        )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValidationError("unsupported result input manifest schema_version")
+        if self.delivery_mode != "bounded_text_v1":
+            raise ValidationError("unsupported result input delivery_mode")
+        _result_uuid(self.input_selection_id, "input_selection_id")
+        object.__setattr__(
+            self,
+            "input_selection_hash",
+            _result_hash(self.input_selection_hash, "input_selection_hash"),
+        )
+        object.__setattr__(self, "groups", _result_groups(self.groups))
+        object.__setattr__(self, "hard_inputs", _result_hard_inputs(self.hard_inputs))
+        object.__setattr__(self, "artifacts", _result_artifacts(self.artifacts))
+        object.__setattr__(self, "evidence", _result_evidence(self.evidence))
+        if not isinstance(self.budget, ResultInputBudgetV1):
+            raise ValidationError("result input manifest budget must be typed")
+        artifact_ids = [item.artifact_id for item in self.artifacts]
+        if len(artifact_ids) != len(set(artifact_ids)):
+            raise ValidationError("result input artifact IDs must be unique")
+        evidence_ids = [item.evidence_id for item in self.evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValidationError("result input evidence IDs must be unique")
+        artifact_id_set = set(artifact_ids)
+        if any(
+            not set(item.artifact_ids).issubset(artifact_id_set) for item in self.evidence
+        ):
+            raise ValidationError("result input Evidence references an artifact outside the manifest")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "input_selection_id": str(self.input_selection_id),
+            "input_selection_hash": self.input_selection_hash,
+            "delivery_mode": self.delivery_mode,
+            "groups": [item.to_mapping() for item in self.groups],
+            "hard_inputs": [item.to_mapping() for item in self.hard_inputs],
+            "artifacts": [item.to_mapping() for item in self.artifacts],
+            "evidence": [item.to_mapping() for item in self.evidence],
+            "budget": self.budget.to_mapping(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedResultInput:
+    artifact_id: UUID
+    content_hash: str
+    size_bytes: int
+    media_type: str
+    sources: tuple[ResultInputSourceProvenanceV1, ...]
+    group_keys: tuple[str, ...]
+    hard_refs: tuple[str, ...]
+    body_text: str
+    candidate_evidence: tuple[ResultInputEvidenceManifestV1, ...] = ()
+
+    def __post_init__(self) -> None:
+        _result_uuid(self.artifact_id, "materialized result input artifact_id")
+        object.__setattr__(self, "content_hash", _result_hash(self.content_hash, "content_hash"))
+        _result_non_negative_int(self.size_bytes, "materialized result input size_bytes")
+        object.__setattr__(self, "media_type", _result_text(self.media_type, "media_type"))
+        object.__setattr__(self, "sources", _result_sources(self.sources))
+        object.__setattr__(self, "group_keys", _result_text_array(self.group_keys, "group_keys", allow_empty=True))
+        object.__setattr__(self, "hard_refs", _result_text_array(self.hard_refs, "hard_refs", allow_empty=True))
+        if not isinstance(self.body_text, str):
+            raise ValidationError("materialized result input body_text must be text")
+        object.__setattr__(self, "candidate_evidence", _result_evidence(self.candidate_evidence))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "artifact_id": str(self.artifact_id),
+            "content_hash": self.content_hash,
+            "size_bytes": self.size_bytes,
+            "media_type": self.media_type,
+            "sources": [item.to_mapping() for item in self.sources],
+            "group_keys": list(self.group_keys),
+            "hard_refs": list(self.hard_refs),
+            "body_text": self.body_text,
+            "candidate_evidence": [item.to_mapping() for item in self.candidate_evidence],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextMaterializationV2:
+    metadata: ContextMetadata
+    system_constraints: SystemConstraintSection
+    work_context: WorkContextSection
+    control_plane_facts: ControlPlaneFactSection
+    project_knowledge: tuple[ProjectKnowledgeSection, ...]
+    artifact_and_evidence_refs: tuple[TypedContextRef, ...]
+    result_inputs: tuple[MaterializedResultInput, ...]
+    schema_version: int = 2
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValidationError("unsupported context materialization schema_version")
+        for field_name, item_type in (
+            ("metadata", ContextMetadata),
+            ("system_constraints", SystemConstraintSection),
+            ("work_context", WorkContextSection),
+            ("control_plane_facts", ControlPlaneFactSection),
+        ):
+            if not isinstance(getattr(self, field_name), item_type):
+                raise ValidationError(f"materialization {field_name} must be typed")
+        if any(not isinstance(item, ProjectKnowledgeSection) for item in self.project_knowledge):
+            raise ValidationError("materialization project knowledge must be typed")
+        object.__setattr__(
+            self,
+            "project_knowledge",
+            tuple(sorted(self.project_knowledge, key=lambda item: item.ordinal)),
+        )
+        if any(not isinstance(item, TypedContextRef) for item in self.artifact_and_evidence_refs):
+            raise ValidationError("materialization artifact/evidence refs must be typed")
+        object.__setattr__(self, "artifact_and_evidence_refs", tuple(self.artifact_and_evidence_refs))
+        if any(not isinstance(item, MaterializedResultInput) for item in self.result_inputs):
+            raise ValidationError("materialization result inputs must be typed")
+        object.__setattr__(self, "result_inputs", tuple(self.result_inputs))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "metadata": self.metadata.to_mapping(),
+            "system_constraints": self.system_constraints.to_mapping(),
+            "work_context": self.work_context.to_mapping(),
+            "control_plane_facts": self.control_plane_facts.to_mapping(),
+            "project_knowledge": [item.to_mapping() for item in self.project_knowledge],
+            "artifact_and_evidence_refs": [item.to_mapping() for item in self.artifact_and_evidence_refs],
+            "result_inputs": [item.to_mapping() for item in self.result_inputs],
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_bytes(self.to_mapping())
+
+    @property
+    def total_byte_count(self) -> int:
+        return len(self.canonical_bytes())
+
+    @property
+    def input_token_count(self) -> int:
+        return ceil(self.total_byte_count / 4)
+
+    @property
+    def knowledge_byte_count(self) -> int:
+        return sum(item.section_byte_count for item in self.project_knowledge)
+
+    @property
+    def knowledge_input_token_count(self) -> int:
+        return sum(ceil(item.section_byte_count / 4) for item in self.project_knowledge)
+
+
+@dataclass(frozen=True, slots=True)
 class ContextPackageKnowledgeRef:
     page_id: UUID
     revision_id: UUID
@@ -737,8 +1429,79 @@ class ContextPackageManifestV1:
             expires_at=self.expires_at,
         )
 
+    @property
+    def manifest_schema_version(self) -> int:
+        return 1
+
     def compute_package_hash(self) -> str:
         return hashlib.sha256(_canonical_bytes(self.hash_document())).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContextPackageManifestV2(ContextPackageManifestV1):
+    result_input_manifest: ResultInputManifestV1
+
+    @classmethod
+    def create(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls,
+        *,
+        package_id: UUID,
+        workspace_id: UUID,
+        purpose: ContextPurpose,
+        consumer_type: ContextConsumerType,
+        consumer_id: UUID,
+        worker_item_id: UUID | None,
+        work_context_revision_id: UUID,
+        context_version: int | None,
+        control_plane_fact_snapshot: Mapping[str, object],
+        knowledge_refs: Sequence[ContextPackageKnowledgeRef],
+        artifact_refs: Sequence[WorkReference],
+        evidence_refs: Sequence[WorkReference],
+        budget: ContextBudgetV1,
+        expires_at: datetime,
+        idempotency_key: str,
+        created_at: datetime,
+        result_input_manifest: ResultInputManifestV1,
+    ) -> ContextPackageManifestV2:
+        return cls(
+            package_id=package_id,
+            workspace_id=workspace_id,
+            purpose=purpose,
+            consumer_type=consumer_type,
+            consumer_id=consumer_id,
+            worker_item_id=worker_item_id,
+            work_context_revision_id=work_context_revision_id,
+            context_version=context_version,
+            control_plane_fact_snapshot=control_plane_fact_snapshot,
+            knowledge_refs=tuple(knowledge_refs),
+            artifact_refs=tuple(artifact_refs),
+            evidence_refs=tuple(evidence_refs),
+            budget=budget,
+            expires_at=expires_at,
+            idempotency_key=idempotency_key,
+            status=ContextPackageStatus.ACTIVE,
+            created_at=created_at,
+            result_input_manifest=result_input_manifest,
+        )
+
+    @property
+    def manifest_schema_version(self) -> int:
+        return 2
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result_input_manifest, ResultInputManifestV1):
+            raise ValidationError("context package v2 result input manifest must be typed")
+        ContextPackageManifestV1.__post_init__(self)
+
+    def hash_document(self) -> dict[str, object]:
+        document = ContextPackageManifestV1.hash_document(self)
+        document["manifest_schema_version"] = 2
+        document["result_input_manifest"] = self.result_input_manifest.to_mapping()
+        return document
+
+
+ContextPackageManifest = ContextPackageManifestV1 | ContextPackageManifestV2
+ContextMaterialization = ContextMaterializationV1 | ContextMaterializationV2
 
 
 @dataclass(frozen=True, slots=True)
@@ -801,6 +1564,10 @@ class ContextAssemblyRequest:
     version: int
     created_at: datetime
     updated_at: datetime
+    manifest_schema_version: int = 1
+    input_selection_id: UUID | None = None
+    input_selection_hash: str | None = None
+    result_input_budget: ResultInputBudgetV1 | None = None
 
     @classmethod
     def create(
@@ -822,6 +1589,10 @@ class ContextAssemblyRequest:
         request_fingerprint: str,
         idempotency_key: str,
         created_at: datetime,
+        manifest_schema_version: int = 1,
+        input_selection_id: UUID | None = None,
+        input_selection_hash: str | None = None,
+        result_input_budget: ResultInputBudgetV1 | None = None,
     ) -> ContextAssemblyRequest:
         return cls(
             request_id=request_id,
@@ -848,6 +1619,10 @@ class ContextAssemblyRequest:
             version=1,
             created_at=created_at,
             updated_at=created_at,
+            manifest_schema_version=manifest_schema_version,
+            input_selection_id=input_selection_id,
+            input_selection_hash=input_selection_hash,
+            result_input_budget=result_input_budget,
         )
 
     def __post_init__(self) -> None:
@@ -879,6 +1654,41 @@ class ContextAssemblyRequest:
                 raise ValidationError("execution assembly requires worker fields")
         else:
             raise ValidationError("invalid assembly purpose")
+        if self.manifest_schema_version == 1:
+            if any(
+                value is not None
+                for value in (
+                    self.input_selection_id,
+                    self.input_selection_hash,
+                    self.result_input_budget,
+                )
+            ):
+                raise ValidationError("v1 context assembly cannot contain result input fields")
+        elif self.manifest_schema_version == 2:
+            if self.purpose is not ContextPurpose.EXECUTION:
+                raise ValidationError("v2 context assembly requires execution purpose")
+            if not isinstance(self.input_selection_id, UUID):
+                raise ValidationError("v2 context assembly requires input_selection_id")
+            if self.input_selection_hash is None:
+                raise ValidationError("v2 context assembly requires input_selection_hash")
+            object.__setattr__(
+                self,
+                "input_selection_hash",
+                _hash(self.input_selection_hash, "input_selection_hash"),
+            )
+            if not isinstance(self.result_input_budget, ResultInputBudgetV1):
+                raise ValidationError("v2 context assembly requires result_input_budget")
+        else:
+            raise ValidationError("unsupported context assembly manifest_schema_version")
+        _positive(self.manifest_schema_version, "assembly manifest_schema_version")
+        if self.input_selection_id is not None and not isinstance(self.input_selection_id, UUID):
+            raise ValidationError("assembly input_selection_id must be a UUID")
+        if self.input_selection_hash is not None:
+            object.__setattr__(
+                self,
+                "input_selection_hash",
+                _hash(self.input_selection_hash, "input_selection_hash"),
+            )
         object.__setattr__(
             self,
             "knowledge_search_scope",
@@ -966,6 +1776,168 @@ def _sorted_knowledge_refs(
     if any(not isinstance(item, ContextPackageKnowledgeRef) for item in values):
         raise ValidationError("package knowledge refs must be typed")
     return tuple(sorted(values, key=lambda item: (item.ordinal, item.page_id, item.revision_id, item.section_key)))
+
+
+def _result_input_mapping(
+    value: object, name: str, allowed: set[str]
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValidationError(f"{name} must be a mapping")
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise ValidationError(f"unknown {name} fields: {', '.join(unknown)}")
+    missing = sorted(key for key in allowed if key not in value)
+    if missing:
+        raise ValidationError(f"missing {name} fields: {', '.join(missing)}")
+    return cast(Mapping[str, object], value)
+
+
+def _result_text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} is required")
+    return value.strip()
+
+
+def _result_positive_int(value: object, name: str) -> int:
+    if type(value) is not int or value < 1:
+        raise ValidationError(f"{name} must be a positive integer")
+    return value
+
+
+def _result_non_negative_int(value: object, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValidationError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _result_uuid(value: object, name: str) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a UUID")
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be a UUID") from exc
+
+
+def _result_hash(value: object, name: str) -> str:
+    if not isinstance(value, str) or _HASH_PATTERN.fullmatch(value) is None:
+        raise ValidationError(f"{name} must be a lowercase SHA-256 hash")
+    return value
+
+
+def _result_text_array(
+    value: object,
+    name: str,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be an array")
+    result = tuple(_result_text(item, name) for item in value)
+    if not allow_empty and not result:
+        raise ValidationError(f"{name} must not be empty")
+    if len(result) != len(set(result)):
+        raise ValidationError(f"{name} must not contain duplicates")
+    return result
+
+
+def _result_uuid_array(
+    value: object,
+    name: str,
+    *,
+    allow_empty: bool = False,
+) -> tuple[UUID, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError(f"{name} must be an array")
+    result = tuple(_result_uuid(item, name) for item in value)
+    if not allow_empty and not result:
+        raise ValidationError(f"{name} must not be empty")
+    if len(result) != len(set(result)):
+        raise ValidationError(f"{name} must not contain duplicates")
+    return result
+
+
+def _result_sources(value: object) -> tuple[ResultInputSourceProvenanceV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result input sources must be an array")
+    result = tuple(
+        item
+        if isinstance(item, ResultInputSourceProvenanceV1)
+        else ResultInputSourceProvenanceV1.from_mapping(item)
+        for item in value
+    )
+    if not result:
+        raise ValidationError("result input sources must not be empty")
+    if len(result) != len(set(result)):
+        raise ValidationError("result input sources must not contain duplicates")
+    return tuple(sorted(result, key=_result_source_sort_key))
+
+
+def _result_source_sort_key(
+    source: ResultInputSourceProvenanceV1,
+) -> tuple[str, str, str, str]:
+    return (
+        source.worker_item_key,
+        str(source.effective_execution_id),
+        str(source.effective_request_id),
+        source.source_basis_hash,
+    )
+
+
+def _result_groups(value: object) -> tuple[ResultInputGroupManifestV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result input groups must be an array")
+    result = tuple(
+        item
+        if isinstance(item, ResultInputGroupManifestV1)
+        else ResultInputGroupManifestV1.from_mapping(item)
+        for item in value
+    )
+    keys = tuple(item.group_key for item in result)
+    if len(keys) != len(set(keys)):
+        raise ValidationError("result input group keys must be unique")
+    return result
+
+
+def _result_hard_inputs(value: object) -> tuple[ResultInputHardInputManifestV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result input hard inputs must be an array")
+    result = tuple(
+        item
+        if isinstance(item, ResultInputHardInputManifestV1)
+        else ResultInputHardInputManifestV1.from_mapping(item)
+        for item in value
+    )
+    keys = tuple(item.dependency_key for item in result)
+    if len(keys) != len(set(keys)):
+        raise ValidationError("result input hard input keys must be unique")
+    return result
+
+
+def _result_artifacts(value: object) -> tuple[ResultInputArtifactManifestV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result input artifacts must be an array")
+    result = tuple(
+        item
+        if isinstance(item, ResultInputArtifactManifestV1)
+        else ResultInputArtifactManifestV1.from_mapping(item)
+        for item in value
+    )
+    return tuple(sorted(result, key=lambda item: str(item.artifact_id)))
+
+
+def _result_evidence(value: object) -> tuple[ResultInputEvidenceManifestV1, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValidationError("result input evidence must be an array")
+    result = tuple(
+        item
+        if isinstance(item, ResultInputEvidenceManifestV1)
+        else ResultInputEvidenceManifestV1.from_mapping(item)
+        for item in value
+    )
+    return tuple(sorted(result, key=lambda item: str(item.evidence_id)))
 
 
 def _package_hash_document(

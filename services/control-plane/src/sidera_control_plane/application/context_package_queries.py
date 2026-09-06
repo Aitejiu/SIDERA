@@ -27,7 +27,8 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationMode,
     ContextMaterializationOutcome,
     ContextMaterializationV1,
-    ContextPackageManifestV1,
+    ContextPackageManifest,
+    ContextPackageManifestV2,
     ContextPurpose,
 )
 from sidera_control_plane.domain.errors import (
@@ -84,7 +85,7 @@ class ContextPackageMaterializationAuditView:
 
 @dataclass(frozen=True, slots=True)
 class ContextPackageView:
-    manifest: ContextPackageManifestV1
+    manifest: ContextPackageManifest
     assembly: ContextPackageAssemblyView
     work_context_revision_number: int
     work_context_content_hash: str
@@ -130,6 +131,8 @@ class ContextPackageQueryStore(Protocol):
         purpose: ContextPurpose,
         consumer_id: UUID,
         workspace_id: UUID,
+        *,
+        manifest_schema_version: int = 1,
     ) -> ContextPackageView | None: ...
 
     def list_submissions(
@@ -146,7 +149,7 @@ class ContextPackageQueryStore(Protocol):
 
     def materialization_input(
         self, package_id: UUID, workspace_id: UUID
-    ) -> tuple[ContextPackageManifestV1, WorkContextRevision] | None: ...
+    ) -> tuple[ContextPackageManifest, WorkContextRevision] | None: ...
 
     def next_materialization_attempt(
         self, package_id: UUID, workspace_id: UUID
@@ -211,9 +214,14 @@ class ContextPackageQueryService:
         workspace_id: UUID,
         consumer_id: UUID,
         purpose: ContextPurpose,
+        *,
+        manifest_schema_version: int = 1,
     ) -> ContextPackageView:
         package = self._store.get_package_for_consumer(
-            purpose, consumer_id, workspace_id
+            purpose,
+            consumer_id,
+            workspace_id,
+            manifest_schema_version=manifest_schema_version,
         )
         if package is None:
             raise NotFound("context package not found")
@@ -256,6 +264,12 @@ class ContextPackageQueryService:
         if materialization_input is None:
             raise NotFound("context package not found")
         manifest, revision = materialization_input
+        if isinstance(manifest, ContextPackageManifestV2):
+            raise ContextPackageOperationError(
+                "context_materialization_v2_not_supported",
+                "context package v2 materialization is not available in this worker",
+                details={"package_id": str(package_id)},
+            )
         now = self._clock()
         catalog = self._catalog_factory()
         try:

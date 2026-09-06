@@ -20,12 +20,16 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationAudit,
     ContextMaterializationOutcome,
     ContextPackageKnowledgeRef,
+    ContextPackageManifest,
     ContextPackageManifestV1,
+    ContextPackageManifestV2,
     ContextPackageStatus,
     ContextPurpose,
     ContextRevocationScope,
     ContextSelectionReason,
     ContextTrustLevel,
+    ResultInputBudgetV1,
+    ResultInputManifestV1,
 )
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.events import EventData
@@ -54,6 +58,8 @@ class ContextAssemblyRepository:
                         ContextAssemblyRequestModel.workspace_id == request.workspace_id,
                         ContextAssemblyRequestModel.purpose == request.purpose.value,
                         ContextAssemblyRequestModel.consumer_id == request.consumer_id,
+                        ContextAssemblyRequestModel.manifest_schema_version
+                        == request.manifest_schema_version,
                     ),
                     and_(
                         ContextAssemblyRequestModel.workspace_id == request.workspace_id,
@@ -81,12 +87,14 @@ class ContextAssemblyRepository:
         consumer_id: UUID,
         workspace_id: UUID,
         *,
+        manifest_schema_version: int = 1,
         for_update: bool = False,
     ) -> ContextAssemblyRequest | None:
         statement = select(ContextAssemblyRequestModel).where(
             ContextAssemblyRequestModel.workspace_id == workspace_id,
             ContextAssemblyRequestModel.purpose == ContextPurpose(purpose).value,
             ContextAssemblyRequestModel.consumer_id == consumer_id,
+            ContextAssemblyRequestModel.manifest_schema_version == manifest_schema_version,
         )
         if for_update:
             statement = statement.with_for_update()
@@ -310,7 +318,7 @@ class ContextAssemblyRepository:
     def complete_with_package(
         self,
         request: ContextAssemblyRequest,
-        manifest: ContextPackageManifestV1,
+        manifest: ContextPackageManifest,
         *,
         owner: str,
         expected_version: int,
@@ -318,7 +326,7 @@ class ContextAssemblyRepository:
         actor_id: str,
         causation_id: UUID,
         correlation_id: UUID,
-    ) -> ContextPackageManifestV1:
+    ) -> ContextPackageManifest:
         if manifest.workspace_id != request.workspace_id:
             raise ValidationError("context package workspace does not match assembly")
         if manifest.consumer_id != request.consumer_id or manifest.purpose is not request.purpose:
@@ -327,6 +335,8 @@ class ContextAssemblyRepository:
             raise ValidationError("context package revision does not match assembly")
         if manifest.idempotency_key != request.idempotency_key:
             raise ValidationError("context package idempotency key does not match assembly")
+        if manifest.manifest_schema_version != request.manifest_schema_version:
+            raise ValidationError("context package manifest protocol does not match assembly")
         self._session.add(_package_model(request, manifest))
         self._session.flush()
         for knowledge_ref in manifest.knowledge_refs:
@@ -450,7 +460,7 @@ class ContextAssemblyRepository:
         self,
         *,
         event_type: str,
-        manifest: ContextPackageManifestV1,
+        manifest: ContextPackageManifest,
         payload: dict[str, object],
         actor_type: str,
         actor_id: str,
@@ -483,7 +493,7 @@ class ContextPackageRepository:
 
     def get(
         self, package_id: UUID, workspace_id: UUID, *, for_update: bool = False
-    ) -> ContextPackageManifestV1 | None:
+    ) -> ContextPackageManifest | None:
         statement = select(ContextPackageModel).where(
             ContextPackageModel.id == package_id,
             ContextPackageModel.workspace_id == workspace_id,
@@ -520,12 +530,14 @@ class ContextPackageRepository:
         consumer_id: UUID,
         workspace_id: UUID,
         *,
+        manifest_schema_version: int = 1,
         for_update: bool = False,
-    ) -> ContextPackageManifestV1 | None:
+    ) -> ContextPackageManifest | None:
         statement = select(ContextPackageModel).where(
             ContextPackageModel.purpose == ContextPurpose(purpose).value,
             ContextPackageModel.consumer_id == consumer_id,
             ContextPackageModel.workspace_id == workspace_id,
+            ContextPackageModel.manifest_schema_version == manifest_schema_version,
         )
         if for_update:
             statement = statement.with_for_update()
@@ -845,39 +857,54 @@ class ContextPackageRepository:
         )
         return int(latest or 0) + 1
 
-    def _to_manifest(self, row: ContextPackageModel) -> ContextPackageManifestV1:
+    def _to_manifest(self, row: ContextPackageModel) -> ContextPackageManifest:
         refs = self._session.scalars(
             select(ContextPackageKnowledgeRefModel)
             .where(ContextPackageKnowledgeRefModel.package_id == row.id)
             .order_by(ContextPackageKnowledgeRefModel.ordinal.asc())
         ).all()
-        manifest = ContextPackageManifestV1(
-            package_id=row.id,
-            workspace_id=row.workspace_id,
-            purpose=ContextPurpose(row.purpose),
-            consumer_type=ContextConsumerType(row.consumer_type),
-            consumer_id=row.consumer_id,
-            worker_item_id=row.worker_item_id,
-            work_context_revision_id=row.work_context_revision_id,
-            context_version=row.context_version,
-            control_plane_fact_snapshot=_mapping(row.control_plane_fact_snapshot, "control_plane_fact_snapshot"),
-            knowledge_refs=tuple(_to_knowledge_ref(item) for item in refs),
-            artifact_refs=_to_work_refs(row.artifact_refs, "artifact_refs"),
-            evidence_refs=_to_work_refs(row.evidence_refs, "evidence_refs"),
-            budget=_to_budget(row.budget),
-            expires_at=row.expires_at,
-            idempotency_key=row.idempotency_key,
-            status=ContextPackageStatus(row.status),
-            created_at=row.created_at,
-            materialized_at=row.materialized_at,
-            revoked_at=row.revoked_at,
-            revocation_reason=row.revocation_reason,
-            revocation_scope=(
+        common = {
+            "package_id": row.id,
+            "workspace_id": row.workspace_id,
+            "purpose": ContextPurpose(row.purpose),
+            "consumer_type": ContextConsumerType(row.consumer_type),
+            "consumer_id": row.consumer_id,
+            "worker_item_id": row.worker_item_id,
+            "work_context_revision_id": row.work_context_revision_id,
+            "context_version": row.context_version,
+            "control_plane_fact_snapshot": _mapping(row.control_plane_fact_snapshot, "control_plane_fact_snapshot"),
+            "knowledge_refs": tuple(_to_knowledge_ref(item) for item in refs),
+            "artifact_refs": _to_work_refs(row.artifact_refs, "artifact_refs"),
+            "evidence_refs": _to_work_refs(row.evidence_refs, "evidence_refs"),
+            "budget": _to_budget(row.budget),
+            "expires_at": row.expires_at,
+            "idempotency_key": row.idempotency_key,
+            "status": ContextPackageStatus(row.status),
+            "created_at": row.created_at,
+            "materialized_at": row.materialized_at,
+            "revoked_at": row.revoked_at,
+            "revocation_reason": row.revocation_reason,
+            "revocation_scope": (
                 ContextRevocationScope(row.revocation_scope)
                 if row.revocation_scope is not None
                 else None
             ),
-        )
+        }
+        if row.manifest_schema_version == 1:
+            if row.result_input_manifest is not None:
+                raise ValidationError("v1 context package cannot contain result input manifest")
+            manifest: ContextPackageManifest = ContextPackageManifestV1(**common)
+        elif row.manifest_schema_version == 2:
+            if row.result_input_manifest is None:
+                raise ValidationError("v2 context package requires result input manifest")
+            manifest = ContextPackageManifestV2(
+                **common,
+                result_input_manifest=ResultInputManifestV1.from_mapping(
+                    row.result_input_manifest
+                ),
+            )
+        else:
+            raise ValidationError("unsupported context package manifest_schema_version")
         if manifest.package_hash != row.package_hash:
             raise ValidationError("stored context package hash does not match manifest")
         return manifest
@@ -893,6 +920,14 @@ def _assembly_request_model(request: ContextAssemblyRequest) -> ContextAssemblyR
         worker_item_id=request.worker_item_id,
         work_context_revision_id=request.work_context_revision_id,
         context_version=request.context_version,
+        manifest_schema_version=request.manifest_schema_version,
+        input_selection_id=request.input_selection_id,
+        input_selection_hash=request.input_selection_hash,
+        result_input_budget=(
+            _plain_json(request.result_input_budget.to_mapping())
+            if request.result_input_budget is not None
+            else None
+        ),
         knowledge_search_scope=_plain_json(request.knowledge_search_scope),
         knowledge_filter_refs=_plain_json(request.knowledge_filter_refs),
         fact_scope_refs=_plain_json(request.fact_scope_refs),
@@ -922,6 +957,14 @@ def _to_assembly_request(row: ContextAssemblyRequestModel) -> ContextAssemblyReq
         worker_item_id=row.worker_item_id,
         work_context_revision_id=row.work_context_revision_id,
         context_version=row.context_version,
+        manifest_schema_version=row.manifest_schema_version,
+        input_selection_id=row.input_selection_id,
+        input_selection_hash=row.input_selection_hash,
+        result_input_budget=(
+            ResultInputBudgetV1.from_mapping(row.result_input_budget)
+            if row.result_input_budget is not None
+            else None
+        ),
         knowledge_search_scope=_mapping(row.knowledge_search_scope, "knowledge_search_scope"),
         knowledge_filter_refs=_sequence(row.knowledge_filter_refs, "knowledge_filter_refs"),
         fact_scope_refs=_sequence(row.fact_scope_refs, "fact_scope_refs"),
@@ -942,7 +985,7 @@ def _to_assembly_request(row: ContextAssemblyRequestModel) -> ContextAssemblyReq
 
 
 def _package_model(
-    request: ContextAssemblyRequest, manifest: ContextPackageManifestV1
+    request: ContextAssemblyRequest, manifest: ContextPackageManifest
 ) -> ContextPackageModel:
     return ContextPackageModel(
         id=manifest.package_id,
@@ -954,6 +997,12 @@ def _package_model(
         worker_item_id=manifest.worker_item_id,
         work_context_revision_id=manifest.work_context_revision_id,
         context_version=manifest.context_version,
+        manifest_schema_version=manifest.manifest_schema_version,
+        result_input_manifest=(
+            _plain_json(manifest.result_input_manifest.to_mapping())
+            if isinstance(manifest, ContextPackageManifestV2)
+            else None
+        ),
         control_plane_fact_snapshot=_plain_json(manifest.control_plane_fact_snapshot),
         artifact_refs=_plain_json([item.to_mapping() for item in manifest.artifact_refs]),
         evidence_refs=_plain_json([item.to_mapping() for item in manifest.evidence_refs]),

@@ -55,6 +55,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
     ContextMaterializationAudit,
     ContextMaterializationV1,
+    ContextPackageManifest,
     ContextPackageManifestV1,
     ContextPurpose,
 )
@@ -695,6 +696,7 @@ class ContextAssemblyRepositoryPort(Protocol):
         consumer_id: UUID,
         workspace_id: UUID,
         *,
+        manifest_schema_version: int = 1,
         for_update: bool = False,
     ) -> ContextAssemblyRequest | None:
         raise NotImplementedError
@@ -759,7 +761,7 @@ class ContextAssemblyRepositoryPort(Protocol):
     def complete_with_package(
         self,
         request: ContextAssemblyRequest,
-        manifest: ContextPackageManifestV1,
+        manifest: ContextPackageManifest,
         *,
         owner: str,
         expected_version: int,
@@ -767,14 +769,14 @@ class ContextAssemblyRepositoryPort(Protocol):
         actor_id: str,
         causation_id: UUID,
         correlation_id: UUID,
-    ) -> ContextPackageManifestV1:
+    ) -> ContextPackageManifest:
         raise NotImplementedError
 
 
 class ContextPackageRepositoryPort(Protocol):
     def get(
         self, package_id: UUID, workspace_id: UUID, *, for_update: bool = False
-    ) -> ContextPackageManifestV1 | None:
+    ) -> ContextPackageManifest | None:
         raise NotImplementedError
 
     def get_ack(
@@ -794,8 +796,9 @@ class ContextPackageRepositoryPort(Protocol):
         consumer_id: UUID,
         workspace_id: UUID,
         *,
+        manifest_schema_version: int = 1,
         for_update: bool = False,
-    ) -> ContextPackageManifestV1 | None:
+    ) -> ContextPackageManifest | None:
         raise NotImplementedError
 
     def add_ack(
