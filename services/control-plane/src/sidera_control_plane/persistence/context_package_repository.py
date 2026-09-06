@@ -705,7 +705,7 @@ class ContextPackageRepository:
         actor_id: str,
         causation_id: UUID,
         correlation_id: UUID,
-    ) -> ContextPackageManifestV1:
+    ) -> ContextPackageManifest:
         package = self.get(package_id, workspace_id, for_update=True)
         if package is None:
             raise ValidationError("context package not found")
@@ -766,7 +766,7 @@ class ContextPackageRepository:
         actor_id: str,
         causation_id: UUID,
         correlation_id: UUID,
-    ) -> ContextPackageManifestV1:
+    ) -> ContextPackageManifest:
         package = self.get(package_id, workspace_id, for_update=True)
         if package is None:
             raise ValidationError("context package not found")

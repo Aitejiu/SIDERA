@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -42,9 +42,17 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
+from sidera_control_plane.application.ports import (
+    ExactRevisionManifest,
+    ExactSectionBody,
+    ExactSectionRef,
+    KnowledgeCatalogPort,
+    SearchHit,
+)
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
+from sidera_control_plane.context_package_worker import ContextPackageWorker
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.collaboration import (
     CollaborationRuntimeBindingSnapshot,
@@ -56,6 +64,10 @@ from sidera_control_plane.domain.collaboration_runtime import (
     parse_runtime_decision_v2,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
+from sidera_control_plane.domain.context_packages import (
+    ContextPackageManifestV2,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.execution import ExecutionSession
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
@@ -109,6 +121,47 @@ class _StaticRuntimeResolver:
             interface_version=run.runtime_interface_version,
             config_version=run.runtime_config_version,
         )
+
+
+class _EmptyCatalog(KnowledgeCatalogPort):
+    def search(
+        self,
+        workspace_id: UUID,
+        query: str,
+        *,
+        tags: Sequence[str] = (),
+        source_types: Sequence[str] = (),
+        status: str | None = "active",
+        limit: int = 20,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> tuple[SearchHit, ...]:
+        del workspace_id, query, tags, source_types, status, limit
+        del correlation_id, caller_request_id
+        return ()
+
+    def get_revision_manifest(
+        self,
+        workspace_id: UUID,
+        page_id: UUID,
+        revision_id: UUID,
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> ExactRevisionManifest:
+        del workspace_id, page_id, revision_id, correlation_id, caller_request_id
+        raise AssertionError("result-input scenario has no Knowledge refs")
+
+    def materialize(
+        self,
+        workspace_id: UUID,
+        sections: Sequence[ExactSectionRef],
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> tuple[ExactSectionBody, ...]:
+        del workspace_id, sections, correlation_id, caller_request_id
+        raise AssertionError("result-input scenario has no Knowledge refs")
 
 
 class ResultInputScenario:
@@ -449,6 +502,70 @@ class ResultInputScenario:
             owner_id="result-input-activation",
             clock=self.clock,
         ).run_once(limit=20)
+
+    def assemble_context(self, key: str) -> ContextPackageManifestV2:
+        execution_id = self._execution_id(key)
+        assert execution_id is not None
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            assert execution is not None
+            release = uow.collaboration_ledger.get_release_for_request(
+                self.workspace_id,
+                self.request_ids[key],
+            )
+            assert release is not None
+            assembly = uow.context_assemblies.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                execution_id,
+                self.workspace_id,
+                manifest_schema_version=2,
+            )
+            assert assembly is not None
+
+        with self.uow_factory() as uow:
+            existing = uow.context_packages.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                execution_id,
+                self.workspace_id,
+                manifest_schema_version=2,
+            )
+        if existing is None:
+            result = ContextPackageWorker(
+                uow_factory=self.uow_factory,
+                catalog=_EmptyCatalog(),
+                owner_id=f"result-input-context-{key}",
+                lease_seconds=60,
+                clock=self.clock,
+            ).run_once(limit=20)
+            assert result.ready >= 1
+            assert result.failed == 0
+            assert result.blocked == 0
+
+        with self.uow_factory() as uow:
+            package = uow.context_packages.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                execution_id,
+                self.workspace_id,
+                manifest_schema_version=2,
+            )
+        assert isinstance(package, ContextPackageManifestV2)
+        return package
+
+    def package_ids(self, key: str) -> tuple[UUID, ...]:
+        execution_id = self._execution_id(key)
+        assert execution_id is not None
+        values: list[UUID] = []
+        with self.uow_factory() as uow:
+            for version in (1, 2):
+                package = uow.context_packages.get_for_consumer(
+                    ContextPurpose.EXECUTION,
+                    execution_id,
+                    self.workspace_id,
+                    manifest_schema_version=version,
+                )
+                if package is not None:
+                    values.append(package.package_id)
+        return tuple(values)
 
     def execution_count(self, key: str) -> int:
         with self.database.session() as session:

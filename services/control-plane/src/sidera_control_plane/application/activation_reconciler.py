@@ -13,6 +13,7 @@ from sidera_control_plane.application.collaboration_decisions import (
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
+    validate_execution_context_selection,
 )
 from sidera_control_plane.application.execution_commands import (
     build_continuation_execution,
@@ -342,6 +343,7 @@ class ActivationReconciler:
             )
 
         uow.executions.add(execution)
+        input_selection = self._context_input_selection(uow, request)
         uow.context_assemblies.add(
             build_execution_context_assembly_request(
                 execution=execution,
@@ -350,6 +352,8 @@ class ActivationReconciler:
                 work_context_revision=context.work_context_revision,
                 ttl_seconds=self._execution_context_ttl_seconds,
                 created_at=now,
+                manifest_schema_version=2 if input_selection is not None else 1,
+                input_selection=input_selection,
             )
         )
         uow.flush()
@@ -402,6 +406,35 @@ class ActivationReconciler:
             events.append(transition_event)
         self._record_events(uow, envelope, request, tuple(events))
         return execution.id, False
+
+    @staticmethod
+    def _context_input_selection(
+        uow: ControlPlaneUnitOfWork,
+        request: ExecutionRequest,
+    ) -> CollaborationInputSelectionV1 | None:
+        if request.input_selection_id is None:
+            return None
+        selection = uow.input_selections.get(
+            request.workspace_id,
+            request.input_selection_id,
+        )
+        release = uow.collaboration_ledger.get_release_for_request(
+            request.workspace_id,
+            request.id,
+        )
+        if selection is None or release is None:
+            raise InvalidTransition(
+                "selection-bound execution is missing its release or Selection"
+            )
+        try:
+            validate_execution_context_selection(
+                execution_request=request,
+                release=release,
+                selection=selection,
+            )
+        except ValueError as exc:
+            raise InvalidTransition(str(exc)) from exc
+        return selection
 
     def _bind_worker_transition(
         self,

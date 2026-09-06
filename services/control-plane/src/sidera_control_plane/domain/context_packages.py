@@ -925,7 +925,10 @@ class ResultInputManifestV1:
 
     @classmethod
     def from_selection(
-        cls, selection: CollaborationInputSelectionV1
+        cls,
+        selection: CollaborationInputSelectionV1,
+        *,
+        budget: ResultInputBudgetV1 | None = None,
     ) -> ResultInputManifestV1:
         if not isinstance(selection, CollaborationInputSelectionV1):
             raise ValidationError("result input manifest requires a typed selection")
@@ -1030,7 +1033,7 @@ class ResultInputManifestV1:
             hard_inputs=hard_values,
             artifacts=artifacts,
             evidence=evidence,
-            budget=ResultInputBudgetV1(),
+            budget=budget or ResultInputBudgetV1(),
         )
 
     @classmethod

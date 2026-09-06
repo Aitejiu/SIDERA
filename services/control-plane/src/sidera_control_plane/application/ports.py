@@ -56,7 +56,6 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationAudit,
     ContextMaterializationV1,
     ContextPackageManifest,
-    ContextPackageManifestV1,
     ContextPurpose,
 )
 from sidera_control_plane.domain.context_patches import (
@@ -836,7 +835,7 @@ class ContextPackageRepositoryPort(Protocol):
         actor_id: str,
         causation_id: UUID,
         correlation_id: UUID,
-    ) -> ContextPackageManifestV1:
+    ) -> ContextPackageManifest:
         raise NotImplementedError
 
     def mark_corrupt(
@@ -850,7 +849,7 @@ class ContextPackageRepositoryPort(Protocol):
         actor_id: str,
         causation_id: UUID,
         correlation_id: UUID,
-    ) -> ContextPackageManifestV1:
+    ) -> ContextPackageManifest:
         raise NotImplementedError
 
 

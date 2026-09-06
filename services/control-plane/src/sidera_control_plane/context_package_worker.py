@@ -21,6 +21,9 @@ from sidera_control_plane.application.context_assembly import (
     ContextAssembler,
     ContextAssemblyError,
 )
+from sidera_control_plane.application.context_requests import (
+    validate_execution_context_selection,
+)
 from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     KnowledgeCatalogPort,
@@ -30,11 +33,12 @@ from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
-    ContextPackageManifestV1,
+    ContextPackageManifest,
     ContextPurpose,
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.handoff_evidence import HandoffContextBundle
+from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
 from sidera_control_plane.domain.planning import PlanningRunStatus
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
@@ -48,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _RETRY_BACKOFF_SECONDS = (5, 15, 45, 135, 300)
 _PACKAGE_NAMESPACE = NAMESPACE_URL
+_PACKAGE_V2_NAMESPACE = uuid5(_PACKAGE_NAMESPACE, "sidera:context-package:v2")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +70,7 @@ class _AssemblyInput:
     control_plane_fact_snapshot: Mapping[str, object]
     artifact_refs: tuple[WorkReference, ...]
     evidence_refs: tuple[WorkReference, ...]
+    input_selection: CollaborationInputSelectionV1 | None = None
 
 
 class ContextPackageWorker:
@@ -152,16 +158,72 @@ class ContextPackageWorker:
                     "context_reference_not_found",
                     "WorkContext revision is no longer available",
                 )
+            input_selection = None
             if request.purpose is ContextPurpose.PLANNING_RUN:
                 facts = self._planning_facts(uow, request)
             else:
+                input_selection = self._execution_input_selection(uow, request)
                 facts = self._execution_facts(uow, request)
             return _AssemblyInput(
                 work_context_revision=revision,
                 control_plane_fact_snapshot=facts,
                 artifact_refs=revision.snapshot.artifact_refs,
                 evidence_refs=revision.snapshot.evidence_refs,
+                input_selection=input_selection,
             )
+
+    def _execution_input_selection(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: ContextAssemblyRequest,
+    ) -> CollaborationInputSelectionV1 | None:
+        if request.manifest_schema_version == 1:
+            return None
+        if request.manifest_schema_version != 2:
+            raise ContextAssemblyError(
+                "context_manifest_schema_unsupported",
+                "execution context manifest schema is unsupported",
+            )
+        if request.input_selection_id is None:
+            raise ContextAssemblyError(
+                "context_input_selection_missing",
+                "execution context has no input Selection reference",
+            )
+        selection = uow.input_selections.get(
+            request.workspace_id,
+            request.input_selection_id,
+        )
+        if selection is None:
+            raise ContextAssemblyError(
+                "context_input_selection_missing",
+                "authorized input Selection is no longer available",
+            )
+        execution_request_id = _budget_uuid(request, "execution_request_id")
+        execution_request = uow.execution_requests.get(
+            execution_request_id,
+            request.workspace_id,
+        )
+        release = uow.collaboration_ledger.get_release_for_request(
+            request.workspace_id,
+            execution_request_id,
+        )
+        if execution_request is None or release is None:
+            raise ContextAssemblyError(
+                "context_input_selection_not_released",
+                "execution context is missing its released input Selection",
+            )
+        try:
+            validate_execution_context_selection(
+                execution_request=execution_request,
+                release=release,
+                selection=selection,
+            )
+        except ValueError as exc:
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                str(exc),
+            ) from exc
+        return selection
 
     def _planning_facts(
         self,
@@ -368,11 +430,31 @@ class ContextPackageWorker:
         self,
         request: ContextAssemblyRequest,
         assembly_input: _AssemblyInput,
-    ) -> ContextPackageManifestV1:
-        package_id = uuid5(
-            _PACKAGE_NAMESPACE,
-            f"sidera:context-package:{request.request_id}:v1",
-        )
+    ) -> ContextPackageManifest:
+        if request.manifest_schema_version == 1:
+            package_id = uuid5(
+                _PACKAGE_NAMESPACE,
+                f"sidera:context-package:{request.request_id}:v1",
+            )
+        elif request.manifest_schema_version == 2:
+            if request.input_selection_hash is None:
+                raise ContextAssemblyError(
+                    "context_input_selection_missing",
+                    "v2 execution context has no Selection hash",
+                )
+            package_id = uuid5(
+                _PACKAGE_V2_NAMESPACE,
+                "sidera:context-package:"
+                f"{request.consumer_type.value}:{request.consumer_id}:"
+                f"worker:{request.worker_item_id}:context:{request.context_version}:"
+                f"revision:{request.work_context_revision_id}:"
+                f"selection:{request.input_selection_hash}:v2",
+            )
+        else:
+            raise ContextAssemblyError(
+                "context_manifest_schema_unsupported",
+                "execution context manifest schema is unsupported",
+            )
         return self._assembler.assemble(
             request,
             work_context_revision=assembly_input.work_context_revision,
@@ -383,10 +465,11 @@ class ContextPackageWorker:
             created_at=request.created_at,
             correlation_id=request.request_id,
             caller_request_id=request.request_id,
+            input_selection=assembly_input.input_selection,
         )
 
     def _complete(
-        self, request: ContextAssemblyRequest, manifest: ContextPackageManifestV1
+        self, request: ContextAssemblyRequest, manifest: ContextPackageManifest
     ) -> None:
         with self._uow_factory() as uow:
             envelope = _system_command(

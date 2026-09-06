@@ -9,14 +9,17 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_control_plane.domain.collaboration import RuntimeRelease
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextAssemblyStatus,
     ContextConsumerType,
     ContextPurpose,
+    ResultInputBudgetV1,
 )
 from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.execution_requests import ExecutionRequest
+from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
 from sidera_control_plane.domain.plan_revisions import RevisionBaseDescriptorV1
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
@@ -130,9 +133,26 @@ def build_execution_context_assembly_request(
     idempotency_key: str | None = None,
     additional_fact_scope_refs: Sequence[str] = (),
     additional_budget: Mapping[str, object] | None = None,
+    manifest_schema_version: int = 1,
+    input_selection: CollaborationInputSelectionV1 | None = None,
+    result_input_budget: ResultInputBudgetV1 | None = None,
 ) -> ContextAssemblyRequest:
     if execution.worker_item_id != worker_item.id:
         raise ValueError("execution and WorkerItem do not match")
+    if manifest_schema_version == 1:
+        if input_selection is not None or result_input_budget is not None:
+            raise ValueError("v1 execution context cannot carry an input selection")
+    elif manifest_schema_version == 2:
+        if not isinstance(input_selection, CollaborationInputSelectionV1):
+            raise ValueError("v2 execution context requires an input selection")
+        _validate_selection_target(
+            execution_request=execution_request,
+            worker_item=worker_item,
+            selection=input_selection,
+        )
+        result_input_budget = result_input_budget or ResultInputBudgetV1()
+    else:
+        raise ValueError("unsupported execution context manifest schema version")
     profile_id = uuid5(
         EXECUTION_CONTEXT_PROFILE_NAMESPACE,
         f"sidera:execution-context-profile:{execution_request.budget_class}:v1",
@@ -157,6 +177,17 @@ def build_execution_context_assembly_request(
                 + ", ".join(sorted(overlapping_keys))
             )
         budget.update(additional_budget)
+    if input_selection is not None:
+        selection_budget = {
+            "input_selection_id": str(input_selection.id),
+            "input_selection_hash": input_selection.selection_hash,
+            "input_selection_target_request_version": input_selection.target_request_version,
+            "input_selection_plan_generation": input_selection.plan_generation,
+            "input_selection_plan_content_hash": input_selection.plan_content_hash,
+        }
+        if set(selection_budget).intersection(additional_budget or {}):
+            raise ValueError("additional context budget cannot replace input selection facts")
+        budget.update(selection_budget)
     snapshot = work_context_revision.snapshot
     search_scope = _search_scope(
         snapshot.objective,
@@ -173,6 +204,8 @@ def build_execution_context_assembly_request(
         "dependency_state",
     )
     fact_scope_refs += tuple(additional_fact_scope_refs)
+    if input_selection is not None:
+        fact_scope_refs += ("collaboration_release", "input_selection")
     expires_at = _expires_at(created_at, ttl_seconds)
     fingerprint = _request_fingerprint(
         purpose=ContextPurpose.EXECUTION,
@@ -191,6 +224,21 @@ def build_execution_context_assembly_request(
         plan_id=execution_request.plan_snapshot_id,
         plan_generation=execution_request.plan_generation,
     )
+    if manifest_schema_version == 1:
+        effective_idempotency_key = idempotency_key or f"context:execution:{execution.id}:v1"
+    else:
+        assert input_selection is not None
+        if idempotency_key is not None and (
+            ":v2:" not in idempotency_key
+            or input_selection.selection_hash not in idempotency_key
+        ):
+            raise ValueError(
+                "v2 execution context idempotency key must include protocol and selection hash"
+            )
+        effective_idempotency_key = idempotency_key or (
+            f"context:execution:{execution.id}:v2:context:{worker_item.context_version}:"
+            f"revision:{work_context_revision.revision_id}:selection:{input_selection.selection_hash}"
+        )
     return ContextAssemblyRequest.create(
         request_id=request_id or uuid4(),
         workspace_id=execution.workspace_id,
@@ -206,9 +254,90 @@ def build_execution_context_assembly_request(
         budget=budget,
         expires_at=expires_at,
         request_fingerprint=fingerprint,
-        idempotency_key=idempotency_key or f"context:execution:{execution.id}:v1",
+        idempotency_key=effective_idempotency_key,
         created_at=created_at,
+        manifest_schema_version=manifest_schema_version,
+        input_selection_id=(input_selection.id if input_selection is not None else None),
+        input_selection_hash=(
+            input_selection.selection_hash if input_selection is not None else None
+        ),
+        result_input_budget=result_input_budget,
     )
+
+
+def validate_execution_context_selection(
+    *,
+    execution_request: ExecutionRequest,
+    release: RuntimeRelease,
+    selection: CollaborationInputSelectionV1,
+) -> None:
+    """Ensure an execution context can only use the Selection in its Release."""
+
+    mismatches: list[str] = []
+    if selection.workspace_id != execution_request.workspace_id:
+        mismatches.append("selection workspace")
+    if release.workspace_id != execution_request.workspace_id:
+        mismatches.append("release workspace")
+    if selection.target_execution_request_id != execution_request.id:
+        mismatches.append("selection target request")
+    if release.execution_request_id != execution_request.id:
+        mismatches.append("release target request")
+    if selection.target_worker_item_id != execution_request.worker_item_id:
+        mismatches.append("selection target WorkerItem")
+    if selection.root_task_id != execution_request.root_task_id:
+        mismatches.append("selection root task")
+    if selection.plan_snapshot_id != execution_request.plan_snapshot_id:
+        mismatches.append("selection plan")
+    if selection.plan_generation != execution_request.plan_generation:
+        mismatches.append("selection plan generation")
+    if selection.plan_content_hash != release.plan_content_hash:
+        mismatches.append("selection plan hash")
+    if release.plan_snapshot_id != execution_request.plan_snapshot_id:
+        mismatches.append("release plan")
+    if release.plan_generation != execution_request.plan_generation:
+        mismatches.append("release plan generation")
+    if selection.run_id != release.run_id:
+        mismatches.append("selection collaboration run")
+    if selection.target_request_version != release.request_version_at_release:
+        mismatches.append("selection release request version")
+    if selection.target_request_version > execution_request.version:
+        mismatches.append("selection request version is newer than target")
+    if execution_request.input_selection_id != selection.id:
+        mismatches.append("execution request selection id")
+    if execution_request.input_selection_hash != selection.selection_hash:
+        mismatches.append("execution request selection hash")
+    if release.input_selection_id != selection.id:
+        mismatches.append("release selection id")
+    if release.input_selection_hash != selection.selection_hash:
+        mismatches.append("release selection hash")
+    if mismatches:
+        raise ValueError(
+            "execution context selection scope mismatch: " + ", ".join(mismatches)
+        )
+
+
+def _validate_selection_target(
+    *,
+    execution_request: ExecutionRequest,
+    worker_item: WorkerItem,
+    selection: CollaborationInputSelectionV1,
+) -> None:
+    if selection.workspace_id != execution_request.workspace_id:
+        raise ValueError("input selection workspace does not match execution")
+    if selection.target_execution_request_id != execution_request.id:
+        raise ValueError("input selection target request does not match execution")
+    if selection.target_worker_item_id != worker_item.id:
+        raise ValueError("input selection target WorkerItem does not match execution")
+    if selection.root_task_id != execution_request.root_task_id:
+        raise ValueError("input selection root task does not match execution")
+    if selection.plan_snapshot_id != execution_request.plan_snapshot_id:
+        raise ValueError("input selection plan does not match execution")
+    if selection.plan_generation != execution_request.plan_generation:
+        raise ValueError("input selection plan generation does not match execution")
+    if execution_request.input_selection_id != selection.id:
+        raise ValueError("execution request is not bound to the input selection")
+    if execution_request.input_selection_hash != selection.selection_hash:
+        raise ValueError("execution request input selection hash does not match")
 
 
 def rebind_planning_context_assembly_request(

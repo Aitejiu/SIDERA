@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.ports import (
@@ -14,11 +15,17 @@ from sidera_control_plane.application.ports import (
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextBudgetV1,
+    ContextConsumerType,
     ContextPackageKnowledgeRef,
+    ContextPackageManifest,
     ContextPackageManifestV1,
+    ContextPackageManifestV2,
+    ContextPurpose,
     ContextSelectionReason,
     ContextTrustLevel,
+    ResultInputManifestV1,
 )
+from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
 from sidera_control_plane.domain.work_context import (
     KnowledgeRevisionRef,
     WorkContextRevision,
@@ -83,8 +90,10 @@ class ContextAssembler:
         created_at: datetime | None = None,
         correlation_id: UUID,
         caller_request_id: UUID,
-    ) -> ContextPackageManifestV1:
+        input_selection: CollaborationInputSelectionV1 | None = None,
+    ) -> ContextPackageManifest:
         self._validate_input_scope(request, work_context_revision)
+        self._validate_result_input_scope(request, input_selection)
         explicit_refs = tuple(
             _explicit_reference(item) for item in request.knowledge_filter_refs
         )
@@ -133,32 +142,45 @@ class ContextAssembler:
             actual_chars=actual_chars,
             actual_input_tokens=actual_input_tokens,
         )
-        manifest = ContextPackageManifestV1.create(
-            package_id=package_id or uuid4(),
-            workspace_id=request.workspace_id,
-            purpose=request.purpose,
-            consumer_type=request.consumer_type,
-            consumer_id=request.consumer_id,
-            worker_item_id=request.worker_item_id,
-            work_context_revision_id=request.work_context_revision_id,
-            context_version=request.context_version,
-            control_plane_fact_snapshot=control_plane_fact_snapshot,
-            knowledge_refs=tuple(item.reference for item in selected),
-            artifact_refs=(
+        common = {
+            "package_id": package_id or uuid4(),
+            "workspace_id": request.workspace_id,
+            "purpose": request.purpose,
+            "consumer_type": request.consumer_type,
+            "consumer_id": request.consumer_id,
+            "worker_item_id": request.worker_item_id,
+            "work_context_revision_id": request.work_context_revision_id,
+            "context_version": request.context_version,
+            "control_plane_fact_snapshot": control_plane_fact_snapshot,
+            "knowledge_refs": tuple(item.reference for item in selected),
+            "artifact_refs": (
                 tuple(artifact_refs)
                 if artifact_refs is not None
                 else work_context_revision.snapshot.artifact_refs
             ),
-            evidence_refs=(
+            "evidence_refs": (
                 tuple(evidence_refs)
                 if evidence_refs is not None
                 else work_context_revision.snapshot.evidence_refs
             ),
-            budget=frozen_budget,
-            expires_at=request.expires_at,
-            idempotency_key=request.idempotency_key,
-            created_at=created_at or request.created_at,
-        )
+            "budget": frozen_budget,
+            "expires_at": request.expires_at,
+            "idempotency_key": request.idempotency_key,
+            "created_at": created_at or request.created_at,
+        }
+        if request.manifest_schema_version == 1:
+            manifest: ContextPackageManifest = ContextPackageManifestV1.create(
+                **cast(Any, common)
+            )
+        else:
+            assert input_selection is not None
+            manifest = ContextPackageManifestV2.create(
+                **cast(Any, common),
+                result_input_manifest=ResultInputManifestV1.from_selection(
+                    input_selection,
+                    budget=request.result_input_budget,
+                ),
+            )
         if _json_size(manifest.hash_document()) > MAX_PACKAGE_PAYLOAD_BYTES:
             raise ContextAssemblyError(
                 "context_budget_exceeded",
@@ -397,6 +419,53 @@ class ContextAssembler:
             raise ContextAssemblyError(
                 "context_consumer_stale",
                 "WorkContext revision is stale for this assembly request",
+            )
+
+    @staticmethod
+    def _validate_result_input_scope(
+        request: ContextAssemblyRequest,
+        input_selection: CollaborationInputSelectionV1 | None,
+    ) -> None:
+        if request.manifest_schema_version == 1:
+            if input_selection is not None:
+                raise ContextAssemblyError(
+                    "context_input_selection_unexpected",
+                    "v1 context assembly cannot receive an input Selection",
+                )
+            return
+        if request.manifest_schema_version != 2:
+            raise ContextAssemblyError(
+                "context_manifest_schema_unsupported",
+                "context assembly manifest schema is unsupported",
+            )
+        if input_selection is None:
+            raise ContextAssemblyError(
+                "context_input_selection_missing",
+                "v2 context assembly requires the committed input Selection",
+            )
+        if (
+            request.purpose is not ContextPurpose.EXECUTION
+            or request.consumer_type is not ContextConsumerType.WORKER
+        ):
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                "result input context requires an execution Worker consumer",
+            )
+        if (
+            input_selection.workspace_id != request.workspace_id
+            or input_selection.target_worker_item_id != request.worker_item_id
+            or input_selection.id != request.input_selection_id
+            or input_selection.selection_hash != request.input_selection_hash
+        ):
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                "input Selection does not match the assembly target",
+            )
+        execution_request_id = request.budget.get("execution_request_id")
+        if str(input_selection.target_execution_request_id) != str(execution_request_id):
+            raise ContextAssemblyError(
+                "context_input_selection_scope_invalid",
+                "input Selection does not match the execution request",
             )
 
 
