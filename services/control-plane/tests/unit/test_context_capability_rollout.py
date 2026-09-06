@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Literal
+from types import SimpleNamespace
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import pytest
@@ -10,6 +11,8 @@ from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.worker_gateway import (
+    GatewayMessageError,
+    WorkerGateway,
     _initial_prompt,
     context_package_reference,
 )
@@ -20,6 +23,7 @@ from sidera_control_plane.domain.context_packages import (
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
+    HandoffCheckpointMode,
     IdempotencyCapability,
     ResumeCapability,
     SandboxCapability,
@@ -116,6 +120,111 @@ def test_worker_capability_profile_declares_context_versions() -> None:
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.STABLE,
     ).context_package_versions == ()
+
+
+def test_legacy_empty_worker_profile_only_implies_v1_support() -> None:
+    profile = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.QUEUED,
+        idempotency=IdempotencyCapability.NONE,
+        resume=ResumeCapability.SAME_PROCESS,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.STABLE,
+    )
+
+    assert profile.supports_context_package_version(1)
+    assert not profile.supports_context_package_version(2)
+
+
+def test_v1_only_binding_is_rejected_before_v2_worker_start() -> None:
+    profile = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.QUEUED,
+        idempotency=IdempotencyCapability.NONE,
+        resume=ResumeCapability.SAME_PROCESS,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.STABLE,
+        context_package_versions=(1,),
+    )
+    context = cast(
+        Any,
+        SimpleNamespace(
+            binding=SimpleNamespace(capability_snapshot=profile),
+            adapter_instance=SimpleNamespace(id=uuid4(), config={}),
+        ),
+    )
+    gateway = WorkerGateway(
+        lambda: None,  # type: ignore[return-value]
+        adapter_factories={},
+        workspace_factories={},
+    )
+
+    with pytest.raises(GatewayMessageError) as caught:
+        gateway._validate_context_adapter_capability(
+            context,
+            FakeWorkerAdapter(),
+            required_version=2,
+        )
+
+    assert caught.value.code == "context_adapter_unsupported"
+
+
+def test_runtime_probe_cannot_downgrade_a_v2_binding() -> None:
+    profile = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.QUEUED,
+        idempotency=IdempotencyCapability.NONE,
+        resume=ResumeCapability.SAME_PROCESS,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.STABLE,
+        context_package_versions=(1, 2),
+    )
+    context = cast(
+        Any,
+        SimpleNamespace(
+            binding=SimpleNamespace(capability_snapshot=profile),
+            adapter_instance=SimpleNamespace(id=uuid4(), config={}),
+        ),
+    )
+    gateway = WorkerGateway(
+        lambda: None,  # type: ignore[return-value]
+        adapter_factories={},
+        workspace_factories={},
+    )
+
+    with pytest.raises(GatewayMessageError) as caught:
+        gateway._validate_context_adapter_capability(
+            context,
+            FakeWorkerAdapter(),
+            required_version=2,
+        )
+
+    assert caught.value.code == "runtime_capability_mismatch"
+
+
+def test_runtime_context_profile_allows_new_versions_but_rejects_lost_bound_versions() -> None:
+    bound = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.QUEUED,
+        idempotency=IdempotencyCapability.NONE,
+        resume=ResumeCapability.SAME_PROCESS,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.STABLE,
+        context_package_versions=(1,),
+    )
+    observed_with_extra = replace(
+        bound,
+        context_package_versions=(1, 2),
+        handoff_checkpoint_mode=HandoffCheckpointMode.NATIVE,
+        handoff_checkpoint_versions=(1,),
+    )
+    observed_without_bound = replace(
+        bound,
+        context_package_versions=(),
+    )
+
+    assert bound.context_versions_compatible_with(observed_with_extra)
+    assert not bound.context_versions_compatible_with(observed_without_bound)
 
 
 def test_execution_spec_keeps_legacy_and_typed_context_as_one_source() -> None:

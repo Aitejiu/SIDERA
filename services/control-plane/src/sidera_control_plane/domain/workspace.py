@@ -10,7 +10,7 @@ from uuid import UUID
 
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
-    ContextMaterializationV1,
+    ContextMaterialization,
     ContextPurpose,
     context_package_reference,
 )
@@ -93,7 +93,7 @@ class ExecutionSpec:
     adapter_config_version: int
     workspace_module_ref: UUID
     workspace_config_version: int
-    context_package: ContextMaterializationV1 | None = None
+    context_package: ContextMaterialization | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version not in (1, 2):

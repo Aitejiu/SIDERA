@@ -53,6 +53,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextAssemblyRequest,
     ContextConsumerType,
+    ContextMaterialization,
     ContextMaterializationAudit,
     ContextMaterializationV1,
     ContextPackageManifest,
@@ -2007,7 +2008,7 @@ class WorkerAdapter(Protocol):
 
     def accept_context(
         self,
-        materialization: ContextMaterializationV1,
+        materialization: ContextMaterialization,
         *,
         operation_id: UUID,
     ) -> ContextAcknowledgement:

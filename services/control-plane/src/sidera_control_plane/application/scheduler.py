@@ -43,7 +43,7 @@ from sidera_control_plane.application.worker_runtime import (
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyStatus,
-    ContextPackageManifestV1,
+    ContextPackageManifest,
     ContextPackageStatus,
     ContextPurpose,
 )
@@ -269,7 +269,7 @@ class Scheduler:
                     inspections = tuple(
                         _apply_context_capability_gate(
                             inspection,
-                            required_version=context_package.context_version or 0,
+                            required_version=context_package.manifest_schema_version,
                         )
                         for inspection in inspections
                     )
@@ -644,11 +644,22 @@ class Scheduler:
         uow: ControlPlaneUnitOfWork,
         execution: Execution,
         now: datetime,
-    ) -> tuple[ContextPackageManifestV1 | None, SchedulingIssue | None]:
+    ) -> tuple[ContextPackageManifest | None, SchedulingIssue | None]:
+        execution_request = uow.execution_requests.get_effective_by_execution_lineage(
+            execution.lineage_id,
+            execution.workspace_id,
+        )
+        manifest_schema_version = (
+            2
+            if execution_request is not None
+            and execution_request.input_selection_id is not None
+            else 1
+        )
         assembly = uow.context_assemblies.get_for_consumer(
             ContextPurpose.EXECUTION,
             execution.id,
             execution.workspace_id,
+            manifest_schema_version=manifest_schema_version,
         )
         if assembly is None:
             return None, SchedulingIssue(
@@ -684,6 +695,7 @@ class Scheduler:
             ContextPurpose.EXECUTION,
             execution.id,
             execution.workspace_id,
+            manifest_schema_version=manifest_schema_version,
         )
         if package is None:
             return None, SchedulingIssue(
@@ -1007,7 +1019,9 @@ def _apply_context_capability_gate(
 ) -> RuntimeCandidateInspection:
     if inspection.resolved is None or required_version < 1:
         return inspection
-    if required_version in inspection.resolved.capability_snapshot.context_package_versions:
+    if inspection.resolved.capability_snapshot.supports_context_package_version(
+        required_version
+    ):
         return inspection
     return RuntimeCandidateInspection(
         worker=inspection.worker,

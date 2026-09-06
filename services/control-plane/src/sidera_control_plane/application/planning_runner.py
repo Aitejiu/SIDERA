@@ -916,6 +916,12 @@ class PlanningRunner:
             correlation_id=item.correlation_id,
             caller_request_id=item.request_id,
         )
+        if not isinstance(materialization, ContextMaterializationV1):
+            raise ContextGateError(
+                "context_adapter_unsupported",
+                "planner adapter only supports V1 context packages",
+                blocked=True,
+            )
         accept_context = getattr(adapter, "accept_context", None)
         if not callable(accept_context):
             raise ContextGateError(

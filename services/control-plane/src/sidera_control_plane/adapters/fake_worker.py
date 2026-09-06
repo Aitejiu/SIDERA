@@ -12,6 +12,7 @@ from sidera_control_plane.domain.artifacts import ArtifactCandidate
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextConsumerType,
+    ContextMaterialization,
     ContextMaterializationV1,
     ContextPurpose,
 )
@@ -128,10 +129,12 @@ class FakeWorkerAdapter:
 
     def accept_context(
         self,
-        materialization: ContextMaterializationV1,
+        materialization: ContextMaterialization,
         *,
         operation_id: UUID,
     ) -> ContextAcknowledgement:
+        if not isinstance(materialization, ContextMaterializationV1):
+            raise TypeError("fake worker only supports V1 context materialization")
         _validate_context(materialization, operation_id)
         metadata = materialization.metadata
         return ContextAcknowledgement(

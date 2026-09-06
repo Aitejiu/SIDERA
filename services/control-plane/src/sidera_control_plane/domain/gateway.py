@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.domain.context_packages import ContextAcknowledgement
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 from sidera_control_plane.domain.handoffs import HandoffPhase
 from sidera_control_plane.domain.modules import (
@@ -318,6 +319,31 @@ class DeliveryResult:
             raise ValidationError("accepted_sequence cannot be negative")
         if outcome is DeliveryOutcome.DELIVERED and self.accepted_sequence is None:
             raise ValidationError("delivered input requires accepted_sequence")
+
+
+def bind_context_acknowledgement(
+    acknowledgement: ContextAcknowledgement,
+    *,
+    adapter_module_id: UUID,
+    adapter_config_version: int,
+) -> ContextAcknowledgement:
+    """Bind acknowledgement ownership to the exact runtime snapshot."""
+
+    if not isinstance(adapter_module_id, UUID):
+        raise ValidationError("adapter_module_id must be a UUID")
+    if (
+        not isinstance(adapter_config_version, int)
+        or isinstance(adapter_config_version, bool)
+        or adapter_config_version < 1
+    ):
+        raise ValidationError("adapter_config_version must be positive")
+    if acknowledgement.adapter_config_version != adapter_config_version:
+        raise ValidationError("context acknowledgement adapter config is stale")
+    return replace(
+        acknowledgement,
+        adapter_module_id=adapter_module_id,
+        adapter_config_version=adapter_config_version,
+    )
 
 
 def _operation_type(value: GatewayOperationType | str) -> GatewayOperationType:

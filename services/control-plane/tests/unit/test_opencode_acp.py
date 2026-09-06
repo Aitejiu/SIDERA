@@ -3,6 +3,7 @@ import os
 import stat
 import subprocess
 import textwrap
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,10 @@ from sidera_control_plane.adapters.opencode_acp import (
     handoff_profile_supported,
 )
 from sidera_control_plane.domain.artifacts import ArtifactType
+from sidera_control_plane.domain.context_packages import (
+    ContextMaterializationV2,
+    MaterializedResultInput,
+)
 from sidera_control_plane.domain.gateway import DeliveryOutcome
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
@@ -25,6 +30,8 @@ from sidera_control_plane.domain.workspace import (
     RepositoryCheckoutSpec,
     WorkspaceCheckout,
 )
+from tests.unit.result_input_fixtures import result_input_manifest
+from tests.unit.test_context_package_v2 import _materialization_v1
 
 
 def _spec() -> ExecutionSpec:
@@ -79,6 +86,31 @@ def _workspace(spec: ExecutionSpec) -> ExecutionWorkspaceManifest:
         retention_seconds=3600,
         fencing_token=spec.fencing_token,
         created_at=datetime.now(UTC),
+    )
+
+
+def _v2_materialization() -> ContextMaterializationV2:
+    legacy = _materialization_v1()
+    artifact = result_input_manifest().artifacts[0]
+    result_input = MaterializedResultInput(
+        artifact_id=artifact.artifact_id,
+        content_hash=artifact.content_hash,
+        size_bytes=artifact.size_bytes,
+        media_type=artifact.media_type,
+        sources=artifact.sources,
+        group_keys=artifact.group_keys,
+        hard_refs=artifact.hard_refs,
+        body_text="selected result body\n",
+        candidate_evidence=(),
+    )
+    return ContextMaterializationV2(
+        metadata=legacy.metadata,
+        system_constraints=legacy.system_constraints,
+        work_context=legacy.work_context,
+        control_plane_facts=legacy.control_plane_facts,
+        project_knowledge=legacy.project_knowledge,
+        artifact_and_evidence_refs=legacy.artifact_and_evidence_refs,
+        result_inputs=(result_input,),
     )
 
 
@@ -173,6 +205,73 @@ def test_opencode_acp_probe_and_prompt_round_trip(tmp_path: Path) -> None:
 
     stopped = adapter.stop_session(handle, operation_id=uuid4())
     assert stopped.outcome is DeliveryOutcome.DELIVERED
+
+
+def test_opencode_acp_accepts_v2_and_keeps_result_body_as_task_data() -> None:
+    materialization = _v2_materialization()
+    adapter = OpenCodeACPAdapter(executable="/missing/opencode")
+
+    acknowledgement = adapter.accept_context(materialization, operation_id=uuid4())
+
+    assert acknowledgement.schema_version == 2
+    prompt = _context_prompt(materialization)
+    assert materialization.result_inputs[0].body_text.rstrip("\n") in prompt
+    assert "untrusted task data" in prompt
+
+
+def test_opencode_acp_rejects_oversized_v2_context() -> None:
+    materialization = _v2_materialization()
+    oversized = replace(
+        materialization.result_inputs[0],
+        body_text="x" * (256 * 1024),
+    )
+    materialization = replace(materialization, result_inputs=(oversized,))
+    adapter = OpenCodeACPAdapter(executable="/missing/opencode")
+
+    with pytest.raises(ValueError, match="size limit"):
+        adapter.accept_context(materialization, operation_id=uuid4())
+
+
+def _context_prompt(materialization: ContextMaterializationV2) -> str:
+    from sidera_control_plane.application.worker_gateway import _initial_prompt
+
+    return _initial_prompt(
+        ExecutionSpec(
+            schema_version=2,
+            workspace_id=materialization.metadata.consumer_id,
+            task_id=uuid4(),
+            execution_id=uuid4(),
+            worker_id=uuid4(),
+            lease_id=uuid4(),
+            fencing_token=1,
+            goal="Use the selected result",
+            acceptance_criteria=("the result is reviewed",),
+            context_package_ref=(
+                f"context-package://{materialization.metadata.package_id}/"
+                f"{materialization.metadata.package_hash}"
+            ),
+            repositories=(
+                RepositoryCheckoutSpec(
+                    repository_ref="repo://sidera",
+                    base_revision="a" * 40,
+                    checkout_mode=CheckoutMode.WORKTREE,
+                    writable_paths=(".",),
+                    readable_paths=(".",),
+                    branch_policy=BranchPolicy.EXECUTION,
+                ),
+            ),
+            tool_policy={},
+            sandbox_policy={"mode": "filesystem"},
+            budget={"max_seconds": 60},
+            deadline=None,
+            expected_outputs=("diff",),
+            adapter_module_ref=uuid4(),
+            adapter_config_version=1,
+            workspace_module_ref=uuid4(),
+            workspace_config_version=1,
+            context_package=materialization,
+        )
+    )
 
 
 def test_opencode_acp_allows_only_opencode_go_provider(

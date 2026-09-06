@@ -12,10 +12,12 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import func, select
 
+from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
     ReferenceCollaborationRuntime,
 )
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
+from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.collaboration_decisions import (
     CollaborationDecisionApplicationResult,
     CollaborationDecisionService,
@@ -39,8 +41,10 @@ from sidera_control_plane.application.collaboration_runtime_resolver import (
     ResolvedCollaborationRuntime,
 )
 from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
+from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.ports import (
     ExactRevisionManifest,
@@ -49,9 +53,15 @@ from sidera_control_plane.application.ports import (
     KnowledgeCatalogPort,
     SearchHit,
 )
+from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
+from sidera_control_plane.application.worker_gateway import (
+    ASSIGNMENT_TOPIC,
+    WorkerGateway,
+)
+from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
 from sidera_control_plane.context_package_worker import ContextPackageWorker
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.collaboration import (
@@ -65,18 +75,30 @@ from sidera_control_plane.domain.collaboration_runtime import (
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_packages import (
+    ContextAcknowledgement,
+    ContextMaterialization,
+    ContextMaterializationV1,
+    ContextMaterializationV2,
     ContextPackageManifestV2,
     ContextPurpose,
 )
 from sidera_control_plane.domain.execution import ExecutionSession
+from sidera_control_plane.domain.gateway import AdapterSessionHandle
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
+    CapabilityInput,
     CollaborationRuntimeCapabilityProfile,
+    HandoffCheckpointMode,
     IdempotencyCapability,
     ModuleDefinition,
     ModuleInstance,
     ModuleLifecycle,
+    ResumeCapability,
+    SandboxCapability,
     StabilityLevel,
+    StopCapability,
+    WorkerAdapterCapabilityProfile,
+    WorkspaceProviderCapabilityProfile,
 )
 from sidera_control_plane.domain.planning import PlanningRequest
 from sidera_control_plane.domain.planning_proposals import (
@@ -89,6 +111,12 @@ from sidera_control_plane.domain.work_context import (
     WorkContextRevisionReason,
 )
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_runtime import WorkerRuntimeConfiguration
+from sidera_control_plane.domain.workspace import (
+    ExecutionSpec,
+    ExecutionWorkspaceManifest,
+    WorkspaceCheckout,
+)
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
 )
@@ -101,6 +129,7 @@ from sidera_control_plane.persistence.models import (
     CollaborationReleaseProposalModel,
     ExecutionModel,
     ExecutionRequestModel,
+    OutboxMessageModel,
     RuntimeReleaseModel,
 )
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -164,6 +193,114 @@ class _EmptyCatalog(KnowledgeCatalogPort):
         raise AssertionError("result-input scenario has no Knowledge refs")
 
 
+_CAPTURE_ADAPTER_CAPABILITIES = WorkerAdapterCapabilityProfile(
+    input=CapabilityInput.QUEUED,
+    idempotency=IdempotencyCapability.NONE,
+    resume=ResumeCapability.SAME_PROCESS,
+    stop=StopCapability.EXACT_EXECUTION,
+    sandbox=SandboxCapability.FILESYSTEM,
+    stability=StabilityLevel.STABLE,
+    context_package_versions=(1, 2),
+    context_patch_versions=(1,),
+    handoff_checkpoint_mode=HandoffCheckpointMode.NATIVE,
+    handoff_checkpoint_versions=(1,),
+    handoff_session_context_versions=(1,),
+    handoff_writer_gate_versions=(1,),
+    handoff_inspection=True,
+)
+
+
+class _CaptureWorkerAdapter(FakeWorkerAdapter):
+    _CAPABILITIES = _CAPTURE_ADAPTER_CAPABILITIES
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepted_contexts: list[ContextMaterialization] = []
+        self.start_calls: list[ExecutionSpec] = []
+
+    def accept_context(
+        self,
+        materialization: ContextMaterialization,
+        *,
+        operation_id: UUID,
+    ) -> ContextAcknowledgement:
+        if not isinstance(materialization, (ContextMaterializationV1, ContextMaterializationV2)):
+            raise TypeError("unsupported context materialization")
+        self.accepted_contexts.append(materialization)
+        metadata = materialization.metadata
+        return ContextAcknowledgement(
+            package_id=metadata.package_id,
+            package_hash=metadata.package_hash,
+            consumer_type=metadata.consumer_type,
+            consumer_id=metadata.consumer_id,
+            context_version=metadata.context_version,
+            adapter_module_id=uuid4(),
+            adapter_config_version=1,
+            acknowledged_at=datetime.now(UTC),
+            schema_version=materialization.schema_version,
+            operation_id=operation_id,
+        )
+
+    def start_session(
+        self,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+        *,
+        operation_id: UUID,
+    ) -> AdapterSessionHandle:
+        self.start_calls.append(spec)
+        return super().start_session(spec, workspace, operation_id=operation_id)
+
+
+class _CaptureWorkspaceProvider:
+    def prepare(
+        self,
+        spec: ExecutionSpec,
+        *,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        del operation_id
+        return ExecutionWorkspaceManifest.create(
+            id=uuid4(),
+            workspace_id=spec.workspace_id,
+            task_id=spec.task_id,
+            execution_id=spec.execution_id,
+            checkouts=(
+                WorkspaceCheckout(
+                    repository_ref="repo://sidera",
+                    base_revision="a" * 40,
+                    branch=f"sidera/execution/{spec.execution_id}",
+                    current_head="a" * 40,
+                ),
+            ),
+            location_ref=f"capture-workspace://{spec.execution_id}",
+            retention_seconds=3600,
+            fencing_token=spec.fencing_token,
+            created_at=FROZEN_NOW,
+        )
+
+    def freeze(
+        self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> ExecutionWorkspaceManifest:
+        del operation_id
+        return manifest
+
+    def retain(
+        self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> ExecutionWorkspaceManifest:
+        del operation_id
+        return manifest
+
+    def release(
+        self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> ExecutionWorkspaceManifest:
+        del operation_id
+        return manifest
+
+    def inspect(self, location_ref: str) -> object:
+        raise RuntimeError(f"not implemented for {location_ref}")
+
+
 class ResultInputScenario:
     """Shared real-persistence harness grown incrementally by R6.3.4 tasks."""
 
@@ -179,6 +316,8 @@ class ResultInputScenario:
         self.artifact_store = LocalArtifactContentStore(
             tmp_path / "result-input-artifacts"
         )
+        self._artifact_root = tmp_path / "result-input-artifacts"
+        self._source_storage_refs: dict[str, str] = {}
         self.ids: dict[str, UUID] = {
             name: uuid4()
             for name in (
@@ -194,6 +333,8 @@ class ResultInputScenario:
         }
         self.worker_item_ids: dict[str, UUID] = {}
         self.request_ids: dict[str, UUID] = {}
+        self._capture_adapter: _CaptureWorkerAdapter | None = None
+        self._gateway: WorkerGateway | None = None
         self._runtime = ReferenceCollaborationRuntime(clock=self.clock)
         self._decision_service = CollaborationDecisionService(
             uow_factory=self.uow_factory,
@@ -438,6 +579,7 @@ class ResultInputScenario:
         storage_ref = self.artifact_store.put(
             self.workspace_id, execution_id, digest, body
         )
+        self._source_storage_refs[key] = storage_ref
         provenance: dict[str, object] = {
             "producer": f"scenario:{key}",
             "environment_ref": "env://result-input-scenario",
@@ -489,6 +631,12 @@ class ResultInputScenario:
         )
         assert len(report.artifacts) == 1
         return report.artifacts[0].id
+
+    def remove_source_body(self, key: str) -> None:
+        storage_ref = self._source_storage_refs[key]
+        digest = storage_ref.rsplit("/", 1)[-1]
+        path = self._artifact_root / str(self.workspace_id) / digest[:2] / digest
+        path.unlink()
 
     def reconcile(self) -> None:
         for _ in range(10):
@@ -550,6 +698,160 @@ class ResultInputScenario:
             )
         assert isinstance(package, ContextPackageManifestV2)
         return package
+
+    def start_worker(self, key: str) -> object:
+        execution_id = self._execution_id(key)
+        assert execution_id is not None
+        adapter = _CaptureWorkerAdapter()
+        workspace_provider = _CaptureWorkspaceProvider()
+        self._install_capture_runtime(execution_id, adapter)
+
+        scheduled = Scheduler(
+            self.uow_factory,
+            LowestCostWorkerPolicy(),
+            self.clock,
+            context_enforcement=True,
+        ).run_once(limit=20)
+        assert scheduled.assigned == 1
+        message = self._assignment_message(execution_id)
+        gateway = WorkerGateway(
+            self.uow_factory,
+            adapter_factories={"capture": lambda _instance: adapter},
+            workspace_factories={
+                "capture-workspace": lambda _instance: workspace_provider
+            },
+            artifact_content_store=self.artifact_store,
+            context_materializer=ContextMaterializer(
+                _EmptyCatalog(),
+                result_input_content=ArtifactContentService(
+                    self.database,
+                    self.artifact_store,
+                ),
+            ),
+            clock=self.clock,
+        )
+        self._capture_adapter = adapter
+        self._gateway = gateway
+        return gateway.handle(message)
+
+    def captured_context(self, key: str) -> ContextMaterialization:
+        del key
+        if self._capture_adapter is None or not self._capture_adapter.accepted_contexts:
+            raise AssertionError("worker context was not accepted")
+        return self._capture_adapter.accepted_contexts[-1]
+
+    def start_call_count(self, key: str) -> int:
+        del key
+        return len(self._capture_adapter.start_calls) if self._capture_adapter else 0
+
+    def _install_capture_runtime(
+        self, execution_id: UUID, adapter: _CaptureWorkerAdapter
+    ) -> None:
+        workspace_capabilities = WorkspaceProviderCapabilityProfile(
+            isolation=SandboxCapability.FILESYSTEM,
+            writable=True,
+            git_worktree=True,
+            stability=StabilityLevel.STABLE,
+        )
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            assert execution is not None
+            worker = Worker.register(
+                worker_id=uuid4(),
+                workspace_id=self.workspace_id,
+                adapter_type="capture",
+                display_name="Result input capture worker",
+                capabilities=frozenset(execution.capability_requirements),
+                capacity=1,
+                cost_per_hour_microunits=0,
+                startup_latency_ms=0,
+                now=self.now,
+            )
+            adapter_definition = ModuleDefinition(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                module_type="worker_adapter",
+                provider="capture",
+                interface_version="sidera.worker-adapter.v2",
+                config_schema_version=1,
+                capabilities=adapter._CAPABILITIES,
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            workspace_definition = ModuleDefinition(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                module_type="workspace_provider",
+                provider="capture-workspace",
+                interface_version="sidera.workspace-provider.v1",
+                config_schema_version=1,
+                capabilities=workspace_capabilities,
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            adapter_instance = ModuleInstance(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                definition_id=adapter_definition.id,
+                instance_name="result-input-capture-adapter",
+                config_version=1,
+                config_namespace="adapter",
+                config={"adapter.mode": "capture"},
+                secret_refs=(),
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            workspace_instance = ModuleInstance(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                definition_id=workspace_definition.id,
+                instance_name="result-input-capture-workspace",
+                config_version=1,
+                config_namespace="workspace",
+                config={
+                    "workspace.repository_ref": "repo://sidera",
+                    "workspace.base_revision": "a" * 40,
+                },
+                secret_refs=(),
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            uow.workers.add(worker)
+            uow.modules.add_definition(adapter_definition)
+            uow.modules.add_definition(workspace_definition)
+            uow.modules.add_instance(adapter_instance)
+            uow.modules.add_instance(workspace_instance)
+            uow.worker_runtime_configurations.add(
+                WorkerRuntimeConfiguration.create(
+                    worker_id=worker.id,
+                    workspace_id=self.workspace_id,
+                    adapter_module_instance_id=adapter_instance.id,
+                    adapter_module_config_version=1,
+                    workspace_module_instance_id=workspace_instance.id,
+                    workspace_module_config_version=1,
+                )
+            )
+
+    def _assignment_message(self, execution_id: UUID) -> OutboxMessage:
+        with self.database.session() as session:
+            rows = session.scalars(
+                select(OutboxMessageModel).where(
+                    OutboxMessageModel.topic == ASSIGNMENT_TOPIC
+                )
+            ).all()
+        row = next(
+            (
+                item
+                for item in rows
+                if item.payload.get("aggregate_id") == str(execution_id)
+            ),
+            None,
+        )
+        assert row is not None
+        return OutboxMessage(
+            id=row.id,
+            event_id=row.event_id,
+            topic=row.topic,
+            payload=dict(row.payload),
+            attempts=max(int(row.attempts), 1),
+            claim_token=uuid4(),
+        )
 
     def package_ids(self, key: str) -> tuple[UUID, ...]:
         execution_id = self._execution_id(key)

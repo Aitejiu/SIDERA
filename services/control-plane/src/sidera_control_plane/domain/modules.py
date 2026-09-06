@@ -194,6 +194,28 @@ class WorkerAdapterCapabilityProfile:
         if not isinstance(self.handoff_inspection, bool):
             raise ValidationError("handoff_inspection capability must be a boolean")
 
+    def supports_context_package_version(self, version: int) -> bool:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValidationError("context package version must be positive")
+        # Capability snapshots written before versioned context packages existed
+        # have an empty tuple. Keep those workers on the legacy V1 path; newer
+        # versions must always be explicitly declared.
+        if version == 1 and not self.context_package_versions:
+            return True
+        return version in self.context_package_versions
+
+    def context_versions_compatible_with(
+        self, observed: "WorkerAdapterCapabilityProfile"
+    ) -> bool:
+        """Check that the observed adapter still supports bound context versions."""
+
+        if not isinstance(observed, WorkerAdapterCapabilityProfile):
+            return False
+        return all(
+            version in observed.context_package_versions
+            for version in self.context_package_versions
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceProviderCapabilityProfile:

@@ -34,7 +34,9 @@ from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactTyp
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextConsumerType,
+    ContextMaterialization,
     ContextMaterializationV1,
+    ContextMaterializationV2,
     ContextPurpose,
 )
 from sidera_control_plane.domain.context_patches import (
@@ -104,7 +106,7 @@ class OpenCodeACPAdapter:
         stop=StopCapability.EXACT_EXECUTION,
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.EXPERIMENTAL,
-        context_package_versions=(1,),
+        context_package_versions=(1, 2),
         context_patch_versions=(),
     )
     _HANDOFF_PROFILE = WorkerAdapterCapabilityProfile(
@@ -114,7 +116,7 @@ class OpenCodeACPAdapter:
         stop=StopCapability.EXACT_EXECUTION,
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.EXPERIMENTAL,
-        context_package_versions=(1,),
+        context_package_versions=(1, 2),
         context_patch_versions=(),
         handoff_checkpoint_mode=HandoffCheckpointMode.CONTROL_EVENT,
         handoff_checkpoint_versions=(1,),
@@ -205,7 +207,7 @@ class OpenCodeACPAdapter:
 
     def accept_context(
         self,
-        materialization: ContextMaterializationV1,
+        materialization: ContextMaterialization,
         *,
         operation_id: UUID,
     ) -> ContextAcknowledgement:
@@ -1094,7 +1096,7 @@ class _OpenCodeSession:
         execution_id: UUID,
         fencing_token: int,
         workspace_digest: str,
-        context_package: ContextMaterializationV1 | None,
+        context_package: ContextMaterialization | None,
         context_binding: SessionContextBinding | None,
         handoff_instruction: str | None,
         handoff_held: bool,
@@ -1136,14 +1138,18 @@ class _OpenCodeHandoffOperation:
 
 
 def _validate_context(
-    materialization: ContextMaterializationV1,
+    materialization: ContextMaterialization,
     operation_id: UUID,
 ) -> None:
-    if not isinstance(materialization, ContextMaterializationV1):
-        raise TypeError("materialization must be a ContextMaterializationV1")
+    expected_type = {
+        1: ContextMaterializationV1,
+        2: ContextMaterializationV2,
+    }.get(materialization.schema_version)
+    if expected_type is None or not isinstance(materialization, expected_type):
+        raise TypeError("materialization schema does not match its typed payload")
     if not isinstance(operation_id, UUID):
         raise TypeError("operation_id must be a UUID")
-    if materialization.schema_version != 1:
+    if materialization.schema_version not in (1, 2):
         raise ValueError("unsupported context materialization schema")
     if (
         materialization.metadata.purpose is not ContextPurpose.EXECUTION
@@ -1160,7 +1166,7 @@ def _require_handoff_profile(profile: WorkerAdapterCapabilityProfile) -> None:
 
 
 def _handoff_facts(
-    materialization: ContextMaterializationV1 | None,
+    materialization: ContextMaterialization | None,
 ) -> Mapping[str, object] | None:
     if materialization is None:
         return None
@@ -1179,7 +1185,7 @@ def _handoff_instruction(facts: Mapping[str, object]) -> str:
 
 
 def _context_refs(
-    materialization: ContextMaterializationV1, *, category: str
+    materialization: ContextMaterialization, *, category: str
 ) -> tuple[str, ...]:
     return tuple(
         f"{category}://{ref.ref_id}"

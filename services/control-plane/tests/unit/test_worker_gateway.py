@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import cast
@@ -20,12 +21,14 @@ from sidera_control_plane.application.worker_gateway import (
     _load_module,
 )
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
+from sidera_control_plane.domain.context_packages import ContextAcknowledgement
 from sidera_control_plane.domain.gateway import (
     RuntimeModuleOperation,
     runtime_module_operation_allowed,
 )
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import ModuleLifecycle
+from tests.unit.test_context_package_v2 import _materialization_v1
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
@@ -301,6 +304,81 @@ def test_gateway_message_error_preserves_stable_code() -> None:
     )
 
     assert error.code == "runtime_binding_missing"
+
+
+def test_gateway_binds_context_ack_to_exact_adapter_runtime_snapshot() -> None:
+    materialization = _materialization_v1()
+    operation_id = uuid4()
+    metadata = materialization.metadata
+    acknowledgement = ContextAcknowledgement(
+        package_id=metadata.package_id,
+        package_hash=metadata.package_hash,
+        consumer_type=metadata.consumer_type,
+        consumer_id=metadata.consumer_id,
+        context_version=metadata.context_version,
+        adapter_module_id=uuid4(),
+        adapter_config_version=1,
+        acknowledged_at=NOW,
+        schema_version=materialization.schema_version,
+        operation_id=operation_id,
+    )
+    adapter_module_id = uuid4()
+
+    bound = WorkerGateway._validate_context_acknowledgement(
+        acknowledgement,
+        materialization=materialization,
+        operation_id=operation_id,
+        adapter_module_id=adapter_module_id,
+        adapter_config_version=1,
+    )
+
+    assert bound.adapter_module_id == adapter_module_id
+    assert bound.adapter_config_version == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("operation", "consumer", "package", "config"),
+)
+def test_gateway_rejects_context_ack_identity_or_stale_config(
+    mutation: str,
+) -> None:
+    materialization = _materialization_v1()
+    operation_id = uuid4()
+    metadata = materialization.metadata
+    acknowledgement = ContextAcknowledgement(
+        package_id=metadata.package_id,
+        package_hash=metadata.package_hash,
+        consumer_type=metadata.consumer_type,
+        consumer_id=metadata.consumer_id,
+        context_version=metadata.context_version,
+        adapter_module_id=uuid4(),
+        adapter_config_version=1,
+        acknowledged_at=NOW,
+        schema_version=materialization.schema_version,
+        operation_id=operation_id,
+    )
+    if mutation == "operation":
+        acknowledgement = replace(acknowledgement, operation_id=None)
+    elif mutation == "consumer":
+        acknowledgement = replace(acknowledgement, consumer_id=uuid4())
+    elif mutation == "package":
+        acknowledgement = replace(acknowledgement, package_id=uuid4())
+    elif mutation == "config":
+        acknowledgement = replace(acknowledgement, adapter_config_version=2)
+    else:
+        raise AssertionError(f"unsupported mutation: {mutation}")
+
+    with pytest.raises(GatewayMessageError) as caught:
+        WorkerGateway._validate_context_acknowledgement(
+            acknowledgement,
+            materialization=materialization,
+            operation_id=operation_id,
+            adapter_module_id=uuid4(),
+            adapter_config_version=1,
+        )
+
+    assert caught.value.code == "context_acknowledgement_mismatch"
 
 
 def test_gateway_rejects_a_binding_to_a_missing_module_instance() -> None:
