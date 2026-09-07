@@ -120,6 +120,7 @@ from sidera_control_plane.domain.handoffs import (
 from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.modules import (
+    LOCAL_VERIFICATION_PROVIDER,
     CapabilityInput,
     ExecutionBinding,
     HandoffCheckpointMode,
@@ -130,6 +131,7 @@ from sidera_control_plane.domain.modules import (
     WorkspaceProviderCapabilityProfile,
 )
 from sidera_control_plane.domain.result_operations import ResultError
+from sidera_control_plane.domain.result_verification import VerificationManifestV1
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
     SchedulingIssue,
@@ -191,6 +193,8 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "code_input_conflict",
         "code_input_unavailable",
         "verification_input_unsupported",
+        "verification_capability_unsupported",
+        "code_input_adapter_unsupported",
         "handoff_in_progress",
         "handoff_gate_unavailable",
     }
@@ -673,47 +677,93 @@ class WorkerGateway:
                 )
                 physical_input_ack: Mapping[str, object] | None = None
                 if isinstance(context_materialization, ContextMaterializationV3):
-                    code_input_manifest = context_materialization.code_input_manifest
-                    if code_input_manifest is None:
-                        raise GatewayMessageError(
-                            "verification execution is not supported by the normal Gateway path",
-                            code="verification_input_unsupported",
+                    verification_manifest = context_materialization.verification_manifest
+                    if verification_manifest is not None:
+                        if (
+                            context.adapter_definition.provider
+                            != LOCAL_VERIFICATION_PROVIDER
+                        ):
+                            raise GatewayMessageError(
+                                "verification execution requires the local verification provider",
+                                code="verification_input_unsupported",
+                            )
+                        prepare_spec = self._spec_factory.create(
+                            context.execution,
+                            context.task,
+                            context.binding,
+                            context.adapter_instance,
+                            context.workspace_instance,
                         )
-                    prepare_spec = self._spec_factory.create(
-                        context.execution,
-                        context.task,
-                        context.binding,
-                        context.adapter_instance,
-                        context.workspace_instance,
-                    )
-                    workspace = self._ensure_workspace(context, prepare_spec)
-                    receipt = self._materialize_code_inputs(
-                        context,
-                        workspace,
-                        code_input_manifest,
-                    )
-                    physical_input_ack = receipt.to_mapping()
-                    self._record_code_result_start(
-                        context,
-                        prepare_spec,
-                        workspace,
-                        input_commit=receipt.actual_commit,
-                    )
-                    self._acknowledge_execution_context(
-                        context,
-                        context_materialization,
-                        physical_input_ack=physical_input_ack,
-                    )
-                    spec = self._spec_factory.create(
-                        context.execution,
-                        context.task,
-                        context.binding,
-                        context.adapter_instance,
-                        context.workspace_instance,
-                        context_materialization=context_materialization,
-                        execution_purpose="code",
-                        physical_input_ack=physical_input_ack,
-                    )
+                        workspace = self._ensure_workspace(context, prepare_spec)
+                        physical_input_ack = _verification_input_ack(
+                            context.execution.id,
+                            verification_manifest,
+                        )
+                        self._acknowledge_execution_context(
+                            context,
+                            context_materialization,
+                            physical_input_ack=physical_input_ack,
+                        )
+                        spec = self._spec_factory.create(
+                            context.execution,
+                            context.task,
+                            context.binding,
+                            context.adapter_instance,
+                            context.workspace_instance,
+                            context_materialization=context_materialization,
+                            execution_purpose="verification",
+                            physical_input_ack=physical_input_ack,
+                        )
+                    else:
+                        code_input_manifest = context_materialization.code_input_manifest
+                        if code_input_manifest is None:
+                            raise GatewayMessageError(
+                                "execution input manifest is missing",
+                                code="verification_input_unsupported",
+                            )
+                        if (
+                            context.adapter_definition.provider
+                            == LOCAL_VERIFICATION_PROVIDER
+                        ):
+                            raise GatewayMessageError(
+                                "local verification provider cannot execute code inputs",
+                                code="code_input_adapter_unsupported",
+                            )
+                        prepare_spec = self._spec_factory.create(
+                            context.execution,
+                            context.task,
+                            context.binding,
+                            context.adapter_instance,
+                            context.workspace_instance,
+                        )
+                        workspace = self._ensure_workspace(context, prepare_spec)
+                        receipt = self._materialize_code_inputs(
+                            context,
+                            workspace,
+                            code_input_manifest,
+                        )
+                        physical_input_ack = receipt.to_mapping()
+                        self._record_code_result_start(
+                            context,
+                            prepare_spec,
+                            workspace,
+                            input_commit=receipt.actual_commit,
+                        )
+                        self._acknowledge_execution_context(
+                            context,
+                            context_materialization,
+                            physical_input_ack=physical_input_ack,
+                        )
+                        spec = self._spec_factory.create(
+                            context.execution,
+                            context.task,
+                            context.binding,
+                            context.adapter_instance,
+                            context.workspace_instance,
+                            context_materialization=context_materialization,
+                            execution_purpose="code",
+                            physical_input_ack=physical_input_ack,
+                        )
                 else:
                     if context_materialization is not None:
                         self._acknowledge_execution_context(
@@ -731,7 +781,8 @@ class WorkerGateway:
                     workspace = self._ensure_workspace(context, spec)
                     self._record_code_result_start(context, spec, workspace)
                 result = self._ensure_session(context, spec, workspace)
-                self._ensure_initial_prompt(context, spec, result)
+                if spec.execution_purpose != "verification":
+                    self._ensure_initial_prompt(context, spec, result)
                 if keeper.health_error is not None:
                     raise GatewayRecoveryRequired(
                         "assignment lease renewal failed"
@@ -3016,6 +3067,17 @@ class WorkerGateway:
                 "worker adapter capability probe rejected the context package",
                 code="context_adapter_unsupported",
             )
+        if context.adapter_definition.provider == LOCAL_VERIFICATION_PROVIDER:
+            if not binding_profile.supports_verification_version(1):
+                raise GatewayMessageError(
+                    "verification runtime binding does not declare verification support",
+                    code="verification_capability_unsupported",
+                )
+            if not actual_profile.supports_verification_version(1):
+                raise GatewayMessageError(
+                    "verification adapter probe does not support verification version 1",
+                    code="verification_capability_unsupported",
+                )
 
     @staticmethod
     def _validate_context_acknowledgement(
@@ -3564,11 +3626,15 @@ class WorkerGateway:
             fencing_token=fencing_token,
             events=adapter_events,
         )
-        code_result = self._capture_observed_terminal(
-            workspace_id=workspace_id,
-            execution_id=execution_id,
-            fencing_token=fencing_token,
-            report=event_report,
+        code_result = (
+            None
+            if context.adapter_definition.provider == LOCAL_VERIFICATION_PROVIDER
+            else self._capture_observed_terminal(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                fencing_token=fencing_token,
+                report=event_report,
+            )
         )
         candidates = adapter.collect_artifacts(
             handle,
@@ -5033,6 +5099,23 @@ def _initial_prompt(spec: ExecutionSpec) -> str:
         f"{context_json}\n"
         "</sidera-context-json>"
     )
+
+
+def _verification_input_ack(
+    execution_id: UUID,
+    manifest: VerificationManifestV1,
+) -> dict[str, object]:
+    """Record the exact candidate facts bound to a verification execution."""
+
+    return {
+        "status": "verification_input_bound",
+        "execution_id": str(execution_id),
+        "candidate_id": str(manifest.candidate_id),
+        "candidate_hash": manifest.candidate_hash,
+        "actual_commit": manifest.result_commit,
+        "actual_tree": manifest.result_tree,
+        "verification_basis_hash": manifest.verification_basis_hash,
+    }
 
 
 def _assignment_ids(

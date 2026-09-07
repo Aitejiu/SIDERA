@@ -11,6 +11,8 @@ from uuid import UUID
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.modules import (
+    LOCAL_VERIFICATION_PROVIDER,
+    VERIFICATION_RESULT_VERSION,
     WORKER_ADAPTER_MODULE_TYPE,
     WORKSPACE_PROVIDER_MODULE_TYPE,
     ModuleDefinition,
@@ -62,6 +64,27 @@ class WorkerRuntimeInspectionPort(Protocol):
 
 
 RuntimeIssue = SchedulingIssue
+
+
+class RuntimeBindingError(ValueError):
+    """The selected runtime cannot serve the requested execution purpose."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def require_verification_runtime(
+    runtime: ResolvedWorkerRuntime,
+    *,
+    version: int = VERIFICATION_RESULT_VERSION,
+) -> None:
+    """Require the dedicated provider and its declared verification capability."""
+
+    if runtime.adapter_type != LOCAL_VERIFICATION_PROVIDER:
+        raise RuntimeBindingError("verification_provider_required")
+    if not runtime.capability_snapshot.supports_verification_version(version):
+        raise RuntimeBindingError("verification_capability_unsupported")
 
 
 class WorkerRuntimeResolver:

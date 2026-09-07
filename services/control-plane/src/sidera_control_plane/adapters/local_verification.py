@@ -9,13 +9,18 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections import deque
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateProposalV1,
+)
 from sidera_control_plane.application.result_ports import (
     CheckRunObservation,
     CheckRunRequest,
@@ -25,11 +30,57 @@ from sidera_control_plane.application.result_ports import (
     ReportAvailability,
     ReportAvailabilityStatus,
 )
+from sidera_control_plane.domain.artifacts import ArtifactCandidate
+from sidera_control_plane.domain.context_packages import (
+    ContextAcknowledgement,
+    ContextConsumerType,
+    ContextMaterialization,
+    ContextMaterializationV3,
+    ContextPurpose,
+    context_package_reference,
+)
+from sidera_control_plane.domain.context_patches import (
+    ContextPatchDeliveryResult,
+    ContextPatchMaterializationV1,
+)
+from sidera_control_plane.domain.gateway import (
+    AdapterEvent,
+    AdapterSessionHandle,
+    DeliveryOutcome,
+    DeliveryResult,
+)
+from sidera_control_plane.domain.handoff_evidence import (
+    HandoffCheckpointEvidence,
+    HandoffOperationInspection,
+)
+from sidera_control_plane.domain.modules import (
+    CapabilityInput,
+    HandoffCheckpointMode,
+    IdempotencyCapability,
+    ResumeCapability,
+    SandboxCapability,
+    StabilityLevel,
+    StopCapability,
+    WorkerAdapterCapabilityProfile,
+)
 from sidera_control_plane.domain.result_integration import CheckSpecV1
+from sidera_control_plane.domain.result_verification import VerificationManifestV1
+from sidera_control_plane.domain.workspace import (
+    ExecutionSpec,
+    ExecutionWorkspaceManifest,
+)
 
 
 class LocalCheckRunnerError(RuntimeError):
     """The local verification runner cannot establish a safe execution boundary."""
+
+
+class LocalVerificationAdapterError(RuntimeError):
+    """A verification adapter operation cannot be accepted safely."""
+
+    def __init__(self, code: str, message: str | None = None) -> None:
+        self.code = code
+        super().__init__(message or code)
 
 
 _OID_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
@@ -126,6 +177,27 @@ class _Run:
     log_refs: tuple[str, str]
     captures: tuple[_LogCapture, _LogCapture]
     observation: CheckRunObservation
+
+
+@dataclass(slots=True)
+class _VerificationSession:
+    handle: AdapterSessionHandle
+    runner_operation_id: UUID
+    fingerprint: tuple[object, ...] | None
+    candidate_id: UUID | None
+    check_key: str | None
+    events: deque[AdapterEvent]
+    next_sequence: int
+    observation: CheckRunObservation
+    terminal_event_emitted: bool = False
+    deliveries: dict[UUID, DeliveryResult] | None = None
+    patch_results: dict[UUID, ContextPatchDeliveryResult] | None = None
+
+    def __post_init__(self) -> None:
+        if self.deliveries is None:
+            self.deliveries = {}
+        if self.patch_results is None:
+            self.patch_results = {}
 
 
 class LocalCheckRunner(LocalCheckRunnerPort):
@@ -811,6 +883,678 @@ class LocalCheckRunner(LocalCheckRunnerPort):
 
     def _state_path(self, operation_id: UUID) -> Path:
         return self._state_root / f"{operation_id}.json"
+
+
+class LocalVerificationAdapter:
+    """Expose one deterministic check runner through the WorkerAdapter contract."""
+
+    _PROFILE = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.UNSUPPORTED,
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        resume=ResumeCapability.DURABLE,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.STABLE,
+        context_package_versions=(3,),
+        context_patch_versions=(),
+        handoff_checkpoint_mode=HandoffCheckpointMode.UNSUPPORTED,
+        code_result_versions=(),
+        verification_versions=(1,),
+    )
+
+    def __init__(
+        self,
+        *,
+        runner: LocalCheckRunnerPort,
+        check_specs: Mapping[str, CheckSpecV1],
+        workspace_locator: Callable[[ExecutionWorkspaceManifest], Path],
+        environment_version: int = 1,
+        adapter_module_id: UUID | None = None,
+        adapter_config_version: int = 1,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if not all(
+            callable(getattr(runner, name, None))
+            for name in ("start", "inspect", "stop")
+        ):
+            raise TypeError("verification runner must implement LocalCheckRunnerPort")
+        if not callable(workspace_locator):
+            raise TypeError("verification workspace locator is required")
+        if environment_version < 1 or adapter_config_version < 1:
+            raise ValueError("verification binding versions must be positive")
+        normalized: dict[str, CheckSpecV1] = {}
+        for key, check in check_specs.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("verification check keys must be non-empty strings")
+            if not isinstance(check, CheckSpecV1) or check.key != key:
+                raise TypeError("verification check specs must be keyed by CheckSpecV1.key")
+            normalized[key] = check
+        self._runner = runner
+        self._check_specs = MappingProxyType(normalized)
+        self._workspace_locator = workspace_locator
+        self._environment_version = environment_version
+        self._adapter_module_id = adapter_module_id or uuid5(
+            NAMESPACE_URL, "sidera.local-verification.adapter"
+        )
+        self._adapter_config_version = adapter_config_version
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._context_acknowledgements: dict[UUID, ContextAcknowledgement] = {}
+        self._context_fingerprints: dict[UUID, tuple[object, ...]] = {}
+        self._sessions_by_operation: dict[UUID, _VerificationSession] = {}
+        self._sessions_by_adapter_id: dict[str, _VerificationSession] = {}
+        self._lock = threading.RLock()
+
+    @classmethod
+    def capabilities(cls) -> WorkerAdapterCapabilityProfile:
+        return cls._PROFILE
+
+    def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
+        del config
+        return self._PROFILE
+
+    def accept_context(
+        self,
+        materialization: ContextMaterialization,
+        *,
+        operation_id: UUID,
+    ) -> ContextAcknowledgement:
+        if not isinstance(operation_id, UUID):
+            raise LocalVerificationAdapterError("verification_operation_invalid")
+        _require_verification_materialization(materialization)
+        fingerprint = _context_fingerprint(materialization)
+        with self._lock:
+            existing = self._context_acknowledgements.get(operation_id)
+            if existing is not None:
+                if self._context_fingerprints.get(operation_id) != fingerprint:
+                    raise LocalVerificationAdapterError(
+                        "verification_context_operation_conflict"
+                    )
+                return existing
+            metadata = materialization.metadata
+            acknowledgement = ContextAcknowledgement(
+                package_id=metadata.package_id,
+                package_hash=metadata.package_hash,
+                consumer_type=metadata.consumer_type,
+                consumer_id=metadata.consumer_id,
+                context_version=metadata.context_version,
+                adapter_module_id=self._adapter_module_id,
+                adapter_config_version=self._adapter_config_version,
+                acknowledged_at=self._now(),
+                schema_version=materialization.schema_version,
+                operation_id=operation_id,
+            )
+            self._context_acknowledgements[operation_id] = acknowledgement
+            self._context_fingerprints[operation_id] = fingerprint
+            return acknowledgement
+
+    def start_session(
+        self,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+        *,
+        operation_id: UUID,
+    ) -> AdapterSessionHandle:
+        if not isinstance(operation_id, UUID):
+            raise LocalVerificationAdapterError("verification_operation_invalid")
+        with self._lock:
+            verification_manifest = self._validate_start_inputs(spec, workspace)
+            check = self._resolve_check(verification_manifest)
+            fingerprint = self._spec_fingerprint(spec, workspace)
+            existing = self._sessions_by_operation.get(operation_id)
+            if existing is not None:
+                if existing.fingerprint != fingerprint:
+                    raise LocalVerificationAdapterError(
+                        "verification_start_identity_conflict"
+                    )
+                return existing.handle
+
+            location = self._workspace_location(workspace)
+            now = self._now()
+            deadline = spec.deadline or now + timedelta(seconds=check.timeout_seconds)
+            request = CheckRunRequest(
+                operation_id=operation_id,
+                candidate_id=verification_manifest.candidate_id,
+                candidate_hash=verification_manifest.candidate_hash,
+                actual_commit=verification_manifest.result_commit,
+                actual_tree=verification_manifest.result_tree,
+                check=check,
+                workspace_location=location,
+                deadline=deadline,
+                log_ref=f"verification/{operation_id}/{check.key}",
+            )
+            try:
+                observation = self._runner.start(request)
+            except LocalVerificationAdapterError:
+                raise
+            except Exception as exc:
+                raise LocalVerificationAdapterError(
+                    "verification_runner_start_failed"
+                ) from exc
+            if not isinstance(observation, CheckRunObservation):
+                raise LocalVerificationAdapterError("verification_runner_invalid")
+            if observation.operation_id != operation_id:
+                raise LocalVerificationAdapterError(
+                    "verification_runner_operation_mismatch"
+                )
+            if (
+                observation.actual_commit != verification_manifest.result_commit
+                or observation.actual_tree != verification_manifest.result_tree
+            ):
+                raise LocalVerificationAdapterError(
+                    "verification_runner_candidate_mismatch"
+                )
+            execution_session_id = uuid5(
+                NAMESPACE_URL,
+                f"sidera.local-verification.session:{spec.execution_id}:{operation_id}",
+            )
+            handle = AdapterSessionHandle(
+                execution_session_id=execution_session_id,
+                adapter_session_id=f"local-verification-{operation_id}",
+                process_ref=f"local-check://{operation_id}",
+                capability_snapshot=self._PROFILE,
+                last_accepted_sequence=0,
+                started_at=observation.started_at or now,
+            )
+            session = _VerificationSession(
+                handle=handle,
+                runner_operation_id=operation_id,
+                fingerprint=self._spec_fingerprint(spec, workspace),
+                candidate_id=verification_manifest.candidate_id,
+                check_key=check.key,
+                events=deque(),
+                next_sequence=1,
+                observation=observation,
+            )
+            self._append_event(
+                session,
+                event_type="session.started",
+                payload=self._event_payload(session, observation),
+                occurred_at=observation.started_at or now,
+            )
+            self._remember_session(session)
+            return handle
+
+    def read_events(self, handle: AdapterSessionHandle) -> Iterable[AdapterEvent]:
+        session = self._session(handle)
+        with self._lock:
+            self._refresh_session(session)
+            events = tuple(session.events)
+            session.events.clear()
+            return events
+
+    def send_input(
+        self,
+        handle: AdapterSessionHandle,
+        text: str,
+        attachment_refs: tuple[str, ...],
+        *,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        del text, attachment_refs
+        session = self._session(handle)
+        with self._lock:
+            assert session.deliveries is not None
+            existing = session.deliveries.get(operation_id)
+            if existing is not None:
+                return existing
+            result = DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.FAILED,
+                accepted_sequence=None,
+                failure_code="verification_input_unsupported",
+                execution_session_id=handle.execution_session_id,
+            )
+            session.deliveries[operation_id] = result
+            return result
+
+    def apply_context_patch(
+        self,
+        handle: AdapterSessionHandle,
+        materialization: ContextPatchMaterializationV1,
+        *,
+        operation_id: UUID,
+    ) -> ContextPatchDeliveryResult:
+        session = self._session(handle)
+        patch_hash = "0" * 64
+        if isinstance(materialization, ContextPatchMaterializationV1):
+            patch_hash = materialization.patch.patch_hash
+        with self._lock:
+            assert session.patch_results is not None
+            existing = session.patch_results.get(operation_id)
+            if existing is not None:
+                return existing
+            result = ContextPatchDeliveryResult(
+                outcome="failed",
+                operation_id=operation_id,
+                patch_hash=patch_hash,
+                accepted_sequence=None,
+                error_code="verification_input_unsupported",
+            )
+            session.patch_results[operation_id] = result
+            return result
+
+    def stop_session(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        session = self._session(handle)
+        with self._lock:
+            assert session.deliveries is not None
+            existing = session.deliveries.get(operation_id)
+            if existing is not None:
+                return existing
+            try:
+                observation = self._runner.stop(session.runner_operation_id)
+            except Exception:  # noqa: BLE001
+                result = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="verification_stop_unknown",
+                    execution_session_id=handle.execution_session_id,
+                )
+                session.deliveries[operation_id] = result
+                return result
+            if observation is None:
+                result = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="verification_observation_unavailable",
+                    execution_session_id=handle.execution_session_id,
+                )
+                session.deliveries[operation_id] = result
+                return result
+            if (
+                not isinstance(observation, CheckRunObservation)
+                or observation.operation_id != session.runner_operation_id
+            ):
+                result = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="verification_runner_operation_mismatch",
+                    execution_session_id=handle.execution_session_id,
+                )
+                session.deliveries[operation_id] = result
+                return result
+            session.observation = observation
+            if observation.status is CheckRunStatus.UNKNOWN:
+                self._emit_terminal_if_needed(session)
+                result = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code=observation.failure_code or "process_state_unknown",
+                    execution_session_id=handle.execution_session_id,
+                )
+                session.deliveries[operation_id] = result
+                return result
+            if observation.status is CheckRunStatus.RUNNING:
+                result = DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="process_state_unknown",
+                    execution_session_id=handle.execution_session_id,
+                )
+                session.deliveries[operation_id] = result
+                return result
+            self._emit_terminal_if_needed(session)
+            accepted_sequence = max(handle.last_accepted_sequence, session.next_sequence - 1)
+            result = DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.DELIVERED,
+                accepted_sequence=accepted_sequence,
+                failure_code=None,
+                execution_session_id=handle.execution_session_id,
+            )
+            session.deliveries[operation_id] = result
+            return result
+
+    def collect_artifacts(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> tuple[ArtifactCandidate, ...]:
+        del operation_id
+        self._session(handle)
+        return ()
+
+    def collect_knowledge_candidates(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> tuple[KnowledgeCandidateProposalV1, ...]:
+        del operation_id
+        self._session(handle)
+        return ()
+
+    def capture_handoff_checkpoint(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        transition_id: UUID,
+        source_input_cutoff_sequence: int,
+        operation_id: UUID,
+    ) -> HandoffCheckpointEvidence:
+        del handle, transition_id, source_input_cutoff_sequence, operation_id
+        raise LocalVerificationAdapterError("verification_handoff_unsupported")
+
+    def inspect_handoff_operation(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+    ) -> HandoffOperationInspection:
+        del handle, operation_id
+        raise LocalVerificationAdapterError("verification_handoff_unsupported")
+
+    def enable_handoff_writer(
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        fencing_token: int,
+        operation_id: UUID,
+    ) -> DeliveryResult:
+        del handle, fencing_token, operation_id
+        raise LocalVerificationAdapterError("verification_handoff_unsupported")
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise LocalVerificationAdapterError("verification_clock_invalid")
+        return value.astimezone(UTC)
+
+    def _validate_start_inputs(
+        self,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+    ) -> VerificationManifestV1:
+        if not isinstance(spec, ExecutionSpec) or spec.schema_version != 3:
+            raise LocalVerificationAdapterError("verification_spec_unsupported")
+        if spec.execution_purpose != "verification":
+            raise LocalVerificationAdapterError("verification_spec_unsupported")
+        if not isinstance(spec.context_package, ContextMaterializationV3):
+            raise LocalVerificationAdapterError("verification_context_unsupported")
+        manifest = _require_verification_materialization(spec.context_package)
+        if spec.context_package_ref != context_package_reference(
+            spec.context_package.metadata.package_id,
+            spec.context_package.metadata.package_hash,
+        ):
+            raise LocalVerificationAdapterError("verification_context_stale")
+        if spec.execution_id != spec.context_package.metadata.consumer_id:
+            raise LocalVerificationAdapterError("verification_context_consumer_mismatch")
+        if spec.physical_input_ack != _verification_input_ack(
+            spec.execution_id, manifest
+        ):
+            raise LocalVerificationAdapterError("verification_input_ack_mismatch")
+        if (
+            workspace.workspace_id != spec.workspace_id
+            or workspace.task_id != spec.task_id
+            or workspace.execution_id != spec.execution_id
+            or workspace.fencing_token != spec.fencing_token
+        ):
+            raise LocalVerificationAdapterError("verification_workspace_mismatch")
+        return manifest
+
+    def _resolve_check(self, manifest: VerificationManifestV1) -> CheckSpecV1:
+        if len(manifest.checks) != 1:
+            raise LocalVerificationAdapterError("verification_check_set_unsupported")
+        reference = manifest.checks[0]
+        check = self._check_specs.get(reference.key)
+        if check is None:
+            raise LocalVerificationAdapterError("verification_check_unavailable")
+        if check.version != reference.version or _check_spec_hash(check) != reference.spec_hash:
+            raise LocalVerificationAdapterError("verification_check_binding_mismatch")
+        environment = manifest.environment_binding
+        if (
+            environment.ref != check.environment_ref
+            or environment.version != self._environment_version
+        ):
+            raise LocalVerificationAdapterError("verification_environment_mismatch")
+        return check
+
+    def _workspace_location(self, workspace: ExecutionWorkspaceManifest) -> Path:
+        try:
+            location = self._workspace_locator(workspace)
+        except Exception as exc:
+            raise LocalVerificationAdapterError(
+                "verification_workspace_unavailable"
+            ) from exc
+        if not isinstance(location, Path) or not location.is_absolute():
+            raise LocalVerificationAdapterError("verification_workspace_unavailable")
+        if location.is_symlink() or not location.is_dir():
+            raise LocalVerificationAdapterError("verification_workspace_unavailable")
+        return location.resolve()
+
+    def _spec_fingerprint(
+        self,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+    ) -> tuple[object, ...]:
+        context = spec.context_package
+        manifest = (
+            context.verification_manifest
+            if isinstance(context, ContextMaterializationV3)
+            else None
+        )
+        return (
+            spec.execution_id,
+            spec.workspace_id,
+            spec.task_id,
+            spec.worker_id,
+            spec.lease_id,
+            spec.fencing_token,
+            spec.adapter_module_ref,
+            spec.adapter_config_version,
+            spec.workspace_module_ref,
+            spec.workspace_config_version,
+            spec.context_package_ref,
+            spec.execution_purpose,
+            (
+                None
+                if spec.physical_input_ack is None
+                else tuple(sorted(spec.physical_input_ack.items()))
+            ),
+            workspace.id,
+            workspace.workspace_id,
+            workspace.task_id,
+            workspace.execution_id,
+            workspace.fencing_token,
+            None if manifest is None else manifest.candidate_id,
+            None if manifest is None else manifest.candidate_hash,
+            None if manifest is None else manifest.result_commit,
+            None if manifest is None else manifest.result_tree,
+            None
+            if manifest is None or len(manifest.checks) != 1
+            else (
+                manifest.checks[0].key,
+                manifest.checks[0].version,
+                manifest.checks[0].spec_hash,
+            ),
+            None if manifest is None else manifest.environment_binding.ref,
+            None if manifest is None else manifest.environment_binding.version,
+            None
+            if manifest is None
+            else manifest.verification_basis_hash,
+        )
+
+    def _remember_session(self, session: _VerificationSession) -> None:
+        self._sessions_by_operation[session.runner_operation_id] = session
+        self._sessions_by_adapter_id[session.handle.adapter_session_id] = session
+
+    def _session(self, handle: AdapterSessionHandle) -> _VerificationSession:
+        if not isinstance(handle, AdapterSessionHandle):
+            raise LocalVerificationAdapterError("verification_session_invalid")
+        if handle.capability_snapshot != self._PROFILE:
+            raise LocalVerificationAdapterError("verification_session_capability_mismatch")
+        with self._lock:
+            session = self._sessions_by_adapter_id.get(handle.adapter_session_id)
+            if session is not None:
+                if session.handle.execution_session_id != handle.execution_session_id:
+                    raise LocalVerificationAdapterError("verification_session_mismatch")
+                return session
+            prefix = "local-check://"
+            if not handle.process_ref.startswith(prefix):
+                raise LocalVerificationAdapterError("verification_session_unrecoverable")
+            try:
+                runner_operation_id = UUID(handle.process_ref.removeprefix(prefix))
+            except ValueError as exc:
+                raise LocalVerificationAdapterError(
+                    "verification_session_unrecoverable"
+                ) from exc
+            if handle.adapter_session_id != f"local-verification-{runner_operation_id}":
+                raise LocalVerificationAdapterError("verification_session_identity_mismatch")
+            observation = self._runner.inspect(runner_operation_id)
+            if observation is None:
+                raise LocalVerificationAdapterError("verification_observation_unavailable")
+            if not isinstance(observation, CheckRunObservation):
+                raise LocalVerificationAdapterError("verification_runner_invalid")
+            if observation.operation_id != runner_operation_id:
+                raise LocalVerificationAdapterError(
+                    "verification_runner_operation_mismatch"
+                )
+            session = _VerificationSession(
+                handle=handle,
+                runner_operation_id=runner_operation_id,
+                fingerprint=None,
+                candidate_id=None,
+                check_key=None,
+                events=deque(),
+                next_sequence=max(handle.last_accepted_sequence + 1, 1),
+                observation=observation,
+            )
+            self._remember_session(session)
+            return session
+
+    def _refresh_session(self, session: _VerificationSession) -> None:
+        observation = self._runner.inspect(session.runner_operation_id)
+        if observation is None:
+            return
+        if not isinstance(observation, CheckRunObservation):
+            raise LocalVerificationAdapterError("verification_runner_invalid")
+        if observation.operation_id != session.runner_operation_id:
+            raise LocalVerificationAdapterError(
+                "verification_runner_operation_mismatch"
+            )
+        session.observation = observation
+        self._emit_terminal_if_needed(session)
+
+    def _emit_terminal_if_needed(self, session: _VerificationSession) -> None:
+        if session.terminal_event_emitted or session.observation.status not in _TERMINAL_STATUSES:
+            return
+        status = session.observation.status
+        event_type = (
+            "session.succeeded"
+            if status is CheckRunStatus.PASSED
+            else "session.canceled"
+            if status is CheckRunStatus.INTERRUPTED
+            else "session.failed"
+        )
+        self._append_event(
+            session,
+            event_type=event_type,
+            payload=self._event_payload(session, session.observation),
+            occurred_at=session.observation.finished_at or self._now(),
+        )
+        session.terminal_event_emitted = True
+
+    def _event_payload(
+        self,
+        session: _VerificationSession,
+        observation: CheckRunObservation,
+    ) -> dict[str, object]:
+        payload = observation.to_mapping()
+        payload.update(
+            {
+                "provider": "local_verification",
+                "purpose": "verification",
+                "candidate_id": None if session.candidate_id is None else str(session.candidate_id),
+                "check_key": session.check_key,
+            }
+        )
+        return payload
+
+    def _append_event(
+        self,
+        session: _VerificationSession,
+        *,
+        event_type: str,
+        payload: Mapping[str, object],
+        occurred_at: datetime,
+    ) -> None:
+        sequence = session.next_sequence
+        session.events.append(
+            AdapterEvent(
+                event_type=event_type,
+                sequence=sequence,
+                payload=payload,
+                occurred_at=occurred_at,
+            )
+        )
+        session.next_sequence += 1
+
+
+def _require_verification_materialization(
+    materialization: ContextMaterialization,
+) -> VerificationManifestV1:
+    if not isinstance(materialization, ContextMaterializationV3):
+        raise LocalVerificationAdapterError("verification_context_unsupported")
+    if (
+        materialization.metadata.purpose is not ContextPurpose.EXECUTION
+        or materialization.metadata.consumer_type is not ContextConsumerType.WORKER
+        or materialization.verification_manifest is None
+        or materialization.code_input_manifest is not None
+    ):
+        raise LocalVerificationAdapterError("verification_context_unsupported")
+    if materialization.total_byte_count > 256 * 1024:
+        raise LocalVerificationAdapterError("verification_context_too_large")
+    return materialization.verification_manifest
+
+
+def _context_fingerprint(
+    materialization: ContextMaterialization,
+) -> tuple[object, ...]:
+    manifest = _require_verification_materialization(materialization)
+    metadata = materialization.metadata
+    return (
+        materialization.schema_version,
+        metadata.package_id,
+        metadata.package_hash,
+        metadata.consumer_id,
+        manifest.verification_basis_hash,
+    )
+
+
+def _verification_input_ack(
+    execution_id: UUID,
+    manifest: VerificationManifestV1,
+) -> dict[str, object]:
+    return {
+        "status": "verification_input_bound",
+        "execution_id": str(execution_id),
+        "candidate_id": str(manifest.candidate_id),
+        "candidate_hash": manifest.candidate_hash,
+        "actual_commit": manifest.result_commit,
+        "actual_tree": manifest.result_tree,
+        "verification_basis_hash": manifest.verification_basis_hash,
+    }
+
+
+def _check_spec_hash(check: CheckSpecV1) -> str:
+    payload = json.dumps(
+        check.to_mapping(),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _read_stream(stream: Any, size: int) -> bytes:

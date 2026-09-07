@@ -60,6 +60,13 @@ PLANNER_ADAPTER_MODULE_TYPE = "planner_adapter"
 COLLABORATION_RUNTIME_MODULE_TYPE = "collaboration_runtime"
 NOTIFICATION_CHANNEL_MODULE_TYPE = "notification_channel"
 
+# Verification is a provider choice, not a second module category. Keeping the
+# identifiers in the domain avoids slightly different purpose checks at each
+# runtime boundary.
+LOCAL_VERIFICATION_PROVIDER = "local_verification"
+VERIFICATION_CONTEXT_PACKAGE_VERSION = 3
+VERIFICATION_RESULT_VERSION = 1
+
 COLLABORATION_INPUT_GROUPS_STRATEGY_ID = "input_groups_v1"
 COLLABORATION_PROJECTION_SCHEMA_V2 = 2
 COLLABORATION_DECISION_SCHEMA_V2 = 2

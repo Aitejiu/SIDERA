@@ -172,6 +172,12 @@ def get_settings(request: Request) -> Settings:
     return settings
 
 
+def get_worker_runtime_resolver() -> WorkerRuntimeResolver:
+    """Construct the shared runtime-fact resolver used by command/query edges."""
+
+    return WorkerRuntimeResolver()
+
+
 class AdapterWorkflowRequiresLoopback(ValidationError):
     code = "adapter_workflow_requires_loopback"
 
@@ -199,7 +205,7 @@ def get_command_service(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
-    runtime_resolver = WorkerRuntimeResolver()
+    runtime_resolver = get_worker_runtime_resolver()
     handoff_candidates = HandoffCandidateService(
         factory,
         runtime_resolver=runtime_resolver,
@@ -292,7 +298,7 @@ def get_handoff_public_query_service(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
-    runtime_resolver = WorkerRuntimeResolver()
+    runtime_resolver = get_worker_runtime_resolver()
     candidate_service = HandoffCandidateService(
         factory,
         runtime_resolver=runtime_resolver,
