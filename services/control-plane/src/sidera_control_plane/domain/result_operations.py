@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from uuid import UUID
 
 from sidera_control_plane.domain.errors import DomainError, ValidationError
@@ -39,6 +40,99 @@ class ResultOperationStatus(StrEnum):
     BLOCKED = "blocked"
     UNKNOWN = "unknown"
     FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ReworkImpactV1:
+    """The deterministic impact report for replacing one code result."""
+
+    changed_result_id: UUID
+    replacement_result_id: UUID
+    affected: tuple[UUID, ...]
+    reusable: tuple[UUID, ...]
+    requires_revision: bool
+    reason_by_worker: Mapping[UUID, str]
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ReworkImpactV1:
+        fields = frozenset(
+            {
+                "changed_result_id",
+                "replacement_result_id",
+                "affected",
+                "reusable",
+                "requires_revision",
+                "reason_by_worker",
+            }
+        )
+        mapping = _mapping(value, "rework impact", fields)
+        reasons = mapping["reason_by_worker"]
+        if not isinstance(reasons, Mapping):
+            raise ValidationError("rework impact reason_by_worker must be an object")
+        return cls(
+            changed_result_id=_parse_uuid(
+                mapping["changed_result_id"], "rework impact changed_result_id"
+            ),
+            replacement_result_id=_parse_uuid(
+                mapping["replacement_result_id"], "rework impact replacement_result_id"
+            ),
+            affected=_unique_uuids(mapping["affected"], "rework impact affected"),
+            reusable=_unique_uuids(mapping["reusable"], "rework impact reusable"),
+            requires_revision=mapping["requires_revision"],  # type: ignore[arg-type]
+            reason_by_worker={
+                _parse_uuid(key, "rework impact reason worker")
+                if not isinstance(key, UUID)
+                else key: _text(reason, "rework impact reason")
+                for key, reason in reasons.items()
+            },
+        )
+
+    def __post_init__(self) -> None:
+        _uuid(self.changed_result_id, "rework impact changed_result_id")
+        _uuid(self.replacement_result_id, "rework impact replacement_result_id")
+        if self.changed_result_id == self.replacement_result_id:
+            raise ValidationError("rework impact must use a new replacement result")
+        if type(self.requires_revision) is not bool:
+            raise ValidationError("rework impact requires_revision must be a boolean")
+
+        affected = tuple(sorted(_unique_uuids(self.affected, "rework impact affected"), key=str))
+        reusable = tuple(sorted(_unique_uuids(self.reusable, "rework impact reusable"), key=str))
+        if self.changed_result_id in affected or self.changed_result_id in reusable:
+            raise ValidationError("rework impact cannot classify the changed result as a worker")
+        if set(affected) & set(reusable):
+            raise ValidationError("rework impact affected and reusable must be disjoint")
+        object.__setattr__(self, "affected", affected)
+        object.__setattr__(self, "reusable", reusable)
+
+        if not isinstance(self.reason_by_worker, Mapping):
+            raise ValidationError("rework impact reason_by_worker must be an object")
+        allowed_workers = set(affected) | set(reusable)
+        normalized_reasons: dict[UUID, str] = {}
+        for worker_id, reason in self.reason_by_worker.items():
+            _uuid(worker_id, "rework impact reason worker")
+            if worker_id not in allowed_workers:
+                raise ValidationError("rework impact reason references an unknown worker")
+            normalized_reasons[worker_id] = _text(reason, "rework impact reason")
+        object.__setattr__(
+            self,
+            "reason_by_worker",
+            MappingProxyType(
+                dict(sorted(normalized_reasons.items(), key=lambda item: str(item[0])))
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "changed_result_id": str(self.changed_result_id),
+            "replacement_result_id": str(self.replacement_result_id),
+            "affected": [str(item) for item in self.affected],
+            "reusable": [str(item) for item in self.reusable],
+            "requires_revision": self.requires_revision,
+            "reason_by_worker": {
+                str(worker_id): reason
+                for worker_id, reason in self.reason_by_worker.items()
+            },
+        }
 
 
 def _uuid(value: object, label: str) -> UUID:
@@ -489,6 +583,7 @@ __all__ = [
     "ResultApplyOperationV1",
     "ResultError",
     "ResultOperationStatus",
+    "ReworkImpactV1",
     "ReworkMode",
     "ReworkRecordV1",
     "ReworkStatus",

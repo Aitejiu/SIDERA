@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
 from sidera_control_plane.domain.result_operations import TaskResultHead
 
 
@@ -121,6 +125,114 @@ def snapshot_mapping(**overrides: object) -> dict[str, object]:
     }
     value.update(overrides)
     return value
+
+
+def _snapshot_content_hash(value: dict[str, object]) -> str:
+    content = {
+        "schema_version": value["schema_version"],
+        "workspace_id": value["workspace_id"],
+        "root_task_id": value["root_task_id"],
+        "worker_item_id": value["worker_item_id"],
+        "request_id": value["request_id"],
+        "execution_id": value["execution_id"],
+        "repository_ref": value["repository_ref"],
+        "input_commit": value["input_commit"],
+        "input_tree": value["input_tree"],
+        "result_commit": value["result_commit"],
+        "result_tree": value["result_tree"],
+        "consumed_result_ids": value["consumed_result_ids"],
+        "artifact_ids": value["artifact_ids"],
+        "capture_operation_id": value["capture_operation_id"],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _impact_snapshot(**overrides: object) -> CodeResultSnapshotV1:
+    value = snapshot_mapping(**overrides)
+    value["content_hash"] = _snapshot_content_hash(value)
+    return CodeResultSnapshotV1.from_mapping(value)
+
+
+@dataclass(frozen=True, slots=True)
+class ReworkImpactCase:
+    a1: CodeResultSnapshotV1
+    a2: CodeResultSnapshotV1
+    b: CodeResultSnapshotV1
+    c: CodeResultSnapshotV1
+    hard_edges: tuple[tuple[UUID, UUID], ...]
+
+    @property
+    def a_worker_id(self) -> UUID:
+        return self.a1.worker_item_id
+
+    @property
+    def b_worker_id(self) -> UUID:
+        return self.b.worker_item_id
+
+    @property
+    def c_worker_id(self) -> UUID:
+        return self.c.worker_item_id
+
+    @property
+    def provenance(self) -> dict[UUID, CodeResultSnapshotV1]:
+        return {item.id: item for item in (self.a1, self.b, self.c)}
+
+
+def rework_impact_case(
+    *, replacement_tree: str = "e" * 40, b_consumes_a1: bool = True
+) -> ReworkImpactCase:
+    a1 = _impact_snapshot(
+        id="10000000-0000-0000-0000-000000000101",
+        worker_item_id="40000000-0000-0000-0000-000000000101",
+        request_id="50000000-0000-0000-0000-000000000101",
+        execution_id="60000000-0000-0000-0000-000000000101",
+        capture_operation_id="80000000-0000-0000-0000-000000000101",
+        result_commit="c" * 40,
+        result_tree="d" * 40,
+    )
+    a2 = _impact_snapshot(
+        id="10000000-0000-0000-0000-000000000104",
+        worker_item_id="40000000-0000-0000-0000-000000000101",
+        request_id="50000000-0000-0000-0000-000000000104",
+        execution_id="60000000-0000-0000-0000-000000000104",
+        capture_operation_id="80000000-0000-0000-0000-000000000104",
+        result_commit="f" * 40,
+        result_tree=replacement_tree,
+    )
+    b = _impact_snapshot(
+        id="10000000-0000-0000-0000-000000000102",
+        worker_item_id="40000000-0000-0000-0000-000000000102",
+        request_id="50000000-0000-0000-0000-000000000102",
+        execution_id="60000000-0000-0000-0000-000000000102",
+        capture_operation_id="80000000-0000-0000-0000-000000000102",
+        result_commit="c" * 40,
+        result_tree="e" * 40,
+        consumed_result_ids=[str(a1.id)] if b_consumes_a1 else [],
+    )
+    c = _impact_snapshot(
+        id="10000000-0000-0000-0000-000000000103",
+        worker_item_id="40000000-0000-0000-0000-000000000103",
+        request_id="50000000-0000-0000-0000-000000000103",
+        execution_id="60000000-0000-0000-0000-000000000103",
+        capture_operation_id="80000000-0000-0000-0000-000000000103",
+        result_commit="c" * 40,
+        result_tree="e" * 40,
+    )
+    return ReworkImpactCase(
+        a1=a1,
+        a2=a2,
+        b=b,
+        c=c,
+        hard_edges=((a1.worker_item_id, b.worker_item_id),),
+    )
 
 
 def candidate_mapping(**overrides: object) -> dict[str, object]:
