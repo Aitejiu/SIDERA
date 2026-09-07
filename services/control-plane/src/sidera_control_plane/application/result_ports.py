@@ -4,14 +4,16 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID
 
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
     IntegrationCandidateV1,
 )
+from sidera_control_plane.domain.result_integration import CheckSpecV1
 from sidera_control_plane.domain.result_operations import (
     ResultApplyOperationV1,
     ResultError,
@@ -31,6 +33,368 @@ if TYPE_CHECKING:
 
 _GIT_OID_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_CHECK_REFERENCE_PATTERN = re.compile(r"^[^\x00]+$")
+
+
+class CheckRunStatus(StrEnum):
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    ENVIRONMENT_BLOCKED = "environment_blocked"
+    TIMED_OUT = "timed_out"
+    INTERRUPTED = "interrupted"
+    UNKNOWN = "unknown"
+
+
+class ReportAvailabilityStatus(StrEnum):
+    PRESENT = "present"
+    MISSING = "missing"
+    OUT_OF_BOUNDS = "out_of_bounds"
+    TOO_LARGE = "too_large"
+    READ_ERROR = "read_error"
+
+
+def _require_uuid(value: object, label: str) -> UUID:
+    if not isinstance(value, UUID):
+        raise TypeError(f"{label} must be a UUID")
+    return value
+
+
+def _require_text(value: object, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise ValueError(f"{label} must be a non-empty string")
+    return value if allow_empty else value.strip()
+
+
+def _require_hash(value: object, label: str) -> str:
+    result = _require_text(value, label).lower()
+    if _SHA256_PATTERN.fullmatch(result) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 hash")
+    return result
+
+
+def _require_git_oid(value: object, label: str) -> str:
+    result = _require_text(value, label).lower()
+    if _GIT_OID_PATTERN.fullmatch(result) is None:
+        raise ValueError(f"{label} must be a Git object id")
+    return result
+
+
+def _require_relative_reference(value: object, label: str) -> str:
+    result = _require_text(value, label)
+    if (
+        not _CHECK_REFERENCE_PATTERN.fullmatch(result)
+        or result.startswith(("/", "\\", "http:", "https:", "file:"))
+        or "\\" in result
+        or "://" in result
+    ):
+        raise ValueError(f"{label} must be a relative local path")
+    path = PurePosixPath(result)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"{label} must be a relative local path")
+    return result
+
+
+def _require_aware_datetime(value: object, label: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{label} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessStartIdentity:
+    pid: int
+    process_group_id: int
+    started_at: datetime
+    nonce: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid <= 0:
+            raise ValueError("process identity pid must be positive")
+        if (
+            isinstance(self.process_group_id, bool)
+            or not isinstance(self.process_group_id, int)
+            or self.process_group_id <= 0
+        ):
+            raise ValueError("process identity process_group_id must be positive")
+        object.__setattr__(
+            self, "started_at", _require_aware_datetime(self.started_at, "process identity started_at")
+        )
+        _require_text(self.nonce, "process identity nonce")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "pid": self.pid,
+            "process_group_id": self.process_group_id,
+            "started_at": self.started_at.isoformat(),
+            "nonce": self.nonce,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ProcessStartIdentity:
+        if not isinstance(value, Mapping):
+            raise TypeError("process identity must be an object")
+        started_at = value.get("started_at")
+        if isinstance(started_at, str):
+            started_at = datetime.fromisoformat(started_at)
+        return cls(
+            pid=value.get("pid"),  # type: ignore[arg-type]
+            process_group_id=value.get("process_group_id"),  # type: ignore[arg-type]
+            started_at=started_at,  # type: ignore[arg-type]
+            nonce=value.get("nonce"),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReportAvailability:
+    path: str
+    status: ReportAvailabilityStatus
+    size_bytes: int | None
+    sha256: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "path", _require_relative_reference(self.path, "report path")
+        )
+        if not isinstance(self.status, ReportAvailabilityStatus):
+            object.__setattr__(
+                self, "status", ReportAvailabilityStatus(self.status)  # type: ignore[arg-type]
+            )
+        if self.size_bytes is not None and (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or self.size_bytes < 0
+        ):
+            raise ValueError("report size_bytes must be non-negative or null")
+        if self.sha256 is not None:
+            object.__setattr__(self, "sha256", _require_hash(self.sha256, "report sha256"))
+        if self.status is ReportAvailabilityStatus.PRESENT and self.sha256 is None:
+            raise ValueError("present report must have a sha256")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "status": self.status.value,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ReportAvailability:
+        if not isinstance(value, Mapping):
+            raise TypeError("report availability must be an object")
+        return cls(
+            path=value.get("path"),  # type: ignore[arg-type]
+            status=ReportAvailabilityStatus(value.get("status")),  # type: ignore[arg-type]
+            size_bytes=value.get("size_bytes"),  # type: ignore[arg-type]
+            sha256=value.get("sha256"),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CheckRunRequest:
+    operation_id: UUID
+    candidate_id: UUID
+    candidate_hash: str
+    actual_commit: str
+    actual_tree: str
+    check: CheckSpecV1
+    workspace_location: Path
+    deadline: datetime
+    log_ref: str
+
+    def __post_init__(self) -> None:
+        _require_uuid(self.operation_id, "check operation_id")
+        _require_uuid(self.candidate_id, "check candidate_id")
+        object.__setattr__(
+            self, "candidate_hash", _require_hash(self.candidate_hash, "check candidate_hash")
+        )
+        object.__setattr__(
+            self, "actual_commit", _require_git_oid(self.actual_commit, "check actual_commit")
+        )
+        object.__setattr__(
+            self, "actual_tree", _require_git_oid(self.actual_tree, "check actual_tree")
+        )
+        if not isinstance(self.check, CheckSpecV1):
+            raise TypeError("check request check must be a CheckSpecV1")
+        if not isinstance(self.workspace_location, Path):
+            raise TypeError("check workspace_location must be a Path")
+        if not self.workspace_location.is_absolute():
+            raise ValueError("check workspace_location must be absolute")
+        object.__setattr__(
+            self, "deadline", _require_aware_datetime(self.deadline, "check deadline")
+        )
+        object.__setattr__(
+            self, "log_ref", _require_relative_reference(self.log_ref, "check log_ref")
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "operation_id": str(self.operation_id),
+            "candidate_id": str(self.candidate_id),
+            "candidate_hash": self.candidate_hash,
+            "actual_commit": self.actual_commit,
+            "actual_tree": self.actual_tree,
+            "check": self.check.to_mapping(),
+            "workspace_location": str(self.workspace_location),
+            "deadline": self.deadline.isoformat(),
+            "log_ref": self.log_ref,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> CheckRunRequest:
+        if not isinstance(value, Mapping):
+            raise TypeError("check request must be an object")
+        deadline = value.get("deadline")
+        if isinstance(deadline, str):
+            deadline = datetime.fromisoformat(deadline)
+        workspace_location = value.get("workspace_location")
+        if isinstance(workspace_location, str):
+            workspace_location = Path(workspace_location)
+        return cls(
+            operation_id=UUID(str(value.get("operation_id"))),
+            candidate_id=UUID(str(value.get("candidate_id"))),
+            candidate_hash=value.get("candidate_hash"),  # type: ignore[arg-type]
+            actual_commit=value.get("actual_commit"),  # type: ignore[arg-type]
+            actual_tree=value.get("actual_tree"),  # type: ignore[arg-type]
+            check=CheckSpecV1.from_mapping(value.get("check")),
+            workspace_location=workspace_location,  # type: ignore[arg-type]
+            deadline=deadline,  # type: ignore[arg-type]
+            log_ref=value.get("log_ref"),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CheckRunObservation:
+    operation_id: UUID
+    status: CheckRunStatus
+    pid: int | None
+    process_start_identity: ProcessStartIdentity | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    exit_code: int | None
+    log_refs: tuple[str, ...]
+    actual_commit: str
+    actual_tree: str
+    source_dirty: bool | None
+    report_availability: tuple[ReportAvailability, ...]
+    failure_code: str | None
+
+    def __post_init__(self) -> None:
+        _require_uuid(self.operation_id, "check observation operation_id")
+        if not isinstance(self.status, CheckRunStatus):
+            object.__setattr__(
+                self, "status", CheckRunStatus(self.status)  # type: ignore[arg-type]
+            )
+        if self.pid is not None and (
+            isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid <= 0
+        ):
+            raise ValueError("check observation pid must be positive or null")
+        if self.process_start_identity is not None and not isinstance(
+            self.process_start_identity, ProcessStartIdentity
+        ):
+            raise TypeError("check observation process identity is invalid")
+        if (
+            self.pid is not None
+            and self.process_start_identity is not None
+            and self.pid != self.process_start_identity.pid
+        ):
+            raise ValueError("check observation pid does not match process identity")
+        for value, label in (
+            (self.started_at, "check observation started_at"),
+            (self.finished_at, "check observation finished_at"),
+        ):
+            if value is not None:
+                _require_aware_datetime(value, label)
+        if self.status is CheckRunStatus.RUNNING and (
+            self.exit_code is not None or self.finished_at is not None
+        ):
+            raise ValueError("running check observation cannot have exit facts")
+        if self.exit_code is not None and isinstance(self.exit_code, bool):
+            raise ValueError("check observation exit_code must be an integer or null")
+        if not isinstance(self.log_refs, tuple):
+            raise TypeError("check observation log_refs must be a tuple")
+        object.__setattr__(
+            self,
+            "log_refs",
+            tuple(_require_relative_reference(item, "check log_ref") for item in self.log_refs),
+        )
+        object.__setattr__(
+            self, "actual_commit", _require_git_oid(self.actual_commit, "check observation actual_commit")
+        )
+        object.__setattr__(
+            self, "actual_tree", _require_git_oid(self.actual_tree, "check observation actual_tree")
+        )
+        if self.source_dirty is not None and not isinstance(self.source_dirty, bool):
+            raise ValueError("check observation source_dirty must be boolean or null")
+        if not isinstance(self.report_availability, tuple):
+            raise TypeError("check observation report_availability must be a tuple")
+        if self.failure_code is not None:
+            _require_text(self.failure_code, "check observation failure_code")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "operation_id": str(self.operation_id),
+            "status": self.status.value,
+            "pid": self.pid,
+            "process_start_identity": (
+                None
+                if self.process_start_identity is None
+                else self.process_start_identity.to_mapping()
+            ),
+            "started_at": None if self.started_at is None else self.started_at.isoformat(),
+            "finished_at": None if self.finished_at is None else self.finished_at.isoformat(),
+            "exit_code": self.exit_code,
+            "log_refs": list(self.log_refs),
+            "actual_commit": self.actual_commit,
+            "actual_tree": self.actual_tree,
+            "source_dirty": self.source_dirty,
+            "report_availability": [item.to_mapping() for item in self.report_availability],
+            "failure_code": self.failure_code,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> CheckRunObservation:
+        if not isinstance(value, Mapping):
+            raise TypeError("check observation must be an object")
+        started_at = value.get("started_at")
+        finished_at = value.get("finished_at")
+        if isinstance(started_at, str):
+            started_at = datetime.fromisoformat(started_at)
+        if isinstance(finished_at, str):
+            finished_at = datetime.fromisoformat(finished_at)
+        identity = value.get("process_start_identity")
+        return cls(
+            operation_id=UUID(str(value.get("operation_id"))),
+            status=CheckRunStatus(value.get("status")),  # type: ignore[arg-type]
+            pid=value.get("pid"),  # type: ignore[arg-type]
+            process_start_identity=(
+                None if identity is None else ProcessStartIdentity.from_mapping(identity)
+            ),
+            started_at=started_at,  # type: ignore[arg-type]
+            finished_at=finished_at,  # type: ignore[arg-type]
+            exit_code=value.get("exit_code"),  # type: ignore[arg-type]
+            log_refs=tuple(value.get("log_refs", ())),  # type: ignore[arg-type]
+            actual_commit=value.get("actual_commit"),  # type: ignore[arg-type]
+            actual_tree=value.get("actual_tree"),  # type: ignore[arg-type]
+            source_dirty=value.get("source_dirty"),  # type: ignore[arg-type]
+            report_availability=tuple(
+                ReportAvailability.from_mapping(item)
+                for item in cast(Sequence[object], value.get("report_availability", ()))
+            ),
+            failure_code=value.get("failure_code"),  # type: ignore[arg-type]
+        )
+
+
+class LocalCheckRunnerPort(Protocol):
+    def start(self, request: CheckRunRequest) -> CheckRunObservation:
+        raise NotImplementedError
+
+    def inspect(self, operation_id: UUID) -> CheckRunObservation | None:
+        raise NotImplementedError
+
+    def stop(self, operation_id: UUID) -> CheckRunObservation | None:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,9 +693,16 @@ class ResultRepositoryPort(Protocol):
 
 __all__ = [
     "CapturedCode",
+    "CheckRunObservation",
+    "CheckRunRequest",
+    "CheckRunStatus",
     "CodeInputReceipt",
     "CodeResultCapturePort",
     "CodeResultMaterializationPort",
+    "LocalCheckRunnerPort",
+    "ProcessStartIdentity",
+    "ReportAvailability",
+    "ReportAvailabilityStatus",
     "ResultApplyOperationV1",
     "ResultError",
     "ResultOperation",
