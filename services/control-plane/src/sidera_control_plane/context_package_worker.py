@@ -171,6 +171,15 @@ class ContextPackageWorker:
                 facts = self._planning_facts(uow, request)
             else:
                 input_selection = self._execution_input_selection(uow, request)
+                if (
+                    request.manifest_schema_version == 3
+                    and request.verification_manifest is not None
+                    and "verification_request_id" not in request.budget
+                ):
+                    raise ContextAssemblyError(
+                        "context_verification_request_missing",
+                        "v3 verification context has no verification request reference",
+                    )
                 if request.code_input_manifest is not None:
                     try:
                         code_input_manifest = resolve_code_inputs(
@@ -346,7 +355,12 @@ class ContextPackageWorker:
         uow: ControlPlaneUnitOfWork,
         request: ContextAssemblyRequest,
     ) -> Mapping[str, object]:
-        execution_request_id = _budget_uuid(request, "execution_request_id")
+        request_budget_key = (
+            "verification_request_id"
+            if request.verification_manifest is not None
+            else "execution_request_id"
+        )
+        execution_request_id = _budget_uuid(request, request_budget_key)
         execution_request = uow.execution_requests.get(
             execution_request_id, request.workspace_id
         )

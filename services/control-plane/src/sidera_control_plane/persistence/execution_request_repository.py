@@ -60,6 +60,7 @@ class ExecutionRequestRepository:
             ExecutionRequestModel.worker_item_key == worker_item_key,
             ExecutionRequestModel.workspace_id == workspace_id,
             ExecutionRequestModel.handoff_transition_id.is_(None),
+            ExecutionRequestModel.result_derivation_kind.is_(None),
         )
         if for_update:
             statement = statement.with_for_update()

@@ -3017,7 +3017,9 @@ class ExecutionRequestModel(TimestampMixin, Base):
             "proposal_revision_id",
             "worker_item_key",
             unique=True,
-            postgresql_where=text("handoff_transition_id IS NULL"),
+            postgresql_where=text(
+                "handoff_transition_id IS NULL AND result_derivation_kind IS NULL"
+            ),
         ),
         Index(
             "uq_execution_requests_handoff_transition",

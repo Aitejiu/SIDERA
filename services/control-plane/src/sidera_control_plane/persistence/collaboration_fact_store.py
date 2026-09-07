@@ -295,6 +295,8 @@ class SqlAlchemyCollaborationFactStore:
                 ExecutionRequestModel.source_execution_id,
                 ExecutionRequestModel.source_session_id,
                 ExecutionRequestModel.handoff_transition_id,
+                ExecutionRequestModel.result_derivation_kind,
+                ExecutionRequestModel.source_candidate_id,
                 ExecutionRequestModel.expected_artifact_refs,
                 ExecutionRequestModel.expected_evidence_refs,
             )
@@ -357,6 +359,8 @@ class SqlAlchemyCollaborationFactStore:
             ExecutionRequestModel.source_execution_id,
             ExecutionRequestModel.source_session_id,
             ExecutionRequestModel.handoff_transition_id,
+            ExecutionRequestModel.result_derivation_kind,
+            ExecutionRequestModel.source_candidate_id,
             ExecutionRequestModel.expected_artifact_refs,
             ExecutionRequestModel.expected_evidence_refs,
             ExecutionRequestModel.plan_generation,
@@ -368,6 +372,10 @@ class SqlAlchemyCollaborationFactStore:
             ExecutionRequestModel.worker_item_id.in_(worker_item_ids),
             ExecutionRequestModel.subtask_task_id.in_(subtask_task_ids),
             ExecutionRequestModel.handoff_transition_id.is_(None),
+            or_(
+                ExecutionRequestModel.result_derivation_kind.is_(None),
+                ExecutionRequestModel.result_derivation_kind != "verification",
+            ),
             ExecutionRequestModel.status.not_in({"cancelled", "obsolete"}),
         )
         if current_request_ids:
@@ -429,6 +437,8 @@ class SqlAlchemyCollaborationFactStore:
             source_execution_id=row.source_execution_id,
             source_session_id=row.source_session_id,
             handoff_transition_id=row.handoff_transition_id,
+            result_derivation_kind=row.result_derivation_kind,
+            source_candidate_id=row.source_candidate_id,
             expected_artifact_refs=_string_tuple(row.expected_artifact_refs),
             expected_evidence_refs=_string_tuple(row.expected_evidence_refs),
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.collaboration_projection import (
@@ -367,6 +367,10 @@ def _current_request_for_worker(
             ExecutionRequestModel.plan_generation == plan_row.generation,
             ExecutionRequestModel.worker_item_id == worker_item_id,
             ExecutionRequestModel.handoff_transition_id.is_(None),
+            or_(
+                ExecutionRequestModel.result_derivation_kind.is_(None),
+                ExecutionRequestModel.result_derivation_kind != "verification",
+            ),
         )
         .order_by(
             ExecutionRequestModel.updated_at.desc(),
@@ -418,6 +422,8 @@ def _request_fact(
         source_execution_id=row.source_execution_id,
         source_session_id=row.source_session_id,
         handoff_transition_id=row.handoff_transition_id,
+        result_derivation_kind=row.result_derivation_kind,
+        source_candidate_id=row.source_candidate_id,
     )
 
 

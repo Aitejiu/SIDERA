@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select, update
 
 from sidera_control_plane.adapters.git_results import GitResultStore
+from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.application.code_result_capture import (
     CodeResultCaptureService,
     code_capture_operation_id,
@@ -27,6 +28,9 @@ from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
 from sidera_control_plane.application.result_integration import ResultIntegrationService
+from sidera_control_plane.application.result_verification import (
+    ResultVerificationService,
+)
 from sidera_control_plane.application.worker_gateway import GatewayMessageError
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.code_results import (
@@ -34,7 +38,10 @@ from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
-from sidera_control_plane.domain.context_packages import ResultInputBudgetV1
+from sidera_control_plane.domain.context_packages import (
+    ContextPurpose,
+    ResultInputBudgetV1,
+)
 from sidera_control_plane.domain.result_operations import TaskResultHead
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
@@ -606,6 +613,53 @@ class ResultIntegrationScenario:
     def adapter_start_count(self, key: str) -> int:
         return self._planning.start_call_count(key)
 
+    @property
+    def verification_service(self) -> ResultVerificationService:
+        return ResultVerificationService(
+            self.uow,
+            clock=lambda: self._planning.now,
+        )
+
+    def request(self, request_id: UUID):
+        with self.uow() as uow:
+            request = uow.execution_requests.get(request_id, self.workspace_id)
+        if request is None:
+            raise AssertionError(f"execution request {request_id} was not found")
+        return request
+
+    def worker_configuration(self, key: str):
+        normalized_key = "summary" if key == "integrate" else key
+        worker_item_id = self.worker_item_ids.get(normalized_key)
+        if worker_item_id is None:
+            raise KeyError(normalized_key)
+        with self.uow() as uow:
+            worker_item = uow.worker_items.get(worker_item_id, self.workspace_id)
+        if worker_item is None:
+            raise AssertionError(f"WorkerItem {normalized_key!r} was not found")
+        return worker_item
+
+    def tick(self, *, limit: int = 20):
+        return ActivationReconciler(
+            uow_factory=self.uow,
+            owner_id="result-verification-activation",
+            clock=lambda: self._planning.now,
+        ).run_once(limit=limit)
+
+    def context_assembly_for_request(self, request_id: UUID):
+        request = self.request(request_id)
+        if request.first_execution_id is None:
+            raise AssertionError("execution request has not been materialized")
+        with self.uow() as uow:
+            assembly = uow.context_assemblies.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                request.first_execution_id,
+                self.workspace_id,
+                manifest_schema_version=3,
+            )
+        if assembly is None:
+            raise AssertionError("execution context assembly was not found")
+        return assembly
+
     def _new_capture_service(self) -> CodeResultCaptureService:
         return CodeResultCaptureService(
             lambda: self.uow(),
@@ -787,7 +841,10 @@ def result_scenario(
     ids = seed_execution_request_facts(database, workspace_id)
     request_id = uuid4()
     with database.session() as session:
-        session.add(request_row(ids, request_id=request_id))
+        legacy_request = request_row(ids, request_id=request_id)
+        legacy_request.status = "obsolete"
+        legacy_request.gate_reason = "result_integration_fixture_legacy_request"
+        session.add(legacy_request)
         session.commit()
     return ResultIntegrationScenario(
         database,

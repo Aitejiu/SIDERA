@@ -3395,6 +3395,11 @@ class WorkerGateway:
     def _audit_start_block_from_message(
         self, message: OutboxMessage, failure_code: str
     ) -> None:
+        # Result-input failures are retriable materialization outcomes, not
+        # workspace binding failures. Keep them out of the workspace operation
+        # so restoring the source body can make the same execution retry.
+        if failure_code in _RESULT_INPUT_FAILURE_CODES:
+            return
         try:
             (
                 workspace_id,

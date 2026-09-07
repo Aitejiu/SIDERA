@@ -85,6 +85,9 @@ def require_verification_runtime(
         raise RuntimeBindingError("verification_provider_required")
     if not runtime.capability_snapshot.supports_verification_version(version):
         raise RuntimeBindingError("verification_capability_unsupported")
+    workspace_capabilities = runtime.workspace_capability_snapshot
+    if workspace_capabilities is None or not workspace_capabilities.git_worktree:
+        raise RuntimeBindingError("verification_workspace_unsupported")
 
 
 class WorkerRuntimeResolver:
@@ -400,7 +403,7 @@ def _resolve(
         "workspace_config_version": configuration.workspace_module_config_version,
     }
     facts.update(_workspace_scope_facts(worker, workspace_instance))
-    return ResolvedWorkerRuntime(
+    resolved = ResolvedWorkerRuntime(
         worker_id=worker.id,
         adapter_type=worker.adapter_type,
         adapter_module_instance_id=adapter_instance.id,
@@ -413,6 +416,22 @@ def _resolve(
         resolution_facts=MappingProxyType(facts),
         workspace_capability_snapshot=workspace_definition.capabilities,
     )
+    if execution is not None and execution.purpose == "verification":
+        try:
+            require_verification_runtime(resolved)
+        except RuntimeBindingError as exc:
+            reason = (
+                SchedulingBlockReason.ADAPTER_MODULE_UNAVAILABLE
+                if exc.code == "verification_provider_required"
+                else SchedulingBlockReason.RUNTIME_CAPABILITY_MISMATCH
+            )
+            return _issue(
+                reason,
+                worker,
+                reason=exc.code,
+                required_verification_version=VERIFICATION_RESULT_VERSION,
+            )
+    return resolved
 
 
 def _workspace_scope_facts(

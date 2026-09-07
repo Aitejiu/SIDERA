@@ -10,8 +10,8 @@ from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
-from sidera_control_plane.domain.collaboration import RuntimeRelease
 from sidera_control_plane.domain.code_results import CodeInputManifestV1
+from sidera_control_plane.domain.collaboration import RuntimeRelease
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextAssemblyStatus,
@@ -502,6 +502,11 @@ def build_execution_context_assembly_request(
 ) -> ContextAssemblyRequest:
     if execution.worker_item_id != worker_item.id:
         raise ValueError("execution and WorkerItem do not match")
+    if (
+        execution_request.result_derivation_kind == "verification"
+        and manifest_schema_version != 3
+    ):
+        raise ValueError("verification execution context requires manifest schema v3")
     if manifest_schema_version == 1:
         if any(
             value is not None
@@ -548,6 +553,10 @@ def build_execution_context_assembly_request(
                 or code_input_manifest.selection_hash != input_selection.selection_hash
             ):
                 raise ValueError("v3 code input manifest scope does not match execution")
+            if execution_request.result_derivation_kind == "verification":
+                raise ValueError(
+                    "verification execution context requires a verification manifest"
+                )
             result_input_budget = result_input_budget or ResultInputBudgetV1()
         elif input_selection is not None or result_input_budget is not None:
             raise ValueError("v3 verification context cannot carry code selection fields")
@@ -555,11 +564,23 @@ def build_execution_context_assembly_request(
             verification_manifest, VerificationManifestV1
         ):
             raise ValueError("v3 verification manifest must be typed")
+        if verification_manifest is not None and (
+            execution_request.result_derivation_kind != "verification"
+            or execution_request.source_candidate_id != verification_manifest.candidate_id
+        ):
+            raise ValueError(
+                "verification manifest scope does not match execution request"
+            )
     else:
         raise ValueError("unsupported execution context manifest schema version")
     profile_id = uuid5(
         EXECUTION_CONTEXT_PROFILE_NAMESPACE,
         f"sidera:execution-context-profile:{execution_request.budget_class}:v1",
+    )
+    request_budget_key = (
+        "verification_request_id"
+        if verification_manifest is not None
+        else "execution_request_id"
     )
     budget = {
         "profile_id": str(profile_id),
@@ -568,7 +589,7 @@ def build_execution_context_assembly_request(
         "max_chars": DEFAULT_CONTEXT_MAX_CHARS,
         "max_input_tokens": DEFAULT_CONTEXT_MAX_INPUT_TOKENS,
         "budget_class": execution_request.budget_class,
-        "execution_request_id": str(execution_request.id),
+        request_budget_key: str(execution_request.id),
         "proposal_revision_id": str(execution_request.proposal_revision_id),
         "plan_id": str(execution_request.plan_snapshot_id),
         "plan_generation": execution_request.plan_generation,

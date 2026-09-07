@@ -139,3 +139,51 @@ def test_runtime_binding_rejects_verification_on_normal_provider() -> None:
 
     with pytest.raises(RuntimeBindingError, match="verification_provider_required"):
         require_verification_runtime(runtime)
+
+
+def test_runtime_binding_rejects_verification_without_git_worktree() -> None:
+    from sidera_control_plane.application.worker_runtime import (
+        ResolvedWorkerRuntime,
+        RuntimeBindingError,
+        require_verification_runtime,
+    )
+    from sidera_control_plane.domain.modules import (
+        CapabilityInput,
+        IdempotencyCapability,
+        ResumeCapability,
+        SandboxCapability,
+        StabilityLevel,
+        StopCapability,
+        WorkerAdapterCapabilityProfile,
+        WorkspaceProviderCapabilityProfile,
+    )
+
+    runtime = ResolvedWorkerRuntime(
+        worker_id=uuid4(),
+        adapter_type=LOCAL_VERIFICATION_PROVIDER,
+        adapter_module_instance_id=uuid4(),
+        adapter_module_config_version=1,
+        workspace_module_instance_id=uuid4(),
+        workspace_module_config_version=1,
+        adapter_definition_id=uuid4(),
+        workspace_definition_id=uuid4(),
+        capability_snapshot=WorkerAdapterCapabilityProfile(
+            input=CapabilityInput.QUEUED,
+            idempotency=IdempotencyCapability.NONE,
+            resume=ResumeCapability.SAME_PROCESS,
+            stop=StopCapability.EXACT_EXECUTION,
+            sandbox=SandboxCapability.FILESYSTEM,
+            stability=StabilityLevel.STABLE,
+            verification_versions=(1,),
+        ),
+        resolution_facts={},
+        workspace_capability_snapshot=WorkspaceProviderCapabilityProfile(
+            isolation=SandboxCapability.ISOLATED_RUNTIME,
+            writable=True,
+            git_worktree=False,
+            stability=StabilityLevel.STABLE,
+        ),
+    )
+
+    with pytest.raises(RuntimeBindingError, match="verification_workspace_unsupported"):
+        require_verification_runtime(runtime)

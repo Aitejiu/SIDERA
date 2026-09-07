@@ -96,6 +96,8 @@ class CollaborationRequestFact:
     source_execution_id: UUID | None = None
     source_session_id: UUID | None = None
     handoff_transition_id: UUID | None = None
+    result_derivation_kind: str | None = None
+    source_candidate_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,6 +732,12 @@ class CollaborationProjectionAssembler:
             "first_execution_id": (
                 str(item.first_execution_id)
                 if item.first_execution_id is not None
+                else None
+            ),
+            "result_derivation_kind": item.result_derivation_kind,
+            "source_candidate_id": (
+                str(item.source_candidate_id)
+                if item.source_candidate_id is not None
                 else None
             ),
             "expected_artifact_refs": list(item.expected_artifact_refs),

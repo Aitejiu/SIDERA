@@ -713,6 +713,7 @@ class ResultInputScenario:
                 config_schema_version=1,
                 capabilities=replace(
                     _CAPTURE_ADAPTER_CAPABILITIES,
+                    context_package_versions=(1, 2, 3),
                     verification_versions=(1,),
                 ),
                 lifecycle=ModuleLifecycle.ACTIVE,

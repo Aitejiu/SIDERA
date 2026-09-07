@@ -24,6 +24,9 @@ from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGateResult,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_verification import (
+    verification_manifest_for_request,
+)
 from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import InvalidTransition
@@ -344,6 +347,11 @@ class ActivationReconciler:
 
         uow.executions.add(execution)
         input_selection = self._context_input_selection(uow, request)
+        verification_manifest = (
+            verification_manifest_for_request(uow, request)
+            if request.result_derivation_kind == "verification"
+            else None
+        )
         uow.context_assemblies.add(
             build_execution_context_assembly_request(
                 execution=execution,
@@ -352,8 +360,15 @@ class ActivationReconciler:
                 work_context_revision=context.work_context_revision,
                 ttl_seconds=self._execution_context_ttl_seconds,
                 created_at=now,
-                manifest_schema_version=2 if input_selection is not None else 1,
+                manifest_schema_version=(
+                    3
+                    if verification_manifest is not None
+                    else 2
+                    if input_selection is not None
+                    else 1
+                ),
                 input_selection=input_selection,
+                verification_manifest=verification_manifest,
             )
         )
         uow.flush()

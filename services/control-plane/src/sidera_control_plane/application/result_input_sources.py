@@ -41,6 +41,7 @@ def resolve_result_input_source(
         and item.worker_item_id == placement.worker_item_id
         and item.subtask_task_id == placement.subtask_task_id
         and item.handoff_transition_id is None
+        and item.result_derivation_kind != "verification"
     )
     if len(current_requests) != 1:
         return _unresolved(
@@ -250,6 +251,7 @@ def _handoff_target(
         and item.worker_item_id == placement.worker_item_id
         and item.subtask_task_id == placement.subtask_task_id
         and item.handoff_transition_id == transition_id
+        and item.result_derivation_kind != "verification"
         and item.execution_lineage_id is not None
     )
     if len(executions) != 1 or len(requests) != 1:
