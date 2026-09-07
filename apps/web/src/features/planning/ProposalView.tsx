@@ -8,6 +8,7 @@ import { ProposalDiff } from "./ProposalDiff";
 import { ProposalGraph } from "./ProposalGraph";
 import { ProposalInputGroups } from "./ProposalInputGroups";
 import { normalizePlanningProposal } from "./proposalTypes";
+import { ResultPlanSummary } from "@/features/results/ResultPlanSummary";
 
 type ProposalViewMode = "architecture" | "graph" | "diff";
 
@@ -48,6 +49,10 @@ export function ProposalView({
         <span className="mono-label">Proposal V{proposal.revision} · Brief V{proposal.brief_revision}</span>
       </div>
       <ProposalDecisionSummary summary={model.decisionSummary} />
+      <ResultPlanSummary
+        proposalSchemaVersion={proposal.proposal_schema_version}
+        integrationSpec={model.displayIntegrationSpec}
+      />
       <div className="planning-proposal__view-switch" role="tablist" aria-label="方案视图">
         <ViewButton mode="architecture" active={mode === "architecture"} label="执行架构" onClick={() => setMode("architecture")} />
         <ViewButton mode="graph" active={mode === "graph"} label="依赖 DAG" onClick={() => setMode("graph")} />

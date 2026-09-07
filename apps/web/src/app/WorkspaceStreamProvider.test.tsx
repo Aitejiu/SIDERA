@@ -80,6 +80,21 @@ async function flushAsyncNotifications(): Promise<void> {
 }
 
 describe("WorkspaceStreamProvider projection matching", () => {
+  it("invalidates only the matching root task result query", () => {
+    const resultChange = change("result_overview", ROOT_TASK_ID);
+
+    expect(matchesProjectionQuery(
+      ["task-results", WORKSPACE_ID, ROOT_TASK_ID],
+      WORKSPACE_ID,
+      resultChange,
+    )).toBe(true);
+    expect(matchesProjectionQuery(
+      ["task-results", WORKSPACE_ID, "another-root"],
+      WORKSPACE_ID,
+      resultChange,
+    )).toBe(false);
+  });
+
   it("targets notification summary, lists, and only the changed thread detail", () => {
     const threadChange = change("notification_thread", THREAD_ID);
 

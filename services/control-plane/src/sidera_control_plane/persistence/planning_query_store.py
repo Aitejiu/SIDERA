@@ -891,7 +891,7 @@ def _safe_proposal_display(
         )
         if key in decision_summary
     }
-    return {
+    display: dict[str, object] = {
         "root_task": plan_template.get("root_task", {}),
         "subtasks": plan_template.get("subtasks", []),
         "worker_items": plan_template.get("worker_items", []),
@@ -903,6 +903,10 @@ def _safe_proposal_display(
         "impact_policy": plan_template.get("impact_policy", {}),
         "collaboration": collaboration.to_mapping(),
     }
+    integration_spec = plan_template.get("integration_spec")
+    if isinstance(integration_spec, Mapping):
+        display["integration_spec"] = dict(integration_spec)
+    return display
 
 
 def _materialization_view(

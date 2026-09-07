@@ -116,6 +116,7 @@ export interface ProposalViewModel {
   impactPolicy: ProposalImpactPolicy;
   diff: ProposalDiffSummary;
   inputGroups: InputGroupDisplay[];
+  displayIntegrationSpec: unknown;
 }
 
 export function normalizePlanningProposal(proposal: PlanningProposal): ProposalViewModel {
@@ -215,6 +216,7 @@ export function normalizePlanningProposal(proposal: PlanningProposal): ProposalV
       blockedWorkerItemKeys: stringList(derivedDiff.blocked_worker_item_keys),
     },
     inputGroups,
+    displayIntegrationSpec: display.integration_spec,
   };
 }
 

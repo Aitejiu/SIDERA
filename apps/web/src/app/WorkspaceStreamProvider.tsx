@@ -12,6 +12,7 @@ import {
 
 import {
   createProjectionStream,
+  RESULT_OVERVIEW_PROJECTION_TYPE,
   type ProjectionChange,
   type ProjectionStream,
   type ProjectionStreamSnapshot,
@@ -259,6 +260,8 @@ export function matchesProjectionQuery(
     case "worker_trace":
       return queryType === "worker-traces" ||
         (queryType === "worker-trace" && matchesResource());
+    case RESULT_OVERVIEW_PROJECTION_TYPE:
+      return queryType === "task-results" && matchesResource();
     case "planning_request":
       return queryType === "planning-requests"
         || (queryType === "planning-request" && matchesResource())

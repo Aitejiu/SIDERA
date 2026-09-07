@@ -5,6 +5,8 @@ export type ProjectionStreamStatus =
   | "resyncing"
   | "offline";
 
+export const RESULT_OVERVIEW_PROJECTION_TYPE = "result_overview" as const;
+
 export interface ProjectionChange {
   workspace_id: string;
   cursor: number;

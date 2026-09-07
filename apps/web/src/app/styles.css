@@ -3033,6 +3033,114 @@ h1 {
   line-height: 1.6;
 }
 
+.result-plan-summary {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px 0 20px;
+  border-bottom: 1px solid var(--structure);
+}
+
+.result-plan-summary__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.result-plan-summary__heading h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+}
+
+.result-plan-summary__disabled {
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  background: var(--canvas);
+}
+
+.result-plan-summary__facts,
+.result-plan-summary__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  min-width: 0;
+  background: var(--structure);
+}
+
+.result-plan-summary__facts > div,
+.result-plan-summary__list,
+.result-plan-summary__revision {
+  min-width: 0;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.result-plan-summary__facts dt,
+.result-plan-summary__list h3,
+.result-plan-summary__revision > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.result-plan-summary__facts dd {
+  margin: 8px 0 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.result-plan-summary__facts small,
+.result-plan-summary__list li span,
+.result-plan-summary__revision li {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.result-plan-summary__list h3 {
+  margin-bottom: 10px;
+}
+
+.result-plan-summary__list ul,
+.result-plan-summary__revision ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 17px;
+}
+
+.result-plan-summary__list li strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.result-plan-summary__revision {
+  border-left: 3px solid var(--dispatch);
+}
+
+@media (max-width: 680px) {
+  .result-plan-summary__facts,
+  .result-plan-summary__columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .planning-input-groups {
   display: grid;
   gap: 14px;

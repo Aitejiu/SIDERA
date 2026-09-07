@@ -9,6 +9,7 @@ const riskLabels: Record<string, string> = {
   dependency_change: "依赖关系发生变化",
   unknown_outcome: "存在外部执行结果未知的分支",
   active_branch_impact: "活动执行分支会受到影响",
+  integration_spec_changed: "成果集成合同发生变化",
 };
 
 export function RevisionDecisionSummary({
