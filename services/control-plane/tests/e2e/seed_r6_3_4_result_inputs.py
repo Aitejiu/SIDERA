@@ -13,6 +13,7 @@ from sidera_control_plane.persistence.models import WorkspaceModel
 from tests.integration.result_input_scenario import (
     PendingResultInputSeed,
     ResultInputScenario,
+    ResultInputWorkerRuntime,
 )
 
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
@@ -48,25 +49,35 @@ def seed_result_input_plan(
     now: datetime = NOW,
     groups: tuple[dict[str, object], ...] | None = None,
     hard_edges: tuple[tuple[str, str], ...] = (),
+    source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
+    max_attempts: int = 2,
     browser_state: bool = False,
+    worker_runtime: ResultInputWorkerRuntime | None = None,
 ) -> tuple[ResultInputSeed, ResultInputScenario]:
     """Create a V5 proposal without confirming or starting any work."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("fixture timestamp must be timezone-aware")
     _ensure_workspace(database, workspace_id, now)
 
-    scenario = ResultInputScenario(database, workspace_id, source_root.parent)
+    scenario = ResultInputScenario(
+        database,
+        workspace_id,
+        source_root.parent,
+        worker_runtime=worker_runtime,
+    )
     scenario.now = now
     pending = scenario.prepare_plan(
         groups=groups,
         hard_edges=hard_edges,
-        max_attempts=2,
+        source_worker_keys=source_worker_keys,
+        max_attempts=max_attempts,
         browser_state=browser_state,
     )
 
     source_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     source_files: dict[str, Path] = {}
-    for key, body in SOURCE_BODIES.items():
+    for key in source_worker_keys:
+        body = SOURCE_BODIES[key]
         path = source_root / SOURCE_FILENAMES[key]
         path.write_bytes(body)
         path.chmod(0o600)

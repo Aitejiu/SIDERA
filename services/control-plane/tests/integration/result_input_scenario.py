@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -62,6 +62,7 @@ from sidera_control_plane.application.handoff_input_transfer import (
     HandoffInputTransferService,
 )
 from sidera_control_plane.application.handoff_target import HandoffTargetService
+from sidera_control_plane.application.input_dispatcher import InputDispatcher
 from sidera_control_plane.application.notification_policy import (
     NotificationPolicyV1,
     NotificationPolicyV2,
@@ -77,6 +78,8 @@ from sidera_control_plane.application.ports import (
     ExactSectionRef,
     KnowledgeCatalogPort,
     SearchHit,
+    WorkerAdapter,
+    WorkspaceProvider,
 )
 from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.work_context_commands import (
@@ -84,6 +87,7 @@ from sidera_control_plane.application.work_context_commands import (
 )
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
+    GatewayExecutionResult,
     GatewayMessageError,
     WorkerGateway,
 )
@@ -479,13 +483,44 @@ class _CaptureWorkspaceProvider:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ResultInputWorkerRuntime:
+    """Inject one bounded adapter/workspace pair into the scenario harness."""
+
+    adapter_provider: str
+    adapter_interface_version: str
+    adapter_capabilities: WorkerAdapterCapabilityProfile
+    adapter_factory: Callable[[ModuleInstance], WorkerAdapter]
+    adapter_config_namespace: str
+    adapter_config: Mapping[str, object]
+    workspace_provider: str
+    workspace_interface_version: str
+    workspace_capabilities: WorkspaceProviderCapabilityProfile
+    workspace_factory: Callable[[ModuleInstance], WorkspaceProvider]
+    workspace_config_namespace: str
+    workspace_config: Mapping[str, object]
+    adapter_config_version: int = 1
+    workspace_config_version: int = 1
+    worker_display_name: str = "Result input injected worker"
+    adapter_instance_name: str = "result-input-injected-adapter"
+    workspace_instance_name: str = "result-input-injected-workspace"
+
+
 class ResultInputScenario:
     """Shared real-persistence harness grown incrementally by R6.3.4 tasks."""
 
-    def __init__(self, database: Database, workspace_id: UUID, tmp_path: Path) -> None:
+    def __init__(
+        self,
+        database: Database,
+        workspace_id: UUID,
+        tmp_path: Path,
+        *,
+        worker_runtime: ResultInputWorkerRuntime | None = None,
+    ) -> None:
         self.database = database
         self.workspace_id = workspace_id
         self.tmp_path = tmp_path
+        self._worker_runtime = worker_runtime
         self.now = FROZEN_NOW
         self.clock: Callable[[], datetime] = lambda: self.now
         self.uow_factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: (
@@ -503,6 +538,9 @@ class ResultInputScenario:
         self._capture_workspace_instance: ModuleInstance | None = None
         self._capture_adapters_by_instance: dict[UUID, _CaptureWorkerAdapter] = {}
         self._capture_workers_by_adapter_instance: dict[UUID, UUID] = {}
+        self._worker_adapters_by_instance: dict[UUID, WorkerAdapter] = {}
+        self._worker_workers_by_adapter_instance: dict[UUID, UUID] = {}
+        self._worker_adapters_by_key: dict[str, list[WorkerAdapter]] = {}
         self.ids: dict[str, UUID] = {
             name: uuid4()
             for name in (
@@ -550,6 +588,7 @@ class ResultInputScenario:
         *,
         groups: tuple[dict[str, object], ...] | None = None,
         hard_edges: tuple[tuple[str, str], ...] = (),
+        source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
         max_attempts: int = 1,
         result_inputs_enabled: bool = True,
         prepare_only: bool = False,
@@ -671,6 +710,7 @@ class ResultInputScenario:
             _proposal_mapping(
                 groups=groups,
                 hard_edges=hard_edges,
+                source_worker_keys=source_worker_keys,
                 max_attempts=max_attempts,
                 browser_state=browser_state,
             )
@@ -743,12 +783,14 @@ class ResultInputScenario:
         *,
         groups: tuple[dict[str, object], ...] | None = None,
         hard_edges: tuple[tuple[str, str], ...] = (),
+        source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
         max_attempts: int = 1,
         browser_state: bool = False,
     ) -> PendingResultInputSeed:
         prepared = self.confirm_plan(
             groups=groups,
             hard_edges=hard_edges,
+            source_worker_keys=source_worker_keys,
             max_attempts=max_attempts,
             browser_state=browser_state,
             prepare_only=True,
@@ -1425,11 +1467,21 @@ class ResultInputScenario:
             binding = uow.bindings.get_for_execution(execution_id, self.workspace_id)
             assert execution is not None
 
+        adapter: WorkerAdapter | None = None
         if execution.status is ExecutionStatus.QUEUED:
-            adapter = _CaptureWorkerAdapter(
-                raise_after_start=start_outcome_unknown,
+            if self._worker_runtime is None:
+                adapter = _CaptureWorkerAdapter(
+                    raise_after_start=start_outcome_unknown,
+                )
+            elif start_outcome_unknown:
+                raise AssertionError(
+                    "unknown start injection is not supported by the real adapter"
+                )
+            _worker_id, adapter_instance_id, _workspace_instance_id = (
+                self._install_capture_runtime(execution_id, adapter)
             )
-            self._install_capture_runtime(execution_id, adapter)
+            if adapter is None:
+                adapter = self._worker_adapters_by_instance[adapter_instance_id]
             scheduled = Scheduler(
                 self.uow_factory,
                 LowestCostWorkerPolicy(),
@@ -1441,23 +1493,35 @@ class ResultInputScenario:
                 target_execution_id=execution_id,
             )
             assert scheduled.assigned == 1
-            self._capture_adapters_by_key.setdefault(key, []).append(adapter)
+            self._worker_adapters_by_key.setdefault(key, []).append(adapter)
+            if isinstance(adapter, _CaptureWorkerAdapter):
+                self._capture_adapters_by_key.setdefault(key, []).append(adapter)
         elif execution.status is ExecutionStatus.LEASED:
             if start_outcome_unknown:
                 raise AssertionError("unknown start injection requires a queued execution")
             assert binding is not None
-            adapter = self._capture_adapters_by_instance.get(binding.adapter_module_id)
+            adapter = self._worker_adapters_by_instance.get(binding.adapter_module_id)
+            if adapter is None and self._worker_runtime is None:
+                capture_adapter = _CaptureWorkerAdapter()
+                adapter = capture_adapter
+                self._worker_adapters_by_instance[binding.adapter_module_id] = adapter
+                self._capture_adapters_by_instance[binding.adapter_module_id] = (
+                    capture_adapter
+                )
+                self._worker_adapters_by_key.setdefault(key, []).append(adapter)
+                self._capture_adapters_by_key.setdefault(key, []).append(
+                    capture_adapter
+                )
             if adapter is None:
-                adapter = _CaptureWorkerAdapter()
-                self._capture_adapters_by_instance[binding.adapter_module_id] = adapter
-                self._capture_adapters_by_key.setdefault(key, []).append(adapter)
+                raise AssertionError("injected WorkerAdapter runtime is unavailable")
         else:
             raise AssertionError(
                 f"cannot start result-input execution in {execution.status.value} state"
             )
 
         message = self._assignment_message(execution_id)
-        self._capture_adapter = adapter
+        if isinstance(adapter, _CaptureWorkerAdapter):
+            self._capture_adapter = adapter
         gateway = self._capture_gateway()
         self._gateway = gateway
         if crash_after_context_ack:
@@ -1472,6 +1536,94 @@ class ResultInputScenario:
             if exc.code in _RESULT_INPUT_GATEWAY_CODES:
                 return exc
             raise
+
+    def complete_injected_worker(
+        self,
+        key: str,
+        *,
+        prompt: str,
+        marker: bytes,
+        max_report_bytes: int = 4_096,
+    ) -> tuple[UUID, ...]:
+        """Run one WorkerItem through an injected adapter and persist its result."""
+
+        if self._worker_runtime is None:
+            raise AssertionError("an injected WorkerAdapter runtime is required")
+        if not prompt.strip() or not marker:
+            raise ValueError("prompt and marker are required")
+        if max_report_bytes < 1:
+            raise ValueError("max_report_bytes must be positive")
+
+        self._ensure_source_executions()
+        self.activate()
+        self.assemble_context(key)
+        started = self.start_worker(key)
+        if not isinstance(started, GatewayExecutionResult):
+            raise TypeError("injected WorkerAdapter did not start the Session")
+
+        self.send_worker_input(key, text=prompt)
+        dispatch = InputDispatcher(
+            self.uow_factory,
+            self._capture_gateway(),
+            clock=self.clock,
+        ).run_once(batch_size=1)
+        if dispatch.delivered != 1 or dispatch.failed or dispatch.blocked:
+            raise AssertionError(f"injected worker input was not delivered: {dispatch}")
+
+        execution_id = self.latest_execution_id(key)
+        with self.uow_factory() as uow:
+            execution = uow.executions.get(execution_id, self.workspace_id)
+            assert execution is not None
+            assert execution.active_lease_id is not None
+            lease = uow.leases.get(execution.active_lease_id, self.workspace_id)
+            session = uow.sessions.get_active_for_execution(execution_id)
+            assert lease is not None
+            assert session is not None
+            worker_id = execution.assigned_worker_id or lease.worker_id
+
+        sync = self._capture_gateway().sync_session(
+            workspace_id=self.workspace_id,
+            execution_id=execution_id,
+            session_id=session.id,
+            lease_id=lease.id,
+            fencing_token=lease.fencing_token,
+        )
+        if not sync.artifact_report.artifacts:
+            raise AssertionError("injected WorkerAdapter produced no Artifact")
+        artifact_ids: list[UUID] = []
+        for artifact in sync.artifact_report.artifacts:
+            body = self.artifact_store.read(artifact.storage_ref)
+            if len(body) > max_report_bytes:
+                raise AssertionError("real result Artifact exceeds the byte limit")
+            if marker in body:
+                artifact_ids.append(artifact.id)
+        if not artifact_ids:
+            raise AssertionError("real result Artifact did not contain its marker")
+
+        with self.uow_factory() as uow:
+            current = uow.executions.get(execution_id, self.workspace_id)
+            assert current is not None
+            execution_version = current.version
+        CommandService(self.uow_factory, (ExecutionCommandHandler(self.clock),)).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ReportExecutionSucceeded",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(worker_id),
+                target_id=execution_id,
+                payload={
+                    "worker_id": str(worker_id),
+                    "lease_id": str(lease.id),
+                    "fencing_token": lease.fencing_token,
+                },
+                expected_version=execution_version,
+                idempotency_key=f"result-input-injected-succeeded:{execution_id}",
+                correlation_id=self.ids["root_task"],
+            )
+        )
+        return tuple(artifact_ids)
 
     def handoff_worker(
         self,
@@ -1629,16 +1781,25 @@ class ResultInputScenario:
         raise AssertionError("handoff did not reach a terminal state")
 
     def _capture_gateway(self) -> WorkerGateway:
+        adapter_factories: dict[str, Callable[[ModuleInstance], WorkerAdapter]] = {
+            "capture": lambda instance: self._worker_adapters_by_instance[instance.id]
+        }
+        workspace_factories: dict[
+            str, Callable[[ModuleInstance], WorkspaceProvider]
+        ] = {
+            "capture-workspace": lambda _instance: self._capture_workspace_provider
+        }
+        if self._worker_runtime is not None:
+            adapter_factories[self._worker_runtime.adapter_provider] = (
+                self._injected_adapter_factory
+            )
+            workspace_factories[self._worker_runtime.workspace_provider] = (
+                self._worker_runtime.workspace_factory
+            )
         return WorkerGateway(
             self.uow_factory,
-            adapter_factories={
-                "capture": lambda instance: self._capture_adapters_by_instance[
-                    instance.id
-                ],
-            },
-            workspace_factories={
-                "capture-workspace": lambda _instance: self._capture_workspace_provider
-            },
+            adapter_factories=adapter_factories,
+            workspace_factories=workspace_factories,
             artifact_content_store=self.artifact_store,
             context_materializer=ContextMaterializer(
                 _EmptyCatalog(),
@@ -1649,6 +1810,16 @@ class ResultInputScenario:
             ),
             clock=self.clock,
         )
+
+    def _injected_adapter_factory(self, instance: ModuleInstance) -> WorkerAdapter:
+        runtime = self._worker_runtime
+        if runtime is None:
+            raise AssertionError("injected WorkerAdapter runtime is unavailable")
+        adapter = self._worker_adapters_by_instance.get(instance.id)
+        if adapter is None:
+            adapter = runtime.adapter_factory(instance)
+            self._worker_adapters_by_instance[instance.id] = adapter
+        return adapter
 
     def captured_context(self, key: str) -> ContextMaterialization:
         adapters = self._capture_adapters_by_key.get(key, ())
@@ -1673,7 +1844,10 @@ class ResultInputScenario:
         attachment_refs: tuple[str, ...] = (),
     ) -> object:
         execution_id = self.latest_execution_id(key)
-        context = self.captured_context(key)
+        if self._worker_runtime is None:
+            context_version = self.captured_context(key).metadata.context_version
+        else:
+            context_version = self.context_package_for_execution(execution_id).context_version
         with self.uow_factory() as uow:
             session = uow.sessions.get_active_for_execution(execution_id)
             snapshot = uow.plans.get_current_for_root(
@@ -1700,7 +1874,7 @@ class ResultInputScenario:
                     "context": {
                         "worker_item_id": str(self.worker_item_ids[key]),
                         "plan_generation": snapshot.generation,
-                        "context_version": context.metadata.context_version,
+                        "context_version": context_version,
                         "execution_id": str(execution_id),
                         "session_id": str(session.id),
                         "session_version": session_version,
@@ -1890,28 +2064,67 @@ class ResultInputScenario:
     def _install_capture_runtime(
         self,
         execution_id: UUID,
-        adapter: _CaptureWorkerAdapter,
+        adapter: WorkerAdapter | None,
         *,
         workspace_mode: str = "managed",
         reuse_workspace_instance: ModuleInstance | None = None,
     ) -> tuple[UUID, UUID, UUID]:
-        workspace_capabilities = WorkspaceProviderCapabilityProfile(
-            isolation=SandboxCapability.FILESYSTEM,
-            writable=True,
-            git_worktree=True,
-            stability=StabilityLevel.STABLE,
-            workspace_handoff_versions=(1,),
-            workspace_transfer_modes=(HandoffTransferMode.REUSE_EXACT,),
-            handoff_inspection=True,
-        )
+        runtime = self._worker_runtime
+        if runtime is None:
+            if not isinstance(adapter, _CaptureWorkerAdapter):
+                raise AssertionError("capture runtime requires a capture adapter")
+            adapter_provider = "capture"
+            adapter_interface_version = "sidera.worker-adapter.v2"
+            adapter_capabilities = adapter._CAPABILITIES
+            adapter_config_namespace = "adapter"
+            adapter_config: Mapping[str, object] = {
+                "adapter.mode": workspace_mode,
+            }
+            adapter_config_version = 1
+            adapter_instance_name = "result-input-capture-adapter"
+            workspace_provider = "capture-workspace"
+            workspace_interface_version = "sidera.workspace-provider.v1"
+            workspace_capabilities = WorkspaceProviderCapabilityProfile(
+                isolation=SandboxCapability.FILESYSTEM,
+                writable=True,
+                git_worktree=True,
+                stability=StabilityLevel.STABLE,
+                workspace_handoff_versions=(1,),
+                workspace_transfer_modes=(HandoffTransferMode.REUSE_EXACT,),
+                handoff_inspection=True,
+            )
+            workspace_config_namespace = "workspace"
+            workspace_config: Mapping[str, object] = {
+                "workspace.repository_ref": "repo://sidera",
+                "workspace.base_revision": "a" * 40,
+            }
+            workspace_config_version = 1
+            workspace_instance_name = "result-input-capture-workspace"
+            worker_display_name = "Result input capture worker"
+        else:
+            adapter_provider = runtime.adapter_provider
+            adapter_interface_version = runtime.adapter_interface_version
+            adapter_capabilities = runtime.adapter_capabilities
+            adapter_config_namespace = runtime.adapter_config_namespace
+            adapter_config = runtime.adapter_config
+            adapter_config_version = runtime.adapter_config_version
+            adapter_instance_name = runtime.adapter_instance_name
+            workspace_provider = runtime.workspace_provider
+            workspace_interface_version = runtime.workspace_interface_version
+            workspace_capabilities = runtime.workspace_capabilities
+            workspace_config_namespace = runtime.workspace_config_namespace
+            workspace_config = runtime.workspace_config
+            workspace_config_version = runtime.workspace_config_version
+            workspace_instance_name = runtime.workspace_instance_name
+            worker_display_name = runtime.worker_display_name
         with self.uow_factory() as uow:
             execution = uow.executions.get(execution_id, self.workspace_id)
             assert execution is not None
             worker = Worker.register(
                 worker_id=uuid4(),
                 workspace_id=self.workspace_id,
-                adapter_type="capture",
-                display_name="Result input capture worker",
+                adapter_type=adapter_provider,
+                display_name=worker_display_name,
                 capabilities=frozenset(execution.capability_requirements),
                 capacity=1,
                 cost_per_hour_microunits=0,
@@ -1922,20 +2135,20 @@ class ResultInputScenario:
                 id=uuid4(),
                 workspace_id=self.workspace_id,
                 module_type="worker_adapter",
-                provider="capture",
-                interface_version="sidera.worker-adapter.v2",
+                provider=adapter_provider,
+                interface_version=adapter_interface_version,
                 config_schema_version=1,
-                capabilities=adapter._CAPABILITIES,
+                capabilities=adapter_capabilities,
                 lifecycle=ModuleLifecycle.ACTIVE,
             )
             adapter_instance = ModuleInstance(
                 id=uuid4(),
                 workspace_id=self.workspace_id,
                 definition_id=adapter_definition.id,
-                instance_name=f"result-input-capture-adapter-{worker.id}",
-                config_version=1,
-                config_namespace="adapter",
-                config={"adapter.mode": workspace_mode},
+                instance_name=f"{adapter_instance_name}-{worker.id}",
+                config_version=adapter_config_version,
+                config_namespace=adapter_config_namespace,
+                config=adapter_config,
                 secret_refs=(),
                 lifecycle=ModuleLifecycle.ACTIVE,
             )
@@ -1944,8 +2157,8 @@ class ResultInputScenario:
                     id=uuid4(),
                     workspace_id=self.workspace_id,
                     module_type="workspace_provider",
-                    provider="capture-workspace",
-                    interface_version="sidera.workspace-provider.v1",
+                    provider=workspace_provider,
+                    interface_version=workspace_interface_version,
                     config_schema_version=1,
                     capabilities=workspace_capabilities,
                     lifecycle=ModuleLifecycle.ACTIVE,
@@ -1954,13 +2167,10 @@ class ResultInputScenario:
                     id=uuid4(),
                     workspace_id=self.workspace_id,
                     definition_id=workspace_definition.id,
-                    instance_name=f"result-input-capture-workspace-{worker.id}",
-                    config_version=1,
-                    config_namespace="workspace",
-                    config={
-                        "workspace.repository_ref": "repo://sidera",
-                        "workspace.base_revision": "a" * 40,
-                    },
+                    instance_name=f"{workspace_instance_name}-{worker.id}",
+                    config_version=workspace_config_version,
+                    config_namespace=workspace_config_namespace,
+                    config=workspace_config,
                     secret_refs=(),
                     lifecycle=ModuleLifecycle.ACTIVE,
                 )
@@ -1979,14 +2189,21 @@ class ResultInputScenario:
                     worker_id=worker.id,
                     workspace_id=self.workspace_id,
                     adapter_module_instance_id=adapter_instance.id,
-                    adapter_module_config_version=1,
+                    adapter_module_config_version=adapter_config_version,
                     workspace_module_instance_id=workspace_instance.id,
-                    workspace_module_config_version=1,
+                    workspace_module_config_version=workspace_config_version,
                 )
             )
-        self._capture_adapters_by_instance[adapter_instance.id] = adapter
-        self._capture_workers_by_adapter_instance[adapter_instance.id] = worker.id
-        if self._capture_workspace_instance is None:
+        if adapter is None:
+            assert runtime is not None
+            adapter = runtime.adapter_factory(adapter_instance)
+        self._worker_adapters_by_instance[adapter_instance.id] = adapter
+        self._worker_workers_by_adapter_instance[adapter_instance.id] = worker.id
+        if runtime is None:
+            assert isinstance(adapter, _CaptureWorkerAdapter)
+            self._capture_adapters_by_instance[adapter_instance.id] = adapter
+            self._capture_workers_by_adapter_instance[adapter_instance.id] = worker.id
+        if runtime is None and self._capture_workspace_instance is None:
             self._capture_workspace_instance = workspace_instance
         return worker.id, adapter_instance.id, workspace_instance.id
 
@@ -2434,7 +2651,8 @@ class ResultInputScenario:
             clock=self.clock,
         ).run_once(limit=20)
         for key in ("a", "b", "c"):
-            assert self._execution_id(key) is not None
+            if key in self.worker_item_ids:
+                assert self._execution_id(key) is not None
 
     def _execution_id(self, key: str) -> UUID | None:
         worker_item_id = self.worker_item_ids[key]
@@ -2526,6 +2744,7 @@ def _proposal_mapping(
     *,
     groups: tuple[dict[str, object], ...] | None,
     hard_edges: tuple[tuple[str, str], ...],
+    source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
     max_attempts: int = 1,
     browser_state: bool = False,
 ) -> dict[str, object]:
@@ -2550,7 +2769,11 @@ def _proposal_mapping(
     summary_worker["key"] = "summary"
     summary_worker["title"] = "Summary worker"
     summary_intent["worker_item_key"] = "summary"
-    for key in ("b", "c"):
+    if not source_worker_keys or source_worker_keys[0] != "a":
+        raise ValueError("source_worker_keys must start with 'a'")
+    if len(set(source_worker_keys)) != len(source_worker_keys):
+        raise ValueError("source_worker_keys must be unique")
+    for key in source_worker_keys[1:]:
         worker = deepcopy(build_worker)
         worker["key"] = key
         worker["title"] = f"Worker {key.upper()}"
@@ -2637,16 +2860,16 @@ def _proposal_mapping(
         }
         for upstream, downstream in hard_edges
     ]
+    default_candidates = [
+        {"worker_item_key": key, "priority": priority}
+        for priority, key in enumerate(source_worker_keys, start=1)
+    ]
     default_groups = (
         {
             "group_key": "research",
             "title": "Research results",
             "consumer_worker_item_key": "summary",
-            "candidates": [
-                {"worker_item_key": "a", "priority": 1},
-                {"worker_item_key": "b", "priority": 2},
-                {"worker_item_key": "c", "priority": 3},
-            ],
+            "candidates": default_candidates,
             "requirements": {
                 "execution_status": "succeeded",
                 "required_artifact_refs": ["artifact_type:build"],
