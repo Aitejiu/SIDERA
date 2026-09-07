@@ -21,6 +21,7 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerResult,
     PlannerRunControl,
 )
+from sidera_control_plane.application.result_ports import ResultRepositoryPort
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -2470,6 +2471,7 @@ class ControlPlaneUnitOfWork(Protocol):
     context_packages: ContextPackageRepositoryPort
     knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
     notifications: NotificationLedger
+    results: ResultRepositoryPort
 
     def flush(self) -> None:
         raise NotImplementedError

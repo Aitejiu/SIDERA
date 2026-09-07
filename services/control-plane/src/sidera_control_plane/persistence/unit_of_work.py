@@ -45,6 +45,7 @@ from sidera_control_plane.application.ports import (
     PlanTransitionRepositoryPort,
     ProjectionChangePublisherPort,
     ProposalMaterializationRepositoryPort,
+    ResultRepositoryPort,
     SchedulingBlockRepositoryPort,
     SessionRepositoryPort,
     TaskRepositoryPort,
@@ -134,6 +135,7 @@ from sidera_control_plane.persistence.repositories import (
     EventRepository,
     TaskRepository,
 )
+from sidera_control_plane.persistence.result_repository import ResultRepository
 from sidera_control_plane.persistence.scheduling_block_repository import (
     SqlAlchemySchedulingBlockRepository,
 )
@@ -200,6 +202,7 @@ class SqlAlchemyUnitOfWork:
     knowledge_candidate_submissions: KnowledgeCandidateSubmissionRepositoryPort
     notifications: NotificationLedger
     notification_observations: NotificationObservationStore
+    results: ResultRepositoryPort
 
     def __init__(
         self, database: Database, *, projection_change_retention_seconds: int = 604_800
@@ -283,6 +286,7 @@ class SqlAlchemyUnitOfWork:
         self.notification_observations = SqlAlchemyNotificationObservationStore(
             self.session
         )
+        self.results = ResultRepository(self.session)
         return self
 
     def __exit__(
