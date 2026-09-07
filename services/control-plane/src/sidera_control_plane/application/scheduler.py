@@ -115,7 +115,13 @@ class Scheduler:
         self._context_enforcement = context_enforcement
         self._context_package_cutover_at = context_package_cutover_at
 
-    def run_once(self, limit: int) -> SchedulerRunResult:
+    def run_once(
+        self,
+        limit: int,
+        *,
+        workspace_id: UUID | None = None,
+        target_execution_id: UUID | None = None,
+    ) -> SchedulerRunResult:
         if limit < 1:
             raise ValueError("limit must be positive")
         examined = 0
@@ -123,9 +129,17 @@ class Scheduler:
         deferred = 0
         deferred_ids: set[UUID] = set()
         for _ in range(limit):
-            item_examined, item_assigned, item_deferred, execution_id = (
-                self._assign_one(excluded_ids=frozenset(deferred_ids))
-            )
+            if workspace_id is None and target_execution_id is None:
+                assignment = self._assign_one(
+                    excluded_ids=frozenset(deferred_ids),
+                )
+            else:
+                assignment = self._assign_one(
+                    excluded_ids=frozenset(deferred_ids),
+                    workspace_id=workspace_id,
+                    target_execution_id=target_execution_id,
+                )
+            item_examined, item_assigned, item_deferred, execution_id = assignment
             examined += item_examined
             assigned += item_assigned
             deferred += item_deferred
@@ -142,12 +156,24 @@ class Scheduler:
         )
 
     def _assign_one(
-        self, *, excluded_ids: Collection[UUID]
+        self,
+        *,
+        excluded_ids: Collection[UUID],
+        workspace_id: UUID | None = None,
+        target_execution_id: UUID | None = None,
     ) -> tuple[int, int, int, UUID | None]:
-        return self._assign_one_transaction(excluded_ids=excluded_ids)
+        return self._assign_one_transaction(
+            excluded_ids=excluded_ids,
+            workspace_id=workspace_id,
+            target_execution_id=target_execution_id,
+        )
 
     def _assign_one_transaction(
-        self, *, excluded_ids: Collection[UUID]
+        self,
+        *,
+        excluded_ids: Collection[UUID],
+        workspace_id: UUID | None = None,
+        target_execution_id: UUID | None = None,
     ) -> tuple[int, int, int, UUID | None]:
         now = self._clock()
         assignment_started_at = self._monotonic_clock()
@@ -158,6 +184,8 @@ class Scheduler:
                     now=now,
                     limit=1,
                     excluded_ids=excluded_ids,
+                    workspace_id=workspace_id,
+                    target_execution_id=target_execution_id,
                 )
                 if not claimed:
                     return 0, 0, 0, None

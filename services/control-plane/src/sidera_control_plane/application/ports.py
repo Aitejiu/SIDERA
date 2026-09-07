@@ -1667,6 +1667,8 @@ class ExecutionRepositoryPort(Protocol):
         now: datetime,
         limit: int,
         excluded_ids: Collection[UUID] = (),
+        workspace_id: UUID | None = None,
+        target_execution_id: UUID | None = None,
     ) -> tuple[Execution, ...]:
         raise NotImplementedError
 

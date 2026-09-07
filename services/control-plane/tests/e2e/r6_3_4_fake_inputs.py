@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 
+from sidera_control_plane.domain.execution import ExecutionStatus
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ArtifactModel,
@@ -82,7 +83,10 @@ def _dispatch(
         if (root / STATE_FILENAME).exists():
             raise DriverError("seed_state_exists")
         seed, _scenario = seed_result_input_plan(
-            database, workspace_id, root / "sources"
+            database,
+            workspace_id,
+            root / "sources",
+            browser_state=os.environ.get("SIDERA_R6_3_4_BROWSER_STATE") == "1",
         )
         state = _new_state(seed, root)
         _write_state(root, state)
@@ -90,8 +94,12 @@ def _dispatch(
 
     state = _read_state(root, workspace_id)
     if action == "prepare-browser":
+        if state["phase"] == "browser_ready":
+            return _public_state(state, action)
         if state["phase"] != "pending_confirmation":
             raise DriverError("browser_prepare_requires_pending_confirmation")
+        if state.get("browser_fixture") is True:
+            return _prepare_browser(database, workspace_id, root, state, action)
         return _public_state(
             {
                 **state,
@@ -106,6 +114,33 @@ def _dispatch(
     if action == "inspect":
         return _inspect(database, workspace_id, root, state, action)
     raise DriverError("unsupported_action")
+
+
+def _prepare_browser(
+    database: Database,
+    workspace_id: UUID,
+    root: Path,
+    state: Mapping[str, Any],
+    action: str,
+) -> dict[str, object]:
+    pending = pending_from_mapping(state["pending"])
+    scenario = ResultInputScenario(database, workspace_id, root)
+    scenario.now = scenario.now.replace(year=2026, month=9, day=7)
+    scenario.load_pending_confirmation(pending)
+    scenario.confirm_prepared_plan()
+    scenario.pause_release("approval-worker")
+    scenario.complete_source("b", body=SOURCE_BODIES["b"])
+    scenario.complete_source("c", body=SOURCE_BODIES["c"])
+    scenario.reconcile()
+    try:
+        scenario.pending_proposal("approval-worker")
+    except AssertionError as exc:
+        raise DriverError("browser_approval_proposal_was_not_created") from exc
+    scenario.activate()
+    updated = _materialized_state(state, scenario, phase="browser_ready")
+    updated["browser_state"] = "awaiting_confirmation"
+    _write_state(root, updated)
+    return _public_state(updated, action)
 
 
 def _finish_late_source(
@@ -149,15 +184,26 @@ def _recover_body(
         scenario.complete_source("b", body=SOURCE_BODIES["b"])
         scenario.complete_source("c", body=SOURCE_BODIES["c"])
         scenario.reconcile()
-    elif state["phase"] != "late_source_ready":
-        raise DriverError("body_recovery_requires_late_source")
-    else:
+    elif state["phase"] in {"late_source_ready", "browser_ready"}:
         request_id = _state_uuid(state, "planning_request_id")
         scenario.load_materialized_plan(request_id)
+    else:
+        raise DriverError("body_recovery_requires_late_source")
     scenario.activate()
     scenario.assemble_context("summary")
-    if scenario._execution_id("a") is None:
+    source_a_execution_id = scenario._execution_id("a")
+    if source_a_execution_id is None:
         scenario.complete_source("a", body=SOURCE_BODIES["a"])
+    else:
+        with scenario.uow_factory() as uow:
+            source_a_execution = uow.executions.get(
+                source_a_execution_id,
+                workspace_id,
+            )
+        if source_a_execution is None:
+            raise DriverError("source_a_execution_disappeared")
+        if source_a_execution.status is not ExecutionStatus.SUCCEEDED:
+            scenario.complete_source("a", body=SOURCE_BODIES["a"])
     artifact_id = scenario.source_artifact_id("b")
     with database.session() as session:
         artifact = session.get(ArtifactModel, artifact_id)
@@ -168,6 +214,9 @@ def _recover_body(
     blocked = scenario.start_worker("summary")
     if getattr(blocked, "code", None) != "result_input_unavailable":
         raise DriverError("body_failure_was_not_observed")
+    if state.get("browser_fixture") is True:
+        scenario.run_notifications()
+        scenario.run_notifications()
     scenario.artifact_store.put(
         workspace_id,
         scenario.latest_execution_id("b"),
@@ -177,6 +226,9 @@ def _recover_body(
     started = scenario.start_worker("summary")
     if getattr(started, "session_id", None) is None:
         raise DriverError("body_recovery_did_not_start")
+    if state.get("browser_fixture") is True:
+        scenario.run_notifications()
+        scenario.run_notifications()
     updated = _materialized_state(state, scenario, phase="recovered")
     _write_state(root, updated)
     return _public_state(updated, action)
@@ -241,6 +293,7 @@ def _new_state(seed: ResultInputSeed, root: Path) -> dict[str, object]:
         "schema_version": 1,
         "workspace_id": str(seed.pending.workspace_id),
         "phase": "pending_confirmation",
+        "browser_fixture": os.environ.get("SIDERA_R6_3_4_BROWSER_STATE") == "1",
         "pending": seed.pending.to_mapping(),
         "source_files": {
             key: str(path.relative_to(root))

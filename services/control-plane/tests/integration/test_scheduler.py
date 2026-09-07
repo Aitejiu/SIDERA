@@ -320,6 +320,43 @@ def test_scheduler_assigns_atomically_and_records_auditable_facts(
     }
 
 
+def test_scheduler_can_scope_claims_to_one_workspace(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    other_workspace_id = uuid4()
+    add_workspace(database, other_workspace_id, "Other scheduler workspace")
+    _target_task, _target_workers, target_execution = seed_scheduler_case(
+        database,
+        workspace_id,
+        worker_specs=(WorkerSpec("target worker", frozenset({"code", "python"})),),
+    )
+    _other_task, _other_workers, other_execution = seed_scheduler_case(
+        database,
+        other_workspace_id,
+        worker_specs=(WorkerSpec("other worker", frozenset({"code", "python"})),),
+    )
+
+    result = make_scheduler(database).run_once(
+        limit=10,
+        workspace_id=workspace_id,
+        target_execution_id=target_execution.id,
+    )
+
+    assert result.examined == 1
+    assert result.assigned == 1
+    assert result.deferred == 0
+    with database.session() as session:
+        target_status = session.scalar(
+            select(ExecutionModel.status).where(ExecutionModel.id == target_execution.id)
+        )
+        other_status = session.scalar(
+            select(ExecutionModel.status).where(ExecutionModel.id == other_execution.id)
+        )
+    assert target_status == ExecutionStatus.LEASED.value
+    assert other_status == ExecutionStatus.QUEUED.value
+
+
 @pytest.mark.parametrize(
     "worker_spec",
     [

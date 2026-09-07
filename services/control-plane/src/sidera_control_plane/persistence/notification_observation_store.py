@@ -632,10 +632,15 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             subject_id = str(execution_request.id)
         deep_link = f"/workspaces/{change.workspace_id}/tasks/{root_task.id}"
         if worker_item is not None:
-            deep_link += f"/worker-items/{worker_item.id}"
+            deep_link = (
+                f"/workspaces/{change.workspace_id}/worker-items/{worker_item.id}"
+            )
         elif planning_request is not None:
             deep_link += f"?planning_request={planning_request.id}"
-        if subject_type == NotificationObservationSubjectType.EXECUTION_REQUEST.value:
+        if (
+            subject_type == NotificationObservationSubjectType.EXECUTION_REQUEST.value
+            and execution_request is not None
+        ):
             separator = "&" if "?" in deep_link else "?"
             deep_link += f"{separator}execution_request={execution_request.id}"
 

@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 import { test as base, type Page } from "@playwright/test";
 
@@ -60,6 +63,18 @@ export type R6CollaborationSeed = {
   request_ids: Record<string, string>;
   worker_ids: Record<string, string>;
 };
+export type R6ResultInputSeed = {
+  workspace_id: string;
+  root_task_id: string;
+  summary_worker_item_id: string;
+  source_worker_item_ids: string[];
+};
+export type R6ResultInputAction =
+  | "seed"
+  | "prepare-browser"
+  | "finish-late-source"
+  | "recover-body"
+  | "inspect";
 
 const webRoot = resolve(import.meta.dirname, "../..");
 const repositoryRoot = resolve(webRoot, "../..");
@@ -73,11 +88,13 @@ const collaborationSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_3_1
 const collaborationRuntimeScript = resolve(controlPlaneRoot, "tests/e2e/r6_3_1_fake_runtime.py");
 const governanceSeedScript = resolve(controlPlaneRoot, "tests/e2e/seed_r6_3_2_governance.py");
 const governanceRuntimeScript = resolve(controlPlaneRoot, "tests/e2e/r6_3_2_governance_runtime.py");
+const resultInputRuntimeModule = "tests.e2e.r6_3_4_fake_inputs";
 const defaultPython = resolve(controlPlaneRoot, ".venv/bin/python");
 const knowledgeServiceRoot = resolve(repositoryRoot, "services/knowledge-service");
 const knowledgeSeedScript = resolve(knowledgeServiceRoot, "tests/e2e/seed_r5_3_knowledge.py");
 const knowledgeDefaultPython = resolve(knowledgeServiceRoot, ".venv/bin/python");
 const defaultContextPackageCutoverAt = "2026-08-27T00:00:00+08:00";
+const resultInputRoots = new Map<string, string>();
 
 export function seedR4Workspace(scenario: SeedScenario = "task-first"): void {
   execFileSync(
@@ -233,6 +250,39 @@ export function runR6GovernanceAfterPause(
   return runGovernanceRuntime(workspaceId);
 }
 
+export function seedR6ResultInputs(
+  workspaceId: string,
+  root: string,
+): R6ResultInputSeed {
+  runR6ResultInputAction(workspaceId, root, "seed");
+  const state = runR6ResultInputAction(workspaceId, root, "prepare-browser");
+  const rootTaskId = requiredStateString(state, "root_task_id");
+  const workerItemIds = requiredStateRecord(state, "worker_item_ids");
+  const summaryWorkerItemId = requiredRecordString(workerItemIds, "summary");
+  const sourceWorkerItemIds = ["a", "b", "c"].map((key) => requiredRecordString(workerItemIds, key));
+  return {
+    workspace_id: workspaceId,
+    root_task_id: rootTaskId,
+    summary_worker_item_id: summaryWorkerItemId,
+    source_worker_item_ids: sourceWorkerItemIds,
+  };
+}
+
+export function prepareR6ResultInputsBrowser(workspaceId: string): Record<string, unknown> {
+  return runR6ResultInputActionForWorkspace(workspaceId, "prepare-browser");
+}
+
+export function runR6ResultInputActionForWorkspace(
+  workspaceId: string,
+  action: R6ResultInputAction,
+): Record<string, unknown> {
+  const root = resultInputRoots.get(workspaceId);
+  if (root === undefined) {
+    throw new Error(`R6.3.4 result-input workspace is not registered: ${workspaceId}`);
+  }
+  return runR6ResultInputAction(workspaceId, root, action);
+}
+
 export function seedKnowledge(workspaceId: string = WORKSPACE_ID): void {
   execFileSync(
     process.env.SIDERA_E2E_KNOWLEDGE_PYTHON ?? knowledgeDefaultPython,
@@ -376,6 +426,64 @@ function runGovernanceRuntime(
     throw new Error("R6.3.2 governance runtime returned a non-object summary");
   }
   return parsed as Record<string, unknown>;
+}
+
+function runR6ResultInputAction(
+  workspaceId: string,
+  root: string,
+  action: R6ResultInputAction,
+): Record<string, unknown> {
+  const output = execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    ["-m", resultInputRuntimeModule, "--workspace-id", workspaceId, "--action", action],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: {
+        ...e2eEnvironment(),
+        SIDERA_R6_3_4_TEST_MODE: "1",
+        SIDERA_R6_3_4_BROWSER_STATE: "1",
+        SIDERA_R6_3_4_TEST_ROOT: root,
+      },
+      encoding: "utf8",
+    },
+  );
+  const lastLine = output.trim().split(/\r?\n/).at(-1);
+  if (lastLine === undefined || lastLine.length === 0) {
+    throw new Error(`R6.3.4 result-input action ${action} did not return a JSON summary`);
+  }
+  const parsed: unknown = JSON.parse(lastLine);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`R6.3.4 result-input action ${action} returned a non-object summary`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function requiredStateString(state: Record<string, unknown>, key: string): string {
+  const value = state[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`R6.3.4 result-input state is missing ${key}`);
+  }
+  return value;
+}
+
+function requiredStateRecord(
+  state: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const value = state[key];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`R6.3.4 result-input state is missing record ${key}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredRecordString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`R6.3.4 result-input state is missing worker ${key}`);
+  }
+  return value;
 }
 
 function runControlPlaneOnce(moduleName: string): Record<string, unknown> {
@@ -525,6 +633,12 @@ type Fixtures = {
   runR6GovernanceOnce: (workspaceId?: string) => Record<string, unknown>;
   prepareR6GovernanceBrowser: (workspaceId?: string) => Record<string, unknown>;
   runR6GovernanceAfterPause: (workspaceId?: string) => Record<string, unknown>;
+  seedR6ResultInputs: () => R6ResultInputSeed;
+  prepareR6ResultInputsBrowser: (workspaceId: string) => Record<string, unknown>;
+  runR6ResultInputAction: (
+    workspaceId: string,
+    action: R6ResultInputAction,
+  ) => Record<string, unknown>;
   seedKnowledge: (workspaceId?: string) => void;
 };
 
@@ -594,6 +708,32 @@ export const test = base.extend<Fixtures>({
     // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(runR6GovernanceAfterPause);
+  },
+  seedR6ResultInputs: async ({ browserName }, use) => {
+    void browserName;
+    const workspaceId = randomUUID();
+    const root = mkdtempSync(join(tmpdir(), "sidera-r6-3-4-result-inputs-"));
+    resultInputRoots.set(workspaceId, root);
+    try {
+      // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+      // eslint-disable-next-line react-hooks/rules-of-hooks
+      await use(() => seedR6ResultInputs(workspaceId, root));
+    } finally {
+      resultInputRoots.delete(workspaceId);
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  prepareR6ResultInputsBrowser: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(prepareR6ResultInputsBrowser);
+  },
+  runR6ResultInputAction: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(runR6ResultInputActionForWorkspace);
   },
   seedKnowledge: async ({ browserName }, use) => {
     void browserName;

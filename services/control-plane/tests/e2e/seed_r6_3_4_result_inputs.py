@@ -48,6 +48,7 @@ def seed_result_input_plan(
     now: datetime = NOW,
     groups: tuple[dict[str, object], ...] | None = None,
     hard_edges: tuple[tuple[str, str], ...] = (),
+    browser_state: bool = False,
 ) -> tuple[ResultInputSeed, ResultInputScenario]:
     """Create a V5 proposal without confirming or starting any work."""
     if now.tzinfo is None or now.utcoffset() is None:
@@ -60,6 +61,7 @@ def seed_result_input_plan(
         groups=groups,
         hard_edges=hard_edges,
         max_attempts=2,
+        browser_state=browser_state,
     )
 
     source_root.mkdir(mode=0o700, parents=True, exist_ok=True)

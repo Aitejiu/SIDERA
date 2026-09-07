@@ -337,6 +337,34 @@ def test_subtask_workspace_change_preserves_root_and_subtask_identity(
         assert fact.root_task_id == root_task.id
         assert fact.subtask_id == subtask.id
 
+    with SqlAlchemyUnitOfWork(database) as uow:
+        uow.projection_changes.changed(
+            workspace_id=workspace_id,
+            projection_type="worker_item_workspace",
+            resource_id=worker_item_id,
+            change_type="worker_item_attention",
+            resource_version=1,
+            correlation_id=uuid4(),
+        )
+
+    second = NotificationReconciler(
+        uow_factory, clock=lambda: NOW, owner="worker-item-reconciler"
+    ).reconcile_workspace(workspace_id)
+
+    assert second.facts_created == 1
+    with database.session() as session:
+        fact = session.scalar(
+            select(NotificationFactModel).where(
+                NotificationFactModel.worker_item_id == worker_item_id
+            )
+        )
+        assert fact is not None
+        assert fact.root_task_id == root_task.id
+        assert fact.subtask_id == subtask.id
+        assert fact.deep_link == (
+            f"/workspaces/{workspace_id}/worker-items/{worker_item_id}"
+        )
+
 
 @pytest.mark.parametrize(
     "failure_stage", ("after_fact", "after_thread", "before_cursor")

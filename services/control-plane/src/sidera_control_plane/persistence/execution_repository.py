@@ -186,6 +186,8 @@ class ExecutionRepository:
         now: datetime,
         limit: int,
         excluded_ids: Collection[UUID] = (),
+        workspace_id: UUID | None = None,
+        target_execution_id: UUID | None = None,
     ) -> tuple[Execution, ...]:
         statement = (
             select(ExecutionModel)
@@ -203,6 +205,10 @@ class ExecutionRepository:
                 TaskModel.status.in_(("ready", "running")),
             )
         )
+        if workspace_id is not None:
+            statement = statement.where(ExecutionModel.workspace_id == workspace_id)
+        if target_execution_id is not None:
+            statement = statement.where(ExecutionModel.id == target_execution_id)
         if excluded_ids:
             statement = statement.where(ExecutionModel.id.not_in(tuple(excluded_ids)))
         statement = (

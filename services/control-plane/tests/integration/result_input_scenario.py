@@ -553,6 +553,7 @@ class ResultInputScenario:
         max_attempts: int = 1,
         result_inputs_enabled: bool = True,
         prepare_only: bool = False,
+        browser_state: bool = False,
     ) -> PendingResultInputSeed | None:
         planner_capability = replace(
             planner_capabilities(), proposal_schema_versions=(5,)
@@ -671,6 +672,7 @@ class ResultInputScenario:
                 groups=groups,
                 hard_edges=hard_edges,
                 max_attempts=max_attempts,
+                browser_state=browser_state,
             )
         )
         with self.uow_factory() as uow:
@@ -742,11 +744,13 @@ class ResultInputScenario:
         groups: tuple[dict[str, object], ...] | None = None,
         hard_edges: tuple[tuple[str, str], ...] = (),
         max_attempts: int = 1,
+        browser_state: bool = False,
     ) -> PendingResultInputSeed:
         prepared = self.confirm_plan(
             groups=groups,
             hard_edges=hard_edges,
             max_attempts=max_attempts,
+            browser_state=browser_state,
             prepare_only=True,
         )
         assert prepared is not None
@@ -1431,7 +1435,11 @@ class ResultInputScenario:
                 LowestCostWorkerPolicy(),
                 self.clock,
                 context_enforcement=True,
-            ).run_once(limit=20)
+            ).run_once(
+                limit=1,
+                workspace_id=self.workspace_id,
+                target_execution_id=execution_id,
+            )
             assert scheduled.assigned == 1
             self._capture_adapters_by_key.setdefault(key, []).append(adapter)
         elif execution.status is ExecutionStatus.LEASED:
@@ -2519,6 +2527,7 @@ def _proposal_mapping(
     groups: tuple[dict[str, object], ...] | None,
     hard_edges: tuple[tuple[str, str], ...],
     max_attempts: int = 1,
+    browser_state: bool = False,
 ) -> dict[str, object]:
     raw = proposal_v5_mapping()
     worker_items = raw["worker_items"]
@@ -2549,6 +2558,74 @@ def _proposal_mapping(
         intent = deepcopy(build_intent)
         intent["worker_item_key"] = key
         intents.append(intent)
+
+    if browser_state:
+        subtasks = raw["subtasks"]
+        milestones = raw["milestones"]
+        assert isinstance(subtasks, list)
+        assert isinstance(milestones, list)
+        subtasks.append(
+            {
+                "key": "integration-gate",
+                "kind": "child",
+                "title": "Integration gate",
+                "goal_summary": "Wait for the independent integration result.",
+                "acceptance_refs": ["acceptance:integration"],
+                "expected_outputs": ["artifact_type:build"],
+                "milestone_key": "m3",
+                "source_refs": ["brief:1"],
+            }
+        )
+        milestones.append(
+            {
+                "key": "m3",
+                "title": "Integration gate",
+                "subtask_keys": ["integration-gate"],
+                "acceptance_refs": ["acceptance:integration"],
+                "order_hint": 3,
+            }
+        )
+
+        source_d = deepcopy(build_worker)
+        source_d["key"] = "d"
+        source_d["title"] = "Worker D"
+        source_d["responsibility"] = "Produce the independent integration result."
+        worker_items.append(source_d)
+        source_d_intent = deepcopy(build_intent)
+        source_d_intent["worker_item_key"] = "d"
+        source_d_intent["purpose"] = "Produce the independent integration result."
+        intents.append(source_d_intent)
+
+        approval_worker = deepcopy(summary_worker)
+        approval_worker["key"] = "approval-worker"
+        approval_worker["title"] = "Approval worker"
+        approval_worker["role"] = "approver"
+        approval_worker["responsibility"] = "Review the fixed result selection."
+        worker_items.append(approval_worker)
+        approval_intent = deepcopy(summary_intent)
+        approval_intent["worker_item_key"] = "approval-worker"
+        approval_intent["purpose"] = "Review the fixed result selection."
+        intents.append(approval_intent)
+
+        integration_worker = deepcopy(summary_worker)
+        integration_worker["key"] = "integration-gate-worker"
+        integration_worker["subtask_key"] = "integration-gate"
+        integration_worker["title"] = "Integration gate worker"
+        integration_worker["role"] = "integrator"
+        integration_worker["responsibility"] = "Wait for the independent integration result."
+        worker_items.append(integration_worker)
+        integration_intent = deepcopy(summary_intent)
+        integration_intent["worker_item_key"] = "integration-gate-worker"
+        integration_intent["purpose"] = "Wait for the independent integration result."
+        integration_intent["activation_dependencies"] = [
+            {
+                "upstream_worker_item_key": "d",
+                "downstream_worker_item_key": "integration-gate-worker",
+                "kind": "hard",
+                "required_artifact_refs": ["artifact_type:build"],
+            }
+        ]
+        intents.append(integration_intent)
     for intent in intents:
         intent["max_attempts"] = max_attempts
     summary_intent["activation_dependencies"] = [
@@ -2581,9 +2658,35 @@ def _proposal_mapping(
             "selection_strategy": "plan_order",
         },
     )
+    browser_groups = (
+        *default_groups,
+        {
+            "group_key": "approval-review",
+            "title": "Approval review",
+            "consumer_worker_item_key": "approval-worker",
+            "candidates": [
+                {"worker_item_key": "b", "priority": 1},
+                {"worker_item_key": "c", "priority": 2},
+            ],
+            "requirements": {
+                "execution_status": "succeeded",
+                "required_artifact_refs": ["artifact_type:build"],
+                "required_evidence_refs": ["acceptance:build"],
+                "evidence_status": "candidate",
+            },
+            "mode": "at_least",
+            "minimum_count": 2,
+            "selection_strategy": "plan_order",
+        },
+    )
     policy = raw["collaboration_policy_request"]
     assert isinstance(policy, dict)
-    selected_groups = default_groups if groups is None else groups
+    if browser_state and groups is None:
+        selected_groups = browser_groups
+    elif groups is None:
+        selected_groups = default_groups
+    else:
+        selected_groups = groups
     policy["input_groups"] = [deepcopy(item) for item in selected_groups]
     return raw
 
