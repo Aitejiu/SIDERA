@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from sidera_control_plane.domain.code_results import (
@@ -21,6 +23,93 @@ from sidera_control_plane.domain.result_verification import (
     TaskAcceptanceDecisionV1,
     VerificationResultV1,
 )
+
+if TYPE_CHECKING:
+    from sidera_control_plane.domain.workspace import ExecutionWorkspaceManifest
+
+
+_GIT_OID_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedCode:
+    """Immutable receipt for a Git result captured from one execution workspace."""
+
+    operation_id: UUID
+    repository_ref: str
+    input_commit: str
+    input_tree: str
+    result_commit: str
+    result_tree: str
+    observed_agent_head: str
+    receipt_ref: str
+    created_at: datetime
+    _repository_path: Path | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation_id, UUID):
+            raise TypeError("capture operation_id must be a UUID")
+        if not isinstance(self.repository_ref, str) or not self.repository_ref.strip():
+            raise ValueError("capture repository_ref is required")
+        for value, label in (
+            (self.input_commit, "input_commit"),
+            (self.input_tree, "input_tree"),
+            (self.result_commit, "result_commit"),
+            (self.result_tree, "result_tree"),
+            (self.observed_agent_head, "observed_agent_head"),
+        ):
+            if not isinstance(value, str) or _GIT_OID_PATTERN.fullmatch(value) is None:
+                raise ValueError(f"capture {label} must be a Git object id")
+        expected_ref = f"refs/sidera/results/{self.operation_id}"
+        if self.receipt_ref != f"{expected_ref}.metadata":
+            raise ValueError("capture receipt_ref does not match operation_id")
+        if (
+            not isinstance(self.created_at, datetime)
+            or self.created_at.tzinfo is None
+            or self.created_at.utcoffset() is None
+        ):
+            raise ValueError("capture created_at must be timezone-aware")
+        if self._repository_path is not None and not isinstance(
+            self._repository_path, Path
+        ):
+            raise TypeError("capture repository path must be a Path")
+
+    @property
+    def result_ref(self) -> str:
+        return f"refs/sidera/results/{self.operation_id}"
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "operation_id": str(self.operation_id),
+            "repository_ref": self.repository_ref,
+            "input_commit": self.input_commit,
+            "input_tree": self.input_tree,
+            "result_commit": self.result_commit,
+            "result_tree": self.result_tree,
+            "observed_agent_head": self.observed_agent_head,
+            "receipt_ref": self.receipt_ref,
+            "created_at": self.created_at.astimezone(UTC).isoformat(),
+        }
+
+
+class CodeResultCapturePort(Protocol):
+    def capture(
+        self,
+        *,
+        manifest: ExecutionWorkspaceManifest,
+        input_commit: str,
+        operation_id: UUID,
+        writable_paths: Sequence[str],
+    ) -> CapturedCode:
+        raise NotImplementedError
+
+    def inspect_capture(self, operation_id: UUID) -> CapturedCode | None:
+        raise NotImplementedError
+
+    def export_patch(self, snapshot: CapturedCode) -> bytes:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +235,8 @@ class ResultRepositoryPort(Protocol):
 
 
 __all__ = [
+    "CapturedCode",
+    "CodeResultCapturePort",
     "ResultApplyOperationV1",
     "ResultError",
     "ResultOperation",

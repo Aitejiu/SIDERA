@@ -496,6 +496,11 @@ class GitWorktreeWorkspaceManager:
     def manifest_by_id(self, manifest_id: UUID) -> ExecutionWorkspaceManifest | None:
         return self._manifests_by_id.get(manifest_id)
 
+    def configured_repository_resolver(self) -> dict[str, Path]:
+        """Return the configured opaque repository refs for result adapters."""
+
+        return dict(self._repository_by_ref)
+
     def _validate_handoff_target(
         self,
         source_manifest: ExecutionWorkspaceManifest,
