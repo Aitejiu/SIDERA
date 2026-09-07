@@ -135,3 +135,78 @@ def code_input_manifest_mapping(**overrides: object) -> dict[str, object]:
 
 def fixed_uuid(value: str) -> UUID:
     return UUID(value)
+
+
+def verification_manifest_mapping(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "candidate_id": "90000000-0000-0000-0000-000000000001",
+        "candidate_hash": "a4a7b7a5c37e1c6231fb37dc17cafcdb8ff6ad5394e2925613e54447baf73cf4",
+        "result_commit": "c" * 40,
+        "result_tree": "d" * 40,
+        "checks": [
+            {
+                "key": "unit",
+                "version": 1,
+                "spec_hash": "5" * 64,
+            }
+        ],
+        "environment_binding": {"ref": "env://python-test", "version": 1},
+        "verification_basis_hash": "03cf6c66dec81fbcccab9e239b63fbcacb749589a69ed38222eb186fa2a00f06",
+    }
+    value.update(overrides)
+    return value
+
+
+def verification_mapping(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "id": "a1000000-0000-0000-0000-000000000001",
+        "schema_version": 1,
+        "workspace_id": "20000000-0000-0000-0000-000000000001",
+        "root_task_id": "30000000-0000-0000-0000-000000000001",
+        "candidate_id": "90000000-0000-0000-0000-000000000001",
+        "execution_id": "60000000-0000-0000-0000-000000000004",
+        "check_key": "unit",
+        "check_version": 1,
+        "check_hash": "5" * 64,
+        "environment_ref": "env://python-test",
+        "environment_hash": "6" * 64,
+        "actual_commit": "c" * 40,
+        "actual_tree": "d" * 40,
+        "operation_id": "80000000-0000-0000-0000-000000000002",
+        "attempt": 1,
+        "status": "failed",
+        "exit_code": 1,
+        "started_at": "2026-09-07T12:02:00+00:00",
+        "finished_at": "2026-09-07T12:02:01+00:00",
+        "artifact_ids": ["70000000-0000-0000-0000-000000000002"],
+        "failure_code": "check_exit_nonzero",
+    }
+    value.update(overrides)
+    return value
+
+
+def acceptance_mapping(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "id": "a2000000-0000-0000-0000-000000000001",
+        "workspace_id": "20000000-0000-0000-0000-000000000001",
+        "root_task_id": "30000000-0000-0000-0000-000000000001",
+        "candidate_id": "90000000-0000-0000-0000-000000000001",
+        "candidate_hash": "a4a7b7a5c37e1c6231fb37dc17cafcdb8ff6ad5394e2925613e54447baf73cf4",
+        "plan_content_hash": "1" * 64,
+        "acceptance_basis_hash": "7" * 64,
+        "result_version": 1,
+        "criteria": [
+            {
+                "criterion_key": "login",
+                "decision": "exception_accepted",
+                "reason": "Known fixture limitation",
+            }
+        ],
+        "actor_type": "local",
+        "actor_id": "aitejiu",
+        "command_id": "a3000000-0000-0000-0000-000000000001",
+        "created_at": "2026-09-07T12:03:00+00:00",
+    }
+    value.update(overrides)
+    return value
