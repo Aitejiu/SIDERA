@@ -6,6 +6,10 @@ from typing import Any
 from uuid import UUID
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.handoffs import (
     HandoffPhase,
@@ -98,6 +102,16 @@ class HandoffOperationGate:
         transition_id: UUID | None = None,
         target_execution_id: UUID | None = None,
     ) -> HandoffGateResult:
+        worker_items = getattr(self._uow, "worker_items", None)
+        if worker_items is not None:
+            worker_item = worker_items.get(worker_item_id, workspace_id)
+            if worker_item is not None:
+                require_result_gate(
+                    self._uow,
+                    workspace_id,
+                    worker_item.root_task_id,
+                    ResultGateAction.HANDOFF,
+                )
         try:
             operation_value = HandoffGateOperation(operation)
         except (TypeError, ValueError) as exc:

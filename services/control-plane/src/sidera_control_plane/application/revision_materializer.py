@@ -9,6 +9,10 @@ from uuid import UUID, uuid4
 
 from sidera_control_plane.application.handoff_gate import HandoffInProgress
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.application.worker_item_materializer import (
     WorkerItemMaterializer,
 )
@@ -247,10 +251,17 @@ class RevisionMaterializer:
 
         # The request is already locked by PlanningCommandHandler. Keep the
         # remaining lock order deterministic: head, Tasks, then WorkerItems.
+        root_task_id = request.root_task_id or payload.base_descriptor.root_task_id
         head = uow.plans.get_head(
-            request.root_task_id or payload.base_descriptor.root_task_id,
+            root_task_id,
             request.workspace_id,
             for_update=True,
+        )
+        require_result_gate(
+            uow,
+            request.workspace_id,
+            root_task_id,
+            ResultGateAction.ACTIVATE_REVISION,
         )
         if head is None or not _head_matches_base(head, payload, base_snapshot):
             raise RevisionStaleBase(

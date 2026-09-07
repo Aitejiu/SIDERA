@@ -114,13 +114,15 @@ class ResultFinalizationService:
         workspace_id: UUID,
         root_task_id: UUID,
     ) -> FinalizationOutcome:
-        # Acceptance records and finalization use the same root -> head lock order.
-        task = uow.tasks.get(root_task_id, workspace_id, for_update=True)
-        if task is None:
-            return _blocked("root_task_missing")
+        # Root plan head and result head are acquired before mutable task/request
+        # rows so revision, acceptance, and finalization share one lock order.
+        uow.plans.get_head(root_task_id, workspace_id, for_update=True)
         head = uow.results.get_head(workspace_id, root_task_id, for_update=True)
         if head is None:
             return _blocked("result_head_missing")
+        task = uow.tasks.get(root_task_id, workspace_id, for_update=True)
+        if task is None:
+            return _blocked("root_task_missing")
         if head.current_acceptance_id is None:
             return _blocked("acceptance_required")
 

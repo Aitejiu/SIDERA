@@ -21,6 +21,10 @@ from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     WorkerItemPlacement,
 )
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.application.result_source_fence import (
     discover_result_source_fence,
     lock_result_source_fence,
@@ -1394,6 +1398,12 @@ def _assert_result_acceptance_allows_new_execution(
         worker_item = uow.worker_items.get(worker_item_id, workspace_id)
         if worker_item is not None:
             root_task_id = worker_item.root_task_id
+    require_result_gate(
+        uow,
+        workspace_id,
+        root_task_id,
+        ResultGateAction.CREATE_EXECUTION,
+    )
     head = uow.results.get_head(workspace_id, root_task_id)
     if head is not None and head.current_acceptance_id is not None:
         raise InvalidTransition("result acceptance closes new execution work")

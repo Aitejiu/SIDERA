@@ -9,6 +9,10 @@ from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.application.result_input_sources import (
     build_rework_code_input_manifest,
 )
@@ -548,6 +552,13 @@ class ResultReworkService:
     def _load_scope(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> tuple[TaskResultHead, IntegrationCandidateV1, Any, IntegrationSpecV1]:
+        if envelope.target_id is not None:
+            require_result_gate(
+                uow,
+                envelope.workspace_id,
+                envelope.target_id,
+                ResultGateAction.REWORK,
+            )
         head = self._load_head(uow, envelope)
         candidate_id = _payload_uuid(envelope.payload, "candidate_id")
         candidate = uow.results.get_record("candidate", candidate_id, envelope.workspace_id)
@@ -564,11 +575,6 @@ class ResultReworkService:
             )
         if head.current_acceptance_id is not None:
             raise ResultError("rework_acceptance_exists", {})
-        if head.active_operation_id is not None:
-            raise ResultError(
-                "result_operation_in_progress",
-                {"operation_id": str(head.active_operation_id)},
-            )
 
         plan_head = uow.plans.get_head(head.root_task_id, envelope.workspace_id, for_update=True)
         if plan_head is None:

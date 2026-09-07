@@ -17,6 +17,10 @@ from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
@@ -121,6 +125,13 @@ class ResultIntegrationService:
                 },
             )
 
+        require_result_gate(
+            uow,
+            envelope.workspace_id,
+            envelope.target_id,
+            ResultGateAction.REINTEGRATE,
+        )
+
         head = uow.results.get_head(
             envelope.workspace_id, envelope.target_id, for_update=True
         )
@@ -141,8 +152,6 @@ class ResultIntegrationService:
             raise ResultError("reintegrate_candidate_not_current", {})
         if head.current_acceptance_id is not None:
             raise ResultError("reintegrate_acceptance_exists", {})
-        if head.active_operation_id is not None:
-            raise ResultError("result_operation_in_progress", {})
 
         candidate = uow.results.get_record(
             "candidate", source_candidate_id, envelope.workspace_id
@@ -428,9 +437,7 @@ class ResultIntegrationService:
         self._require_uuid(operation_id, "operation_id")
 
         with self._uow_factory() as uow:
-            execution = uow.executions.get(
-                execution_id, workspace_id, for_update=True
-            )
+            execution = uow.executions.get(execution_id, workspace_id)
             if execution is None:
                 raise ResultError(
                     "integration_execution_not_found",
@@ -447,6 +454,28 @@ class ResultIntegrationService:
             if execution.worker_item_id is None:
                 raise ResultError("integration_worker_required", {})
 
+            request = uow.execution_requests.get_by_execution_lineage(
+                execution.lineage_id, workspace_id
+            )
+            if request is None:
+                raise ResultError(
+                    "integration_execution_request_not_found",
+                    {"execution_id": str(execution_id)},
+                )
+            require_result_gate(
+                uow,
+                workspace_id,
+                request.root_task_id,
+                ResultGateAction.PUBLISH_CANDIDATE,
+            )
+            execution = uow.executions.get(
+                execution_id, workspace_id, for_update=True
+            )
+            if execution is None:
+                raise ResultError(
+                    "integration_execution_not_found",
+                    {"execution_id": str(execution_id)},
+                )
             request = uow.execution_requests.get_by_execution_lineage(
                 execution.lineage_id, workspace_id, for_update=True
             )
@@ -540,12 +569,6 @@ class ResultIntegrationService:
                     "integration_acceptance_exists",
                     {"acceptance_id": str(head.current_acceptance_id)},
                 )
-            if head.active_operation_id is not None:
-                raise ResultError(
-                    "result_operation_in_progress",
-                    {"operation_id": str(head.active_operation_id)},
-                )
-
             candidate_id = uuid5(
                 NAMESPACE_URL, f"sidera.integration-candidate:{operation_id}"
             )

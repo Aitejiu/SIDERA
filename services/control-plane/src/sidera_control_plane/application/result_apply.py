@@ -11,6 +11,10 @@ from sidera_control_plane.application.result_finalization import (
     FinalizationOutcome,
     ResultFinalizationService,
 )
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.application.result_ports import (
     ApplyOutcome,
     ApplyReceipt,
@@ -162,6 +166,12 @@ class ResultApplyService:
         operation_id: UUID | None,
     ) -> _PreparedApply | ResultApplyOutcome:
         with self._uow_factory() as uow:
+            require_result_gate(
+                uow,
+                workspace_id,
+                root_task_id,
+                ResultGateAction.RECORD_RECEIPT,
+            )
             task = uow.tasks.get(root_task_id, workspace_id, for_update=True)
             if task is None:
                 return _blocked(None, "root_task_missing")

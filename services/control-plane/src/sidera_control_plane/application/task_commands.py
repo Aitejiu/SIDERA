@@ -3,6 +3,10 @@ from uuid import uuid4
 
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.events import EventData
@@ -85,6 +89,13 @@ class TaskCommandHandler:
             )
         if envelope.expected_version < 1:
             raise ValidationError("expected_version must be positive")
+        if envelope.command_type == "CancelTask":
+            require_result_gate(
+                uow,
+                envelope.workspace_id,
+                envelope.target_id,
+                ResultGateAction.CANCEL_TASK,
+            )
 
         task = uow.tasks.get(envelope.target_id, envelope.workspace_id)
         if task is None:

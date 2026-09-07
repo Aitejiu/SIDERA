@@ -58,6 +58,7 @@ from sidera_control_plane.application.result_rework import ResultReworkService
 from sidera_control_plane.application.result_verification import (
     ResultVerificationService,
 )
+from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.application.worker_gateway import GatewayMessageError
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.code_results import (
@@ -597,6 +598,7 @@ class ResultIntegrationScenario:
                     local_actor_type="local",
                     local_actor_id="operator",
                 ),
+                TaskCommandHandler(),
                 ResultIntegrationService(
                     lambda: self.uow(),
                     clock=lambda: self._planning.now,

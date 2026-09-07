@@ -9,6 +9,10 @@ from re import fullmatch
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_gate import (
+    ResultGateAction,
+    require_result_gate,
+)
 from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
@@ -97,6 +101,13 @@ class ResultAcceptanceService:
                 "acceptance_actor_forbidden",
                 {"actor_type": self._local_actor_type},
             )
+
+        require_result_gate(
+            uow,
+            envelope.workspace_id,
+            envelope.target_id,
+            ResultGateAction.ACCEPT,
+        )
 
         task = uow.tasks.get(envelope.target_id, envelope.workspace_id, for_update=True)
         if task is None:
