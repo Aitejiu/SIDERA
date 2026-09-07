@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from hashlib import sha256
 from uuid import UUID
 
 from sidera_control_plane.application.collaboration_projection import (
@@ -10,6 +11,13 @@ from sidera_control_plane.application.collaboration_projection import (
     CollaborationWorkerPlacementFact,
 )
 from sidera_control_plane.domain.artifacts import ArtifactType, EvidenceClaimStatus
+from sidera_control_plane.domain.code_results import (
+    CodeInputManifestV1,
+    CodeInputSourceV1,
+    CodeResultSnapshotV1,
+    IntegrationCandidateV1,
+)
+from sidera_control_plane.domain.collaboration_runtime import canonical_json_bytes
 from sidera_control_plane.domain.execution import ExecutionStatus
 from sidera_control_plane.domain.result_inputs import (
     ResultInputArtifact,
@@ -18,6 +26,70 @@ from sidera_control_plane.domain.result_inputs import (
 )
 
 _UNKNOWN_HANDOFF_STATUSES = frozenset({"blocked_unknown"})
+
+
+def build_rework_code_input_manifest(
+    *,
+    candidate: IntegrationCandidateV1,
+    snapshots: Sequence[CodeResultSnapshotV1],
+    request_id: UUID,
+    execution_id: UUID,
+    repository_ref: str,
+) -> CodeInputManifestV1:
+    """Build a fresh V3 code input identity from one authorized candidate."""
+
+    if not isinstance(candidate, IntegrationCandidateV1):
+        raise TypeError("rework candidate must be typed")
+    if not snapshots:
+        raise ValueError("rework code input snapshots must not be empty")
+    snapshots_by_id = {snapshot.id: snapshot for snapshot in snapshots}
+    if set(snapshots_by_id) != set(candidate.source_result_ids):
+        raise ValueError("rework code input snapshots do not match candidate sources")
+    ordered = tuple(snapshots_by_id[item] for item in candidate.source_result_ids)
+    if any(
+        snapshot.workspace_id != candidate.workspace_id
+        or snapshot.root_task_id != candidate.root_task_id
+        or snapshot.repository_ref != repository_ref
+        for snapshot in ordered
+    ):
+        raise ValueError("rework code input snapshot scope does not match candidate")
+
+    sources = tuple(
+        CodeInputSourceV1(
+            result_id=snapshot.id,
+            result_hash=snapshot.content_hash,
+            input_commit=snapshot.input_commit,
+            input_tree=snapshot.input_tree,
+            result_commit=snapshot.result_commit,
+            result_tree=snapshot.result_tree,
+        )
+        for snapshot in ordered
+    )
+    content = {
+        "schema_version": 1,
+        "workspace_id": str(candidate.workspace_id),
+        "root_task_id": str(candidate.root_task_id),
+        "request_id": str(request_id),
+        "execution_id": str(execution_id),
+        "selection_id": str(candidate.input_selection_id),
+        "selection_hash": candidate.input_selection_hash,
+        "repository_ref": repository_ref,
+        "base_commit": candidate.base_commit,
+        "sources": [item.to_mapping() for item in sources],
+    }
+    return CodeInputManifestV1(
+        schema_version=1,
+        workspace_id=candidate.workspace_id,
+        root_task_id=candidate.root_task_id,
+        request_id=request_id,
+        execution_id=execution_id,
+        selection_id=candidate.input_selection_id,
+        selection_hash=candidate.input_selection_hash,
+        repository_ref=repository_ref,
+        base_commit=candidate.base_commit,
+        sources=sources,
+        input_hash=sha256(canonical_json_bytes(content)).hexdigest(),
+    )
 
 
 def resolve_result_input_source(

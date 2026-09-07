@@ -5,14 +5,24 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.context_requests import (
+    build_execution_context_assembly_request,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_input_sources import (
+    build_rework_code_input_manifest,
+)
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
     IntegrationCandidateV1,
 )
+from sidera_control_plane.domain.collaboration import CollaborationGateMode
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.context_packages import ContextAssemblyRequest
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.execution import Execution
+from sidera_control_plane.domain.execution_requests import ExecutionRequest
 from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.result_integration import IntegrationSpecV1
 from sidera_control_plane.domain.result_operations import (
@@ -26,11 +36,155 @@ from sidera_control_plane.domain.result_operations import (
     extend_rework_budget,
     reserve_rework_round,
 )
+from sidera_control_plane.domain.work_context import WorkContextRevision
+from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
 
 type ResultProvenance = Mapping[UUID, CodeResultSnapshotV1]
 type HardResultEdge = tuple[UUID, UUID]
 
 _REWORK_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-rework:v1")
+
+
+def require_authorized_source_candidate(
+    uow: ControlPlaneUnitOfWork,
+    request: ExecutionRequest,
+) -> IntegrationCandidateV1:
+    """Require a rework request to remain bound to its current candidate."""
+
+    if request.result_derivation_kind != "rework" or request.source_candidate_id is None:
+        raise ResultError("rework_source_candidate_required", {})
+    if request.rework_record_id is None:
+        raise ResultError("rework_record_required", {})
+    candidate = uow.results.get_record(
+        "candidate", request.source_candidate_id, request.workspace_id
+    )
+    record = uow.results.get_record(
+        "rework", request.rework_record_id, request.workspace_id
+    )
+    if not isinstance(candidate, IntegrationCandidateV1):
+        raise ResultError("rework_candidate_not_found", {})
+    if not isinstance(record, ReworkRecordV1):
+        raise ResultError("rework_record_not_found", {})
+    if record.status not in {ReworkStatus.REQUESTED, ReworkStatus.RUNNING}:
+        raise ResultError("rework_record_not_active", {})
+    if (
+        record.candidate_id != candidate.id
+        or request.worker_item_id not in record.target_worker_item_ids
+        or candidate.workspace_id != request.workspace_id
+        or candidate.root_task_id != request.root_task_id
+        or candidate.plan_snapshot_id != request.plan_snapshot_id
+    ):
+        raise ResultError("rework_source_candidate_scope_mismatch", {})
+    head = uow.results.get_head(request.workspace_id, request.root_task_id)
+    if (
+        head is None
+        or head.current_candidate_id != candidate.id
+        or head.current_acceptance_id is not None
+        or head.active_operation_id is not None
+    ):
+        raise ResultError("rework_source_candidate_not_current", {})
+    plan = uow.plans.get_current_for_root(request.root_task_id, request.workspace_id)
+    if (
+        plan is None
+        or plan.id != candidate.plan_snapshot_id
+        or plan.generation != request.plan_generation
+        or candidate.plan_content_hash != plan_snapshot_content_hash(plan)
+    ):
+        raise ResultError("rework_plan_stale", {})
+    return candidate
+
+
+def build_rework_context(
+    uow: ControlPlaneUnitOfWork,
+    request: ExecutionRequest,
+    source_candidate: IntegrationCandidateV1,
+    *,
+    execution: Execution | None = None,
+    worker_item: WorkerItem | None = None,
+    work_context_revision: WorkContextRevision | None = None,
+    ttl_seconds: int = 7_200,
+    created_at: datetime | None = None,
+) -> ContextAssemblyRequest:
+    """Build a fresh V3 assembly request from candidate provenance."""
+
+    authorized = require_authorized_source_candidate(uow, request)
+    if authorized.id != source_candidate.id:
+        raise ResultError("rework_source_candidate_scope_mismatch", {})
+    if execution is None:
+        if request.first_execution_id is None:
+            raise ResultError("rework_execution_required", {})
+        execution = uow.executions.get(request.first_execution_id, request.workspace_id)
+    if execution is None or execution.worker_item_id != request.worker_item_id:
+        raise ResultError("rework_execution_scope_mismatch", {})
+    if worker_item is None:
+        worker_item = uow.worker_items.get(request.worker_item_id, request.workspace_id)
+    if worker_item is None or worker_item.status is WorkerItemStatus.RETIRED:
+        raise ResultError("rework_worker_retired", {})
+    if work_context_revision is None:
+        work_context = uow.work_contexts.get_by_planning_request(
+            request.planning_request_id, request.workspace_id
+        )
+        if work_context is None:
+            work_context = uow.work_contexts.get_by_root_task(
+                request.root_task_id, request.workspace_id
+            )
+        if work_context is None:
+            raise ResultError("rework_work_context_not_found", {})
+        work_context_revision = uow.work_contexts.get_revision(
+            work_context.current_revision_id, request.workspace_id
+        )
+    if work_context_revision is None:
+        raise ResultError("rework_work_context_revision_not_found", {})
+
+    rework_record_id = request.rework_record_id
+    if rework_record_id is None:
+        raise ResultError("rework_record_required", {})
+
+    plan = uow.plans.get(request.plan_snapshot_id, request.workspace_id)
+    if plan is None or plan.integration_spec is None:
+        raise ResultError("integration_spec_required", {})
+    snapshots: list[CodeResultSnapshotV1] = []
+    for result_id in source_candidate.source_result_ids:
+        snapshot = uow.results.get_record("code_snapshot", result_id, request.workspace_id)
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise ResultError("rework_source_result_not_found", {"result_id": str(result_id)})
+        snapshots.append(snapshot)
+    try:
+        code_manifest = build_rework_code_input_manifest(
+            candidate=source_candidate,
+            snapshots=snapshots,
+            request_id=request.id,
+            execution_id=execution.id,
+            repository_ref=plan.integration_spec.repository_ref,
+        )
+    except ValueError as exc:
+        raise ResultError("rework_source_result_invalid", {}) from exc
+    record = uow.results.get_record("rework", rework_record_id, request.workspace_id)
+    if not isinstance(record, ReworkRecordV1):
+        raise ResultError("rework_record_not_found", {})
+    return build_execution_context_assembly_request(
+        execution=execution,
+        execution_request=request,
+        worker_item=worker_item,
+        work_context_revision=work_context_revision,
+        ttl_seconds=ttl_seconds,
+        created_at=created_at or datetime.now(UTC),
+        manifest_schema_version=3,
+        additional_fact_scope_refs=(
+            "result_rework",
+            "source_candidate",
+            "rework_record",
+        ),
+        additional_budget={
+            "result_derivation_kind": "rework",
+            "source_candidate_id": str(source_candidate.id),
+            "source_candidate_hash": source_candidate.content_hash,
+            "rework_record_id": str(record.id),
+            "rework_reason": record.reason,
+            "rework_issue_keys": list(record.source_issue_keys),
+        },
+        code_input_manifest=code_manifest,
+    )
 
 
 class ResultReworkService:
@@ -99,10 +253,17 @@ class ResultReworkService:
             envelope.payload.get("impact_worker_item_ids", target_ids),
             "impact_worker_item_ids",
         )
+        self._validate_rework_targets(
+            uow,
+            candidate=candidate,
+            plan=plan,
+            target_ids=target_ids,
+        )
+        now = self._now()
         next_head = head
         round_number: int | None = None
         if mode is ReworkMode.AUTOMATIC:
-            next_head = reserve_rework_round(head, self._now())
+            next_head = reserve_rework_round(head, now)
             round_number = next_head.auto_rounds_used
 
         record = self._record(
@@ -119,6 +280,14 @@ class ResultReworkService:
         stored = uow.results.add_immutable("rework", record)
         if not isinstance(stored, ReworkRecordV1):
             raise ResultError("rework_record_conflict", {"record_id": str(record.id)})
+        request_events = self._create_rework_requests(
+            uow,
+            envelope,
+            candidate=candidate,
+            plan=plan,
+            record=stored,
+            now=now,
+        )
         if next_head != head:
             uow.results.save_head(next_head, expected_version=head.result_version)
         event = _rework_event(
@@ -129,11 +298,13 @@ class ResultReworkService:
             suggestion=suggestion,
         )
         uow.events.append_with_outbox(event)
+        for request_event in request_events:
+            uow.events.append_with_outbox(request_event)
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=head.root_task_id,
             aggregate_version=next_head.result_version,
-            event_ids=(event.id,),
+            event_ids=(event.id, *(item.id for item in request_events)),
             data={
                 "rework_record_id": str(stored.id),
                 "request_ids": [str(item) for item in stored.request_ids],
@@ -143,6 +314,176 @@ class ResultReworkService:
                 "round_number": stored.round_number,
             },
         )
+
+    @staticmethod
+    def _validate_rework_targets(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        candidate: IntegrationCandidateV1,
+        plan: Any,
+        target_ids: tuple[UUID, ...],
+    ) -> None:
+        worker_plan = {
+            item.worker_item_id: item
+            for item in plan.worker_item_plans
+            if item.worker_item_id is not None
+        }
+        integration_execution = uow.executions.get(
+            candidate.integration_execution_id, candidate.workspace_id
+        )
+        if integration_execution is None:
+            raise ResultError("rework_source_execution_not_found", {})
+        integration_request = uow.execution_requests.get_by_execution_lineage(
+            integration_execution.lineage_id,
+            candidate.workspace_id,
+        )
+        if integration_request is None:
+            raise ResultError("rework_source_request_not_found", {})
+        for worker_id in target_ids:
+            plan_item = worker_plan[worker_id]
+            worker_item = uow.worker_items.get(
+                worker_id, candidate.workspace_id, for_update=True
+            )
+            if worker_item is None or worker_item.status is WorkerItemStatus.RETIRED:
+                raise ResultError(
+                    "rework_worker_retired", {"worker_item_id": str(worker_id)}
+                )
+            source_request = uow.execution_requests.get_by_proposal_worker_item(
+                integration_request.proposal_revision_id,
+                plan_item.key,
+                candidate.workspace_id,
+            )
+            if (
+                source_request is None
+                or source_request.root_task_id != candidate.root_task_id
+                or source_request.plan_snapshot_id != candidate.plan_snapshot_id
+                or source_request.worker_item_id != worker_id
+                or source_request.result_derivation_kind is not None
+            ):
+                raise ResultError(
+                    "rework_source_request_not_found",
+                    {"worker_item_id": str(worker_id)},
+                )
+
+    def _create_rework_requests(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        envelope: CommandEnvelope,
+        *,
+        candidate: IntegrationCandidateV1,
+        plan: Any,
+        record: ReworkRecordV1,
+        now: datetime,
+    ) -> tuple[EventData, ...]:
+        worker_plan = {
+            item.worker_item_id: item
+            for item in plan.worker_item_plans
+            if item.worker_item_id is not None
+        }
+        integration_execution = uow.executions.get(
+            candidate.integration_execution_id, candidate.workspace_id
+        )
+        if integration_execution is None:
+            raise ResultError("rework_source_execution_not_found", {})
+        integration_request = uow.execution_requests.get_by_execution_lineage(
+            integration_execution.lineage_id,
+            candidate.workspace_id,
+        )
+        if integration_request is None:
+            raise ResultError("rework_source_request_not_found", {})
+        events: list[EventData] = []
+        for request_id, worker_id in zip(
+            record.request_ids,
+            record.target_worker_item_ids,
+            strict=True,
+        ):
+            plan_item = worker_plan[worker_id]
+            source_request = uow.execution_requests.get_by_proposal_worker_item(
+                integration_request.proposal_revision_id,
+                plan_item.key,
+                candidate.workspace_id,
+            )
+            if source_request is None:
+                raise ResultError(
+                    "rework_source_request_not_found",
+                    {"worker_item_id": str(worker_id)},
+                )
+            existing = uow.execution_requests.get(request_id, candidate.workspace_id)
+            if existing is not None:
+                if (
+                    existing.result_derivation_kind != "rework"
+                    or existing.source_candidate_id != candidate.id
+                    or existing.rework_record_id != record.id
+                    or existing.worker_item_id != worker_id
+                ):
+                    raise ResultError(
+                        "rework_execution_request_conflict",
+                        {"execution_request_id": str(request_id)},
+                    )
+                continue
+            request = ExecutionRequest.create(
+                request_id=request_id,
+                workspace_id=candidate.workspace_id,
+                planning_request_id=source_request.planning_request_id,
+                proposal_revision_id=source_request.proposal_revision_id,
+                plan_snapshot_id=candidate.plan_snapshot_id,
+                plan_generation=plan.generation,
+                root_task_id=candidate.root_task_id,
+                subtask_id=source_request.subtask_id,
+                worker_item_id=worker_id,
+                worker_item_key=plan_item.key,
+                intent_key=f"rework:{record.id}:{plan_item.key}",
+                purpose="rework",
+                capability_requirements=source_request.capability_requirements,
+                adapter_preferences=source_request.adapter_preferences,
+                adapter_forbidden=source_request.adapter_forbidden,
+                budget_class=source_request.budget_class,
+                not_before=now,
+                max_attempts=source_request.max_attempts,
+                expected_artifact_refs=source_request.expected_artifact_refs,
+                expected_evidence_refs=source_request.expected_evidence_refs,
+                expected_outputs=source_request.expected_outputs,
+                now=now,
+                collaboration_gate_mode=CollaborationGateMode.UNMANAGED,
+                result_derivation_kind="rework",
+                source_candidate_id=candidate.id,
+                rework_record_id=record.id,
+            )
+            request.mark_ready(now=now)
+            uow.execution_requests.add(request)
+            events.append(
+                EventData(
+                    id=uuid5(
+                        _REWORK_NAMESPACE,
+                        f"execution-request:{record.id}:{worker_id}",
+                    ),
+                    workspace_id=candidate.workspace_id,
+                    aggregate_type="execution_request",
+                    aggregate_id=request.id,
+                    aggregate_version=request.version,
+                    event_type="ExecutionRequestReworkCreated",
+                    payload={
+                        "execution_request_id": str(request.id),
+                        "root_task_id": str(request.root_task_id),
+                        "worker_item_id": str(request.worker_item_id),
+                        "worker_item_key": request.worker_item_key,
+                        "planning_request_id": str(request.planning_request_id),
+                        "proposal_revision_id": str(request.proposal_revision_id),
+                        "plan_snapshot_id": str(request.plan_snapshot_id),
+                        "plan_generation": request.plan_generation,
+                        "result_derivation_kind": request.result_derivation_kind,
+                        "source_candidate_id": str(candidate.id),
+                        "rework_record_id": str(record.id),
+                        "status": request.status.value,
+                    },
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    causation_id=envelope.id,
+                    correlation_id=envelope.correlation_id,
+                )
+            )
+        uow.flush()
+        return tuple(events)
 
     def _authorize_additional_rework(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -668,5 +1009,7 @@ __all__ = [
     "HardResultEdge",
     "ResultProvenance",
     "ResultReworkService",
+    "build_rework_context",
     "compute_rework_impact",
+    "require_authorized_source_candidate",
 ]

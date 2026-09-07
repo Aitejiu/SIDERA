@@ -212,10 +212,19 @@ class ContextPackageWorker:
             )
         if request.manifest_schema_version == 3 and request.input_selection_id is None:
             if request.code_input_manifest is not None:
-                raise ContextAssemblyError(
-                    "context_input_selection_missing",
-                    "v3 code execution context has no input Selection reference",
+                execution_request_id = _budget_uuid(request, "execution_request_id")
+                execution_request = uow.execution_requests.get(
+                    execution_request_id, request.workspace_id
                 )
+                if (
+                    execution_request is None
+                    or execution_request.result_derivation_kind != "rework"
+                ):
+                    raise ContextAssemblyError(
+                        "context_input_selection_missing",
+                        "v3 code execution context has no authorized rework source",
+                    )
+                return None
             return None
         if request.input_selection_id is None:
             raise ContextAssemblyError(

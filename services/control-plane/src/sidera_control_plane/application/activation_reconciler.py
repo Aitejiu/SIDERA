@@ -24,6 +24,10 @@ from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGateResult,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_rework import (
+    build_rework_context,
+    require_authorized_source_candidate,
+)
 from sidera_control_plane.application.result_verification import (
     verification_manifest_for_request,
 )
@@ -352,8 +356,20 @@ class ActivationReconciler:
             if request.result_derivation_kind == "verification"
             else None
         )
-        uow.context_assemblies.add(
-            build_execution_context_assembly_request(
+        if request.result_derivation_kind == "rework":
+            source_candidate = require_authorized_source_candidate(uow, request)
+            context_assembly = build_rework_context(
+                uow,
+                request,
+                source_candidate,
+                execution=execution,
+                worker_item=context.worker_item,
+                work_context_revision=context.work_context_revision,
+                ttl_seconds=self._execution_context_ttl_seconds,
+                created_at=now,
+            )
+        else:
+            context_assembly = build_execution_context_assembly_request(
                 execution=execution,
                 execution_request=request,
                 worker_item=context.worker_item,
@@ -370,7 +386,7 @@ class ActivationReconciler:
                 input_selection=input_selection,
                 verification_manifest=verification_manifest,
             )
-        )
+        uow.context_assemblies.add(context_assembly)
         uow.flush()
         request.materialize(
             execution_lineage_id=execution.lineage_id,

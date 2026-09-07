@@ -537,27 +537,35 @@ def build_execution_context_assembly_request(
         if code_input_manifest is not None:
             if not isinstance(code_input_manifest, CodeInputManifestV1):
                 raise ValueError("v3 code input manifest must be typed")
-            if not isinstance(input_selection, CollaborationInputSelectionV1):
-                raise ValueError("v3 code execution context requires an input selection")
-            _validate_selection_target(
-                execution_request=execution_request,
-                worker_item=worker_item,
-                selection=input_selection,
-            )
             if (
                 code_input_manifest.workspace_id != execution.workspace_id
                 or code_input_manifest.root_task_id != execution_request.root_task_id
                 or code_input_manifest.request_id != execution_request.id
                 or code_input_manifest.execution_id != execution.id
-                or code_input_manifest.selection_id != input_selection.id
-                or code_input_manifest.selection_hash != input_selection.selection_hash
             ):
                 raise ValueError("v3 code input manifest scope does not match execution")
+            if input_selection is None:
+                if execution_request.result_derivation_kind != "rework":
+                    raise ValueError(
+                        "v3 code execution context requires an input selection"
+                    )
+            else:
+                _validate_selection_target(
+                    execution_request=execution_request,
+                    worker_item=worker_item,
+                    selection=input_selection,
+                )
+                if (
+                    code_input_manifest.selection_id != input_selection.id
+                    or code_input_manifest.selection_hash != input_selection.selection_hash
+                ):
+                    raise ValueError("v3 code input manifest selection does not match execution")
             if execution_request.result_derivation_kind == "verification":
                 raise ValueError(
                     "verification execution context requires a verification manifest"
                 )
-            result_input_budget = result_input_budget or ResultInputBudgetV1()
+            if input_selection is not None:
+                result_input_budget = result_input_budget or ResultInputBudgetV1()
         elif input_selection is not None or result_input_budget is not None:
             raise ValueError("v3 verification context cannot carry code selection fields")
         if verification_manifest is not None and not isinstance(

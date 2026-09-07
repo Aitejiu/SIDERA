@@ -168,6 +168,13 @@ class ResultIntegrationScenario:
     def plan_snapshot_id(self) -> UUID:
         return self.ids["plan_snapshot"]
 
+    def plan_generation(self) -> int:
+        with self.uow() as uow:
+            head = uow.plans.get_head(self.root_task_id, self.workspace_id)
+        if head is None:
+            raise AssertionError("result scenario plan head was not found")
+        return head.active_generation
+
     @property
     def worker_ids(self) -> tuple[UUID, ...]:
         return tuple(self.worker_item_ids.values())
