@@ -111,6 +111,12 @@ class CodeResultCapturePort(Protocol):
     def export_patch(self, snapshot: CapturedCode) -> bytes:
         raise NotImplementedError
 
+    def inspect_revision(
+        self, *, repository_ref: str, revision: str
+    ) -> tuple[str, str]:
+        """Resolve an exact commit and its tree without inspecting a worktree."""
+        raise NotImplementedError
+
 
 @dataclass(frozen=True, slots=True)
 class ResultOperationAttemptV1:
@@ -208,6 +214,16 @@ class ResultRepositoryPort(Protocol):
     def get_record(
         self, kind: str, record_id: UUID, workspace_id: UUID
     ) -> ResultRecord | None:
+        raise NotImplementedError
+
+    def get_code_result_by_capture_operation(
+        self, operation_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> CodeResultSnapshotV1 | None:
+        raise NotImplementedError
+
+    def get_operation(
+        self, operation_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ResultOperation | None:
         raise NotImplementedError
 
     def save_head(self, head: TaskResultHead, *, expected_version: int) -> None:

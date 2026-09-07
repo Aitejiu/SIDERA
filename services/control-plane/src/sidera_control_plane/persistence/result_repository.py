@@ -158,6 +158,47 @@ class ResultRepository:
         )
         return parser(row) if row is not None else None
 
+    def get_code_result_by_capture_operation(
+        self,
+        operation_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> CodeResultSnapshotV1 | None:
+        statement = select(CodeResultSnapshotModel).where(
+            CodeResultSnapshotModel.capture_operation_id == operation_id,
+            CodeResultSnapshotModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_snapshot(row) if row is not None else None
+
+    def get_operation(
+        self,
+        operation_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ResultOperation | None:
+        statement = select(ResultOperationAttemptModel).where(
+            ResultOperationAttemptModel.operation_id == operation_id,
+            ResultOperationAttemptModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        if row is not None:
+            return _to_operation_attempt(row)
+        statement = select(ResultApplyOperationModel).where(
+            ResultApplyOperationModel.id == operation_id,
+            ResultApplyOperationModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_apply(row) if row is not None else None
+
     def claim_operations(
         self, kind: str, now: datetime, limit: int
     ) -> tuple[ResultOperationAttemptV1, ...]:

@@ -63,6 +63,17 @@ class EventIngestionResult:
 class EventIngestionReport:
     events: tuple[ExecutionEvent, ...]
     duplicate_sequences: tuple[int, ...]
+    terminal_observations: tuple["TerminalEventObservation", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalEventObservation:
+    """A redacted terminal fact that can be recorded by a result coordinator."""
+
+    event_type: str
+    sequence: int
+    outcome: str
+    payload: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +106,11 @@ class SessionEventIngestor:
     ) -> EventIngestionReport:
         ingested: list[ExecutionEvent] = []
         duplicates: list[int] = []
+        terminal_observations: list[TerminalEventObservation] = []
         for event in events:
+            observation = _terminal_observation(event)
+            if observation is not None:
+                terminal_observations.append(observation)
             result = self.ingest_event(
                 workspace_id=workspace_id,
                 execution_id=execution_id,
@@ -108,7 +123,11 @@ class SessionEventIngestor:
                 duplicates.append(event.sequence)
             elif result.event is not None:
                 ingested.append(result.event)
-        return EventIngestionReport(tuple(ingested), tuple(duplicates))
+        return EventIngestionReport(
+            tuple(ingested),
+            tuple(duplicates),
+            tuple(terminal_observations),
+        )
 
     def ingest_event(
         self,
@@ -327,6 +346,34 @@ class ArtifactRegistry:
                         existing_claims.append(claim)
                     claims.append(claim)
         return ArtifactRegistrationReport(tuple(artifacts), tuple(claims))
+
+
+_TERMINAL_EVENT_OUTCOMES = {
+    "execution.succeeded": "succeeded",
+    "execution.completed": "succeeded",
+    "execution.failed": "failed",
+    "execution.canceled": "canceled",
+    "execution.cancelled": "canceled",
+    "session.succeeded": "succeeded",
+    "session.completed": "succeeded",
+    "session.failed": "failed",
+    "session.canceled": "canceled",
+    "session.cancelled": "canceled",
+}
+
+
+def _terminal_observation(
+    event: AdapterEvent,
+) -> TerminalEventObservation | None:
+    outcome = _TERMINAL_EVENT_OUTCOMES.get(event.event_type.strip().lower())
+    if outcome is None:
+        return None
+    return TerminalEventObservation(
+        event_type=event.event_type,
+        sequence=event.sequence,
+        outcome=outcome,
+        payload=_redact_payload(event.payload),
+    )
 
 
 def _gap_event(

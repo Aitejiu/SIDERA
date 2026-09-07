@@ -10,6 +10,10 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from sidera_control_plane.application.artifact_content import (
     ALLOWED_ARTIFACT_MEDIA_TYPES,
 )
+from sidera_control_plane.application.code_result_capture import (
+    CodeResultCaptureService,
+    code_capture_operation_id,
+)
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_materialization import (
     ContextMaterializationError,
@@ -45,8 +49,10 @@ from sidera_control_plane.application.ports import (
     WorkerAdapter,
     WorkspaceProvider,
 )
+from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.domain.artifacts import ArtifactCandidate
+from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -110,6 +116,7 @@ from sidera_control_plane.domain.modules import (
     StopCapability,
     WorkerAdapterCapabilityProfile,
 )
+from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
     SchedulingIssue,
@@ -152,6 +159,7 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "context_package_corrupt",
         "context_package_stale",
         "context_hash_mismatch",
+        "result_input_unavailable",
         "result_input_integrity_failed",
         "result_input_format_unsupported",
         "result_input_budget_exceeded",
@@ -223,6 +231,7 @@ class GatewayExecutionResult:
 class GatewaySessionSyncResult:
     event_report: EventIngestionReport
     artifact_report: ArtifactRegistrationReport
+    code_result: CodeResultSnapshotV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,6 +572,7 @@ class WorkerGateway:
         context_materializer: ContextMaterializer | None = None,
         context_package_cutover_at: datetime | None = None,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
+        code_result_capture_service: CodeResultCaptureService | None = None,
         assignment_lease_ttl_seconds: int = 30,
         assignment_lease_renew_interval_seconds: float = 0.0,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -590,6 +600,7 @@ class WorkerGateway:
         self._context_package_cutover_at = context_package_cutover_at
         self._scheduling_blocks = SchedulingBlockService()
         self._candidate_submission_service = candidate_submission_service
+        self._code_result_capture_service = code_result_capture_service
         self._assignment_lease_ttl_seconds = assignment_lease_ttl_seconds
         self._assignment_lease_renew_interval_seconds = (
             assignment_lease_renew_interval_seconds
@@ -620,6 +631,7 @@ class WorkerGateway:
                     context_materialization=context_materialization,
                 )
                 workspace = self._ensure_workspace(context, spec)
+                self._record_code_result_start(context, spec, workspace)
                 result = self._ensure_session(context, spec, workspace)
                 self._ensure_initial_prompt(context, spec, result)
                 if keeper.health_error is not None:
@@ -3403,6 +3415,12 @@ class WorkerGateway:
             fencing_token=fencing_token,
             events=adapter_events,
         )
+        code_result = self._capture_observed_terminal(
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            fencing_token=fencing_token,
+            report=event_report,
+        )
         candidates = adapter.collect_artifacts(
             handle,
             operation_id=uuid5(
@@ -3432,7 +3450,128 @@ class WorkerGateway:
             execution_id=execution_id,
             session_id=session_id,
         )
-        return GatewaySessionSyncResult(event_report, artifact_report)
+        return GatewaySessionSyncResult(event_report, artifact_report, code_result)
+
+    def observe_terminal(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        operation_id: UUID,
+        outcome: str = "succeeded",
+        fencing_token: int | None = None,
+        details: Mapping[str, object] | None = None,
+    ) -> ResultOperationAttemptV1:
+        service = self._require_code_result_capture_service()
+        try:
+            return service.observe_terminal(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                operation_id=operation_id,
+                outcome=outcome,
+                fencing_token=fencing_token,
+                details=details,
+            )
+        except ResultError as exc:
+            raise GatewayMessageError(
+                "execution terminal observation was rejected", code=exc.code
+            ) from exc
+
+    def capture_execution_result(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        operation_id: UUID,
+    ) -> CodeResultSnapshotV1:
+        service = self._require_code_result_capture_service()
+        try:
+            return service.capture_execution(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                operation_id=operation_id,
+            )
+        except ResultError as exc:
+            raise GatewayMessageError(
+                "execution result capture was rejected", code=exc.code
+            ) from exc
+
+    def _record_code_result_start(
+        self,
+        context: _AssignmentContext,
+        spec: ExecutionSpec,
+        workspace: ExecutionWorkspaceManifest,
+    ) -> None:
+        service = self._code_result_capture_service
+        if service is None:
+            return
+        if len(workspace.checkouts) != 1:
+            raise GatewayMessageError(
+                "code result capture requires one repository checkout",
+                code="result_input_format_unsupported",
+            )
+        writable_paths: Sequence[str] = (".",)
+        if spec.repositories:
+            writable_paths = spec.repositories[0].writable_paths
+        try:
+            service.record_execution_start(
+                manifest=workspace,
+                input_commit=workspace.checkouts[0].current_head,
+                writable_paths=writable_paths,
+                operation_id=code_capture_operation_id(context.execution.id),
+            )
+        except ResultError as exc:
+            raise GatewayMessageError(
+                "execution result input boundary could not be recorded",
+                code=exc.code,
+            ) from exc
+
+    def _capture_observed_terminal(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        fencing_token: int,
+        report: EventIngestionReport,
+    ) -> CodeResultSnapshotV1 | None:
+        service = self._code_result_capture_service
+        if service is None:
+            return None
+        snapshot: CodeResultSnapshotV1 | None = None
+        for observation in report.terminal_observations:
+            try:
+                service.observe_terminal(
+                    workspace_id=workspace_id,
+                    execution_id=execution_id,
+                    operation_id=code_capture_operation_id(execution_id),
+                    outcome=observation.outcome,
+                    fencing_token=fencing_token,
+                    details={
+                        "event_type": observation.event_type,
+                        "sequence": observation.sequence,
+                        **dict(observation.payload),
+                    },
+                )
+                if observation.outcome == "succeeded":
+                    snapshot = service.capture_execution(
+                        workspace_id=workspace_id,
+                        execution_id=execution_id,
+                        operation_id=code_capture_operation_id(execution_id),
+                    )
+            except ResultError as exc:
+                raise GatewayMessageError(
+                    "execution terminal result could not be captured",
+                    code=exc.code,
+                ) from exc
+        return snapshot
+
+    def _require_code_result_capture_service(self) -> CodeResultCaptureService:
+        if self._code_result_capture_service is None:
+            raise GatewayMessageError(
+                "code result capture is not configured",
+                code="result_capture_unavailable",
+            )
+        return self._code_result_capture_service
 
     def _queue_knowledge_candidates(
         self,

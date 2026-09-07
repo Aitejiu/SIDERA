@@ -203,6 +203,15 @@ def test_opencode_acp_probe_and_prompt_round_trip(tmp_path: Path) -> None:
     assert progress.payload["trace_category"] == "assistant_summary"
     assert progress.payload["trace_summary"] == "done"
 
+    session = adapter._session(handle)
+    session.transport.process.terminate()
+    session.transport.process.wait(timeout=2)
+    terminal = adapter.observe_terminal(handle)
+    assert terminal is not None
+    assert terminal.event_type == "session.failed"
+    assert terminal.payload["failure_code"] == "process_exited"
+    assert adapter.observe_terminal(handle) is None
+
     stopped = adapter.stop_session(handle, operation_id=uuid4())
     assert stopped.outcome is DeliveryOutcome.DELIVERED
 

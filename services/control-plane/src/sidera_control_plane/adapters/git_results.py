@@ -266,6 +266,16 @@ class GitResultStore:
             git_executable=self._git_executable,
         )
 
+    def inspect_revision(
+        self, *, repository_ref: str, revision: str
+    ) -> tuple[str, str]:
+        """Resolve the exact commit/tree used as a durable execution input."""
+        repository = self._resolve_repository(repository_ref)
+        commit = self._resolve_commit(
+            repository, revision, code="result_input_commit_invalid"
+        )
+        return commit, self._resolve_tree(repository, commit)
+
     def _known_repositories(self) -> tuple[tuple[str, Path], ...]:
         values: dict[str, Path] = {}
         for repository_ref in self._configured_repositories:

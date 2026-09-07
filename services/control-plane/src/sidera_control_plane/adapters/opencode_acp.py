@@ -320,20 +320,18 @@ class OpenCodeACPAdapter:
             self._append_notifications(session)
             events = tuple(session.events)
             session.events.clear()
-            if session.transport.process.poll() is not None and not session.stopped:
-                session.stopped = True
-                sequence = session.next_sequence
-                session.next_sequence += 1
-                events = (
-                    *events,
-                    self._event(
-                        session,
-                        "session.failed",
-                        sequence,
-                        {"failure_code": "process_exited"},
-                    ),
-                )
+            terminal = self._observe_terminal_locked(session)
+            if terminal is not None:
+                events = (*events, terminal)
             return events
+
+    def observe_terminal(
+        self, handle: AdapterSessionHandle
+    ) -> AdapterEvent | None:
+        """Return one durable terminal observation when the ACP process exits."""
+        session = self._session(handle)
+        with session.lock:
+            return self._observe_terminal_locked(session)
 
     def send_input(
         self,
@@ -1066,6 +1064,21 @@ class OpenCodeACPAdapter:
                 )
             )
             session.next_sequence += 1
+
+    def _observe_terminal_locked(
+        self, session: "_OpenCodeSession"
+    ) -> AdapterEvent | None:
+        if session.stopped or session.transport.process.poll() is None:
+            return None
+        session.stopped = True
+        sequence = session.next_sequence
+        session.next_sequence += 1
+        return self._event(
+            session,
+            "session.failed",
+            sequence,
+            {"failure_code": "process_exited"},
+        )
 
     @staticmethod
     def _event(

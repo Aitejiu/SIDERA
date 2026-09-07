@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -9,8 +11,23 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 
+from sidera_control_plane.adapters.git_results import GitResultStore
+from sidera_control_plane.application.code_result_capture import (
+    CodeResultCaptureService,
+    code_capture_operation_id,
+)
+from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
+from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.result_operations import TaskResultHead
+from sidera_control_plane.domain.workspace import (
+    ExecutionWorkspaceManifest,
+    WorkspaceCheckout,
+)
+from sidera_control_plane.persistence.artifact_content_store import (
+    LocalArtifactContentStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import EventModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -46,6 +63,15 @@ class ResultIntegrationScenario:
         self._seeded = False
         self.worker_item_ids: dict[str, UUID] = {}
         self.request_ids: dict[str, UUID] = {}
+        self._source_execution_ids: dict[str, UUID] = {}
+        self._source_worktrees: dict[str, Path] = {}
+        self._repository = tmp_path / "result-integration-repository"
+        self._worktree_root = tmp_path / "result-integration-worktrees"
+        self._artifact_store = LocalArtifactContentStore(
+            tmp_path / "result-integration-artifacts"
+        )
+        self._capture_service: CodeResultCaptureService | None = None
+        self._base_commit = self._init_repository()
 
     @property
     def root_task_id(self) -> UUID:
@@ -53,7 +79,21 @@ class ResultIntegrationScenario:
 
     @property
     def execution_id(self) -> UUID:
-        return self.ids["execution"]
+        return self._source_execution_ids.get("a", self.ids["execution"])
+
+    @property
+    def capture_operation_id(self) -> UUID:
+        return code_capture_operation_id(self.execution_id)
+
+    @property
+    def capture_service(self) -> CodeResultCaptureService:
+        if self._capture_service is None:
+            self._capture_service = self._new_capture_service()
+        return self._capture_service
+
+    @property
+    def base_commit(self) -> str:
+        return self._base_commit
 
     @property
     def root_id(self) -> UUID:
@@ -81,7 +121,190 @@ class ResultIntegrationScenario:
         self.request_id = self._planning.ids["planning_request"]
         self.worker_item_ids = dict(self._planning.worker_item_ids)
         self.request_ids = dict(self._planning.request_ids)
+        self._capture_service = self._new_capture_service()
         self._seeded = True
+
+    def source(
+        self,
+        key: str,
+        *,
+        files: dict[str, bytes],
+        commit: bool,
+        capture: bool = True,
+    ) -> CodeResultSnapshotV1 | None:
+        """Run one source WorkerItem through a real Git worktree."""
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("source key is required")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("source files are required")
+        self.seed_plan()
+        source_key = "a" if key == "login" else key
+        if source_key not in self.worker_item_ids:
+            raise KeyError(source_key)
+        if source_key in self._source_execution_ids:
+            raise AssertionError(f"source {source_key!r} has already been started")
+        self._planning._ensure_source_executions()
+        execution_id = self._planning._execution_id(source_key)
+        if execution_id is None:
+            raise AssertionError(f"source execution {source_key!r} was not created")
+        worker_id, lease_id, _session_id, execution_version = self._planning._start_source(
+            execution_id, key=source_key
+        )
+        del execution_version
+        worktree, manifest = self._create_worktree(execution_id)
+        self._source_execution_ids[source_key] = execution_id
+        self._source_worktrees[source_key] = worktree
+        with self.uow() as uow:
+            uow.workspaces.add(manifest)
+        service = self.capture_service
+        service.record_execution_start(
+            manifest=manifest,
+            input_commit=self._base_commit,
+            writable_paths=(".",),
+            operation_id=code_capture_operation_id(execution_id),
+        )
+        for relative, body in files.items():
+            path = (worktree / relative).resolve()
+            if worktree not in path.parents or path == worktree:
+                raise ValueError("source file escapes the worktree")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        if commit:
+            self._git(worktree, "add", "-A")
+            self._git(
+                worktree,
+                "-c",
+                "user.name=Result Integration Worker",
+                "-c",
+                "user.email=worker@sidera.local",
+                "commit",
+                "-m",
+                f"source result {source_key}",
+            )
+            service.observe_terminal(
+                workspace_id=self.workspace_id,
+                execution_id=execution_id,
+                operation_id=code_capture_operation_id(execution_id),
+                outcome="succeeded",
+                fencing_token=1,
+            )
+            if not capture:
+                return None
+            snapshot = service.capture_execution(
+                workspace_id=self.workspace_id,
+                execution_id=execution_id,
+                operation_id=code_capture_operation_id(execution_id),
+            )
+            with self.uow() as uow:
+                current = uow.executions.get(execution_id, self.workspace_id)
+            if current is None:
+                raise AssertionError("source execution disappeared")
+            CommandService(
+                lambda: self.uow(),
+                (ExecutionCommandHandler(lambda: self._planning.now),),
+            ).handle(
+                CommandEnvelope(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    command_type="ReportExecutionSucceeded",
+                    target_type="execution",
+                    actor_type="worker",
+                    actor_id=str(worker_id),
+                    target_id=execution_id,
+                    payload={
+                        "worker_id": str(worker_id),
+                        "lease_id": str(lease_id),
+                        "fencing_token": 1,
+                    },
+                    expected_version=current.version,
+                    idempotency_key=f"result-capture-source-succeeded:{execution_id}",
+                    correlation_id=self.root_task_id,
+                )
+            )
+            return snapshot
+        return None
+
+    def reopen_services(self) -> None:
+        self._capture_service = self._new_capture_service()
+
+    def retained_code_results(self) -> tuple[CodeResultSnapshotV1, ...]:
+        with self.uow() as uow:
+            return uow.results.retained_code_results(self.workspace_id)
+
+    def _new_capture_service(self) -> CodeResultCaptureService:
+        return CodeResultCaptureService(
+            lambda: self.uow(),
+            GitResultStore({"repo://integration-test": self._repository}),
+            artifact_content_store=self._artifact_store,
+            clock=lambda: self._planning.now,
+        )
+
+    def _init_repository(self) -> str:
+        self._repository.mkdir(parents=True, exist_ok=True)
+        self._worktree_root.mkdir(parents=True, exist_ok=True)
+        self._git(self._repository, "init", "--initial-branch=main")
+        (self._repository / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+        (self._repository / "README.md").write_text("base\n", encoding="utf-8")
+        self._git(self._repository, "add", "-A")
+        self._git(
+            self._repository,
+            "-c",
+            "user.name=Result Integration Base",
+            "-c",
+            "user.email=base@sidera.local",
+            "commit",
+            "-m",
+            "base",
+        )
+        return self._git(self._repository, "rev-parse", "HEAD")
+
+    def _create_worktree(
+        self, execution_id: UUID
+    ) -> tuple[Path, ExecutionWorkspaceManifest]:
+        worktree = self._worktree_root / str(execution_id)
+        branch = f"sidera/execution/{execution_id}"
+        self._git(
+            self._repository,
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree),
+            self._base_commit,
+        )
+        manifest = ExecutionWorkspaceManifest.create(
+            id=uuid4(),
+            workspace_id=self.workspace_id,
+            task_id=self._planning._execution_task_id(execution_id),
+            execution_id=execution_id,
+            checkouts=(
+                WorkspaceCheckout(
+                    repository_ref="repo://integration-test",
+                    base_revision=self._base_commit,
+                    branch=branch,
+                    current_head=self._base_commit,
+                ),
+            ),
+            location_ref=f"git-worktree://{execution_id}",
+            retention_seconds=3600,
+            fencing_token=1,
+            created_at=NOW,
+        )
+        manifest.mark_preparing()
+        manifest.mark_ready()
+        manifest.mark_active()
+        return worktree, manifest
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        return result.stdout.decode("utf-8").strip()
 
     def confirm_with_missing_spec_module(self) -> None:
         self._planning.confirm_plan(

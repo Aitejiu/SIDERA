@@ -6,6 +6,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.application.event_ingestor import (
+    EventIngestionReport,
+    TerminalEventObservation,
+)
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
 from sidera_control_plane.application.ports import (
     ArtifactContentWriter,
@@ -135,6 +139,21 @@ class RecordingLeaseUow:
         del exc_type, exc_value, traceback
 
 
+class RecordingResultCapture:
+    def __init__(self) -> None:
+        self.observations: list[dict[str, object]] = []
+        self.captures: list[dict[str, object]] = []
+        self.snapshot = object()
+
+    def observe_terminal(self, **kwargs):
+        self.observations.append(kwargs)
+        return object()
+
+    def capture_execution(self, **kwargs):
+        self.captures.append(kwargs)
+        return self.snapshot
+
+
 def test_assignment_lease_keeper_renews_and_audits_with_fencing() -> None:
     workspace_id = UUID("20000000-0000-0000-0000-000000000001")
     execution_id = UUID("70000000-0000-0000-0000-000000000001")
@@ -216,6 +235,50 @@ def test_gateway_runner_reschedules_failures_without_acknowledging() -> None:
     assert store.acknowledged == []
     assert store.rescheduled[0][2] == NOW + timedelta(seconds=2)
     assert "gateway_unavailable" in store.rescheduled[0][3]
+
+
+def test_gateway_observes_all_terminals_but_captures_only_success() -> None:
+    capture = RecordingResultCapture()
+    gateway = WorkerGateway(
+        lambda: None,  # type: ignore[return-value]
+        adapter_factories={},
+        workspace_factories={},
+        code_result_capture_service=capture,  # type: ignore[arg-type]
+    )
+    workspace_id = UUID("20000000-0000-0000-0000-000000000001")
+    execution_id = UUID("70000000-0000-0000-0000-000000000001")
+    report = EventIngestionReport(
+        events=(),
+        duplicate_sequences=(),
+        terminal_observations=(
+            TerminalEventObservation(
+                event_type="session.failed",
+                sequence=1,
+                outcome="failed",
+                payload={"failure_code": "worker_failed"},
+            ),
+            TerminalEventObservation(
+                event_type="execution.succeeded",
+                sequence=2,
+                outcome="succeeded",
+                payload={"summary": "ready"},
+            ),
+        ),
+    )
+
+    result = gateway._capture_observed_terminal(
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        fencing_token=1,
+        report=report,
+    )
+
+    assert result is capture.snapshot
+    assert [item["outcome"] for item in capture.observations] == [
+        "failed",
+        "succeeded",
+    ]
+    assert len(capture.captures) == 1
 
 
 def test_worker_gateway_stores_content_before_registry_and_strips_bytes() -> None:
