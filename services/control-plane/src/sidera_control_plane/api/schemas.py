@@ -103,7 +103,10 @@ from sidera_control_plane.application.work_context_queries import (
 )
 from sidera_control_plane.collaboration_readiness import ReadinessReport
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
-from sidera_control_plane.domain.context_packages import ContextPackageManifestV2
+from sidera_control_plane.domain.context_packages import (
+    ContextPackageManifestV2,
+    ContextPackageManifestV3,
+)
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.result_inputs import (
     InputGroupCandidateV1,
@@ -4699,6 +4702,8 @@ class ContextPackageResponse(BaseModel):
     context_version: int | None
     manifest_schema_version: int
     result_input_manifest: dict[str, Any] | None
+    code_input_manifest: dict[str, Any] | None
+    verification_manifest: dict[str, Any] | None
     control_plane_fact_snapshot: dict[str, Any]
     knowledge_refs: tuple[ContextPackageKnowledgeRefResponse, ...]
     artifact_refs: tuple[ContextPackageReferenceResponse, ...]
@@ -4734,7 +4739,20 @@ class ContextPackageResponse(BaseModel):
             manifest_schema_version=manifest.manifest_schema_version,
             result_input_manifest=(
                 jsonable_encoder(manifest.result_input_manifest.to_mapping())
-                if isinstance(manifest, ContextPackageManifestV2)
+                if isinstance(manifest, (ContextPackageManifestV2, ContextPackageManifestV3))
+                and manifest.result_input_manifest is not None
+                else None
+            ),
+            code_input_manifest=(
+                jsonable_encoder(manifest.code_input_manifest.to_mapping())
+                if isinstance(manifest, ContextPackageManifestV3)
+                and manifest.code_input_manifest is not None
+                else None
+            ),
+            verification_manifest=(
+                jsonable_encoder(manifest.verification_manifest.to_mapping())
+                if isinstance(manifest, ContextPackageManifestV3)
+                and manifest.verification_manifest is not None
                 else None
             ),
             control_plane_fact_snapshot=jsonable_encoder(
@@ -4989,6 +5007,8 @@ class ContextMaterializationResponse(BaseModel):
     project_knowledge: tuple[MaterializationKnowledgeResponse, ...]
     artifact_and_evidence_refs: tuple[MaterializedContextRefResponse, ...]
     result_inputs: tuple[dict[str, Any], ...] = ()
+    code_input_manifest: dict[str, Any] | None = None
+    verification_manifest: dict[str, Any] | None = None
     total_byte_count: int
     input_token_count: int
 

@@ -4289,10 +4289,21 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
         ),
         CheckConstraint(
             "(manifest_schema_version = 1 AND input_selection_id IS NULL "
-            "AND input_selection_hash IS NULL AND result_input_budget IS NULL) OR "
+            "AND input_selection_hash IS NULL AND result_input_budget IS NULL "
+            "AND code_input_manifest IS NULL AND verification_manifest IS NULL) OR "
             "(manifest_schema_version = 2 AND input_selection_id IS NOT NULL "
             "AND input_selection_hash ~ '^[0-9a-f]{64}$' "
-            "AND jsonb_typeof(result_input_budget) = 'object')",
+            "AND jsonb_typeof(result_input_budget) = 'object' "
+            "AND code_input_manifest IS NULL AND verification_manifest IS NULL) OR "
+            "(manifest_schema_version = 3 AND "
+            "((code_input_manifest IS NOT NULL AND verification_manifest IS NULL) OR "
+            "(code_input_manifest IS NULL AND verification_manifest IS NOT NULL)) AND "
+            "((input_selection_id IS NULL AND input_selection_hash IS NULL "
+            "AND result_input_budget IS NULL) OR "
+            "(input_selection_id IS NOT NULL "
+            "AND input_selection_hash ~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(result_input_budget) = 'object')) AND "
+            "jsonb_typeof(COALESCE(code_input_manifest, verification_manifest)) = 'object')",
             name="ck_context_assembly_requests_manifest_protocol",
         ),
         CheckConstraint(
@@ -4392,6 +4403,12 @@ class ContextAssemblyRequestModel(TimestampMixin, Base):
     result_input_budget: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True)
     )
+    code_input_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    verification_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     knowledge_search_scope: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
     )
@@ -4452,7 +4469,14 @@ class ContextPackageModel(TimestampMixin, Base):
         CheckConstraint(
             "(manifest_schema_version = 1 AND result_input_manifest IS NULL) OR "
             "(manifest_schema_version = 2 "
-            "AND jsonb_typeof(result_input_manifest) = 'object')",
+            "AND jsonb_typeof(result_input_manifest) = 'object' "
+            "AND code_input_manifest IS NULL AND verification_manifest IS NULL) OR "
+            "(manifest_schema_version = 3 AND "
+            "((code_input_manifest IS NOT NULL AND verification_manifest IS NULL) OR "
+            "(code_input_manifest IS NULL AND verification_manifest IS NOT NULL)) AND "
+            "(result_input_manifest IS NULL OR "
+            "jsonb_typeof(result_input_manifest) = 'object') AND "
+            "jsonb_typeof(COALESCE(code_input_manifest, verification_manifest)) = 'object')",
             name="ck_context_packages_manifest_protocol",
         ),
         CheckConstraint(
@@ -4534,6 +4558,12 @@ class ContextPackageModel(TimestampMixin, Base):
         Integer, nullable=False, server_default=text("1")
     )
     result_input_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    code_input_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    verification_manifest: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True)
     )
     control_plane_fact_snapshot: Mapped[dict[str, Any]] = mapped_column(

@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import cast
 from uuid import UUID
 
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.input_selections import (
     CollaborationInputSelectionV1,
@@ -21,6 +22,7 @@ from sidera_control_plane.domain.result_inputs import (
     ResultInputArtifact,
     ResultInputEvidence,
 )
+from sidera_control_plane.domain.result_verification import VerificationManifestV1
 from sidera_control_plane.domain.work_context import (
     AcceptedDecision,
     ClarificationDecision,
@@ -1218,6 +1220,61 @@ class ContextMaterializationV2:
         return sum(ceil(item.section_byte_count / 4) for item in self.project_knowledge)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContextMaterializationV3(ContextMaterializationV1):
+    """Runtime context carrying one exact code or verification input contract."""
+
+    result_inputs: tuple[MaterializedResultInput, ...] = ()
+    code_input_manifest: CodeInputManifestV1 | None = None
+    verification_manifest: VerificationManifestV1 | None = None
+    schema_version: int = 3
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 3:
+            raise ValidationError("unsupported context materialization schema_version")
+        for field_name, item_type in (
+            ("metadata", ContextMetadata),
+            ("system_constraints", SystemConstraintSection),
+            ("work_context", WorkContextSection),
+            ("control_plane_facts", ControlPlaneFactSection),
+        ):
+            if not isinstance(getattr(self, field_name), item_type):
+                raise ValidationError(f"materialization {field_name} must be typed")
+        if any(not isinstance(item, ProjectKnowledgeSection) for item in self.project_knowledge):
+            raise ValidationError("materialization project knowledge must be typed")
+        object.__setattr__(
+            self,
+            "project_knowledge",
+            tuple(sorted(self.project_knowledge, key=lambda item: item.ordinal)),
+        )
+        if any(not isinstance(item, TypedContextRef) for item in self.artifact_and_evidence_refs):
+            raise ValidationError("materialization artifact/evidence refs must be typed")
+        object.__setattr__(self, "artifact_and_evidence_refs", tuple(self.artifact_and_evidence_refs))
+        if any(not isinstance(item, MaterializedResultInput) for item in self.result_inputs):
+            raise ValidationError("materialization result inputs must be typed")
+        object.__setattr__(self, "result_inputs", tuple(self.result_inputs))
+        _validate_execution_input_manifests(
+            self.code_input_manifest,
+            self.verification_manifest,
+            label="context materialization v3",
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        document = ContextMaterializationV1.to_mapping(self)
+        document["result_inputs"] = [item.to_mapping() for item in self.result_inputs]
+        document["code_input_manifest"] = (
+            self.code_input_manifest.to_mapping()
+            if self.code_input_manifest is not None
+            else None
+        )
+        document["verification_manifest"] = (
+            self.verification_manifest.to_mapping()
+            if self.verification_manifest is not None
+            else None
+        )
+        return document
+
+
 @dataclass(frozen=True, slots=True)
 class ContextPackageKnowledgeRef:
     page_id: UUID
@@ -1503,8 +1560,282 @@ class ContextPackageManifestV2(ContextPackageManifestV1):
         return document
 
 
-ContextPackageManifest = ContextPackageManifestV1 | ContextPackageManifestV2
-ContextMaterialization = ContextMaterializationV1 | ContextMaterializationV2
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContextPackageManifestV3(ContextPackageManifestV1):
+    """Immutable package carrying one exact code or verification input contract."""
+
+    result_input_manifest: ResultInputManifestV1 | None = None
+    code_input_manifest: CodeInputManifestV1 | None = None
+    verification_manifest: VerificationManifestV1 | None = None
+
+    @classmethod
+    def create(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls,
+        *,
+        package_id: UUID,
+        workspace_id: UUID,
+        purpose: ContextPurpose,
+        consumer_type: ContextConsumerType,
+        consumer_id: UUID,
+        worker_item_id: UUID | None,
+        work_context_revision_id: UUID,
+        context_version: int | None,
+        control_plane_fact_snapshot: Mapping[str, object],
+        knowledge_refs: Sequence[ContextPackageKnowledgeRef],
+        artifact_refs: Sequence[WorkReference],
+        evidence_refs: Sequence[WorkReference],
+        budget: ContextBudgetV1,
+        expires_at: datetime,
+        idempotency_key: str,
+        created_at: datetime,
+        result_input_manifest: ResultInputManifestV1 | None = None,
+        code_input_manifest: CodeInputManifestV1 | None = None,
+        verification_manifest: VerificationManifestV1 | None = None,
+    ) -> ContextPackageManifestV3:
+        return cls(
+            package_id=package_id,
+            workspace_id=workspace_id,
+            purpose=purpose,
+            consumer_type=consumer_type,
+            consumer_id=consumer_id,
+            worker_item_id=worker_item_id,
+            work_context_revision_id=work_context_revision_id,
+            context_version=context_version,
+            control_plane_fact_snapshot=control_plane_fact_snapshot,
+            knowledge_refs=tuple(knowledge_refs),
+            artifact_refs=tuple(artifact_refs),
+            evidence_refs=tuple(evidence_refs),
+            budget=budget,
+            expires_at=expires_at,
+            idempotency_key=idempotency_key,
+            status=ContextPackageStatus.ACTIVE,
+            created_at=created_at,
+            result_input_manifest=result_input_manifest,
+            code_input_manifest=code_input_manifest,
+            verification_manifest=verification_manifest,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ContextPackageManifestV3:
+        mapping = _context_manifest_mapping(value)
+        schema_version = mapping["manifest_schema_version"]
+        if isinstance(schema_version, bool) or schema_version != 3:
+            raise ValidationError("unsupported context package manifest_schema_version")
+        code_value = mapping["code_input_manifest"]
+        verification_value = mapping["verification_manifest"]
+        result_value = mapping["result_input_manifest"]
+        return cls(
+            package_id=_context_uuid(mapping["package_id"], "package_id"),
+            workspace_id=_context_uuid(mapping["workspace_id"], "workspace_id"),
+            purpose=_context_enum(mapping["purpose"], ContextPurpose, "purpose"),
+            consumer_type=_context_enum(
+                mapping["consumer_type"], ContextConsumerType, "consumer_type"
+            ),
+            consumer_id=_context_uuid(mapping["consumer_id"], "consumer_id"),
+            worker_item_id=(
+                _context_uuid(mapping["worker_item_id"], "worker_item_id")
+                if mapping["worker_item_id"] is not None
+                else None
+            ),
+            work_context_revision_id=_context_uuid(
+                mapping["work_context_revision_id"], "work_context_revision_id"
+            ),
+            context_version=(
+                _context_integer(mapping["context_version"], "context_version")
+                if mapping["context_version"] is not None
+                else None
+            ),
+            control_plane_fact_snapshot=_context_mapping(
+                mapping["control_plane_fact_snapshot"], "control_plane_fact_snapshot"
+            ),
+            knowledge_refs=tuple(
+                _context_knowledge_ref(item)
+                for item in _context_sequence(mapping["knowledge_refs"], "knowledge_refs")
+            ),
+            artifact_refs=tuple(
+                WorkReference.from_mapping(
+                    _context_mapping(item, "artifact_refs item")
+                )
+                for item in _context_sequence(mapping["artifact_refs"], "artifact_refs")
+            ),
+            evidence_refs=tuple(
+                WorkReference.from_mapping(
+                    _context_mapping(item, "evidence_refs item")
+                )
+                for item in _context_sequence(mapping["evidence_refs"], "evidence_refs")
+            ),
+            budget=_context_budget(mapping["budget"]),
+            expires_at=_context_datetime(mapping["expires_at"], "expires_at"),
+            idempotency_key=_context_text(mapping["idempotency_key"], "idempotency_key"),
+            status=_context_enum(mapping["status"], ContextPackageStatus, "status"),
+            created_at=_context_datetime(mapping["created_at"], "created_at"),
+            materialized_at=(
+                _context_datetime(mapping["materialized_at"], "materialized_at")
+                if mapping["materialized_at"] is not None
+                else None
+            ),
+            revoked_at=(
+                _context_datetime(mapping["revoked_at"], "revoked_at")
+                if mapping["revoked_at"] is not None
+                else None
+            ),
+            revocation_reason=(
+                _context_text(mapping["revocation_reason"], "revocation_reason")
+                if mapping["revocation_reason"] is not None
+                else None
+            ),
+            revocation_scope=(
+                _context_enum(
+                    mapping["revocation_scope"],
+                    ContextRevocationScope,
+                    "revocation_scope",
+                )
+                if mapping["revocation_scope"] is not None
+                else None
+            ),
+            result_input_manifest=(
+                ResultInputManifestV1.from_mapping(result_value)
+                if result_value is not None
+                else None
+            ),
+            code_input_manifest=(
+                CodeInputManifestV1.from_mapping(code_value)
+                if code_value is not None
+                else None
+            ),
+            verification_manifest=(
+                VerificationManifestV1.from_mapping(verification_value)
+                if verification_value is not None
+                else None
+            ),
+        )
+
+    @property
+    def manifest_schema_version(self) -> int:
+        return 3
+
+    def __post_init__(self) -> None:
+        if self.result_input_manifest is not None and not isinstance(
+            self.result_input_manifest, ResultInputManifestV1
+        ):
+            raise ValidationError("context package v3 result input manifest must be typed")
+        _validate_execution_input_manifests(
+            self.code_input_manifest,
+            self.verification_manifest,
+            label="context package v3",
+        )
+        if (
+            self.code_input_manifest is not None
+            and self.result_input_manifest is not None
+            and (
+                self.result_input_manifest.input_selection_id
+                != self.code_input_manifest.selection_id
+                or self.result_input_manifest.input_selection_hash
+                != self.code_input_manifest.selection_hash
+            )
+        ):
+            raise ValidationError(
+                "context package v3 code input selection does not match result input"
+            )
+        expected_request_id = self.control_plane_fact_snapshot.get(
+            "execution_request_id"
+        )
+        expected_execution_id = self.control_plane_fact_snapshot.get("execution_id")
+        if self.code_input_manifest is not None:
+            if (
+                expected_request_id is not None
+                and str(expected_request_id) != str(self.code_input_manifest.request_id)
+            ):
+                raise ValidationError(
+                    "context package v3 code input request does not match consumer"
+                )
+            if (
+                expected_execution_id is not None
+                and str(expected_execution_id) != str(self.code_input_manifest.execution_id)
+            ):
+                raise ValidationError(
+                    "context package v3 code input execution does not match consumer"
+                )
+        ContextPackageManifestV1.__post_init__(self)
+
+    def hash_document(self) -> dict[str, object]:
+        document = ContextPackageManifestV1.hash_document(self)
+        document["manifest_schema_version"] = 3
+        document["result_input_manifest"] = (
+            self.result_input_manifest.to_mapping()
+            if self.result_input_manifest is not None
+            else None
+        )
+        document["code_input_manifest"] = (
+            self.code_input_manifest.to_mapping()
+            if self.code_input_manifest is not None
+            else None
+        )
+        document["verification_manifest"] = (
+            self.verification_manifest.to_mapping()
+            if self.verification_manifest is not None
+            else None
+        )
+        return document
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "manifest_schema_version": self.manifest_schema_version,
+            "package_id": str(self.package_id),
+            "workspace_id": str(self.workspace_id),
+            "purpose": self.purpose.value,
+            "consumer_type": self.consumer_type.value,
+            "consumer_id": str(self.consumer_id),
+            "worker_item_id": (
+                str(self.worker_item_id) if self.worker_item_id is not None else None
+            ),
+            "work_context_revision_id": str(self.work_context_revision_id),
+            "context_version": self.context_version,
+            "control_plane_fact_snapshot": _plain_json(self.control_plane_fact_snapshot),
+            "knowledge_refs": [item.to_mapping() for item in self.knowledge_refs],
+            "artifact_refs": [item.to_mapping() for item in self.artifact_refs],
+            "evidence_refs": [item.to_mapping() for item in self.evidence_refs],
+            "budget": self.budget.to_mapping(),
+            "expires_at": self.expires_at.astimezone(UTC).isoformat(),
+            "idempotency_key": self.idempotency_key,
+            "status": self.status.value,
+            "created_at": self.created_at.astimezone(UTC).isoformat(),
+            "materialized_at": (
+                self.materialized_at.astimezone(UTC).isoformat()
+                if self.materialized_at is not None
+                else None
+            ),
+            "revoked_at": (
+                self.revoked_at.astimezone(UTC).isoformat()
+                if self.revoked_at is not None
+                else None
+            ),
+            "revocation_reason": self.revocation_reason,
+            "revocation_scope": (
+                self.revocation_scope.value if self.revocation_scope is not None else None
+            ),
+            "result_input_manifest": (
+                self.result_input_manifest.to_mapping()
+                if self.result_input_manifest is not None
+                else None
+            ),
+            "code_input_manifest": (
+                self.code_input_manifest.to_mapping()
+                if self.code_input_manifest is not None
+                else None
+            ),
+            "verification_manifest": (
+                self.verification_manifest.to_mapping()
+                if self.verification_manifest is not None
+                else None
+            ),
+        }
+
+
+ContextPackageManifest = (
+    ContextPackageManifestV1 | ContextPackageManifestV2 | ContextPackageManifestV3
+)
+ContextMaterialization = ContextMaterializationV1 | ContextMaterializationV2 | ContextMaterializationV3
 
 
 @dataclass(frozen=True, slots=True)
@@ -1571,6 +1902,8 @@ class ContextAssemblyRequest:
     input_selection_id: UUID | None = None
     input_selection_hash: str | None = None
     result_input_budget: ResultInputBudgetV1 | None = None
+    code_input_manifest: CodeInputManifestV1 | None = None
+    verification_manifest: VerificationManifestV1 | None = None
 
     @classmethod
     def create(
@@ -1596,6 +1929,8 @@ class ContextAssemblyRequest:
         input_selection_id: UUID | None = None,
         input_selection_hash: str | None = None,
         result_input_budget: ResultInputBudgetV1 | None = None,
+        code_input_manifest: CodeInputManifestV1 | None = None,
+        verification_manifest: VerificationManifestV1 | None = None,
     ) -> ContextAssemblyRequest:
         return cls(
             request_id=request_id,
@@ -1626,6 +1961,8 @@ class ContextAssemblyRequest:
             input_selection_id=input_selection_id,
             input_selection_hash=input_selection_hash,
             result_input_budget=result_input_budget,
+            code_input_manifest=code_input_manifest,
+            verification_manifest=verification_manifest,
         )
 
     def __post_init__(self) -> None:
@@ -1664,6 +2001,8 @@ class ContextAssemblyRequest:
                     self.input_selection_id,
                     self.input_selection_hash,
                     self.result_input_budget,
+                    self.code_input_manifest,
+                    self.verification_manifest,
                 )
             ):
                 raise ValidationError("v1 context assembly cannot contain result input fields")
@@ -1681,6 +2020,67 @@ class ContextAssemblyRequest:
             )
             if not isinstance(self.result_input_budget, ResultInputBudgetV1):
                 raise ValidationError("v2 context assembly requires result_input_budget")
+            if self.code_input_manifest is not None or self.verification_manifest is not None:
+                raise ValidationError("v2 context assembly cannot contain execution input manifests")
+        elif self.manifest_schema_version == 3:
+            if self.purpose is not ContextPurpose.EXECUTION:
+                raise ValidationError("v3 context assembly requires execution purpose")
+            _validate_execution_input_manifests(
+                self.code_input_manifest,
+                self.verification_manifest,
+                label="context assembly v3",
+            )
+            selection_values = (
+                self.input_selection_id,
+                self.input_selection_hash,
+                self.result_input_budget,
+            )
+            if any(value is not None for value in selection_values) and not all(
+                value is not None for value in selection_values
+            ):
+                raise ValidationError(
+                    "v3 context assembly selection fields must be complete"
+                )
+            if self.input_selection_id is not None:
+                if self.code_input_manifest is None:
+                    raise ValidationError(
+                        "v3 verification context cannot carry code selection fields"
+                    )
+                if (
+                    self.input_selection_id != self.code_input_manifest.selection_id
+                    or self.input_selection_hash != self.code_input_manifest.selection_hash
+                ):
+                    raise ValidationError(
+                        "v3 context assembly selection does not match code input manifest"
+                    )
+                if not isinstance(self.result_input_budget, ResultInputBudgetV1):
+                    raise ValidationError("v3 context assembly requires result_input_budget")
+            expected_request_id = self.budget.get("execution_request_id")
+            expected_execution_id = self.budget.get("execution_id")
+            if self.code_input_manifest is not None:
+                if (
+                    expected_request_id is not None
+                    and str(expected_request_id)
+                    != str(self.code_input_manifest.request_id)
+                ):
+                    raise ValidationError(
+                        "v3 context assembly code input request does not match consumer"
+                    )
+                if (
+                    expected_execution_id is not None
+                    and str(expected_execution_id)
+                    != str(self.code_input_manifest.execution_id)
+                ):
+                    raise ValidationError(
+                        "v3 context assembly code input execution does not match consumer"
+                    )
+            elif (
+                expected_request_id is not None
+                or expected_execution_id is not None
+            ):
+                raise ValidationError(
+                    "v3 verification context cannot carry code execution consumer fields"
+                )
         else:
             raise ValidationError("unsupported context assembly manifest_schema_version")
         _positive(self.manifest_schema_version, "assembly manifest_schema_version")
@@ -1779,6 +2179,176 @@ def _sorted_knowledge_refs(
     if any(not isinstance(item, ContextPackageKnowledgeRef) for item in values):
         raise ValidationError("package knowledge refs must be typed")
     return tuple(sorted(values, key=lambda item: (item.ordinal, item.page_id, item.revision_id, item.section_key)))
+
+
+def _validate_execution_input_manifests(
+    code_input_manifest: CodeInputManifestV1 | None,
+    verification_manifest: VerificationManifestV1 | None,
+    *,
+    label: str,
+) -> None:
+    if code_input_manifest is not None and not isinstance(
+        code_input_manifest, CodeInputManifestV1
+    ):
+        raise ValidationError(f"{label} code input manifest must be typed")
+    if verification_manifest is not None and not isinstance(
+        verification_manifest, VerificationManifestV1
+    ):
+        raise ValidationError(f"{label} verification manifest must be typed")
+    if code_input_manifest is None and verification_manifest is None:
+        raise ValidationError(f"{label} requires exactly one execution input manifest")
+    if code_input_manifest is not None and verification_manifest is not None:
+        raise ValidationError(f"{label} requires exactly one execution input manifest")
+
+
+def _context_manifest_mapping(value: object) -> Mapping[str, object]:
+    fields = {
+        "manifest_schema_version",
+        "package_id",
+        "workspace_id",
+        "purpose",
+        "consumer_type",
+        "consumer_id",
+        "worker_item_id",
+        "work_context_revision_id",
+        "context_version",
+        "control_plane_fact_snapshot",
+        "knowledge_refs",
+        "artifact_refs",
+        "evidence_refs",
+        "budget",
+        "expires_at",
+        "idempotency_key",
+        "status",
+        "created_at",
+        "materialized_at",
+        "revoked_at",
+        "revocation_reason",
+        "revocation_scope",
+        "result_input_manifest",
+        "code_input_manifest",
+        "verification_manifest",
+    }
+    if not isinstance(value, Mapping):
+        raise ValidationError("context package manifest must be an object")
+    keys = set(value)
+    if not all(isinstance(key, str) for key in keys):
+        raise ValidationError("context package manifest field names must be strings")
+    unknown = sorted(keys - fields)
+    missing = sorted(fields - keys)
+    if unknown:
+        raise ValidationError(
+            f"unknown context package manifest fields: {', '.join(unknown)}"
+        )
+    if missing:
+        raise ValidationError(
+            f"missing context package manifest fields: {', '.join(missing)}"
+        )
+    return cast(Mapping[str, object], value)
+
+
+def _context_mapping(value: object, field_name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValidationError(f"{field_name} must be an object")
+    if not all(isinstance(key, str) for key in value):
+        raise ValidationError(f"{field_name} keys must be strings")
+    return cast(Mapping[str, object], value)
+
+
+def _context_sequence(value: object, field_name: str) -> tuple[object, ...]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise ValidationError(f"{field_name} must be an array")
+    return tuple(value)
+
+
+def _context_uuid(value: object, field_name: str) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        raise ValidationError(f"{field_name} must be a UUID")
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValidationError(f"{field_name} must be a UUID") from exc
+
+
+def _context_integer(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError(f"{field_name} must be an integer")
+    return value
+
+
+def _context_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{field_name} is required")
+    return value.strip()
+
+
+def _context_datetime(value: object, field_name: str) -> datetime:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValidationError(f"{field_name} must be an ISO datetime") from exc
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValidationError(f"{field_name} must be timezone aware")
+    return value.astimezone(UTC)
+
+
+def _context_enum[ContextEnumT: StrEnum](
+    value: object, enum_type: type[ContextEnumT], field_name: str
+) -> ContextEnumT:
+    try:
+        return value if isinstance(value, enum_type) else enum_type(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"invalid {field_name}") from exc
+
+
+def _context_budget(value: object) -> ContextBudgetV1:
+    mapping = _context_mapping(value, "budget")
+    return ContextBudgetV1(
+        profile_id=_context_uuid(mapping.get("profile_id"), "budget profile_id"),
+        profile_version=_context_integer(
+            mapping.get("profile_version"), "budget profile_version"
+        ),
+        max_sections=_context_integer(mapping.get("max_sections"), "budget max_sections"),
+        max_chars=_context_integer(mapping.get("max_chars"), "budget max_chars"),
+        max_input_tokens=_context_integer(
+            mapping.get("max_input_tokens"), "budget max_input_tokens"
+        ),
+        actual_sections=_context_integer(
+            mapping.get("actual_sections", 0), "budget actual_sections"
+        ),
+        actual_chars=_context_integer(mapping.get("actual_chars", 0), "budget actual_chars"),
+        actual_input_tokens=_context_integer(
+            mapping.get("actual_input_tokens", 0), "budget actual_input_tokens"
+        ),
+    )
+
+
+def _context_knowledge_ref(value: object) -> ContextPackageKnowledgeRef:
+    mapping = _context_mapping(value, "knowledge ref")
+    source_ids = tuple(
+        _context_uuid(item, "knowledge ref source_id")
+        for item in _context_sequence(mapping.get("source_ids"), "knowledge ref source_ids")
+    )
+    return ContextPackageKnowledgeRef(
+        page_id=_context_uuid(mapping.get("page_id"), "knowledge ref page_id"),
+        revision_id=_context_uuid(
+            mapping.get("revision_id"), "knowledge ref revision_id"
+        ),
+        revision_hash=_context_text(mapping.get("revision_hash"), "knowledge ref revision_hash"),
+        section_key=_context_text(mapping.get("section_key"), "knowledge ref section_key"),
+        section_hash=_context_text(mapping.get("section_hash"), "knowledge ref section_hash"),
+        source_ids=source_ids,
+        selection_reason=_context_enum(
+            mapping.get("selection_reason"), ContextSelectionReason, "selection_reason"
+        ),
+        trust_level=_context_enum(
+            mapping.get("trust_level"), ContextTrustLevel, "trust_level"
+        ),
+        ordinal=_context_integer(mapping.get("ordinal"), "knowledge ref ordinal"),
+    )
 
 
 def _result_input_mapping(

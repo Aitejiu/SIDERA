@@ -249,6 +249,9 @@ class ExecutionRequest:
     collaboration_gate_mode: CollaborationGateMode = CollaborationGateMode.UNMANAGED
     input_selection_id: UUID | None = None
     input_selection_hash: str | None = None
+    result_derivation_kind: str | None = None
+    source_candidate_id: UUID | None = None
+    rework_record_id: UUID | None = None
 
     @classmethod
     def create(
@@ -284,6 +287,9 @@ class ExecutionRequest:
         handoff_transition_id: UUID | None = None,
         input_selection_id: UUID | None = None,
         input_selection_hash: str | None = None,
+        result_derivation_kind: str | None = None,
+        source_candidate_id: UUID | None = None,
+        rework_record_id: UUID | None = None,
     ) -> ExecutionRequest:
         for name, value in (
             ("request_id", request_id),
@@ -313,6 +319,11 @@ class ExecutionRequest:
                 "handoff target requires source execution and session lineage"
             )
         _validate_input_selection_reference(input_selection_id, input_selection_hash)
+        _validate_result_derivation(
+            result_derivation_kind,
+            source_candidate_id,
+            rework_record_id,
+        )
         if plan_generation < 1:
             raise ValidationError("plan_generation must be positive")
         clean_key = _required_text(worker_item_key, "worker_item_key")
@@ -376,6 +387,9 @@ class ExecutionRequest:
             collaboration_gate_mode=gate_mode,
             input_selection_id=input_selection_id,
             input_selection_hash=input_selection_hash,
+            result_derivation_kind=result_derivation_kind,
+            source_candidate_id=source_candidate_id,
+            rework_record_id=rework_record_id,
         )
 
     @property
@@ -766,6 +780,33 @@ def _validate_input_selection_reference(
         and re.fullmatch(r"[0-9a-f]{64}", selection_hash) is None
     ):
         raise ValidationError("input selection hash must be a lowercase SHA-256 hash")
+
+
+def _validate_result_derivation(
+    kind: str | None,
+    source_candidate_id: UUID | None,
+    rework_record_id: UUID | None,
+) -> None:
+    if kind not in {None, "verification", "rework"}:
+        raise ValidationError("unsupported result derivation kind")
+    if source_candidate_id is not None and not isinstance(source_candidate_id, UUID):
+        raise ValidationError("source_candidate_id must be a UUID")
+    if rework_record_id is not None and not isinstance(rework_record_id, UUID):
+        raise ValidationError("rework_record_id must be a UUID")
+    if kind is None and (source_candidate_id is not None or rework_record_id is not None):
+        raise ValidationError("result derivation source requires a derivation kind")
+    if kind == "verification" and (
+        source_candidate_id is None or rework_record_id is not None
+    ):
+        raise ValidationError(
+            "verification result derivation requires only source_candidate_id"
+        )
+    if kind == "rework" and (
+        source_candidate_id is None or rework_record_id is None
+    ):
+        raise ValidationError(
+            "rework result derivation requires source_candidate_id and rework_record_id"
+        )
 
 
 def _aware(value: datetime, name: str) -> None:

@@ -197,6 +197,58 @@ def verification_manifest_mapping(**overrides: object) -> dict[str, object]:
     return value
 
 
+def context_v3_mapping(*, mode: str = "code", **overrides: object) -> dict[str, object]:
+    """Return a complete ContextPackage manifest for one exact V3 purpose."""
+
+    if mode not in {"code", "verification"}:
+        raise ValueError("context V3 mode must be code or verification")
+    value: dict[str, object] = {
+        "manifest_schema_version": 3,
+        "package_id": "71000000-0000-0000-0000-000000000001",
+        "workspace_id": "20000000-0000-0000-0000-000000000001",
+        "purpose": "execution",
+        "consumer_type": "worker",
+        "consumer_id": "40000000-0000-0000-0000-000000000010",
+        "worker_item_id": "40000000-0000-0000-0000-000000000001",
+        "work_context_revision_id": "41000000-0000-0000-0000-000000000001",
+        "context_version": 1,
+        "control_plane_fact_snapshot": {
+            "execution_request_id": "50000000-0000-0000-0000-000000000002",
+            "execution_id": "60000000-0000-0000-0000-000000000003",
+        },
+        "knowledge_refs": [],
+        "artifact_refs": [],
+        "evidence_refs": [],
+        "budget": {
+            "profile_id": "72000000-0000-0000-0000-000000000001",
+            "profile_version": 1,
+            "max_sections": 8,
+            "max_chars": 20_000,
+            "max_input_tokens": 4_000,
+            "actual_sections": 0,
+            "actual_chars": 0,
+            "actual_input_tokens": 0,
+        },
+        "expires_at": "2026-09-07T13:00:00+00:00",
+        "idempotency_key": f"context-v3-{mode}",
+        "status": "active",
+        "created_at": "2026-09-07T12:00:00+00:00",
+        "materialized_at": None,
+        "revoked_at": None,
+        "revocation_reason": None,
+        "revocation_scope": None,
+        "result_input_manifest": None,
+        "code_input_manifest": code_input_manifest_mapping()
+        if mode == "code"
+        else None,
+        "verification_manifest": verification_manifest_mapping()
+        if mode == "verification"
+        else None,
+    }
+    value.update(overrides)
+    return value
+
+
 def verification_mapping(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
         "id": "a1000000-0000-0000-0000-000000000001",

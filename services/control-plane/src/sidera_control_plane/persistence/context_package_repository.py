@@ -11,6 +11,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import EventStorePort
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
     ContextAssemblyRequest,
@@ -23,6 +24,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifest,
     ContextPackageManifestV1,
     ContextPackageManifestV2,
+    ContextPackageManifestV3,
     ContextPackageStatus,
     ContextPurpose,
     ContextRevocationScope,
@@ -33,6 +35,7 @@ from sidera_control_plane.domain.context_packages import (
 )
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.result_verification import VerificationManifestV1
 from sidera_control_plane.domain.work_context import WorkReference
 from sidera_control_plane.persistence.models import (
     ContextAssemblyRequestModel,
@@ -900,16 +903,41 @@ class ContextPackageRepository:
             ),
         }
         if row.manifest_schema_version == 1:
-            if row.result_input_manifest is not None:
-                raise ValidationError("v1 context package cannot contain result input manifest")
+            if (
+                row.result_input_manifest is not None
+                or row.code_input_manifest is not None
+                or row.verification_manifest is not None
+            ):
+                raise ValidationError("v1 context package cannot contain result input manifests")
             manifest: ContextPackageManifest = ContextPackageManifestV1(**common)
         elif row.manifest_schema_version == 2:
             if row.result_input_manifest is None:
                 raise ValidationError("v2 context package requires result input manifest")
+            if row.code_input_manifest is not None or row.verification_manifest is not None:
+                raise ValidationError("v2 context package cannot contain execution input manifests")
             manifest = ContextPackageManifestV2(
                 **common,
                 result_input_manifest=ResultInputManifestV1.from_mapping(
                     row.result_input_manifest
+                ),
+            )
+        elif row.manifest_schema_version == 3:
+            manifest = ContextPackageManifestV3(
+                **common,
+                result_input_manifest=(
+                    ResultInputManifestV1.from_mapping(row.result_input_manifest)
+                    if row.result_input_manifest is not None
+                    else None
+                ),
+                code_input_manifest=(
+                    CodeInputManifestV1.from_mapping(row.code_input_manifest)
+                    if row.code_input_manifest is not None
+                    else None
+                ),
+                verification_manifest=(
+                    VerificationManifestV1.from_mapping(row.verification_manifest)
+                    if row.verification_manifest is not None
+                    else None
                 ),
             )
         else:
@@ -935,6 +963,16 @@ def _assembly_request_model(request: ContextAssemblyRequest) -> ContextAssemblyR
         result_input_budget=(
             _plain_json(request.result_input_budget.to_mapping())
             if request.result_input_budget is not None
+            else None
+        ),
+        code_input_manifest=(
+            _plain_json(request.code_input_manifest.to_mapping())
+            if request.code_input_manifest is not None
+            else None
+        ),
+        verification_manifest=(
+            _plain_json(request.verification_manifest.to_mapping())
+            if request.verification_manifest is not None
             else None
         ),
         knowledge_search_scope=_plain_json(request.knowledge_search_scope),
@@ -974,6 +1012,16 @@ def _to_assembly_request(row: ContextAssemblyRequestModel) -> ContextAssemblyReq
             if row.result_input_budget is not None
             else None
         ),
+        code_input_manifest=(
+            CodeInputManifestV1.from_mapping(row.code_input_manifest)
+            if row.code_input_manifest is not None
+            else None
+        ),
+        verification_manifest=(
+            VerificationManifestV1.from_mapping(row.verification_manifest)
+            if row.verification_manifest is not None
+            else None
+        ),
         knowledge_search_scope=_mapping(row.knowledge_search_scope, "knowledge_search_scope"),
         knowledge_filter_refs=_sequence(row.knowledge_filter_refs, "knowledge_filter_refs"),
         fact_scope_refs=_sequence(row.fact_scope_refs, "fact_scope_refs"),
@@ -1009,7 +1057,20 @@ def _package_model(
         manifest_schema_version=manifest.manifest_schema_version,
         result_input_manifest=(
             _plain_json(manifest.result_input_manifest.to_mapping())
-            if isinstance(manifest, ContextPackageManifestV2)
+            if isinstance(manifest, (ContextPackageManifestV2, ContextPackageManifestV3))
+            and manifest.result_input_manifest is not None
+            else None
+        ),
+        code_input_manifest=(
+            _plain_json(manifest.code_input_manifest.to_mapping())
+            if isinstance(manifest, ContextPackageManifestV3)
+            and manifest.code_input_manifest is not None
+            else None
+        ),
+        verification_manifest=(
+            _plain_json(manifest.verification_manifest.to_mapping())
+            if isinstance(manifest, ContextPackageManifestV3)
+            and manifest.verification_manifest is not None
             else None
         ),
         control_plane_fact_snapshot=_plain_json(manifest.control_plane_fact_snapshot),

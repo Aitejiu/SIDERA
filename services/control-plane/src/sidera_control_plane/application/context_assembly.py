@@ -20,6 +20,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifest,
     ContextPackageManifestV1,
     ContextPackageManifestV2,
+    ContextPackageManifestV3,
     ContextPurpose,
     ContextSelectionReason,
     ContextTrustLevel,
@@ -172,7 +173,7 @@ class ContextAssembler:
             manifest: ContextPackageManifest = ContextPackageManifestV1.create(
                 **cast(Any, common)
             )
-        else:
+        elif request.manifest_schema_version == 2:
             assert input_selection is not None
             manifest = ContextPackageManifestV2.create(
                 **cast(Any, common),
@@ -180,6 +181,21 @@ class ContextAssembler:
                     input_selection,
                     budget=request.result_input_budget,
                 ),
+            )
+        else:
+            result_input_manifest = (
+                ResultInputManifestV1.from_selection(
+                    input_selection,
+                    budget=request.result_input_budget,
+                )
+                if input_selection is not None
+                else None
+            )
+            manifest = ContextPackageManifestV3.create(
+                **cast(Any, common),
+                result_input_manifest=result_input_manifest,
+                code_input_manifest=request.code_input_manifest,
+                verification_manifest=request.verification_manifest,
             )
         if _json_size(manifest.hash_document()) > MAX_PACKAGE_PAYLOAD_BYTES:
             raise ContextAssemblyError(
@@ -433,15 +449,17 @@ class ContextAssembler:
                     "v1 context assembly cannot receive an input Selection",
                 )
             return
-        if request.manifest_schema_version != 2:
+        if request.manifest_schema_version not in {2, 3}:
             raise ContextAssemblyError(
                 "context_manifest_schema_unsupported",
                 "context assembly manifest schema is unsupported",
             )
         if input_selection is None:
+            if request.manifest_schema_version == 3 and request.input_selection_id is None:
+                return
             raise ContextAssemblyError(
                 "context_input_selection_missing",
-                "v2 context assembly requires the committed input Selection",
+                f"v{request.manifest_schema_version} context assembly requires the committed input Selection",
             )
         if (
             request.purpose is not ContextPurpose.EXECUTION
@@ -466,6 +484,16 @@ class ContextAssembler:
             raise ContextAssemblyError(
                 "context_input_selection_scope_invalid",
                 "input Selection does not match the execution request",
+            )
+        if (
+            request.manifest_schema_version == 3
+            and request.code_input_manifest is not None
+            and request.code_input_manifest.request_id
+            != input_selection.target_execution_request_id
+        ):
+            raise ContextAssemblyError(
+                "context_input_manifest_scope_invalid",
+                "code input manifest does not match the execution request",
             )
 
 

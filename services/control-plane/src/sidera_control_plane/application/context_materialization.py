@@ -24,10 +24,12 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterializationOutcome,
     ContextMaterializationV1,
     ContextMaterializationV2,
+    ContextMaterializationV3,
     ContextMetadata,
     ContextPackageManifest,
     ContextPackageManifestV1,
     ContextPackageManifestV2,
+    ContextPackageManifestV3,
     ContextPackageStatus,
     ContextPurpose,
     ContextRevocationScope,
@@ -173,8 +175,10 @@ class ContextMaterializer:
                 "context_budget_exceeded",
                 "Materialized context exceeds the hard payload limit",
             )
-        if isinstance(materialization, ContextMaterializationV2):
-            assert isinstance(manifest, ContextPackageManifestV2)
+        if isinstance(materialization, (ContextMaterializationV2, ContextMaterializationV3)):
+            assert isinstance(manifest, (ContextPackageManifestV2, ContextPackageManifestV3))
+            if manifest.result_input_manifest is None:
+                return materialization
             result_budget = manifest.result_input_manifest.budget
             if (
                 materialization.total_byte_count > result_budget.max_payload_bytes
@@ -467,7 +471,7 @@ class ContextMaterializer:
                 for item in manifest.evidence_refs
             ]
         )
-        if not isinstance(manifest, ContextPackageManifestV2):
+        if not isinstance(manifest, (ContextPackageManifestV2, ContextPackageManifestV3)):
             return ContextMaterializationV1(
                 metadata=metadata,
                 system_constraints=system_constraints,
@@ -476,7 +480,11 @@ class ContextMaterializer:
                 project_knowledge=tuple(project_knowledge),
                 artifact_and_evidence_refs=artifact_and_evidence_refs,
             )
-        if manifest.result_input_manifest.artifacts and self._result_input_content is None:
+        if (
+            manifest.result_input_manifest is not None
+            and manifest.result_input_manifest.artifacts
+            and self._result_input_content is None
+        ):
             raise ContextMaterializationError(
                 "result_input_unavailable",
                 "Result input content port is not configured",
@@ -490,6 +498,7 @@ class ContextMaterializer:
                     content_port=self._result_input_content,
                 )
                 if self._result_input_content is not None
+                and manifest.result_input_manifest is not None
                 else ()
             )
         except ResultInputDeliveryError as exc:
@@ -499,6 +508,18 @@ class ContextMaterializer:
                 temporary=exc.temporary,
                 corrupt=exc.corrupt,
             ) from exc
+        if isinstance(manifest, ContextPackageManifestV3):
+            return ContextMaterializationV3(
+                metadata=metadata,
+                system_constraints=system_constraints,
+                work_context=work_context,
+                control_plane_facts=control_plane_facts,
+                project_knowledge=tuple(project_knowledge),
+                artifact_and_evidence_refs=artifact_and_evidence_refs,
+                result_inputs=result_inputs,
+                code_input_manifest=manifest.code_input_manifest,
+                verification_manifest=manifest.verification_manifest,
+            )
         return ContextMaterializationV2(
             metadata=metadata,
             system_constraints=system_constraints,
@@ -525,7 +546,7 @@ def build_materialization_audit(
         if materialization is None:
             raise ValueError("successful materialization audit requires a payload")
         section_count = len(materialization.project_knowledge)
-        if isinstance(materialization, ContextMaterializationV2):
+        if isinstance(materialization, (ContextMaterializationV2, ContextMaterializationV3)):
             section_count += len(materialization.result_inputs)
         byte_count = materialization.total_byte_count
         input_token_count = materialization.input_token_count

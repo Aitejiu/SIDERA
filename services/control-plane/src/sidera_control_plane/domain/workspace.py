@@ -11,6 +11,7 @@ from uuid import UUID
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
     ContextMaterialization,
+    ContextMaterializationV3,
     ContextPurpose,
     context_package_reference,
 )
@@ -73,7 +74,7 @@ class RepositoryCheckoutSpec:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionSpec:
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     workspace_id: UUID
     task_id: UUID
     execution_id: UUID
@@ -94,16 +95,22 @@ class ExecutionSpec:
     workspace_module_ref: UUID
     workspace_config_version: int
     context_package: ContextMaterialization | None = None
+    execution_purpose: Literal["code", "verification"] | None = None
+    physical_input_ack: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version not in (1, 2):
+        if self.schema_version not in (1, 2, 3):
             raise ValidationError("unsupported ExecutionSpec schema_version")
         if self.schema_version == 1:
             if self.context_package_ref is not None or self.context_package is not None:
                 raise ValidationError("schema v1 cannot carry context package data")
-        else:
+            if self.execution_purpose is not None or self.physical_input_ack is not None:
+                raise ValidationError("schema v1 cannot carry execution input data")
+        elif self.schema_version == 2:
             if self.context_package_ref is None or self.context_package is None:
                 raise ValidationError("schema v2 requires context package data")
+            if self.execution_purpose is not None or self.physical_input_ack is not None:
+                raise ValidationError("schema v2 cannot carry execution input data")
             metadata = self.context_package.metadata
             if (
                 metadata.purpose is not ContextPurpose.EXECUTION
@@ -114,6 +121,39 @@ class ExecutionSpec:
                 raise ValidationError(
                     "schema v2 context package reference does not match metadata"
                 )
+        else:
+            if self.context_package_ref is None or self.context_package is None:
+                raise ValidationError("schema v3 requires context package data")
+            if not isinstance(self.context_package, ContextMaterializationV3):
+                raise ValidationError("schema v3 requires v3 context materialization")
+            if self.execution_purpose not in {"code", "verification"}:
+                raise ValidationError(
+                    "schema v3 requires execution_purpose code or verification"
+                )
+            if not isinstance(self.physical_input_ack, Mapping) or not self.physical_input_ack:
+                raise ValidationError("schema v3 requires physical input acknowledgement")
+            has_code = self.context_package.code_input_manifest is not None
+            has_verification = self.context_package.verification_manifest is not None
+            expected_code = self.execution_purpose == "code"
+            if has_code != expected_code or has_verification == expected_code:
+                raise ValidationError(
+                    "schema v3 execution purpose does not match context manifest"
+                )
+            metadata = self.context_package.metadata
+            if (
+                metadata.purpose is not ContextPurpose.EXECUTION
+                or metadata.consumer_type is not ContextConsumerType.WORKER
+                or self.context_package_ref
+                != context_package_reference(metadata.package_id, metadata.package_hash)
+            ):
+                raise ValidationError(
+                    "schema v3 context package reference does not match metadata"
+                )
+            acknowledged_execution_id = self.physical_input_ack.get("execution_id")
+            if acknowledged_execution_id is not None and str(acknowledged_execution_id) != str(
+                self.execution_id
+            ):
+                raise ValidationError("schema v3 physical input acknowledgement is for another execution")
         if self.fencing_token < 1:
             raise ValidationError("fencing_token must be positive")
         if not self.goal.strip():
