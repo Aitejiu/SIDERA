@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -195,6 +195,32 @@ _RESULT_INPUT_GATEWAY_CODES = frozenset(
         "result_input_budget_exceeded",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingResultInputSeed:
+    """The durable identifiers needed to resume a pending V5 confirmation."""
+
+    workspace_id: UUID
+    planning_request_id: UUID
+    proposal_id: UUID
+    proposal_revision: int
+    proposal_content_hash: str
+    planning_profile_id: UUID
+    planning_profile_version: int
+    expected_request_version: int
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "workspace_id": str(self.workspace_id),
+            "planning_request_id": str(self.planning_request_id),
+            "proposal_id": str(self.proposal_id),
+            "proposal_revision": self.proposal_revision,
+            "proposal_content_hash": self.proposal_content_hash,
+            "planning_profile_id": str(self.planning_profile_id),
+            "planning_profile_version": self.planning_profile_version,
+            "expected_request_version": self.expected_request_version,
+        }
 
 
 class _StaticRuntimeResolver:
@@ -492,6 +518,7 @@ class ResultInputScenario:
         }
         self.worker_item_ids: dict[str, UUID] = {}
         self.request_ids: dict[str, UUID] = {}
+        self._pending_confirmation: PendingResultInputSeed | None = None
         self._capture_adapter: _CaptureWorkerAdapter | None = None
         self._capture_adapters_by_key: dict[str, list[_CaptureWorkerAdapter]] = {}
         self._gateway: WorkerGateway | None = None
@@ -525,7 +552,8 @@ class ResultInputScenario:
         hard_edges: tuple[tuple[str, str], ...] = (),
         max_attempts: int = 1,
         result_inputs_enabled: bool = True,
-    ) -> None:
+        prepare_only: bool = False,
+    ) -> PendingResultInputSeed | None:
         planner_capability = replace(
             planner_capabilities(), proposal_schema_versions=(5,)
         )
@@ -691,7 +719,43 @@ class ResultInputScenario:
             uow.planning_records.add_proposal(proposal, self.workspace_id)
             uow.planning_runs.save(run, previous_run_version)
             uow.planning_requests.save(stored_request, previous_request_version)
-            expected_version = stored_request.version
+            pending = PendingResultInputSeed(
+                workspace_id=self.workspace_id,
+                planning_request_id=stored_request.id,
+                proposal_id=proposal.id,
+                proposal_revision=proposal.revision,
+                proposal_content_hash=proposal.content_hash,
+                planning_profile_id=stored_profile.id,
+                planning_profile_version=stored_profile.version,
+                expected_request_version=stored_request.version,
+            )
+
+        self._pending_confirmation = pending
+        if prepare_only:
+            return pending
+        self.confirm_prepared_plan(result_inputs_enabled=result_inputs_enabled)
+        return None
+
+    def prepare_plan(
+        self,
+        *,
+        groups: tuple[dict[str, object], ...] | None = None,
+        hard_edges: tuple[tuple[str, str], ...] = (),
+        max_attempts: int = 1,
+    ) -> PendingResultInputSeed:
+        prepared = self.confirm_plan(
+            groups=groups,
+            hard_edges=hard_edges,
+            max_attempts=max_attempts,
+            prepare_only=True,
+        )
+        assert prepared is not None
+        return prepared
+
+    def confirm_prepared_plan(self, *, result_inputs_enabled: bool = True) -> None:
+        pending = self._pending_confirmation
+        if pending is None:
+            raise AssertionError("result-input proposal has not been prepared")
 
         result = CommandService(
             self.uow_factory,
@@ -711,19 +775,21 @@ class ResultInputScenario:
                 target_type="planning_request",
                 actor_type="local",
                 actor_id="operator",
-                target_id=request.id,
+                target_id=pending.planning_request_id,
                 payload={
-                    "proposal_revision": 1,
-                    "proposal_content_hash": proposal.content_hash,
-                    "profile_id": str(stored_profile.id),
-                    "profile_version": stored_profile.version,
+                    "proposal_revision": pending.proposal_revision,
+                    "proposal_content_hash": pending.proposal_content_hash,
+                    "profile_id": str(pending.planning_profile_id),
+                    "profile_version": pending.planning_profile_version,
                 },
-                expected_version=expected_version,
-                idempotency_key=f"result-input-confirm:{request.id}",
+                expected_version=pending.expected_request_version,
+                idempotency_key=(
+                    f"result-input-confirm:{pending.planning_request_id}"
+                ),
                 correlation_id=uuid4(),
             )
         )
-        self.ids["planning_request"] = request.id
+        self.ids["planning_request"] = pending.planning_request_id
         self.ids["root_task"] = UUID(str(result.data["root_task_id"]))
         self.ids["plan_snapshot"] = UUID(str(result.data["plan_snapshot_id"]))
         worker_items = result.data["worker_item_mapping"]
@@ -734,6 +800,72 @@ class ResultInputScenario:
             key: UUID(str(value)) for key, value in worker_items.items()
         }
         self.request_ids = {key: UUID(str(value)) for key, value in requests.items()}
+
+    def load_pending_confirmation(self, pending: PendingResultInputSeed) -> None:
+        """Hydrate the pre-confirmation seed after a process restart."""
+        if pending.workspace_id != self.workspace_id:
+            raise ValueError("pending result-input seed belongs to another workspace")
+        self._pending_confirmation = pending
+
+    def load_materialized_plan(self, planning_request_id: UUID) -> None:
+        """Rebuild the scenario's durable IDs after a service restart."""
+        with self.uow_factory() as uow:
+            materialization = uow.proposal_materializations.get_by_request(
+                planning_request_id, self.workspace_id
+            )
+            if materialization is None:
+                raise AssertionError("materialized planning request was not found")
+            self.ids["planning_request"] = planning_request_id
+            self.ids["root_task"] = materialization.root_task_id
+            self.ids["plan_snapshot"] = materialization.plan_snapshot_id
+            self.worker_item_ids = {
+                key: UUID(str(value))
+                for key, value in materialization.worker_item_mapping.items()
+            }
+            if not self.worker_item_ids:
+                raise AssertionError("materialization has no WorkerItems")
+            rows = uow.session.scalars(
+                select(ExecutionRequestModel).where(
+                    ExecutionRequestModel.workspace_id == self.workspace_id,
+                    ExecutionRequestModel.worker_item_key.in_(
+                        tuple(self.worker_item_ids)
+                    ),
+                )
+            ).all()
+            self.request_ids = {
+                row.worker_item_key: row.id
+                for row in rows
+                if row.worker_item_key in self.worker_item_ids
+            }
+            for key in self.worker_item_ids:
+                if key not in self.request_ids:
+                    raise AssertionError(f"execution request {key!r} was not found")
+                execution_id = uow.session.scalar(
+                    select(ExecutionModel.id)
+                    .where(
+                        ExecutionModel.workspace_id == self.workspace_id,
+                        ExecutionModel.worker_item_id == self.worker_item_ids[key],
+                    )
+                    .order_by(
+                        ExecutionModel.created_at.desc(),
+                        ExecutionModel.attempt.desc(),
+                        ExecutionModel.id.desc(),
+                    )
+                    .limit(1)
+                )
+                if execution_id is None:
+                    continue
+                artifact_id = uow.session.scalar(
+                    select(ArtifactModel.id)
+                    .where(
+                        ArtifactModel.workspace_id == self.workspace_id,
+                        ArtifactModel.execution_id == execution_id,
+                    )
+                    .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
+                    .limit(1)
+                )
+                if artifact_id is not None:
+                    self._source_artifact_ids[key] = artifact_id
 
     def run_to_started_summary(self) -> None:
         """Drive the existing result-input path to one started consumer."""
@@ -1308,7 +1440,9 @@ class ResultInputScenario:
             assert binding is not None
             adapter = self._capture_adapters_by_instance.get(binding.adapter_module_id)
             if adapter is None:
-                raise AssertionError("leased execution capture adapter is unavailable")
+                adapter = _CaptureWorkerAdapter()
+                self._capture_adapters_by_instance[binding.adapter_module_id] = adapter
+                self._capture_adapters_by_key.setdefault(key, []).append(adapter)
         else:
             raise AssertionError(
                 f"cannot start result-input execution in {execution.status.value} state"
