@@ -1,4 +1,4 @@
-import { apiCommand, apiGetAt, createCommandIdentity } from "@/shared/api/client";
+import { apiCommand, apiGetAt, apiRequestJson, createCommandIdentity } from "@/shared/api/client";
 import type { components, paths } from "@/shared/api/schema";
 
 export type TaskResultOverview = components["schemas"]["TaskResultOverviewResponse"];
@@ -7,13 +7,13 @@ export type ResultAction = TaskResultOverview["available_actions"][number];
 export type ResultCommandResponse = components["schemas"]["CommandResponse"];
 export type ResultCommandIdentity = ReturnType<typeof createCommandIdentity>;
 
-type AcceptanceCriterionDecision = {
+export type AcceptanceCriterionDecision = {
   criterion_key: string;
   decision: "accept_passed" | "manual_passed" | "exception_accepted";
   reason: string | null;
 };
 
-type CompleteTaskPayload = {
+export type CompleteTaskPayload = {
   candidate_id: string;
   candidate_hash: string;
   acceptance_basis_hash: string;
@@ -21,7 +21,7 @@ type CompleteTaskPayload = {
   criteria: AcceptanceCriterionDecision[];
 };
 
-type RequestTaskReworkPayload = {
+export type RequestTaskReworkPayload = {
   candidate_id: string;
   candidate_hash: string;
   mode: "automatic" | "user";
@@ -45,6 +45,13 @@ export type ResultActionInput =
 const TASK_RESULTS_PATH =
   "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results" as const;
 
+export type AcceptanceBasisResponse = {
+  candidate_id: string;
+  candidate_hash: string;
+  expected_result_version: number;
+  acceptance_basis_hash: string;
+};
+
 export function taskResultsQueryKey(workspaceId: string, rootId: string) {
   return ["task-results", workspaceId, rootId] as const;
 }
@@ -64,6 +71,20 @@ export async function getTaskResults(
     TASK_RESULTS_PATH as keyof paths,
     options.signal === undefined ? undefined : { signal: options.signal },
   );
+}
+
+export async function getTaskResultAcceptanceBasis(
+  workspaceId: string,
+  rootId: string,
+  candidateId: string,
+  criteria: AcceptanceCriterionDecision[],
+): Promise<AcceptanceBasisResponse> {
+  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(rootId)}/results/${encodeURIComponent(candidateId)}/acceptance-basis`;
+  return apiRequestJson<AcceptanceBasisResponse>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ criteria }),
+  });
 }
 
 export async function executeTaskResultAction(

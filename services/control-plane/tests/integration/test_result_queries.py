@@ -84,6 +84,28 @@ def test_result_detail_is_fixed_to_candidate_and_has_bounded_subresources(
     assert rework.json()["items"] == []
 
 
+def test_acceptance_basis_is_derived_from_the_current_candidate(
+    client: TestClient, result_scenario
+) -> None:
+    result_scenario.seed_plan()
+    candidate = result_scenario.candidate(check_exit_code=0)
+    payload = result_scenario.accept_payload(candidate)
+
+    response = client.post(
+        f"{_results_path(result_scenario.workspace_id, result_scenario.root_id)}"
+        f"/{candidate.id}/acceptance-basis",
+        json={"criteria": payload["criteria"]},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["candidate_id"] == str(candidate.id)
+    assert body["candidate_hash"] == candidate.content_hash
+    assert body["expected_result_version"] == result_scenario.head().result_version
+    assert body["acceptance_basis_hash"] == payload["acceptance_basis_hash"]
+    assert result_scenario.events("TaskAcceptanceRecorded") == ()
+
+
 def test_result_queries_enforce_workspace_candidate_and_cursor_scope(
     client: TestClient, result_scenario
 ) -> None:

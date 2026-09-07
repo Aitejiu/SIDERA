@@ -25,6 +25,7 @@ import { TaskGraph } from "./TaskGraph";
 import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
 import { PlanConvergenceStrip } from "./PlanConvergenceStrip";
 import { PlanRevisionAttention } from "./PlanRevisionAttention";
+import { TaskResultPanel } from "@/features/results/TaskResultPanel";
 import type { TaskActivity as TaskActivityProjection, TaskGraph as TaskGraphProjection } from "./types";
 
 export function TaskDetailPage() {
@@ -33,7 +34,11 @@ export function TaskDetailPage() {
   const resolvedRootTaskId = rootTaskId ?? "";
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const viewMode = searchParams.get("view") === "dag" ? "dag" : "board";
+  const viewMode = searchParams.get("view") === "dag"
+    ? "dag"
+    : searchParams.get("view") === "results"
+      ? "results"
+      : "board";
 
   const graphQuery = useQuery({
     queryKey: taskGraphQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
@@ -73,13 +78,11 @@ export function TaskDetailPage() {
     };
   }, [activityQuery.data?.pages]);
 
-  const setViewMode = (nextMode: "board" | "dag") => {
+  const setViewMode = (nextMode: "board" | "dag" | "results") => {
     const nextParams = new URLSearchParams(searchParams);
-    if (nextMode === "dag") {
-      nextParams.set("view", "dag");
-    } else {
-      nextParams.delete("view");
-    }
+    if (nextMode === "dag") nextParams.set("view", "dag");
+    else if (nextMode === "results") nextParams.set("view", "results");
+    else nextParams.delete("view");
     setSearchParams(nextParams);
   };
 
@@ -152,8 +155,8 @@ function TaskDeliveryContent({
   onRetryActivity: () => void;
   onOpenSubtask: (subtaskKey: string) => void;
   rootTaskVersion: number | undefined;
-  viewMode: "board" | "dag";
-  onViewModeChange: (mode: "board" | "dag") => void;
+  viewMode: "board" | "dag" | "results";
+  onViewModeChange: (mode: "board" | "dag" | "results") => void;
   workspaceId: string;
   rootTaskId: string;
   onAcknowledged: () => void;
@@ -240,9 +243,19 @@ function TaskDeliveryContent({
           >
             DAG
           </button>
+          <button
+            className={viewMode === "results" ? "is-active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={viewMode === "results"}
+            onClick={() => onViewModeChange("results")}
+          >
+            成果
+          </button>
         </div>
         {viewMode === "board" ? <TaskBoard nodes={graph.nodes} onOpen={onOpenSubtask} /> : null}
         {viewMode === "dag" ? <TaskGraph graph={graph} onOpen={onOpenSubtask} /> : null}
+        {viewMode === "results" ? <TaskResultPanel workspaceId={workspaceId} rootTaskId={rootTaskId} /> : null}
         <TaskActivity
           activity={activity}
           workspaceId={workspaceId}

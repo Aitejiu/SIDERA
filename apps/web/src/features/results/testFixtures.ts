@@ -74,6 +74,11 @@ export function resultView(
     result_stage: "awaiting_acceptance",
     current_candidate: candidate,
     acceptance: null,
+    apply_policy: {
+      apply_on_accept: false,
+      mode: "fast_forward_only",
+      target_ref: null,
+    },
     active_operation: null,
     criteria: [criterion],
     blocking_reasons: [],

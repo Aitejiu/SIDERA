@@ -8,6 +8,7 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.result_queries import (
+    ResultAcceptanceBasisSnapshot,
     ResultApplyFact,
     ResultArtifactFact,
     ResultCursor,
@@ -315,6 +316,44 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 limit=limit,
             )
 
+    def load_acceptance_basis(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        candidate_id: UUID,
+    ) -> ResultAcceptanceBasisSnapshot | None:
+        with self._database.session() as session:
+            session.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            )
+            head = _head(
+                session.scalar(
+                    select(TaskResultHeadModel).where(
+                        TaskResultHeadModel.workspace_id == workspace_id,
+                        TaskResultHeadModel.root_task_id == root_task_id,
+                    )
+                )
+            )
+            if head is None or head.current_candidate_id != candidate_id:
+                return None
+            candidate = _candidate_row(
+                session, workspace_id, root_task_id, candidate_id
+            )
+            if candidate is None:
+                return None
+            return ResultAcceptanceBasisSnapshot(
+                candidate=candidate,
+                plan=_plan_for_candidate(session, workspace_id, candidate),
+                verifications=_verification_results(
+                    session,
+                    workspace_id,
+                    root_task_id,
+                    candidate_id,
+                    limit=_MAX_CURRENT_VERIFICATIONS,
+                ),
+                result_version=head.result_version,
+            )
+
 
 def _candidate_history(
     session: Session,
@@ -387,7 +426,7 @@ def _verification_page(
     has_more = len(rows) > limit
     items = tuple(_verification(row) for row in rows[:limit])
     marker = (
-        ResultPageMarker(items[-1].created_at, items[-1].id)
+        ResultPageMarker(rows[limit - 1].created_at, rows[limit - 1].id)
         if has_more and items
         else None
     )

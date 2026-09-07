@@ -1288,6 +1288,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Get Task Result Acceptance Basis */
+        post: operations["get_task_result_acceptance_basis"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/rework": {
         parameters: {
             query?: never;
@@ -1564,6 +1581,18 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AcceptanceCriterionDecisionPayload */
+        AcceptanceCriterionDecisionPayload: {
+            /** Criterion Key */
+            criterion_key: string;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "accept_passed" | "manual_passed" | "exception_accepted";
+            /** Reason */
+            reason: string | null;
+        };
         /** AcceptedDecisionPayload */
         AcceptedDecisionPayload: {
             /** Key */
@@ -5824,6 +5853,25 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** ResultAcceptanceBasisRequest */
+        ResultAcceptanceBasisRequest: {
+            /** Criteria */
+            criteria: components["schemas"]["AcceptanceCriterionDecisionPayload"][];
+        };
+        /** ResultAcceptanceBasisResponse */
+        ResultAcceptanceBasisResponse: {
+            /** Acceptance Basis Hash */
+            acceptance_basis_hash: string;
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Expected Result Version */
+            expected_result_version: number;
+        };
         /** ResultAcceptanceResponse */
         ResultAcceptanceResponse: {
             /** Acceptance Basis Hash */
@@ -5888,6 +5936,15 @@ export interface components {
             target_id: string;
             /** Target Type */
             target_type: string;
+        };
+        /** ResultApplyPolicyResponse */
+        ResultApplyPolicyResponse: {
+            /** Apply On Accept */
+            apply_on_accept: boolean;
+            /** Mode */
+            mode: string;
+            /** Target Ref */
+            target_ref: string | null;
         };
         /** ResultApplyResponse */
         ResultApplyResponse: {
@@ -7684,6 +7741,7 @@ export interface components {
         TaskResultOverviewResponse: {
             acceptance: components["schemas"]["ResultAcceptanceResponse"] | null;
             active_operation: components["schemas"]["ResultOperationResponse"] | null;
+            apply_policy: components["schemas"]["ResultApplyPolicyResponse"] | null;
             /**
              * As Of
              * Format: date-time
@@ -11552,6 +11610,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskResultDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_result_acceptance_basis: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResultAcceptanceBasisRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResultAcceptanceBasisResponse"];
                 };
             };
             /** @description Validation Error */

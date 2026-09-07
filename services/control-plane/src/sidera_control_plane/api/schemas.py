@@ -1161,6 +1161,31 @@ class ResultAcceptanceResponse(BaseModel):
     created_at: datetime
 
 
+class ResultAcceptanceBasisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    criteria: tuple[AcceptanceCriterionDecisionPayload, ...] = Field(min_length=1)
+
+
+class ResultAcceptanceBasisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    candidate_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    expected_result_version: int = Field(ge=1)
+    acceptance_basis_hash: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class ResultApplyPolicyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    apply_on_accept: bool
+    mode: str
+    target_ref: str | None
+
+
 class ResultOperationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1261,6 +1286,7 @@ class TaskResultOverviewResponse(BaseModel):
     result_stage: str
     current_candidate: ResultCandidateResponse | None
     acceptance: ResultAcceptanceResponse | None
+    apply_policy: ResultApplyPolicyResponse | None
     active_operation: ResultOperationResponse | None
     criteria: tuple[ResultCriterionResponse, ...]
     blocking_reasons: tuple[str, ...]

@@ -10,12 +10,16 @@ from typing import Protocol, TypeVar
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.result_acceptance import (
+    build_acceptance_basis_hash,
+)
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
     IntegrationCandidateV1,
 )
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.result_integration import IntegrationSpecV1
 from sidera_control_plane.domain.result_operations import (
     ResultOperationStatus,
     ReworkRecordV1,
@@ -27,6 +31,7 @@ from sidera_control_plane.domain.result_verification import (
     TaskAcceptanceDecisionV1,
     VerificationResultV1,
     VerificationStatus,
+    evaluate_criteria,
 )
 
 
@@ -138,6 +143,14 @@ class ResultDetailSnapshot:
     as_of: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ResultAcceptanceBasisSnapshot:
+    candidate: IntegrationCandidateV1
+    plan: TaskPlanSnapshot | None
+    verifications: tuple[VerificationResultV1, ...]
+    result_version: int
+
+
 class ResultQueryStore(Protocol):
     def load_root(
         self,
@@ -181,6 +194,14 @@ class ResultQueryStore(Protocol):
         cursor: ResultCursor | None,
         limit: int,
     ) -> ResultPage[ReworkRecordV1] | None:
+        raise NotImplementedError
+
+    def load_acceptance_basis(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        candidate_id: UUID,
+    ) -> ResultAcceptanceBasisSnapshot | None:
         raise NotImplementedError
 
 
@@ -251,6 +272,21 @@ class ResultAcceptanceView:
     actor_id: str
     command_id: UUID
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ResultApplyPolicyView:
+    apply_on_accept: bool
+    mode: str
+    target_ref: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResultAcceptanceBasisView:
+    candidate_id: UUID
+    candidate_hash: str
+    expected_result_version: int
+    acceptance_basis_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +382,7 @@ class TaskResultOverview:
     result_stage: str
     current_candidate: ResultCandidateView | None
     acceptance: ResultAcceptanceView | None
+    apply_policy: ResultApplyPolicyView | None
     active_operation: ResultOperationView | None
     criteria: tuple[ResultCriterionView, ...]
     blocking_reasons: tuple[str, ...]
@@ -515,6 +552,53 @@ class ResultQueryService:
             ),
         )
 
+    def get_acceptance_basis(
+        self,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        candidate_id: UUID,
+        *,
+        criteria: Sequence[CriterionDecisionV1],
+    ) -> ResultAcceptanceBasisView:
+        snapshot = self._store.load_acceptance_basis(
+            workspace_id,
+            root_task_id,
+            candidate_id,
+        )
+        if snapshot is None:
+            raise NotFound("current task result candidate not found")
+        plan = snapshot.plan
+        spec = None if plan is None else plan.integration_spec
+        if not isinstance(spec, IntegrationSpecV1):
+            raise ValidationError("result acceptance basis is unavailable")
+        if not criteria:
+            raise ValidationError("acceptance criteria must not be empty")
+        criterion_keys = {criterion.key for criterion in spec.criteria}
+        decision_keys = {decision.criterion_key for decision in criteria}
+        missing = sorted(criterion_keys - decision_keys)
+        if missing:
+            raise ValidationError(
+                f"acceptance criteria missing: {', '.join(missing)}"
+            )
+        unknown = sorted(decision_keys - criterion_keys)
+        if unknown:
+            raise ValidationError(
+                f"acceptance criteria unknown: {', '.join(unknown)}"
+            )
+        evaluate_criteria(spec.criteria, snapshot.verifications, criteria)
+        return ResultAcceptanceBasisView(
+            candidate_id=snapshot.candidate.id,
+            candidate_hash=snapshot.candidate.content_hash,
+            expected_result_version=snapshot.result_version,
+            acceptance_basis_hash=build_acceptance_basis_hash(
+                snapshot.candidate,
+                snapshot.verifications,
+                criteria,
+                result_version=snapshot.result_version,
+                integration_spec=spec,
+            ),
+        )
+
 
 def _validate_limit(limit: int) -> None:
     if type(limit) is not int or not 1 <= limit <= 100:
@@ -676,6 +760,7 @@ def _overview(
             )
         ),
         acceptance=acceptance,
+        apply_policy=_apply_policy(snapshot.plan),
         active_operation=active_operation,
         criteria=criteria,
         blocking_reasons=_blocking_reasons(snapshot),
@@ -959,6 +1044,17 @@ def _acceptance(value: TaskAcceptanceDecisionV1 | None) -> ResultAcceptanceView 
     )
 
 
+def _apply_policy(plan: TaskPlanSnapshot | None) -> ResultApplyPolicyView | None:
+    if plan is None or not isinstance(plan.integration_spec, IntegrationSpecV1):
+        return None
+    policy = plan.integration_spec.apply_policy
+    return ResultApplyPolicyView(
+        apply_on_accept=policy.apply_on_accept,
+        mode=policy.mode.value,
+        target_ref=policy.target_ref,
+    )
+
+
 def _operation(value: ResultOperationFact | None) -> ResultOperationView | None:
     if value is None:
         return None
@@ -1038,8 +1134,11 @@ def _apply(value: ResultApplyFact) -> ResultApplyView:
 
 
 __all__ = [
+    "ResultAcceptanceBasisSnapshot",
+    "ResultAcceptanceBasisView",
     "ResultActionView",
     "ResultApplyFact",
+    "ResultApplyPolicyView",
     "ResultApplyView",
     "ResultArtifactFact",
     "ResultArtifactView",

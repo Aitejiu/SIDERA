@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { server } from "@/test/server";
 
 import { TaskDetailPage } from "./TaskDetailPage";
+import { resultView } from "../results/testFixtures";
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
@@ -399,6 +400,10 @@ describe("TaskDetailPage", () => {
         expect(url.searchParams.get("limit")).toBe("8");
         return HttpResponse.json(activity);
       }),
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/results`,
+        () => HttpResponse.json(resultView()),
+      ),
     );
   });
 
@@ -566,6 +571,16 @@ describe("TaskDetailPage", () => {
     expect(await screen.findByText("候选输入（非阻塞）")).toBeVisible();
     expect(screen.getByRole("group", { name: "DAG 关系图例" })).toHaveTextContent("硬依赖");
     expect(screen.getByRole("group", { name: "DAG 关系图例" })).toHaveTextContent("候选 / 非阻塞关系");
+  });
+
+  it("opens the root task result view without changing task identity", async () => {
+    renderPage(`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}?view=results`);
+
+    expect(await screen.findByRole("region", { name: "成果验收" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "成果" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}?view=results`,
+    );
   });
 
   it("shows at most eight recent activities before loading the next page", async () => {

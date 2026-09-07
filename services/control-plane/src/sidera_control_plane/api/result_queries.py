@@ -7,12 +7,15 @@ from fastapi.encoders import jsonable_encoder
 
 from sidera_control_plane.api.dependencies import get_result_query_service
 from sidera_control_plane.api.schemas import (
+    ResultAcceptanceBasisRequest,
+    ResultAcceptanceBasisResponse,
     ResultReworkPageResponse,
     ResultVerificationPageResponse,
     TaskResultDetailResponse,
     TaskResultOverviewResponse,
 )
 from sidera_control_plane.application.result_queries import ResultQueryService
+from sidera_control_plane.domain.result_verification import CriterionDecisionV1
 
 router = APIRouter()
 
@@ -67,6 +70,30 @@ def get_task_result_detail(
     payload["verifications"] = payload["verifications"]["items"]
     payload["rework"] = payload["rework"]["items"]
     return jsonable_encoder(payload)
+
+
+@router.post(
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis",
+    response_model=ResultAcceptanceBasisResponse,
+    operation_id="get_task_result_acceptance_basis",
+)
+def get_task_result_acceptance_basis(
+    workspace_id: UUID,
+    root_task_id: UUID,
+    candidate_id: UUID,
+    payload: ResultAcceptanceBasisRequest,
+    service: Annotated[ResultQueryService, Depends(get_result_query_service)],
+) -> dict[str, Any]:
+    basis = service.get_acceptance_basis(
+        workspace_id,
+        root_task_id,
+        candidate_id,
+        criteria=tuple(
+            CriterionDecisionV1.from_mapping(item.model_dump())
+            for item in payload.criteria
+        ),
+    )
+    return jsonable_encoder(asdict(basis))
 
 
 @router.get(
