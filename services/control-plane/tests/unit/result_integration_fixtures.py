@@ -62,6 +62,43 @@ def independent_mapping() -> dict[str, object]:
     return deepcopy(integration_mapping())
 
 
+def proposal_v6_mapping() -> dict[str, object]:
+    """Return a V6 proposal with an explicit result integration contract."""
+
+    from .result_input_fixtures import proposal_v5_mapping
+
+    value = deepcopy(proposal_v5_mapping())
+    value["schema_version"] = 6
+    spec = integration_mapping()
+    spec["integration_worker_item_key"] = "review-worker"
+    spec["rework_policy"] = {
+        "max_auto_rework_rounds": 2,
+        "max_auto_rework_seconds": 1800,
+        "allowed_worker_item_keys": ["build-worker", "review-worker"],
+    }
+    value["integration_spec"] = spec
+    return value
+
+
+def revision_v6_mapping() -> dict[str, object]:
+    """Return a V6 revision with an explicit result integration contract."""
+
+    from .result_input_fixtures import revision_v5_mapping
+
+    value = deepcopy(revision_v5_mapping())
+    value["schema_version"] = 6
+    spec = integration_mapping()
+    spec["integration_worker_item_key"] = "summary"
+    spec["input_group_keys"] = ["research"]
+    spec["rework_policy"] = {
+        "max_auto_rework_rounds": 2,
+        "max_auto_rework_seconds": 1800,
+        "allowed_worker_item_keys": ["a", "b", "c", "summary"],
+    }
+    value["integration_spec"] = spec
+    return value
+
+
 def snapshot_mapping(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
         "id": "10000000-0000-0000-0000-000000000001",

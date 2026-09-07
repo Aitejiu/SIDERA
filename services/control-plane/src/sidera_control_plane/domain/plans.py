@@ -12,8 +12,12 @@ from sidera_control_plane.domain.collaboration import (
     CollaborationPolicySnapshotV2,
 )
 from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.result_integration import (
+    IntegrationSpecV1,
+    validate_integration_spec,
+)
 
-SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
+SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
 
 
 class WorkItemKind(StrEnum):
@@ -162,6 +166,7 @@ class TaskPlanSnapshot:
     collaboration_policy: (
         CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None
     ) = None
+    integration_spec: IntegrationSpecV1 | None = None
 
     @classmethod
     def create(
@@ -192,6 +197,7 @@ class TaskPlanSnapshot:
         collaboration_policy: (
             CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None
         ) = None,
+        integration_spec: IntegrationSpecV1 | None = None,
     ) -> TaskPlanSnapshot:
         snapshot = cls(
             id=snapshot_id,
@@ -217,6 +223,7 @@ class TaskPlanSnapshot:
             subtask_dependencies=tuple(subtask_dependencies),
             worker_item_dependencies=tuple(worker_item_dependencies),
             collaboration_policy=collaboration_policy,
+            integration_spec=integration_spec,
         )
         snapshot._validate()
         return snapshot
@@ -346,32 +353,31 @@ class TaskPlanSnapshot:
                         for item in required("worker_item_dependencies")
                     ),
                 )
-            if schema_version in {3, 4}:
-                _reject_unknown_fields(
-                    payload,
-                    {
-                        "id",
-                        "schema_version",
-                        "workspace_id",
-                        "root_task_id",
-                        "generation",
-                        "parent_snapshot_id",
-                        "source_type",
-                        "source_ref",
-                        "title",
-                        "goal_summary",
-                        "acceptance_refs",
-                        "subtasks",
-                        "worker_items",
-                        "milestones",
-                        "subtask_dependencies",
-                        "worker_item_dependencies",
-                        "collaboration_policy",
-                        "published_by",
-                        "published_at",
-                    },
-                    "plan",
-                )
+            if schema_version in {3, 4, 5}:
+                allowed_fields = {
+                    "id",
+                    "schema_version",
+                    "workspace_id",
+                    "root_task_id",
+                    "generation",
+                    "parent_snapshot_id",
+                    "source_type",
+                    "source_ref",
+                    "title",
+                    "goal_summary",
+                    "acceptance_refs",
+                    "subtasks",
+                    "worker_items",
+                    "milestones",
+                    "subtask_dependencies",
+                    "worker_item_dependencies",
+                    "collaboration_policy",
+                    "published_by",
+                    "published_at",
+                }
+                if schema_version == 5:
+                    allowed_fields.add("integration_spec")
+                _reject_unknown_fields(payload, allowed_fields, "plan")
                 raw_policy = required("collaboration_policy")
                 policy = (
                     None
@@ -385,6 +391,11 @@ class TaskPlanSnapshot:
                             _payload_mapping(raw_policy, "collaboration_policy")
                         )
                     )
+                )
+                integration_spec = (
+                    IntegrationSpecV1.from_mapping(required("integration_spec"))
+                    if schema_version == 5
+                    else None
                 )
                 return cls.create(
                     **common,
@@ -412,6 +423,7 @@ class TaskPlanSnapshot:
                         for item in required("worker_item_dependencies")
                     ),
                     collaboration_policy=policy,
+                    integration_spec=integration_spec,
                 )
             return cls.create(**common, work_items=(), worker_slots=(), milestones=(), dependencies=())
         except PlanValidationError:
@@ -455,7 +467,7 @@ class TaskPlanSnapshot:
                     ],
                 }
             )
-        elif self.schema_version in {2, 3, 4}:
+        elif self.schema_version in {2, 3, 4, 5}:
             payload.update(
                 {
                     "subtasks": [
@@ -479,10 +491,16 @@ class TaskPlanSnapshot:
                     ],
                 }
             )
-            if self.schema_version in {3, 4}:
+            if self.schema_version in {3, 4, 5}:
                 payload["collaboration_policy"] = (
                     self.collaboration_policy.to_mapping()
                     if self.collaboration_policy is not None
+                    else None
+                )
+            if self.schema_version == 5:
+                payload["integration_spec"] = (
+                    self.integration_spec.to_mapping()
+                    if self.integration_spec is not None
                     else None
                 )
         return payload
@@ -493,7 +511,7 @@ class TaskPlanSnapshot:
                 "unsupported_schema_version",
                 f"unsupported plan schema version: {self.schema_version}",
             )
-        if self.schema_version in {2, 3, 4}:
+        if self.schema_version in {2, 3, 4, 5}:
             self._validate_v2()
             if (
                 self.schema_version == 3
@@ -506,12 +524,29 @@ class TaskPlanSnapshot:
                     "invalid_collaboration_policy",
                     "schema v3 collaboration_policy must be a policy snapshot",
                 )
-            if self.schema_version == 4 and not isinstance(
+            if self.schema_version in {4, 5} and not isinstance(
                 self.collaboration_policy, CollaborationPolicySnapshotV2
             ):
                 self._fail(
                     "invalid_collaboration_policy",
-                    "schema v4 collaboration_policy must be a v2 policy snapshot",
+                    f"schema v{self.schema_version} collaboration_policy must be a v2 policy snapshot",
+                )
+            if self.schema_version == 5:
+                integration_spec = self.integration_spec
+                if not isinstance(integration_spec, IntegrationSpecV1):
+                    self._fail(
+                        "invalid_integration_spec",
+                        "schema v5 integration_spec must be an integration spec",
+                    )
+                assert isinstance(integration_spec, IntegrationSpecV1)
+                assert isinstance(self.collaboration_policy, CollaborationPolicySnapshotV2)
+                validate_integration_spec(
+                    integration_spec,
+                    frozenset(item.key for item in self.worker_item_plans),
+                    frozenset(
+                        group.group_key
+                        for group in self.collaboration_policy.input_groups
+                    ),
                 )
             return
         if self.generation < 1:

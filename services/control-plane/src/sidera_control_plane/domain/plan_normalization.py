@@ -49,7 +49,7 @@ class PlanNormalizer:
     def normalize(self, snapshot: TaskPlanSnapshot) -> CanonicalTaskPlan:
         if snapshot.schema_version == 1:
             return self._normalize_v1(snapshot)
-        if snapshot.schema_version in {2, 3, 4}:
+        if snapshot.schema_version in {2, 3, 4, 5}:
             return self._normalize_v2(snapshot)
         raise ValueError(f"unsupported plan schema version: {snapshot.schema_version}")
 

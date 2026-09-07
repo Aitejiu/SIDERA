@@ -338,6 +338,10 @@ def capability_profile_to_payload(
             )
         if profile.handoff_inspection:
             payload["handoff_inspection"] = True
+        if profile.code_result_versions:
+            payload["code_result_versions"] = list(profile.code_result_versions)
+        if profile.verification_versions:
+            payload["verification_versions"] = list(profile.verification_versions)
         return payload
     if isinstance(profile, WorkspaceProviderCapabilityProfile):
         payload = {
@@ -356,6 +360,8 @@ def capability_profile_to_payload(
             ]
         if profile.handoff_inspection:
             payload["handoff_inspection"] = True
+        if profile.code_input_versions:
+            payload["code_input_versions"] = list(profile.code_input_versions)
         return payload
     if isinstance(profile, NotificationChannelCapabilityProfile):
         return {
@@ -435,6 +441,12 @@ def capability_profile_from_payload(
             handoff_inspection=_bool_capability_or_default(
                 payload, "handoff_inspection", False
             ),
+            code_result_versions=_version_tuple_capability(
+                payload, "code_result_versions"
+            ),
+            verification_versions=_version_tuple_capability(
+                payload, "verification_versions"
+            ),
         )
 
     if canonical_type == WORKSPACE_PROVIDER_MODULE_TYPE:
@@ -466,6 +478,9 @@ def capability_profile_from_payload(
             ),
             handoff_inspection=_bool_capability_or_default(
                 payload, "handoff_inspection", False
+            ),
+            code_input_versions=_version_tuple_capability(
+                payload, "code_input_versions"
             ),
         )
 
@@ -612,6 +627,8 @@ _WORKER_FIELDS = frozenset(
         "handoff_session_context_versions",
         "handoff_writer_gate_versions",
         "handoff_inspection",
+        "code_result_versions",
+        "verification_versions",
     }
 )
 _LEGACY_WORKER_FIELDS = frozenset(
@@ -626,6 +643,7 @@ _WORKSPACE_FIELDS = frozenset(
         "workspace_handoff_versions",
         "workspace_transfer_modes",
         "handoff_inspection",
+        "code_input_versions",
     }
 )
 _PLANNER_FIELDS = frozenset(

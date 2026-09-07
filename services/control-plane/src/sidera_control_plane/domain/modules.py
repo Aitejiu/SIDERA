@@ -112,6 +112,8 @@ class WorkerAdapterCapabilityProfile:
     handoff_session_context_versions: tuple[int, ...] = ()
     handoff_writer_gate_versions: tuple[int, ...] = ()
     handoff_inspection: bool = False
+    code_result_versions: tuple[int, ...] = ()
+    verification_versions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -193,6 +195,16 @@ class WorkerAdapterCapabilityProfile:
         )
         if not isinstance(self.handoff_inspection, bool):
             raise ValidationError("handoff_inspection capability must be a boolean")
+        object.__setattr__(
+            self,
+            "code_result_versions",
+            _positive_version_tuple(self.code_result_versions, "code_result_versions"),
+        )
+        object.__setattr__(
+            self,
+            "verification_versions",
+            _positive_version_tuple(self.verification_versions, "verification_versions"),
+        )
 
     def supports_context_package_version(self, version: int) -> bool:
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
@@ -216,6 +228,16 @@ class WorkerAdapterCapabilityProfile:
             for version in self.context_package_versions
         )
 
+    def supports_code_result_version(self, version: int) -> bool:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValidationError("code result version must be positive")
+        return version in self.code_result_versions
+
+    def supports_verification_version(self, version: int) -> bool:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValidationError("verification version must be positive")
+        return version in self.verification_versions
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceProviderCapabilityProfile:
@@ -226,6 +248,7 @@ class WorkspaceProviderCapabilityProfile:
     workspace_handoff_versions: tuple[int, ...] = ()
     workspace_transfer_modes: tuple[HandoffTransferMode, ...] = ()
     handoff_inspection: bool = False
+    code_input_versions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -256,6 +279,16 @@ class WorkspaceProviderCapabilityProfile:
         )
         if not isinstance(self.handoff_inspection, bool):
             raise ValidationError("handoff_inspection capability must be a boolean")
+        object.__setattr__(
+            self,
+            "code_input_versions",
+            _positive_version_tuple(self.code_input_versions, "code_input_versions"),
+        )
+
+    def supports_code_input_version(self, version: int) -> bool:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValidationError("code input version must be positive")
+        return version in self.code_input_versions
 
 
 @dataclass(frozen=True, slots=True)

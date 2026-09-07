@@ -26,6 +26,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
     PlanningRevisionProposalPayloadV5,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
@@ -248,6 +249,7 @@ class RevisionDiffNormalizer:
             PlanningRevisionProposalPayloadV3
             | PlanningRevisionProposalPayloadV4
             | PlanningRevisionProposalPayloadV5
+            | PlanningRevisionProposalPayloadV6
         ),
         *,
         collaboration_policy: (
@@ -261,7 +263,11 @@ class RevisionDiffNormalizer:
             payload.as_v3()
             if isinstance(
                 payload,
-                (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+                (
+                    PlanningRevisionProposalPayloadV4,
+                    PlanningRevisionProposalPayloadV5,
+                    PlanningRevisionProposalPayloadV6,
+                ),
             )
             else payload
         )
@@ -767,10 +773,14 @@ def _target_collaboration_policy(
         PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
         | PlanningRevisionProposalPayloadV5
+        | PlanningRevisionProposalPayloadV6
     ),
     resolved: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
 ) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
-    if isinstance(payload, PlanningRevisionProposalPayloadV5):
+    if isinstance(
+        payload,
+        (PlanningRevisionProposalPayloadV5, PlanningRevisionProposalPayloadV6),
+    ):
         request = payload.collaboration_policy_request
         if request.mode is CollaborationMode.DISABLED:
             if resolved is not None:
@@ -784,7 +794,7 @@ def _target_collaboration_policy(
             )
         if not isinstance(resolved, CollaborationPolicySnapshotV2):
             raise ValidationError(
-                "revision v5 requires a resolved collaboration policy snapshot v2"
+                f"revision v{payload.schema_version} requires a resolved collaboration policy snapshot v2"
             )
         if resolved.default_policy != request.default_policy:
             raise ValidationError(
@@ -976,12 +986,17 @@ def _target_plan_hash(
         PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
         | PlanningRevisionProposalPayloadV5
+        | PlanningRevisionProposalPayloadV6
     ),
     collaboration_policy: CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None,
 ) -> str:
     if isinstance(
         payload,
-        (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+        (
+            PlanningRevisionProposalPayloadV4,
+            PlanningRevisionProposalPayloadV5,
+            PlanningRevisionProposalPayloadV6,
+        ),
     ):
         target = payload.as_v3().canonical_payload()
         target["collaboration_policy"] = (

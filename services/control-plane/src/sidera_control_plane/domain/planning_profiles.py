@@ -304,14 +304,14 @@ def _validate_collaboration_binding(
     *,
     proposal_schema_version: int | None = None,
 ) -> None:
-    if proposal_schema_version == 5:
+    if proposal_schema_version in {5, 6}:
         if binding is None:
             raise ValidationError(
-                "proposal schema v5 requires a collaboration runtime binding"
+                f"proposal schema v{proposal_schema_version} requires a collaboration runtime binding"
             )
         if not binding.runtime_capability_snapshot.supports_input_groups_v1():
             raise ValidationError(
-                "proposal schema v5 requires runtime input_groups_v1 capability"
+                f"proposal schema v{proposal_schema_version} requires runtime input_groups_v1 capability"
             )
     if binding is None:
         return
