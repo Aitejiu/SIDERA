@@ -185,7 +185,12 @@ class ActivationReconciler:
     ) -> tuple[bool, bool]:
         context, stale_reason = self._current_context(uow, request)
         if context is None:
-            self._obsolete(uow, request, reason=stale_reason or "stale_context", now=now)
+            if stale_reason == "result_acceptance_recorded":
+                self._cancel_after_acceptance(uow, request, now=now)
+            else:
+                self._obsolete(
+                    uow, request, reason=stale_reason or "stale_context", now=now
+                )
             return False, True
 
         transition_gate = self._transition_gate(uow, request)
@@ -229,7 +234,12 @@ class ActivationReconciler:
     ) -> tuple[UUID | None, bool]:
         context, stale_reason = self._current_context(uow, request)
         if context is None:
-            self._obsolete(uow, request, reason=stale_reason or "stale_context", now=now)
+            if stale_reason == "result_acceptance_recorded":
+                self._cancel_after_acceptance(uow, request, now=now)
+            else:
+                self._obsolete(
+                    uow, request, reason=stale_reason or "stale_context", now=now
+                )
             return None, True
 
         transition_gate = self._transition_gate(uow, request)
@@ -535,6 +545,9 @@ class ActivationReconciler:
         root_task = uow.tasks.get(request.root_task_id, request.workspace_id)
         if root_task is None:
             return None, "root_task_missing"
+        result_head = uow.results.get_head(request.workspace_id, request.root_task_id)
+        if result_head is not None and result_head.current_acceptance_id is not None:
+            return None, "result_acceptance_recorded"
         if root_task.status in TERMINAL_TASK_STATUSES:
             return None, "root_task_terminal"
         task = uow.tasks.get(request.subtask_id, request.workspace_id, for_update=True)
@@ -955,6 +968,45 @@ class ActivationReconciler:
                 "subtask_task_id": str(request.subtask_id),
                 "worker_item_id": str(request.worker_item_id),
                 "reason": reason,
+                "status": request.status.value,
+            },
+        )
+        self._record_events(uow, envelope, request, (event,))
+
+    def _cancel_after_acceptance(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        request: ExecutionRequest,
+        *,
+        now: datetime,
+    ) -> None:
+        if request.status not in {
+            ExecutionRequestStatus.BLOCKED,
+            ExecutionRequestStatus.READY,
+        }:
+            return
+        previous_version = request.version
+        request.cancel(now=now, reason="result_acceptance_recorded")
+        uow.execution_requests.save(request, previous_version)
+        envelope = self._envelope(
+            request, action="cancel-after-acceptance", version=previous_version
+        )
+        event = _event(
+            envelope,
+            aggregate_type="execution_request",
+            aggregate_id=request.id,
+            aggregate_version=request.version,
+            event_type="ExecutionRequestCanceled",
+            payload={
+                "execution_request_id": str(request.id),
+                "planning_request_id": str(request.planning_request_id),
+                "proposal_revision_id": str(request.proposal_revision_id),
+                "plan_snapshot_id": str(request.plan_snapshot_id),
+                "plan_generation": request.plan_generation,
+                "root_task_id": str(request.root_task_id),
+                "subtask_task_id": str(request.subtask_id),
+                "worker_item_id": str(request.worker_item_id),
+                "reason": "result_acceptance_recorded",
                 "status": request.status.value,
             },
         )

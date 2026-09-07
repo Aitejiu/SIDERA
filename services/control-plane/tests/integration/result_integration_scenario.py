@@ -36,6 +36,9 @@ from sidera_control_plane.application.result_acceptance import (
     ResultAcceptanceService,
     build_acceptance_basis_hash,
 )
+from sidera_control_plane.application.result_finalization import (
+    ResultFinalizationService,
+)
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
@@ -171,6 +174,9 @@ class ResultIntegrationScenario:
     @property
     def base_commit(self) -> str:
         return self._base_commit
+
+    def target_commit(self) -> str:
+        return self._git(self._repository, "rev-parse", "refs/heads/main")
 
     @property
     def root_id(self) -> UUID:
@@ -824,6 +830,16 @@ class ResultIntegrationScenario:
         if type(limit) is not int or limit < 1:
             raise ValueError("drive limit must be positive")
         del limit
+        with self.uow() as uow:
+            head = uow.results.get_head(self.workspace_id, self.root_task_id)
+        if head is not None and head.current_acceptance_id is not None:
+            return ResultFinalizationService(
+                self.uow,
+                clock=lambda: self._planning.now,
+            ).reconcile(
+                workspace_id=self.workspace_id,
+                root_task_id=self.root_task_id,
+            )
         if self._pending_reintegration_request_id is not None:
             request_id = self._pending_reintegration_request_id
             self._run_integration_execution(request_id=request_id)

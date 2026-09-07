@@ -993,6 +993,16 @@ class ExecutionRequestRepositoryPort(Protocol):
         """Load requests in stable identity order for deterministic locking."""
         raise NotImplementedError
 
+    def list_for_root(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ExecutionRequest, ...]:
+        """List every execution request for a root in stable identity order."""
+        raise NotImplementedError
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         raise NotImplementedError
 

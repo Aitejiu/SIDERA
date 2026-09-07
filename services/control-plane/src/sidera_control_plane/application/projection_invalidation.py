@@ -74,6 +74,7 @@ _EXECUTION_LIFECYCLE_TYPES = {
     "ExecutionRequestGateReady",
     "ExecutionRequestMaterialized",
     "ExecutionRequestObsoleted",
+    "ExecutionRequestCanceled",
     "TaskWaitingForDecision",
 }
 _COLLABORATION_EVENT_TYPES = {

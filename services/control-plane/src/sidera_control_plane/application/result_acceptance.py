@@ -68,7 +68,7 @@ class ResultAcceptanceService:
             raise ResultError("acceptance_target_required", {})
 
         head = uow.results.get_head(
-            envelope.workspace_id, envelope.target_id, for_update=True
+            envelope.workspace_id, envelope.target_id
         )
         if head is None:
             # Result-enabled roots use this service. Legacy tasks retain the original

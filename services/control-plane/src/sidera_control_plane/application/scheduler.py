@@ -192,6 +192,8 @@ class Scheduler:
                     return 0, 0, 0, None
                 execution = claimed[0]
                 execution_id = execution.id
+                if _result_acceptance_recorded(uow, execution):
+                    return 1, 0, 0, execution_id
                 if execution.worker_item_id is not None:
                     handoff_gate = HandoffOperationGate(uow).evaluate(
                         worker_item_id=execution.worker_item_id,
@@ -1011,6 +1013,23 @@ def _is_execution_binding_conflict(error: IntegrityError) -> bool:
 
 def _is_known_scheduler_conflict(error: IntegrityError) -> bool:
     return _is_active_lease_conflict(error) or _is_execution_binding_conflict(error)
+
+
+def _result_acceptance_recorded(
+    uow: ControlPlaneUnitOfWork, execution: Execution
+) -> bool:
+    request = uow.execution_requests.get_effective_by_execution_lineage(
+        execution.lineage_id, execution.workspace_id
+    )
+    root_task_id = request.root_task_id if request is not None else execution.task_id
+    if request is None and execution.worker_item_id is not None:
+        worker_item = uow.worker_items.get(
+            execution.worker_item_id, execution.workspace_id
+        )
+        if worker_item is not None:
+            root_task_id = worker_item.root_task_id
+    head = uow.results.get_head(execution.workspace_id, root_task_id)
+    return head is not None and head.current_acceptance_id is not None
 
 
 def _schedule_envelope(

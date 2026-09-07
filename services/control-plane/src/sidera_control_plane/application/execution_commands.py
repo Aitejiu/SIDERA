@@ -191,6 +191,12 @@ class ExecutionCommandHandler:
         ):
             raise NotFound("worker not found")
         worker_item_id = _validate_execution_worker_item(uow, envelope, task.id)
+        _assert_result_acceptance_allows_new_execution(
+            uow,
+            task_id=task.id,
+            workspace_id=envelope.workspace_id,
+            worker_item_id=worker_item_id,
+        )
 
         execution_id = uuid4()
         execution = Execution.create(
@@ -317,6 +323,7 @@ class ExecutionCommandHandler:
         )
         if execution is None:
             raise NotFound("source execution not found")
+        _assert_result_acceptance_for_execution(uow, execution)
         _require_handoff_operation(
             uow,
             execution.worker_item_id,
@@ -423,6 +430,7 @@ class ExecutionCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         source = _get_fenced_target_execution(uow, envelope)
+        _assert_result_acceptance_for_execution(uow, source)
         _require_handoff_operation(
             uow,
             source.worker_item_id,
@@ -1358,6 +1366,37 @@ def _require_handoff_operation(
         workspace_id=workspace_id,
         operation=operation,
     )
+
+
+def _assert_result_acceptance_for_execution(
+    uow: ControlPlaneUnitOfWork, execution: Execution
+) -> None:
+    request = uow.execution_requests.get_effective_by_execution_lineage(
+        execution.lineage_id, execution.workspace_id
+    )
+    root_task_id = request.root_task_id if request is not None else execution.task_id
+    _assert_result_acceptance_allows_new_execution(
+        uow,
+        task_id=root_task_id,
+        workspace_id=execution.workspace_id,
+    )
+
+
+def _assert_result_acceptance_allows_new_execution(
+    uow: ControlPlaneUnitOfWork,
+    *,
+    task_id: UUID,
+    workspace_id: UUID,
+    worker_item_id: UUID | None = None,
+) -> None:
+    root_task_id = task_id
+    if worker_item_id is not None:
+        worker_item = uow.worker_items.get(worker_item_id, workspace_id)
+        if worker_item is not None:
+            root_task_id = worker_item.root_task_id
+    head = uow.results.get_head(workspace_id, root_task_id)
+    if head is not None and head.current_acceptance_id is not None:
+        raise InvalidTransition("result acceptance closes new execution work")
 
 
 def _get_target_session(

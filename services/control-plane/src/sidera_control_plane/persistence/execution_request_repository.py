@@ -156,6 +156,26 @@ class ExecutionRequestRepository:
         rows = self._session.scalars(statement).all()
         return tuple(_to_request(row) for row in rows)
 
+    def list_for_root(
+        self,
+        root_task_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> tuple[ExecutionRequest, ...]:
+        statement = (
+            select(ExecutionRequestModel)
+            .where(
+                ExecutionRequestModel.root_task_id == root_task_id,
+                ExecutionRequestModel.workspace_id == workspace_id,
+            )
+            .order_by(ExecutionRequestModel.id.asc())
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        return tuple(_to_request(row) for row in rows)
+
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
         result = self._session.execute(
             update(ExecutionRequestModel)
