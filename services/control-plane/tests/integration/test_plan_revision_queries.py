@@ -76,6 +76,7 @@ def test_revision_queries_expose_base_diff_paths_policy_and_active_head(
         "provider": None,
         "runtime_interface": None,
         "runtime_config_version": None,
+        "input_groups": [],
     }
     assert diff_body["collaboration_policy_changes"] == []
     assert diff_body["input_group_changes"] == []
