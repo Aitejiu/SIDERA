@@ -234,7 +234,7 @@ class ResultRepository:
         return tuple(_to_verification(row) for row in rows)
 
     def claim_operations(
-        self, kind: str, now: datetime, limit: int
+        self, kind: str, now: datetime, limit: int, *, owner_id: str | None = None
     ) -> tuple[ResultOperationAttemptV1, ...]:
         if not isinstance(kind, str) or not kind.strip():
             raise ValidationError("operation kind must be a non-empty string")
@@ -259,7 +259,7 @@ class ResultRepository:
         if not rows:
             return ()
 
-        owner = f"result-repository:{uuid4()}"
+        owner = _claim_owner(owner_id)
         expiry = now + timedelta(minutes=5)
         for row in rows:
             row.status = ResultOperationStatus.RUNNING.value
@@ -269,6 +269,58 @@ class ResultRepository:
             row.version += 1
             row.updated_at = now
         return tuple(_to_operation_attempt(row) for row in rows)
+
+    def claim_apply_operations(
+        self, now: datetime, limit: int, *, owner_id: str
+    ) -> tuple[ResultApplyOperationV1, ...]:
+        if type(limit) is not int or limit < 1:
+            raise ValidationError("operation claim limit must be positive")
+        owner = _claim_owner(owner_id)
+        now = _aware(now, "operation claim time")
+        rows = self._session.scalars(
+            select(ResultApplyOperationModel)
+            .where(
+                ResultApplyOperationModel.status.in_(
+                    (ResultOperationStatus.PENDING.value, ResultOperationStatus.RUNNING.value)
+                ),
+                (ResultApplyOperationModel.lease_expiry.is_(None))
+                | (ResultApplyOperationModel.lease_expiry <= now),
+            )
+            .order_by(
+                ResultApplyOperationModel.created_at.asc(),
+                ResultApplyOperationModel.id.asc(),
+            )
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+        ).all()
+        if not rows:
+            return ()
+
+        expiry = now + timedelta(minutes=5)
+        for row in rows:
+            row.status = ResultOperationStatus.RUNNING.value
+            row.lease_owner = owner
+            row.lease_token = str(uuid4())
+            row.lease_expiry = expiry
+            row.version += 1
+            row.updated_at = now
+        return tuple(_to_apply(row) for row in rows)
+
+    def list_unknown_apply_operations(
+        self, limit: int
+    ) -> tuple[ResultApplyOperationV1, ...]:
+        if type(limit) is not int or limit < 1:
+            raise ValidationError("operation list limit must be positive")
+        rows = self._session.scalars(
+            select(ResultApplyOperationModel)
+            .where(ResultApplyOperationModel.status == ResultOperationStatus.UNKNOWN.value)
+            .order_by(
+                ResultApplyOperationModel.created_at.asc(),
+                ResultApplyOperationModel.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+        return tuple(_to_apply(row) for row in rows)
 
     def save_operation(
         self,
@@ -829,6 +881,14 @@ def _aware(value: datetime, label: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValidationError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _claim_owner(value: str | None) -> str:
+    if value is None:
+        return f"result-repository:{uuid4()}"
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError("operation claim owner must be a non-empty string")
+    return value.strip()
 
 
 def _is_integrity_error(value: BaseException) -> bool:

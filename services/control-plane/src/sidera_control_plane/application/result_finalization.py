@@ -89,11 +89,24 @@ class ResultFinalizationService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner_id = owner_id.strip()
 
-    def reconcile(
-        self, workspace_id: UUID, root_task_id: UUID
-    ) -> FinalizationOutcome:
+    def reconcile(self, workspace_id: UUID, root_task_id: UUID) -> FinalizationOutcome:
         with self._uow_factory() as uow:
             return self._reconcile_in_uow(uow, workspace_id, root_task_id)
+
+    def reconcile_in_uow(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        workspace_id: UUID,
+        root_task_id: UUID,
+    ) -> FinalizationOutcome:
+        """Reconcile while the caller owns the current unit of work.
+
+        Result application uses this boundary after clearing its active
+        operation so the receipt, head transition, and finalization decision
+        commit together.
+        """
+
+        return self._reconcile_in_uow(uow, workspace_id, root_task_id)
 
     def _reconcile_in_uow(
         self,
@@ -202,8 +215,6 @@ class ResultFinalizationService:
             return _blocked(failure_code, blocking_ids)
         if blocking_ids:
             return _pending(tuple(blocking_ids))
-        if spec.apply_policy.apply_on_accept:
-            return _pending(failure_code="result_apply_required")
         return complete_accepted_root(
             uow,
             task,
@@ -222,7 +233,9 @@ class ResultFinalizationService:
         operation_id = head.active_operation_id
         if operation_id is None:
             return None
-        operation = uow.results.get_operation(operation_id, workspace_id, for_update=True)
+        operation = uow.results.get_operation(
+            operation_id, workspace_id, for_update=True
+        )
         if operation is None:
             return _blocked("active_result_operation_missing")
         status = getattr(operation, "status", None)

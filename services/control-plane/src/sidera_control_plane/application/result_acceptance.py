@@ -10,7 +10,10 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.task_commands import TaskCommandHandler
-from sidera_control_plane.domain.code_results import IntegrationCandidateV1
+from sidera_control_plane.domain.code_results import (
+    CodeResultSnapshotV1,
+    IntegrationCandidateV1,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import (
     InvalidTransition,
@@ -20,7 +23,11 @@ from sidera_control_plane.domain.errors import (
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.result_integration import IntegrationSpecV1
-from sidera_control_plane.domain.result_operations import ResultError
+from sidera_control_plane.domain.result_operations import (
+    ResultApplyOperationV1,
+    ResultError,
+    ResultOperationStatus,
+)
 from sidera_control_plane.domain.result_verification import (
     CriterionDecisionType,
     CriterionDecisionV1,
@@ -31,6 +38,7 @@ from sidera_control_plane.domain.result_verification import (
 )
 
 _ACCEPTANCE_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:task-acceptance:v1")
+_APPLY_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-apply:v1")
 _ACCEPTANCE_PAYLOAD_FIELDS = frozenset(
     {
         "candidate_id",
@@ -54,10 +62,12 @@ class ResultAcceptanceService:
         *,
         local_actor_type: str = "local",
         local_actor_id: str = "operator",
+        fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         self._clock = clock
         self._local_actor_type = local_actor_type
         self._local_actor_id = local_actor_id
+        self._fault_injector = fault_injector
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -67,9 +77,7 @@ class ResultAcceptanceService:
         if envelope.target_id is None:
             raise ResultError("acceptance_target_required", {})
 
-        head = uow.results.get_head(
-            envelope.workspace_id, envelope.target_id
-        )
+        head = uow.results.get_head(envelope.workspace_id, envelope.target_id)
         if head is None:
             # Result-enabled roots use this service. Legacy tasks retain the original
             # waiting -> succeeded command contract until they opt into result heads.
@@ -153,21 +161,31 @@ class ResultAcceptanceService:
         decision_keys = {decision.criterion_key for decision in decisions}
         missing = sorted(expected_keys - decision_keys)
         if missing:
-            raise ResultError("acceptance_criteria_missing", {"criterion_keys": missing})
+            raise ResultError(
+                "acceptance_criteria_missing", {"criterion_keys": missing}
+            )
         unknown = sorted(decision_keys - expected_keys)
         if unknown:
-            raise ResultError("acceptance_criteria_unknown", {"criterion_keys": unknown})
+            raise ResultError(
+                "acceptance_criteria_unknown", {"criterion_keys": unknown}
+            )
 
         verification_results = uow.results.list_verification_results(
             candidate.id, envelope.workspace_id
         )
         try:
-            evaluations = evaluate_criteria(spec.criteria, verification_results, decisions)
+            evaluations = evaluate_criteria(
+                spec.criteria, verification_results, decisions
+            )
         except ValidationError as exc:
             if "accept_passed requires" in str(exc):
                 raise ResultError("acceptance_verification_failed", {}) from exc
-            raise ResultError("acceptance_decision_invalid", {"reason": str(exc)}) from exc
-        evaluations_by_key = {evaluation.criterion_key: evaluation for evaluation in evaluations}
+            raise ResultError(
+                "acceptance_decision_invalid", {"reason": str(exc)}
+            ) from exc
+        evaluations_by_key = {
+            evaluation.criterion_key: evaluation for evaluation in evaluations
+        }
         for decision in decisions:
             evaluation = evaluations_by_key[decision.criterion_key]
             if (
@@ -215,6 +233,20 @@ class ResultAcceptanceService:
         if not isinstance(stored, TaskAcceptanceDecisionV1):
             raise ResultError("acceptance_record_conflict", {})
 
+        apply_operation: ResultApplyOperationV1 | None = None
+        if spec.apply_policy.apply_on_accept:
+            apply_operation = _build_apply_operation(
+                uow,
+                candidate=candidate,
+                acceptance=stored,
+                spec=spec,
+            )
+            stored_operation = uow.results.save_operation(
+                apply_operation, expected_version=0
+            )
+            if not isinstance(stored_operation, ResultApplyOperationV1):
+                raise ResultError("acceptance_apply_operation_conflict", {})
+
         task_events: list[EventData] = []
         previous_task_status = task.status.value
         previous_task_version = task.version
@@ -249,6 +281,9 @@ class ResultAcceptanceService:
         next_head = replace(
             head,
             current_acceptance_id=stored.id,
+            active_operation_id=(
+                None if apply_operation is None else apply_operation.id
+            ),
             result_version=head.result_version + 1,
         )
         uow.results.save_head(next_head, expected_version=head.result_version)
@@ -266,6 +301,12 @@ class ResultAcceptanceService:
                 "candidate_hash": stored.candidate_hash,
                 "acceptance_basis_hash": stored.acceptance_basis_hash,
                 "result_version": stored.result_version,
+                "apply_operation_id": (
+                    None if apply_operation is None else str(apply_operation.id)
+                ),
+                "apply_status": (
+                    None if apply_operation is None else apply_operation.status.value
+                ),
                 "criteria": [item.to_mapping() for item in stored.criteria],
                 "status": task.status.value,
                 "previous_status": previous_task_status,
@@ -275,21 +316,67 @@ class ResultAcceptanceService:
             causation_id=envelope.id,
             correlation_id=envelope.correlation_id,
         )
-        for event in (*task_events, acceptance_event):
+        apply_events: tuple[EventData, ...] = ()
+        if apply_operation is not None:
+            apply_events = (
+                EventData(
+                    id=uuid5(
+                        _APPLY_NAMESPACE,
+                        f"requested:{apply_operation.id}",
+                    ),
+                    workspace_id=envelope.workspace_id,
+                    aggregate_type="result_apply_operation",
+                    aggregate_id=apply_operation.id,
+                    aggregate_version=apply_operation.version,
+                    event_type="ResultApplyRequested",
+                    payload={
+                        "operation_id": str(apply_operation.id),
+                        "root_task_id": str(apply_operation.root_task_id),
+                        "acceptance_id": str(apply_operation.acceptance_id),
+                        "candidate_id": str(apply_operation.candidate_id),
+                        "repository_ref": apply_operation.repository_ref,
+                        "target_ref": apply_operation.target_ref,
+                        "expected_old_commit": apply_operation.expected_old_commit,
+                        "accepted_commit": apply_operation.accepted_commit,
+                        "status": apply_operation.status.value,
+                    },
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    causation_id=envelope.id,
+                    correlation_id=envelope.correlation_id,
+                ),
+            )
+        for event in (*task_events, acceptance_event, *apply_events):
             uow.events.append_with_outbox(event)
+        self._fault("before_intent_commit")
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=task.id,
             aggregate_version=task.version,
-            event_ids=tuple(event.id for event in (*task_events, acceptance_event)),
+            event_ids=tuple(
+                event.id for event in (*task_events, acceptance_event, *apply_events)
+            ),
             data={
                 "status": "accepted",
                 "acceptance_id": str(stored.id),
                 "candidate_id": str(stored.candidate_id),
                 "result_version": stored.result_version,
                 "task_status": task.status.value,
+                "apply_operation_id": (
+                    None if apply_operation is None else str(apply_operation.id)
+                ),
+                "apply_status": (
+                    None if apply_operation is None else apply_operation.status.value
+                ),
+                "result_stage": (
+                    "applying" if apply_operation is not None else "finalizing"
+                ),
             },
         )
+
+    def _fault(self, point: str) -> None:
+        if self._fault_injector is not None:
+            self._fault_injector(point)
 
 
 def build_acceptance_basis_hash(
@@ -355,9 +442,13 @@ def _parse_decisions(value: object) -> tuple[CriterionDecisionV1, ...]:
         except ValidationError as exc:
             if "exception acceptance requires" in str(exc):
                 raise ResultError("acceptance_exception_reason_required", {}) from exc
-            raise ResultError("acceptance_criteria_invalid", {"reason": str(exc)}) from exc
+            raise ResultError(
+                "acceptance_criteria_invalid", {"reason": str(exc)}
+            ) from exc
     if len({item.criterion_key for item in decisions}) != len(decisions):
-        raise ResultError("acceptance_criteria_invalid", {"reason": "duplicate criterion"})
+        raise ResultError(
+            "acceptance_criteria_invalid", {"reason": "duplicate criterion"}
+        )
     return tuple(decisions)
 
 
@@ -389,6 +480,52 @@ def _aware_now(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("acceptance clock must return an aware datetime")
     return value.astimezone(UTC)
+
+
+def _build_apply_operation(
+    uow: ControlPlaneUnitOfWork,
+    *,
+    candidate: IntegrationCandidateV1,
+    acceptance: TaskAcceptanceDecisionV1,
+    spec: IntegrationSpecV1,
+) -> ResultApplyOperationV1:
+    target_ref = spec.apply_policy.target_ref
+    if target_ref is None:
+        raise ResultError("acceptance_apply_target_required", {})
+    snapshot = uow.results.get_record(
+        "code_snapshot", candidate.code_result_id, candidate.workspace_id
+    )
+    if not isinstance(snapshot, CodeResultSnapshotV1):
+        raise ResultError(
+            "acceptance_code_result_missing",
+            {"code_result_id": str(candidate.code_result_id)},
+        )
+    if (
+        snapshot.workspace_id != candidate.workspace_id
+        or snapshot.root_task_id != candidate.root_task_id
+        or snapshot.repository_ref != spec.repository_ref
+    ):
+        raise ResultError("acceptance_code_result_scope_mismatch", {})
+    operation_id = uuid5(_APPLY_NAMESPACE, f"acceptance:{acceptance.id}")
+    return ResultApplyOperationV1(
+        id=operation_id,
+        workspace_id=candidate.workspace_id,
+        root_task_id=candidate.root_task_id,
+        acceptance_id=acceptance.id,
+        candidate_id=candidate.id,
+        repository_ref=spec.repository_ref,
+        target_ref=target_ref,
+        expected_old_commit=candidate.base_commit,
+        accepted_commit=snapshot.result_commit,
+        status=ResultOperationStatus.PENDING,
+        attempt=1,
+        lease_owner=None,
+        lease_token=None,
+        lease_expiry=None,
+        receipt_ref=None,
+        failure_code=None,
+        version=1,
+    )
 
 
 __all__ = ["ResultAcceptanceService", "build_acceptance_basis_hash"]

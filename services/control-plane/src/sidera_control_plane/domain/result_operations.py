@@ -602,6 +602,10 @@ def transition_operation(
     if operation.status is ResultOperationStatus.SUCCEEDED:
         raise ResultError("result_operation_terminal", {"operation_id": str(operation.id)})
     if operation.status is ResultOperationStatus.UNKNOWN:
+        if status is ResultOperationStatus.SUCCEEDED:
+            # Inspection can prove that the external operation completed.  This
+            # records that fact; it never starts the external operation again.
+            return replace(operation, status=status, version=operation.version + 1)
         raise ResultError(
             "result_operation_inspect_required", {"operation_id": str(operation.id)}
         )

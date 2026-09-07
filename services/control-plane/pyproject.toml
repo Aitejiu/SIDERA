@@ -19,6 +19,7 @@ sidera-collaboration-worker = "sidera_control_plane.collaboration_worker:main"
 sidera-collaboration-readiness = "sidera_control_plane.collaboration_readiness:main"
 sidera-notification-worker = "sidera_control_plane.notification_worker:main"
 sidera-notification-readiness = "sidera_control_plane.notification_readiness:main"
+sidera-result-worker = "sidera_control_plane.result_worker:main"
 
 [dependency-groups]
 dev = [

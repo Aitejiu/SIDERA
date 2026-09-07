@@ -641,6 +641,9 @@ class ResultInputScenario:
         proposal_schema_version: int = 5,
         profile_key: str = "result-input-planner",
         verification_module_refs: tuple[UUID, UUID] | None = None,
+        integration_base_commit: str | None = None,
+        apply_on_accept: bool = False,
+        apply_target_ref: str | None = None,
     ) -> PendingResultInputSeed | None:
         planner_capability = replace(
             planner_capabilities(), proposal_schema_versions=(proposal_schema_version,)
@@ -842,6 +845,9 @@ class ResultInputScenario:
                 and verification_workspace_instance is not None
                 else None
             ),
+            integration_base_commit=integration_base_commit,
+            apply_on_accept=apply_on_accept,
+            apply_target_ref=apply_target_ref,
         )
         payload = (
             PlanningProposalPayloadV6.from_mapping(proposal_mapping)
@@ -2912,6 +2918,9 @@ def _proposal_mapping(
     browser_state: bool = False,
     proposal_schema_version: int = 5,
     verification_module_refs: tuple[UUID, UUID] | None = None,
+    integration_base_commit: str | None = None,
+    apply_on_accept: bool = False,
+    apply_target_ref: str | None = None,
 ) -> dict[str, object]:
     raw = proposal_v5_mapping()
     worker_items = raw["worker_items"]
@@ -3094,6 +3103,13 @@ def _proposal_mapping(
                 "workspace_module_ref": str(verification_module_refs[1]),
                 "workspace_config_version": 1,
             }
+        if integration_base_commit is not None:
+            spec["base_commit"] = integration_base_commit
+        spec["apply_policy"] = {
+            "apply_on_accept": apply_on_accept,
+            "mode": "fast_forward_only",
+            "target_ref": apply_target_ref,
+        }
         raw["schema_version"] = 6
         raw["integration_spec"] = spec
     return raw

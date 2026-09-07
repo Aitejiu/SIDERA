@@ -847,8 +847,18 @@ class ResultRepositoryPort(Protocol):
         raise NotImplementedError
 
     def claim_operations(
-        self, kind: str, now: datetime, limit: int
+        self, kind: str, now: datetime, limit: int, *, owner_id: str | None = None
     ) -> tuple[ResultOperationAttemptV1, ...]:
+        raise NotImplementedError
+
+    def claim_apply_operations(
+        self, now: datetime, limit: int, *, owner_id: str
+    ) -> tuple[ResultApplyOperationV1, ...]:
+        raise NotImplementedError
+
+    def list_unknown_apply_operations(
+        self, limit: int
+    ) -> tuple[ResultApplyOperationV1, ...]:
         raise NotImplementedError
 
     def save_operation(

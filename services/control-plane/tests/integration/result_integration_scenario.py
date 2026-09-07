@@ -36,6 +36,11 @@ from sidera_control_plane.application.result_acceptance import (
     ResultAcceptanceService,
     build_acceptance_basis_hash,
 )
+from sidera_control_plane.application.result_apply import (
+    ResultApplyCrash,
+    ResultApplyOutcome,
+    ResultApplyService,
+)
 from sidera_control_plane.application.result_finalization import (
     ResultFinalizationService,
 )
@@ -67,6 +72,7 @@ from sidera_control_plane.domain.context_packages import (
 )
 from sidera_control_plane.domain.gateway import AdapterEvent
 from sidera_control_plane.domain.result_operations import (
+    ResultApplyOperationV1,
     ResultOperationStatus,
     ReworkRecordV1,
     TaskResultHead,
@@ -88,6 +94,7 @@ from sidera_control_plane.persistence.artifact_content_store import (
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import EventModel, ExecutionRequestModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from sidera_control_plane.result_worker import ResultWorker
 from tests.unit.result_integration_fixtures import snapshot_mapping
 
 from .result_input_scenario import ResultInputScenario
@@ -132,6 +139,9 @@ class ResultIntegrationScenario:
             tmp_path / "result-integration-artifacts"
         )
         self._capture_service: CodeResultCaptureService | None = None
+        self._result_worker: ResultWorker | None = None
+        self._apply_enabled = False
+        self._fault_points: set[str] = set()
         self.code_provider_failure: str | None = None
         self.worker_context_versions: tuple[int, ...] = (1, 2, 3)
         self._check_exit_code: int | None = None
@@ -198,21 +208,58 @@ class ResultIntegrationScenario:
         return tuple(self.worker_item_ids.values())
 
     def seed_plan(self, *, apply: bool = False) -> None:
-        if apply:
-            raise NotImplementedError("result integration apply is added in Task 25")
         if self._seeded:
+            if apply and not self._apply_enabled:
+                raise AssertionError("result integration plan was seeded without apply")
             return
         self._planning.confirm_plan(
             result_inputs_enabled=True,
             proposal_schema_version=6,
             profile_key="r6-result-planning",
+            integration_base_commit=self._base_commit if apply else None,
+            apply_on_accept=apply,
+            apply_target_ref="refs/heads/main" if apply else None,
         )
         self.ids.update(self._planning.ids)
         self.request_id = self._planning.ids["planning_request"]
         self.worker_item_ids = dict(self._planning.worker_item_ids)
         self.request_ids = dict(self._planning.request_ids)
         self._capture_service = self._new_capture_service()
+        self._apply_enabled = apply
         self._seeded = True
+
+    def fail_once(self, point: str) -> None:
+        if not isinstance(point, str) or not point.strip():
+            raise ValueError("fault point is required")
+        self._fault_points.add(point.strip())
+
+    def advance_time(self, seconds: int) -> None:
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 1:
+            raise ValueError("seconds must be a positive integer")
+        self._planning.now += timedelta(seconds=seconds)
+
+    def prepare_unknown_application(self) -> None:
+        with self.uow() as uow:
+            head = uow.results.get_head(
+                self.workspace_id, self.root_task_id, for_update=True
+            )
+            if head is None or head.active_operation_id is None:
+                raise AssertionError("active result application is unavailable")
+            operation = uow.results.get_operation(
+                head.active_operation_id, self.workspace_id, for_update=True
+            )
+            if not isinstance(operation, ResultApplyOperationV1):
+                raise TypeError("active result application is not typed")
+            unknown = replace(
+                operation,
+                status=ResultOperationStatus.UNKNOWN,
+                lease_owner=None,
+                lease_token=None,
+                lease_expiry=None,
+                failure_code="result_operation_inspect_required",
+                version=operation.version + 1,
+            )
+            uow.results.save_operation(unknown, expected_version=operation.version)
 
     def source(
         self,
@@ -237,8 +284,8 @@ class ResultIntegrationScenario:
         execution_id = self._planning._execution_id(source_key)
         if execution_id is None:
             raise AssertionError(f"source execution {source_key!r} was not created")
-        worker_id, lease_id, session_id, execution_version = self._planning._start_source(
-            execution_id, key=source_key
+        worker_id, lease_id, session_id, execution_version = (
+            self._planning._start_source(execution_id, key=source_key)
         )
         del execution_version
         worktree, manifest = self._create_worktree(execution_id)
@@ -366,7 +413,9 @@ class ResultIntegrationScenario:
         integration_request_id = request_id or self._integration_request_id
         if integration_request_id is None:
             integration_request_id = self.request_ids["summary"]
-        integration_execution_id = execution_id or self._planning._execution_id("summary")
+        integration_execution_id = execution_id or self._planning._execution_id(
+            "summary"
+        )
         if integration_execution_id is None:
             raise AssertionError("integration execution was not activated")
         with self.uow() as uow:
@@ -485,7 +534,9 @@ class ResultIntegrationScenario:
         reason: str = "repair the failed result",
     ) -> dict[str, object]:
         def worker_id(key: str) -> UUID:
-            normalized = "summary" if key == "integrate" else ("a" if key == "login" else key)
+            normalized = (
+                "summary" if key == "integrate" else ("a" if key == "login" else key)
+            )
             value = self.worker_item_ids.get(normalized)
             if value is None:
                 raise KeyError(normalized)
@@ -520,7 +571,9 @@ class ResultIntegrationScenario:
         target_id: UUID | None = None,
     ):
         key = idempotency_key or f"scenario:{command_type}:{uuid4()}"
-        command_id = command_id or uuid5(NAMESPACE_URL, f"result-scenario-command:{key}")
+        command_id = command_id or uuid5(
+            NAMESPACE_URL, f"result-scenario-command:{key}"
+        )
         if expected_version is None:
             version = self._command_expected_versions.setdefault(
                 key,
@@ -537,6 +590,7 @@ class ResultIntegrationScenario:
                     clock=lambda: self._planning.now,
                     local_actor_type="local",
                     local_actor_id="operator",
+                    fault_injector=self._fault,
                 ),
                 ResultReworkService(
                     clock=lambda: self._planning.now,
@@ -675,9 +729,7 @@ class ResultIntegrationScenario:
             "replacement_result_ids": [str(replacement.id)],
             "expected_result_version": self.head().result_version,
             "target_observation_id": (
-                None
-                if target_observation_id is None
-                else str(target_observation_id)
+                None if target_observation_id is None else str(target_observation_id)
             ),
             "reason": reason,
         }
@@ -699,8 +751,8 @@ class ResultIntegrationScenario:
         execution_id = request.first_execution_id
         if execution_id is None:
             raise AssertionError("rework execution was not materialized")
-        worker_id, lease_id, session_id, execution_version = self._planning._start_source(
-            execution_id, key=request.worker_item_key
+        worker_id, lease_id, session_id, execution_version = (
+            self._planning._start_source(execution_id, key=request.worker_item_key)
         )
         worktree, manifest = self._create_worktree(execution_id)
         with self.uow() as uow:
@@ -829,10 +881,20 @@ class ResultIntegrationScenario:
 
         if type(limit) is not int or limit < 1:
             raise ValueError("drive limit must be positive")
-        del limit
         with self.uow() as uow:
             head = uow.results.get_head(self.workspace_id, self.root_task_id)
         if head is not None and head.current_acceptance_id is not None:
+            if self._apply_enabled and head.active_operation_id is not None:
+                try:
+                    return self.result_worker.run_once(limit=limit)
+                except ResultApplyCrash as exc:
+                    self.advance_time(301)
+                    operation_id = head.active_operation_id
+                    return ResultApplyOutcome(
+                        state="pending",
+                        operation_id=operation_id,
+                        failure_code=f"injected:{exc.point}",
+                    )
             return ResultFinalizationService(
                 self.uow,
                 clock=lambda: self._planning.now,
@@ -877,7 +939,9 @@ class ResultIntegrationScenario:
                 code_manifest.request_id,
                 self.workspace_id,
             )
-            execution = uow.executions.get(code_manifest.execution_id, self.workspace_id)
+            execution = uow.executions.get(
+                code_manifest.execution_id, self.workspace_id
+            )
             worker_item = (
                 None
                 if execution_request is None
@@ -928,21 +992,25 @@ class ResultIntegrationScenario:
             uow.context_assemblies.add(assembly)
 
     def _run_integration_execution(self, *, request_id: UUID | None = None) -> None:
-        request_id = request_id or self._integration_request_id or self.request_ids["summary"]
+        request_id = (
+            request_id or self._integration_request_id or self.request_ids["summary"]
+        )
         self._planning.reconcile()
         self._planning.activate()
         execution_id = self._planning._execution_id("summary")
         if execution_id is None:
             raise AssertionError("integration execution was not activated")
         with self.uow() as uow:
-            execution_request = uow.execution_requests.get(request_id, self.workspace_id)
+            execution_request = uow.execution_requests.get(
+                request_id, self.workspace_id
+            )
             execution = uow.executions.get(execution_id, self.workspace_id)
         if execution_request is None or execution is None:
             raise AssertionError("integration execution facts are unavailable")
         if execution_request.first_execution_id != execution_id:
             raise AssertionError("latest integration execution does not match request")
-        worker_id, lease_id, _session_id, execution_version = self._planning._start_source(
-            execution_id, key="summary"
+        worker_id, lease_id, _session_id, execution_version = (
+            self._planning._start_source(execution_id, key="summary")
         )
         worktree, manifest = self._create_worktree(execution_id)
         with self.uow() as uow:
@@ -956,13 +1024,17 @@ class ResultIntegrationScenario:
             NAMESPACE_URL,
             f"sidera.integration-input:{execution_id}:{code_inputs.input_hash}",
         )
-        receipt = GitResultStore({"repo://integration-test": self._repository}).materialize(
+        receipt = GitResultStore(
+            {"repo://integration-test": self._repository}
+        ).materialize(
             workspace_manifest=manifest,
             code_inputs=code_inputs,
             operation_id=materialization_operation_id,
         )
         if not receipt.succeeded:
-            raise AssertionError(f"integration inputs conflicted: {receipt.conflict_paths}")
+            raise AssertionError(
+                f"integration inputs conflicted: {receipt.conflict_paths}"
+            )
         self._integration_execution_id = execution_id
         self._integration_request_id = request_id
         if self._integration_operation_id is None:
@@ -1041,6 +1113,50 @@ class ResultIntegrationScenario:
 
     def reopen_services(self) -> None:
         self._capture_service = self._new_capture_service()
+        self._result_worker = None
+
+    def claim_apply_operation(self, owner_id: str) -> ResultApplyOperationV1 | None:
+        with self.uow() as uow:
+            claimed = uow.results.claim_apply_operations(
+                self._planning.now,
+                1,
+                owner_id=owner_id,
+            )
+        return claimed[0] if claimed else None
+
+    def reconcile_apply_operation(
+        self, operation_id: UUID, owner_id: str
+    ) -> ResultApplyOutcome:
+        return ResultApplyService(
+            self.uow,
+            GitResultStore({"repo://integration-test": self._repository}),
+            clock=lambda: self._planning.now,
+            owner_id=owner_id,
+        ).reconcile(
+            self.workspace_id,
+            self.root_task_id,
+            operation_id,
+        )
+
+    def result_worker_for(self, owner_id: str) -> ResultWorker:
+        return ResultWorker(
+            self.uow,
+            ResultApplyService(
+                self.uow,
+                GitResultStore({"repo://integration-test": self._repository}),
+                clock=lambda: self._planning.now,
+                owner_id=owner_id,
+                fault_injector=self._fault,
+            ),
+            owner_id=owner_id,
+            clock=lambda: self._planning.now,
+        )
+
+    @property
+    def result_worker(self) -> ResultWorker:
+        if self._result_worker is None:
+            self._result_worker = self.result_worker_for("result-worker:scenario")
+        return self._result_worker
 
     def retained_code_results(self) -> tuple[CodeResultSnapshotV1, ...]:
         with self.uow() as uow:
@@ -1081,7 +1197,9 @@ class ResultIntegrationScenario:
         self, candidate_id: UUID
     ) -> tuple[VerificationResultV1, ...]:
         with self.uow() as uow:
-            return uow.results.list_verification_results(candidate_id, self.workspace_id)
+            return uow.results.list_verification_results(
+                candidate_id, self.workspace_id
+            )
 
     def candidate_commit(self, candidate: object) -> str:
         candidate_id = getattr(candidate, "id", None)
@@ -1095,6 +1213,11 @@ class ResultIntegrationScenario:
         if not isinstance(snapshot, CodeResultSnapshotV1):
             raise TypeError(f"candidate {candidate_id} has no code snapshot")
         return snapshot.result_commit
+
+    def _fault(self, point: str) -> None:
+        if point in self._fault_points:
+            self._fault_points.remove(point)
+            raise ResultApplyCrash(point)
 
     def candidate_tree(self, candidate: object) -> str:
         code_result_id = getattr(candidate, "code_result_id", None)
@@ -1173,7 +1296,10 @@ class ResultIntegrationScenario:
             updated = replace(
                 current,
                 status=ResultOperationStatus.FAILED,
-                payload={**dict(current.payload), "observation": observation.to_mapping()},
+                payload={
+                    **dict(current.payload),
+                    "observation": observation.to_mapping(),
+                },
                 failure_code="stopped_by_request",
                 version=current.version + 1,
                 updated_at=NOW,
@@ -1249,9 +1375,11 @@ class ResultIntegrationScenario:
         execution_id = request.first_execution_id
         if execution_id is None:
             raise AssertionError("verification request was not materialized")
-        _worker_id, lease_id, session_id, _execution_version = self._planning._start_source(
-            execution_id,
-            key="summary",
+        _worker_id, lease_id, session_id, _execution_version = (
+            self._planning._start_source(
+                execution_id,
+                key="summary",
+            )
         )
         result_commit = self.candidate_commit(candidate)
         result_tree = self.candidate_tree(candidate)
@@ -1290,7 +1418,9 @@ class ResultIntegrationScenario:
             )
         )
         deadline = time.monotonic() + 10
-        while observation.status is CheckRunStatus.RUNNING and time.monotonic() < deadline:
+        while (
+            observation.status is CheckRunStatus.RUNNING and time.monotonic() < deadline
+        ):
             time.sleep(0.01)
             refreshed = runner.inspect(operation_id)
             if refreshed is None:
@@ -1395,6 +1525,7 @@ class ResultIntegrationScenario:
             "-m",
             "base",
         )
+        self._git(self._repository, "checkout", "--detach", "HEAD")
         return self._git(self._repository, "rev-parse", "HEAD")
 
     def _create_worktree(
