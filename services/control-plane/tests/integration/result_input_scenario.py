@@ -81,6 +81,7 @@ from sidera_control_plane.application.ports import (
     WorkerAdapter,
     WorkspaceProvider,
 )
+from sidera_control_plane.application.result_ports import CodeInputReceipt
 from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
@@ -113,8 +114,10 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterialization,
     ContextMaterializationV1,
     ContextMaterializationV2,
+    ContextMaterializationV3,
     ContextPackageManifestV1,
     ContextPackageManifestV2,
+    ContextPackageManifestV3,
     ContextPurpose,
 )
 from sidera_control_plane.domain.execution import ExecutionSession, ExecutionStatus
@@ -156,6 +159,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV5,
 )
+from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 from sidera_control_plane.domain.work_context import (
     WorkContext,
@@ -322,7 +326,10 @@ class _CaptureWorkerAdapter(FakeWorkerAdapter):
         *,
         operation_id: UUID,
     ) -> ContextAcknowledgement:
-        if not isinstance(materialization, (ContextMaterializationV1, ContextMaterializationV2)):
+        if not isinstance(
+            materialization,
+            (ContextMaterializationV1, ContextMaterializationV2, ContextMaterializationV3),
+        ):
             raise TypeError("unsupported context materialization")
         self.accepted_contexts.append(materialization)
         metadata = materialization.metadata
@@ -369,6 +376,8 @@ class _CaptureWorkspaceProvider:
         self._handoff_transfers: dict[
             UUID, tuple[UUID, ExecutionWorkspaceManifest]
         ] = {}
+        self.code_provider_failure: str | None = None
+        self._code_materialization_attempts: dict[UUID, int] = {}
 
     def prepare(
         self,
@@ -384,7 +393,7 @@ class _CaptureWorkspaceProvider:
             execution_id=spec.execution_id,
             checkouts=(
                 WorkspaceCheckout(
-                    repository_ref="repo://sidera",
+                    repository_ref="repo://integration-test",
                     base_revision="a" * 40,
                     branch=f"sidera/execution/{spec.execution_id}",
                     current_head="a" * 40,
@@ -397,6 +406,36 @@ class _CaptureWorkspaceProvider:
         )
         self._manifests_by_location[manifest.location_ref] = manifest
         return manifest
+
+    def materialize(
+        self,
+        *,
+        workspace_manifest: ExecutionWorkspaceManifest,
+        code_inputs: object,
+        operation_id: UUID,
+    ) -> CodeInputReceipt:
+        from sidera_control_plane.domain.code_results import CodeInputManifestV1
+
+        if not isinstance(code_inputs, CodeInputManifestV1):
+            raise ResultError("code_input_manifest_invalid", {})
+        execution_id = workspace_manifest.execution_id
+        self._code_materialization_attempts[execution_id] = (
+            self._code_materialization_attempts.get(execution_id, 0) + 1
+        )
+        if self.code_provider_failure is not None:
+            raise ResultError(self.code_provider_failure, {})
+        checkout = workspace_manifest.checkouts[0]
+        return CodeInputReceipt(
+            execution_id=execution_id,
+            input_hash=code_inputs.input_hash,
+            actual_commit=checkout.current_head,
+            actual_tree="b" * 40,
+            conflict_paths=(),
+            operation_id=operation_id,
+        )
+
+    def code_materialization_attempts(self, execution_id: UUID) -> int:
+        return self._code_materialization_attempts.get(execution_id, 0)
 
     def freeze(
         self, manifest: ExecutionWorkspaceManifest, *, operation_id: UUID
@@ -563,6 +602,8 @@ class ResultInputScenario:
         self._confirmation_command_id: UUID | None = None
         self._capture_adapter: _CaptureWorkerAdapter | None = None
         self._capture_adapters_by_key: dict[str, list[_CaptureWorkerAdapter]] = {}
+        self.code_provider_failure: str | None = None
+        self.worker_context_versions: tuple[int, ...] = (1, 2)
         self._gateway: WorkerGateway | None = None
         self._runtime = ReferenceCollaborationRuntime(clock=self.clock)
         self._decision_service = CollaborationDecisionService(
@@ -1487,9 +1528,9 @@ class ResultInputScenario:
 
     def context_package_for_execution(
         self, execution_id: UUID
-    ) -> ContextPackageManifestV1 | ContextPackageManifestV2:
+    ) -> ContextPackageManifestV1 | ContextPackageManifestV2 | ContextPackageManifestV3:
         with self.uow_factory() as uow:
-            for schema_version in (2, 1):
+            for schema_version in (3, 2, 1):
                 package = uow.context_packages.get_for_consumer(
                     ContextPurpose.EXECUTION,
                     execution_id,
@@ -1566,7 +1607,12 @@ class ResultInputScenario:
         adapter: WorkerAdapter | None = None
         if execution.status is ExecutionStatus.QUEUED:
             if self._worker_runtime is None:
+                capture_capabilities = replace(
+                    _CAPTURE_ADAPTER_CAPABILITIES,
+                    context_package_versions=self.worker_context_versions,
+                )
                 adapter = _CaptureWorkerAdapter(
+                    capabilities=capture_capabilities,
                     raise_after_start=start_outcome_unknown,
                 )
             elif start_outcome_unknown:
@@ -1588,7 +1634,17 @@ class ResultInputScenario:
                 workspace_id=self.workspace_id,
                 target_execution_id=execution_id,
             )
-            assert scheduled.assigned == 1
+            if scheduled.assigned != 1:
+                package = self.context_package_for_execution(execution_id)
+                if (
+                    isinstance(package, ContextPackageManifestV3)
+                    and 3 not in self.worker_context_versions
+                ):
+                    return GatewayMessageError(
+                        "worker adapter does not support code input context",
+                        code="context_adapter_unsupported",
+                    )
+                raise AssertionError(f"worker execution was not assigned: {scheduled}")
             self._worker_adapters_by_key.setdefault(key, []).append(adapter)
             if isinstance(adapter, _CaptureWorkerAdapter):
                 self._capture_adapters_by_key.setdefault(key, []).append(adapter)
@@ -1877,6 +1933,9 @@ class ResultInputScenario:
         raise AssertionError("handoff did not reach a terminal state")
 
     def _capture_gateway(self) -> WorkerGateway:
+        self._capture_workspace_provider.code_provider_failure = (
+            self.code_provider_failure
+        )
         adapter_factories: dict[str, Callable[[ModuleInstance], WorkerAdapter]] = {
             "capture": lambda instance: self._worker_adapters_by_instance[instance.id]
         }
@@ -1931,6 +1990,12 @@ class ResultInputScenario:
             len(adapter.start_calls)
             for adapter in self._capture_adapters_by_key.get(key, ())
         )
+
+    def code_materialization_attempts(self, key: str) -> int:
+        execution_id = self._execution_id(key)
+        if execution_id is None:
+            return 0
+        return self._capture_workspace_provider.code_materialization_attempts(execution_id)
 
     def send_worker_input(
         self,
@@ -2188,10 +2253,11 @@ class ResultInputScenario:
                 workspace_handoff_versions=(1,),
                 workspace_transfer_modes=(HandoffTransferMode.REUSE_EXACT,),
                 handoff_inspection=True,
+                code_input_versions=(1,),
             )
             workspace_config_namespace = "workspace"
             workspace_config: Mapping[str, object] = {
-                "workspace.repository_ref": "repo://sidera",
+                "workspace.repository_ref": "repo://integration-test",
                 "workspace.base_revision": "a" * 40,
             }
             workspace_config_version = 1

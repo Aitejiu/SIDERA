@@ -7,6 +7,11 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
+from sidera_control_plane.domain.code_results import (
+    CodeInputManifestV1,
+    CodeInputSourceV1,
+    CodeResultSnapshotV1,
+)
 from sidera_control_plane.domain.collaboration_runtime import canonical_json_bytes
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.execution import ExecutionStatus
@@ -38,6 +43,106 @@ if TYPE_CHECKING:
 _POSSIBLY_ACTIVE_STATUSES = frozenset(
     {ExecutionStatus.QUEUED, ExecutionStatus.LEASED, ExecutionStatus.RUNNING}
 )
+
+
+def build_code_input_manifest(
+    *,
+    selection: CollaborationInputSelectionV1,
+    snapshots: Sequence[CodeResultSnapshotV1],
+    request_id: UUID,
+    execution_id: UUID,
+    repository_ref: str,
+    base_commit: str,
+) -> CodeInputManifestV1:
+    """Build a code manifest from one immutable Selection and its snapshots."""
+
+    if selection.target_execution_request_id != request_id:
+        raise ValidationError("code input selection does not target the request")
+    if not snapshots:
+        raise ValidationError("code input snapshots must not be empty")
+
+    selected_sources = _selection_sources(selection)
+    selected_execution_ids = {
+        source.effective_execution_id for source in selected_sources
+    }
+    snapshots_by_execution: dict[UUID, CodeResultSnapshotV1] = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise ValidationError("code input snapshots must be typed")
+        if snapshot.execution_id in snapshots_by_execution:
+            raise ValidationError("code input snapshots must be unique by execution")
+        if (
+            snapshot.workspace_id != selection.workspace_id
+            or snapshot.root_task_id != selection.root_task_id
+        ):
+            raise ValidationError("code input snapshot scope does not match selection")
+        snapshots_by_execution[snapshot.execution_id] = snapshot
+    if set(snapshots_by_execution) != selected_execution_ids:
+        raise ValidationError("code input snapshots do not exactly match selection")
+
+    ordered_snapshots: list[CodeResultSnapshotV1] = []
+    seen_execution_ids: set[UUID] = set()
+    for source in selected_sources:
+        if source.effective_execution_id in seen_execution_ids:
+            continue
+        seen_execution_ids.add(source.effective_execution_id)
+        ordered_snapshots.append(snapshots_by_execution[source.effective_execution_id])
+
+    sources = tuple(
+        CodeInputSourceV1(
+            result_id=snapshot.id,
+            result_hash=snapshot.content_hash,
+            input_commit=snapshot.input_commit,
+            input_tree=snapshot.input_tree,
+            result_commit=snapshot.result_commit,
+            result_tree=snapshot.result_tree,
+        )
+        for snapshot in ordered_snapshots
+    )
+    content = {
+        "schema_version": 1,
+        "workspace_id": str(selection.workspace_id),
+        "root_task_id": str(selection.root_task_id),
+        "request_id": str(request_id),
+        "execution_id": str(execution_id),
+        "selection_id": str(selection.id),
+        "selection_hash": selection.selection_hash,
+        "repository_ref": repository_ref,
+        "base_commit": base_commit,
+        "sources": [item.to_mapping() for item in sources],
+    }
+    input_hash = sha256(canonical_json_bytes(content)).hexdigest()
+    return CodeInputManifestV1(
+        schema_version=1,
+        workspace_id=selection.workspace_id,
+        root_task_id=selection.root_task_id,
+        request_id=request_id,
+        execution_id=execution_id,
+        selection_id=selection.id,
+        selection_hash=selection.selection_hash,
+        repository_ref=repository_ref,
+        base_commit=base_commit,
+        sources=sources,
+        input_hash=input_hash,
+    )
+
+
+def _selection_sources(
+    selection: CollaborationInputSelectionV1,
+) -> tuple[InputSelectionSourceV1, ...]:
+    values: list[InputSelectionSourceV1] = []
+    seen: set[UUID] = set()
+    for group in selection.groups:
+        for source in group.sources:
+            if source.effective_execution_id not in seen:
+                seen.add(source.effective_execution_id)
+                values.append(source)
+    for hard_input in selection.hard_inputs:
+        source = hard_input.source
+        if source.effective_execution_id not in seen:
+            seen.add(source.effective_execution_id)
+            values.append(source)
+    return tuple(values)
 
 
 class ResultInputEvaluator:

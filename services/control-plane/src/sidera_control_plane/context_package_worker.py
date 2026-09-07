@@ -6,7 +6,7 @@ import logging
 import signal
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from typing import Any
@@ -16,6 +16,7 @@ from sidera_control_plane.adapters.knowledge_http import (
     KnowledgeAdapterError,
     KnowledgeHttpAdapter,
 )
+from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_assembly import (
     ContextAssembler,
@@ -32,6 +33,7 @@ from sidera_control_plane.application.ports import (
 )
 from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
@@ -42,6 +44,7 @@ from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.handoff_evidence import HandoffContextBundle
 from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
 from sidera_control_plane.domain.planning import PlanningRunStatus
+from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
     SchedulingIssue,
@@ -55,6 +58,7 @@ logger = logging.getLogger(__name__)
 _RETRY_BACKOFF_SECONDS = (5, 15, 45, 135, 300)
 _PACKAGE_NAMESPACE = NAMESPACE_URL
 _PACKAGE_V2_NAMESPACE = uuid5(_PACKAGE_NAMESPACE, "sidera:context-package:v2")
+_PACKAGE_V3_NAMESPACE = uuid5(_PACKAGE_NAMESPACE, "sidera:context-package:v3")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,7 @@ class _AssemblyInput:
     artifact_refs: tuple[WorkReference, ...]
     evidence_refs: tuple[WorkReference, ...]
     input_selection: CollaborationInputSelectionV1 | None = None
+    code_input_manifest: CodeInputManifestV1 | None = None
 
 
 class ContextPackageWorker:
@@ -161,10 +166,19 @@ class ContextPackageWorker:
                     "WorkContext revision is no longer available",
                 )
             input_selection = None
+            code_input_manifest = None
             if request.purpose is ContextPurpose.PLANNING_RUN:
                 facts = self._planning_facts(uow, request)
             else:
                 input_selection = self._execution_input_selection(uow, request)
+                if request.code_input_manifest is not None:
+                    try:
+                        code_input_manifest = resolve_code_inputs(
+                            uow,
+                            request.code_input_manifest,
+                        )
+                    except ResultError as exc:
+                        raise ContextAssemblyError(exc.code, str(exc)) from exc
                 facts = self._execution_facts(uow, request)
             return _AssemblyInput(
                 work_context_revision=revision,
@@ -172,6 +186,7 @@ class ContextPackageWorker:
                 artifact_refs=revision.snapshot.artifact_refs,
                 evidence_refs=revision.snapshot.evidence_refs,
                 input_selection=input_selection,
+                code_input_manifest=code_input_manifest,
             )
 
     def _execution_input_selection(
@@ -181,11 +196,18 @@ class ContextPackageWorker:
     ) -> CollaborationInputSelectionV1 | None:
         if request.manifest_schema_version == 1:
             return None
-        if request.manifest_schema_version != 2:
+        if request.manifest_schema_version not in {2, 3}:
             raise ContextAssemblyError(
                 "context_manifest_schema_unsupported",
                 "execution context manifest schema is unsupported",
             )
+        if request.manifest_schema_version == 3 and request.input_selection_id is None:
+            if request.code_input_manifest is not None:
+                raise ContextAssemblyError(
+                    "context_input_selection_missing",
+                    "v3 code execution context has no input Selection reference",
+                )
+            return None
         if request.input_selection_id is None:
             raise ContextAssemblyError(
                 "context_input_selection_missing",
@@ -490,13 +512,40 @@ class ContextPackageWorker:
                 f"revision:{request.work_context_revision_id}:"
                 f"selection:{request.input_selection_hash}:v2",
             )
+        elif request.manifest_schema_version == 3:
+            input_identity = (
+                assembly_input.code_input_manifest.input_hash
+                if assembly_input.code_input_manifest is not None
+                else request.verification_manifest.verification_basis_hash
+                if request.verification_manifest is not None
+                else None
+            )
+            if input_identity is None:
+                raise ContextAssemblyError(
+                    "context_manifest_schema_unsupported",
+                    "v3 execution context has no input identity",
+                )
+            package_id = uuid5(
+                _PACKAGE_V3_NAMESPACE,
+                "sidera:context-package:"
+                f"{request.consumer_type.value}:{request.consumer_id}:"
+                f"worker:{request.worker_item_id}:context:{request.context_version}:"
+                f"revision:{request.work_context_revision_id}:"
+                f"input:{input_identity}:v3",
+            )
         else:
             raise ContextAssemblyError(
                 "context_manifest_schema_unsupported",
                 "execution context manifest schema is unsupported",
             )
+        assembly_request = request
+        if assembly_input.code_input_manifest is not None:
+            assembly_request = replace(
+                request,
+                code_input_manifest=assembly_input.code_input_manifest,
+            )
         return self._assembler.assemble(
-            request,
+            assembly_request,
             work_context_revision=assembly_input.work_context_revision,
             control_plane_fact_snapshot=assembly_input.control_plane_fact_snapshot,
             artifact_refs=assembly_input.artifact_refs,

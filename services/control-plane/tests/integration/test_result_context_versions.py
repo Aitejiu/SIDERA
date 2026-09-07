@@ -154,7 +154,10 @@ def test_execution_spec_v3_binds_purpose_and_physical_input_ack() -> None:
         workspace_config_version=1,
         context_package=materialization,
         execution_purpose="code",
-        physical_input_ack={"execution_id": str(execution_id), "input_hash": "6" * 64},
+        physical_input_ack={
+            "execution_id": str(execution_id),
+            "input_hash": materialization.code_input_manifest.input_hash,
+        },
     )
 
     assert spec.schema_version == 3
@@ -162,6 +165,15 @@ def test_execution_spec_v3_binds_purpose_and_physical_input_ack() -> None:
 
     with pytest.raises(ValidationError, match="execution purpose"):
         replace(spec, execution_purpose="verification")
+
+    with pytest.raises(ValidationError, match="does not match code input"):
+        replace(
+            spec,
+            physical_input_ack={
+                "status": "accepted",
+                "execution_id": str(execution_id),
+            },
+        )
 
 
 def test_legacy_opencode_adapter_rejects_v3_until_capability_is_declared() -> None:

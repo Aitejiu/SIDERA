@@ -4,7 +4,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.artifact_content import (
@@ -14,6 +14,7 @@ from sidera_control_plane.application.code_result_capture import (
     CodeResultCaptureService,
     code_capture_operation_id,
 )
+from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_materialization import (
     ContextMaterializationError,
@@ -22,6 +23,7 @@ from sidera_control_plane.application.context_materialization import (
 )
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
+    execution_context_manifest_schema_version,
     resolve_execution_context_authorization,
 )
 from sidera_control_plane.application.event_ingestor import (
@@ -49,10 +51,19 @@ from sidera_control_plane.application.ports import (
     WorkerAdapter,
     WorkspaceProvider,
 )
-from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
+from sidera_control_plane.application.result_input_delivery import (
+    materialize_code_inputs,
+)
+from sidera_control_plane.application.result_ports import (
+    CodeInputReceipt,
+    ResultOperationAttemptV1,
+)
 from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.domain.artifacts import ArtifactCandidate
-from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
+from sidera_control_plane.domain.code_results import (
+    CodeInputManifestV1,
+    CodeResultSnapshotV1,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -61,6 +72,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterialization,
     ContextMaterializationMode,
     ContextMaterializationOutcome,
+    ContextMaterializationV3,
     ContextPackageManifest,
     ContextPackageManifestV1,
     ContextPackageStatus,
@@ -115,6 +127,7 @@ from sidera_control_plane.domain.modules import (
     ModuleInstance,
     StopCapability,
     WorkerAdapterCapabilityProfile,
+    WorkspaceProviderCapabilityProfile,
 )
 from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.scheduling import (
@@ -163,6 +176,21 @@ _START_BLOCK_FAILURE_CODES = frozenset(
         "result_input_integrity_failed",
         "result_input_format_unsupported",
         "result_input_budget_exceeded",
+        "code_input_manifest_invalid",
+        "code_input_selection_not_found",
+        "code_input_selection_scope_mismatch",
+        "code_input_consumer_mismatch",
+        "code_input_result_not_found",
+        "code_input_result_invalid",
+        "code_input_result_not_selected",
+        "code_input_result_set_mismatch",
+        "code_input_result_mismatch",
+        "code_input_workspace_unsupported",
+        "code_input_receipt_invalid",
+        "code_input_receipt_mismatch",
+        "code_input_conflict",
+        "code_input_unavailable",
+        "verification_input_unsupported",
         "handoff_in_progress",
         "handoff_gate_unavailable",
     }
@@ -210,6 +238,8 @@ class ExecutionSpecFactory(Protocol):
         adapter_instance: ModuleInstance,
         workspace_instance: ModuleInstance,
         context_materialization: ContextMaterialization | None = None,
+        execution_purpose: Literal["code", "verification"] | None = None,
+        physical_input_ack: Mapping[str, object] | None = None,
     ) -> ExecutionSpec:
         raise NotImplementedError
 
@@ -440,6 +470,8 @@ class ConfiguredExecutionSpecFactory:
         adapter_instance: ModuleInstance,
         workspace_instance: ModuleInstance,
         context_materialization: ContextMaterialization | None = None,
+        execution_purpose: Literal["code", "verification"] | None = None,
+        physical_input_ack: Mapping[str, object] | None = None,
     ) -> ExecutionSpec:
         config = workspace_instance.config
         repository_ref = _required_config(config, workspace_instance.config_namespace, "repository_ref")
@@ -478,8 +510,14 @@ class ConfiguredExecutionSpecFactory:
             "expected_outputs",
             default=("diff",),
         )
+        if context_materialization is None:
+            schema_version = 1
+        elif execution_purpose is not None or physical_input_ack is not None:
+            schema_version = 3
+        else:
+            schema_version = 2
         return ExecutionSpec(
-            schema_version=2 if context_materialization is not None else 1,
+            schema_version=schema_version,
             workspace_id=execution.workspace_id,
             task_id=execution.task_id,
             execution_id=execution.id,
@@ -528,6 +566,8 @@ class ConfiguredExecutionSpecFactory:
             workspace_module_ref=binding.workspace_module_id,
             workspace_config_version=binding.workspace_config_version,
             context_package=context_materialization,
+            execution_purpose=execution_purpose,
+            physical_input_ack=physical_input_ack,
         )
 
 
@@ -542,8 +582,14 @@ class LegacyExecutionSpecFactory(ConfiguredExecutionSpecFactory):
         adapter_instance: ModuleInstance,
         workspace_instance: ModuleInstance,
         context_materialization: ContextMaterialization | None = None,
+        execution_purpose: Literal["code", "verification"] | None = None,
+        physical_input_ack: Mapping[str, object] | None = None,
     ) -> ExecutionSpec:
-        if context_materialization is not None:
+        if (
+            context_materialization is not None
+            or execution_purpose is not None
+            or physical_input_ack is not None
+        ):
             raise GatewayMessageError("legacy ExecutionSpec cannot carry context")
         return super().create(
             execution,
@@ -621,17 +667,69 @@ class WorkerGateway:
             keeper = self._lease_keeper(context)
             keeper.start()
             try:
-                context_materialization = self._prepare_execution_context(context)
-                spec = self._spec_factory.create(
-                    context.execution,
-                    context.task,
-                    context.binding,
-                    context.adapter_instance,
-                    context.workspace_instance,
-                    context_materialization=context_materialization,
+                context_materialization = self._prepare_execution_context(
+                    context,
+                    acknowledge=False,
                 )
-                workspace = self._ensure_workspace(context, spec)
-                self._record_code_result_start(context, spec, workspace)
+                physical_input_ack: Mapping[str, object] | None = None
+                if isinstance(context_materialization, ContextMaterializationV3):
+                    code_input_manifest = context_materialization.code_input_manifest
+                    if code_input_manifest is None:
+                        raise GatewayMessageError(
+                            "verification execution is not supported by the normal Gateway path",
+                            code="verification_input_unsupported",
+                        )
+                    prepare_spec = self._spec_factory.create(
+                        context.execution,
+                        context.task,
+                        context.binding,
+                        context.adapter_instance,
+                        context.workspace_instance,
+                    )
+                    workspace = self._ensure_workspace(context, prepare_spec)
+                    receipt = self._materialize_code_inputs(
+                        context,
+                        workspace,
+                        code_input_manifest,
+                    )
+                    physical_input_ack = receipt.to_mapping()
+                    self._record_code_result_start(
+                        context,
+                        prepare_spec,
+                        workspace,
+                        input_commit=receipt.actual_commit,
+                    )
+                    self._acknowledge_execution_context(
+                        context,
+                        context_materialization,
+                        physical_input_ack=physical_input_ack,
+                    )
+                    spec = self._spec_factory.create(
+                        context.execution,
+                        context.task,
+                        context.binding,
+                        context.adapter_instance,
+                        context.workspace_instance,
+                        context_materialization=context_materialization,
+                        execution_purpose="code",
+                        physical_input_ack=physical_input_ack,
+                    )
+                else:
+                    if context_materialization is not None:
+                        self._acknowledge_execution_context(
+                            context,
+                            context_materialization,
+                        )
+                    spec = self._spec_factory.create(
+                        context.execution,
+                        context.task,
+                        context.binding,
+                        context.adapter_instance,
+                        context.workspace_instance,
+                        context_materialization=context_materialization,
+                    )
+                    workspace = self._ensure_workspace(context, spec)
+                    self._record_code_result_start(context, spec, workspace)
                 result = self._ensure_session(context, spec, workspace)
                 self._ensure_initial_prompt(context, spec, result)
                 if keeper.health_error is not None:
@@ -2636,7 +2734,10 @@ class WorkerGateway:
         )
 
     def _prepare_execution_context(
-        self, context: _AssignmentContext
+        self,
+        context: _AssignmentContext,
+        *,
+        acknowledge: bool = True,
     ) -> ContextMaterialization | None:
         if self._context_materializer is None or not self._context_required(
             context.execution
@@ -2645,22 +2746,15 @@ class WorkerGateway:
         now = self._clock()
         with self._uow_factory() as uow:
             try:
-                authorization = resolve_execution_context_authorization(
-                    uow, context.execution
-                )
+                resolve_execution_context_authorization(uow, context.execution)
             except ExecutionContextAuthorizationError as exc:
                 raise GatewayMessageError(
                     "execution context inheritance is invalid",
                     code="context_input_selection_scope_invalid",
                 ) from exc
-            execution_request = (
-                authorization.request if authorization is not None else None
-            )
-            manifest_schema_version = (
-                2
-                if execution_request is not None
-                and execution_request.input_selection_id is not None
-                else 1
+            manifest_schema_version = execution_context_manifest_schema_version(
+                uow,
+                context.execution,
             )
             assembly = uow.context_assemblies.get_for_consumer(
                 ContextPurpose.EXECUTION,
@@ -2741,7 +2835,6 @@ class WorkerGateway:
                 code="context_reference_not_found",
             )
 
-        operation_id = _context_operation_id(context.execution.id, package.package_id)
         adapter = self._adapter(
             context.adapter_definition,
             context.adapter_instance,
@@ -2782,12 +2875,38 @@ class WorkerGateway:
             raise GatewayMessageError(
                 "execution context materialization failed", code=exc.code
             ) from exc
+        if not acknowledge:
+            return materialization
+        self._acknowledge_execution_context(
+            context,
+            materialization,
+            package=package,
+        )
+        return materialization
+
+    def _acknowledge_execution_context(
+        self,
+        context: _AssignmentContext,
+        materialization: ContextMaterialization,
+        *,
+        package: ContextPackageManifest | None = None,
+        physical_input_ack: Mapping[str, object] | None = None,
+    ) -> None:
+        adapter = self._adapter(
+            context.adapter_definition,
+            context.adapter_instance,
+            operation=RuntimeModuleOperation.START,
+        )
         accept_context = getattr(adapter, "accept_context", None)
         if not callable(accept_context):
             raise GatewayMessageError(
                 "worker adapter does not accept context packages",
                 code="context_adapter_unsupported",
             )
+        operation_id = _context_operation_id(
+            context.execution.id,
+            materialization.metadata.package_id,
+        )
         try:
             acknowledgement = accept_context(
                 materialization,
@@ -2810,21 +2929,47 @@ class WorkerGateway:
             adapter_module_id=context.binding.adapter_module_id,
             adapter_config_version=context.binding.adapter_config_version,
         )
+        if context.execution.worker_item_id is None:
+            raise GatewayMessageError(
+                "execution context has no WorkerItem",
+                code="context_consumer_stale",
+            )
+        if package is None:
+            package = self._package_for_materialization(context, materialization)
         try:
             self._persist_context_acceptance(
                 context,
-                worker_item_id=worker_item.id,
+                worker_item_id=context.execution.worker_item_id,
                 package=package,
                 materialization=materialization,
                 acknowledgement=acknowledgement,
                 operation_id=operation_id,
-                now=now,
+                now=self._clock(),
+                physical_input_ack=physical_input_ack,
             )
         except Exception as exc:
+            if isinstance(exc, GatewayMessageError):
+                raise
             raise GatewayError(
                 "execution context acknowledgement could not be persisted"
             ) from exc
-        return materialization
+
+    def _package_for_materialization(
+        self,
+        context: _AssignmentContext,
+        materialization: ContextMaterialization,
+    ) -> ContextPackageManifest:
+        with self._uow_factory() as uow:
+            package = uow.context_packages.get(
+                materialization.metadata.package_id,
+                context.execution.workspace_id,
+            )
+        if package is None or package.package_hash != materialization.metadata.package_hash:
+            raise GatewayMessageError(
+                "execution context package disappeared during acknowledgement",
+                code="context_package_stale",
+            )
+        return package
 
     def _context_required(self, execution: Execution) -> bool:
         cutoff = self._context_package_cutover_at
@@ -2918,6 +3063,7 @@ class WorkerGateway:
         acknowledgement: ContextAcknowledgement,
         operation_id: UUID,
         now: datetime,
+        physical_input_ack: Mapping[str, object] | None = None,
     ) -> None:
         durable_ack = replace(
             acknowledgement,
@@ -2925,6 +3071,14 @@ class WorkerGateway:
             adapter_config_version=context.binding.adapter_config_version,
         )
         correlation_id = context.causation_id or uuid4()
+        payload: dict[str, object] = {
+            "execution_id": str(context.execution.id),
+            "package_id": str(package.package_id),
+            "package_hash": package.package_hash,
+            "context_version": package.context_version,
+        }
+        if physical_input_ack is not None:
+            payload["physical_input_ack"] = dict(physical_input_ack)
         command = CommandEnvelope(
             id=uuid5(NAMESPACE_URL, f"sidera.gateway.context-command:{operation_id}"),
             workspace_id=context.execution.workspace_id,
@@ -2933,12 +3087,7 @@ class WorkerGateway:
             actor_type="system",
             actor_id="gateway",
             target_id=package.package_id,
-            payload={
-                "execution_id": str(context.execution.id),
-                "package_id": str(package.package_id),
-                "package_hash": package.package_hash,
-                "context_version": package.context_version,
-            },
+            payload=payload,
             expected_version=None,
             idempotency_key=f"gateway-context:{operation_id}",
             correlation_id=correlation_id,
@@ -3501,6 +3650,8 @@ class WorkerGateway:
         context: _AssignmentContext,
         spec: ExecutionSpec,
         workspace: ExecutionWorkspaceManifest,
+        *,
+        input_commit: str | None = None,
     ) -> None:
         service = self._code_result_capture_service
         if service is None:
@@ -3516,7 +3667,7 @@ class WorkerGateway:
         try:
             service.record_execution_start(
                 manifest=workspace,
-                input_commit=workspace.checkouts[0].current_head,
+                input_commit=input_commit or workspace.checkouts[0].current_head,
                 writable_paths=writable_paths,
                 operation_id=code_capture_operation_id(context.execution.id),
             )
@@ -3525,6 +3676,57 @@ class WorkerGateway:
                 "execution result input boundary could not be recorded",
                 code=exc.code,
             ) from exc
+
+    def _materialize_code_inputs(
+        self,
+        context: _AssignmentContext,
+        workspace: ExecutionWorkspaceManifest,
+        code_inputs: CodeInputManifestV1,
+    ) -> CodeInputReceipt:
+        self._validate_code_input_capability(context)
+        with self._uow_factory() as uow:
+            try:
+                resolved = resolve_code_inputs(uow, code_inputs)
+            except ResultError as exc:
+                raise GatewayMessageError(
+                    "code input manifest is no longer authorized",
+                    code=exc.code,
+                ) from exc
+        operation_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.gateway.code-input:{context.execution.id}:{resolved.input_hash}",
+        )
+        provider = self._workspace_provider(
+            context.workspace_definition,
+            context.workspace_instance,
+            operation=RuntimeModuleOperation.START,
+        )
+        try:
+            return materialize_code_inputs(
+                workspace_manifest=workspace,
+                code_inputs=resolved,
+                materializer=provider,
+                operation_id=operation_id,
+            )
+        except ResultError as exc:
+            raise GatewayMessageError(
+                "exact code inputs could not be materialized",
+                code=exc.code,
+            ) from exc
+
+    @staticmethod
+    def _validate_code_input_capability(context: _AssignmentContext) -> None:
+        capabilities = context.workspace_definition.capabilities
+        if not isinstance(capabilities, WorkspaceProviderCapabilityProfile):
+            raise GatewayMessageError(
+                "workspace provider capability profile is invalid",
+                code="code_input_workspace_unsupported",
+            )
+        if not capabilities.supports_code_input_version(1):
+            raise GatewayMessageError(
+                "workspace provider does not support exact code inputs",
+                code="code_input_workspace_unsupported",
+            )
 
     def _capture_observed_terminal(
         self,

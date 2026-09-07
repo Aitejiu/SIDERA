@@ -6,6 +6,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.result_ports import CodeInputReceipt
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffInspectionOutcome,
     HandoffWorkspaceInspection,
@@ -151,6 +153,31 @@ class GitWorktreeWorkspaceManager:
             workspace_config_version=spec.workspace_config_version,
         )
         return manifest
+
+    def materialize(
+        self,
+        *,
+        workspace_manifest: ExecutionWorkspaceManifest,
+        code_inputs: CodeInputManifestV1,
+        operation_id: UUID,
+    ) -> CodeInputReceipt:
+        """Delegate exact code-input installation to the Git result boundary."""
+
+        if not isinstance(code_inputs, CodeInputManifestV1):
+            raise WorkspaceProviderError("code input manifest is invalid")
+        checkout = self._require_checkout(workspace_manifest)
+        location = self._location_for_manifest(workspace_manifest)
+        repository = self._resolve_repository_for_manifest(workspace_manifest, location)
+        from sidera_control_plane.adapters.git_results import GitResultStore
+
+        return GitResultStore(
+            {checkout.repository_ref: repository},
+            git_executable=self._git_executable,
+        ).materialize(
+            workspace_manifest=workspace_manifest,
+            code_inputs=code_inputs,
+            operation_id=operation_id,
+        )
 
     def freeze(
         self,

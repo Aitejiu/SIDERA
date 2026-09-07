@@ -11,12 +11,14 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.collaboration import RuntimeRelease
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextAssemblyStatus,
     ContextConsumerType,
     ContextPurpose,
     ResultInputBudgetV1,
+    VerificationManifestV1,
 )
 from sidera_control_plane.domain.execution import (
     TERMINAL_EXECUTION_STATUSES,
@@ -495,12 +497,22 @@ def build_execution_context_assembly_request(
     manifest_schema_version: int = 1,
     input_selection: CollaborationInputSelectionV1 | None = None,
     result_input_budget: ResultInputBudgetV1 | None = None,
+    code_input_manifest: CodeInputManifestV1 | None = None,
+    verification_manifest: VerificationManifestV1 | None = None,
 ) -> ContextAssemblyRequest:
     if execution.worker_item_id != worker_item.id:
         raise ValueError("execution and WorkerItem do not match")
     if manifest_schema_version == 1:
-        if input_selection is not None or result_input_budget is not None:
-            raise ValueError("v1 execution context cannot carry an input selection")
+        if any(
+            value is not None
+            for value in (
+                input_selection,
+                result_input_budget,
+                code_input_manifest,
+                verification_manifest,
+            )
+        ):
+            raise ValueError("v1 execution context cannot carry execution input")
     elif manifest_schema_version == 2:
         if not isinstance(input_selection, CollaborationInputSelectionV1):
             raise ValueError("v2 execution context requires an input selection")
@@ -510,6 +522,39 @@ def build_execution_context_assembly_request(
             selection=input_selection,
         )
         result_input_budget = result_input_budget or ResultInputBudgetV1()
+        if code_input_manifest is not None or verification_manifest is not None:
+            raise ValueError("v2 execution context cannot carry execution input manifests")
+    elif manifest_schema_version == 3:
+        if code_input_manifest is None and verification_manifest is None:
+            raise ValueError("v3 execution context requires an execution input manifest")
+        if code_input_manifest is not None and verification_manifest is not None:
+            raise ValueError("v3 execution context cannot mix code and verification inputs")
+        if code_input_manifest is not None:
+            if not isinstance(code_input_manifest, CodeInputManifestV1):
+                raise ValueError("v3 code input manifest must be typed")
+            if not isinstance(input_selection, CollaborationInputSelectionV1):
+                raise ValueError("v3 code execution context requires an input selection")
+            _validate_selection_target(
+                execution_request=execution_request,
+                worker_item=worker_item,
+                selection=input_selection,
+            )
+            if (
+                code_input_manifest.workspace_id != execution.workspace_id
+                or code_input_manifest.root_task_id != execution_request.root_task_id
+                or code_input_manifest.request_id != execution_request.id
+                or code_input_manifest.execution_id != execution.id
+                or code_input_manifest.selection_id != input_selection.id
+                or code_input_manifest.selection_hash != input_selection.selection_hash
+            ):
+                raise ValueError("v3 code input manifest scope does not match execution")
+            result_input_budget = result_input_budget or ResultInputBudgetV1()
+        elif input_selection is not None or result_input_budget is not None:
+            raise ValueError("v3 verification context cannot carry code selection fields")
+        if verification_manifest is not None and not isinstance(
+            verification_manifest, VerificationManifestV1
+        ):
+            raise ValueError("v3 verification manifest must be typed")
     else:
         raise ValueError("unsupported execution context manifest schema version")
     profile_id = uuid5(
@@ -528,6 +573,9 @@ def build_execution_context_assembly_request(
         "plan_id": str(execution_request.plan_snapshot_id),
         "plan_generation": execution_request.plan_generation,
     }
+    if code_input_manifest is not None:
+        budget["execution_id"] = str(execution.id)
+        budget["code_input_hash"] = code_input_manifest.input_hash
     if additional_budget:
         overlapping_keys = set(additional_budget).intersection(budget)
         if overlapping_keys:
@@ -565,6 +613,10 @@ def build_execution_context_assembly_request(
     fact_scope_refs += tuple(additional_fact_scope_refs)
     if input_selection is not None:
         fact_scope_refs += ("collaboration_release", "input_selection")
+    if code_input_manifest is not None:
+        fact_scope_refs += ("code_input_manifest",)
+    if verification_manifest is not None:
+        fact_scope_refs += ("verification_manifest",)
     expires_at = _expires_at(created_at, ttl_seconds)
     fingerprint = _request_fingerprint(
         purpose=ContextPurpose.EXECUTION,
@@ -585,7 +637,7 @@ def build_execution_context_assembly_request(
     )
     if manifest_schema_version == 1:
         effective_idempotency_key = idempotency_key or f"context:execution:{execution.id}:v1"
-    else:
+    elif manifest_schema_version == 2:
         assert input_selection is not None
         if idempotency_key is not None and (
             ":v2:" not in idempotency_key
@@ -597,6 +649,25 @@ def build_execution_context_assembly_request(
         effective_idempotency_key = idempotency_key or (
             f"context:execution:{execution.id}:v2:context:{worker_item.context_version}:"
             f"revision:{work_context_revision.revision_id}:selection:{input_selection.selection_hash}"
+        )
+    else:
+        input_identity = (
+            code_input_manifest.input_hash
+            if code_input_manifest is not None
+            else verification_manifest.verification_basis_hash
+            if verification_manifest is not None
+            else None
+        )
+        assert input_identity is not None
+        if idempotency_key is not None and (
+            ":v3:" not in idempotency_key or input_identity not in idempotency_key
+        ):
+            raise ValueError(
+                "v3 execution context idempotency key must include protocol and input hash"
+            )
+        effective_idempotency_key = idempotency_key or (
+            f"context:execution:{execution.id}:v3:context:{worker_item.context_version}:"
+            f"revision:{work_context_revision.revision_id}:input:{input_identity}"
         )
     return ContextAssemblyRequest.create(
         request_id=request_id or uuid4(),
@@ -621,7 +692,32 @@ def build_execution_context_assembly_request(
             input_selection.selection_hash if input_selection is not None else None
         ),
         result_input_budget=result_input_budget,
+        code_input_manifest=code_input_manifest,
+        verification_manifest=verification_manifest,
     )
+
+
+def execution_context_manifest_schema_version(
+    uow: ControlPlaneUnitOfWork,
+    execution: Execution,
+) -> int:
+    """Prefer an existing V3 package before the legacy selection package."""
+
+    authorization = resolve_execution_context_authorization(uow, execution)
+    if authorization is None:
+        return 1
+    request = authorization.request
+    if request.result_derivation_kind == "verification":
+        return 3
+    if request.input_selection_id is None:
+        return 1
+    v3 = uow.context_assemblies.get_for_consumer(
+        ContextPurpose.EXECUTION,
+        execution.id,
+        execution.workspace_id,
+        manifest_schema_version=3,
+    )
+    return 3 if v3 is not None else 2
 
 
 def validate_execution_context_selection(

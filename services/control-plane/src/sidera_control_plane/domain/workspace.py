@@ -154,6 +154,13 @@ class ExecutionSpec:
                 self.execution_id
             ):
                 raise ValidationError("schema v3 physical input acknowledgement is for another execution")
+            if expected_code:
+                code_manifest = self.context_package.code_input_manifest
+                assert code_manifest is not None
+                if self.physical_input_ack.get("input_hash") != code_manifest.input_hash:
+                    raise ValidationError(
+                        "schema v3 physical input acknowledgement does not match code input"
+                    )
         if self.fencing_token < 1:
             raise ValidationError("fencing_token must be positive")
         if not self.goal.strip():

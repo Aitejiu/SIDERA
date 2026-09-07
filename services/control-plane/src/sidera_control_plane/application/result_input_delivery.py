@@ -12,11 +12,18 @@ from sidera_control_plane.application.artifact_content import (
 )
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.ports import ResultInputContentPort
+from sidera_control_plane.application.result_ports import (
+    CodeInputReceipt,
+    CodeResultMaterializationPort,
+)
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.context_packages import (
     MaterializedResultInput,
     ResultInputEvidenceManifestV1,
     ResultInputManifestV1,
 )
+from sidera_control_plane.domain.result_operations import ResultError
+from sidera_control_plane.domain.workspace import ExecutionWorkspaceManifest
 
 _TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/x-diff", "application/json"})
 
@@ -36,6 +43,52 @@ class ResultInputDeliveryError(RuntimeError):
         self.temporary = temporary
         self.corrupt = corrupt
         super().__init__(message)
+
+
+def materialize_code_inputs(
+    *,
+    workspace_manifest: ExecutionWorkspaceManifest,
+    code_inputs: CodeInputManifestV1,
+    materializer: CodeResultMaterializationPort,
+    operation_id: UUID,
+) -> CodeInputReceipt:
+    """Materialize exact selected code and require a matching physical receipt."""
+
+    if not isinstance(workspace_manifest, ExecutionWorkspaceManifest):
+        raise ResultError("code_input_workspace_invalid", {})
+    if not isinstance(code_inputs, CodeInputManifestV1):
+        raise ResultError("code_input_manifest_invalid", {})
+    if not isinstance(operation_id, UUID):
+        raise ResultError("code_input_operation_invalid", {})
+    try:
+        receipt = materializer.materialize(
+            workspace_manifest=workspace_manifest,
+            code_inputs=code_inputs,
+            operation_id=operation_id,
+        )
+    except ResultError as exc:
+        if exc.code.startswith("code_input_"):
+            raise
+        raise ResultError(
+            "code_input_unavailable",
+            {"provider_code": exc.code},
+        ) from exc
+    except Exception as exc:
+        raise ResultError("code_input_unavailable", {}) from exc
+    if not isinstance(receipt, CodeInputReceipt):
+        raise ResultError("code_input_receipt_invalid", {})
+    if (
+        receipt.execution_id != workspace_manifest.execution_id
+        or receipt.operation_id != operation_id
+        or receipt.input_hash != code_inputs.input_hash
+    ):
+        raise ResultError("code_input_receipt_mismatch", {})
+    if receipt.conflict_paths:
+        raise ResultError(
+            "code_input_conflict",
+            {"conflict_paths": list(receipt.conflict_paths)},
+        )
+    return receipt
 
 
 def materialize_result_inputs(

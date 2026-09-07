@@ -21,7 +21,10 @@ from sidera_control_plane.application.planner_runtime import (
     PlannerResult,
     PlannerRunControl,
 )
-from sidera_control_plane.application.result_ports import ResultRepositoryPort
+from sidera_control_plane.application.result_ports import (
+    CodeInputReceipt,
+    ResultRepositoryPort,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -31,6 +34,7 @@ from sidera_control_plane.domain.attention import (
     AttentionAcknowledgement,
     AttentionSource,
 )
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.collaboration import (
     CollaborationEvaluation,
     CollaborationRun,
@@ -2123,6 +2127,16 @@ class WorkspaceProvider(Protocol):
     def prepare(
         self, spec: ExecutionSpec, *, operation_id: UUID
     ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def materialize(
+        self,
+        *,
+        workspace_manifest: ExecutionWorkspaceManifest,
+        code_inputs: CodeInputManifestV1,
+        operation_id: UUID,
+    ) -> CodeInputReceipt:
+        """Install one exact code-input manifest and return its typed receipt."""
         raise NotImplementedError
 
     def freeze(

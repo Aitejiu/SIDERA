@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
+    execution_context_manifest_schema_version,
     resolve_execution_context_authorization,
 )
 from sidera_control_plane.application.handoff_gate import (
@@ -302,6 +303,10 @@ class Scheduler:
                         _apply_context_capability_gate(
                             inspection,
                             required_version=context_package.manifest_schema_version,
+                            requires_code_input=(
+                                getattr(context_package, "code_input_manifest", None)
+                                is not None
+                            ),
                         )
                         for inspection in inspections
                     )
@@ -691,7 +696,7 @@ class Scheduler:
         now: datetime,
     ) -> tuple[ContextPackageManifest | None, SchedulingIssue | None]:
         try:
-            authorization = resolve_execution_context_authorization(uow, execution)
+            resolve_execution_context_authorization(uow, execution)
         except ExecutionContextAuthorizationError as exc:
             return None, SchedulingIssue(
                 reason_code=SchedulingBlockReason.CONTEXT_PACKAGE_STALE,
@@ -701,12 +706,9 @@ class Scheduler:
                 },
                 requires_operator=True,
             )
-        execution_request = authorization.request if authorization is not None else None
-        manifest_schema_version = (
-            2
-            if execution_request is not None
-            and execution_request.input_selection_id is not None
-            else 1
+        manifest_schema_version = execution_context_manifest_schema_version(
+            uow,
+            execution,
         )
         assembly = uow.context_assemblies.get_for_consumer(
             ContextPurpose.EXECUTION,
@@ -1069,28 +1071,49 @@ def _apply_context_capability_gate(
     inspection: RuntimeCandidateInspection,
     *,
     required_version: int,
+    requires_code_input: bool = False,
 ) -> RuntimeCandidateInspection:
     if inspection.resolved is None or required_version < 1:
         return inspection
-    if inspection.resolved.capability_snapshot.supports_context_package_version(
+    if not inspection.resolved.capability_snapshot.supports_context_package_version(
         required_version
     ):
-        return inspection
-    return RuntimeCandidateInspection(
-        worker=inspection.worker,
-        resolved=None,
-        issue=SchedulingIssue(
-            reason_code=SchedulingBlockReason.CONTEXT_ADAPTER_UNSUPPORTED,
-            reason_details={
-                "worker_id": str(inspection.worker.id),
-                "required_context_version": required_version,
-                "supported_context_versions": list(
-                    inspection.resolved.capability_snapshot.context_package_versions
+        return RuntimeCandidateInspection(
+            worker=inspection.worker,
+            resolved=None,
+            issue=SchedulingIssue(
+                reason_code=SchedulingBlockReason.CONTEXT_ADAPTER_UNSUPPORTED,
+                reason_details={
+                    "worker_id": str(inspection.worker.id),
+                    "required_context_version": required_version,
+                    "supported_context_versions": list(
+                        inspection.resolved.capability_snapshot.context_package_versions
+                    ),
+                },
+                requires_operator=False,
+            ),
+        )
+    if requires_code_input:
+        workspace_capabilities = inspection.resolved.workspace_capability_snapshot
+        if workspace_capabilities is None or not workspace_capabilities.supports_code_input_version(1):
+            return RuntimeCandidateInspection(
+                worker=inspection.worker,
+                resolved=None,
+                issue=SchedulingIssue(
+                    reason_code=SchedulingBlockReason.RUNTIME_CAPABILITY_MISMATCH,
+                    reason_details={
+                        "worker_id": str(inspection.worker.id),
+                        "required_code_input_version": 1,
+                        "supported_code_input_versions": list(
+                            workspace_capabilities.code_input_versions
+                            if workspace_capabilities is not None
+                            else ()
+                        ),
+                    },
+                    requires_operator=False,
                 ),
-            },
-            requires_operator=False,
-        ),
-    )
+            )
+    return inspection
 
 
 def _plain_json(value: object) -> Any:

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 
 from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
-from sidera_control_plane.application.result_ports import CodeInputReceipt
+from sidera_control_plane.application.result_input_delivery import (
+    materialize_code_inputs,
+)
+from sidera_control_plane.application.result_ports import (
+    CodeInputReceipt,
+    CodeResultMaterializationPort,
+)
 from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
     CodeResultSnapshotV1,
@@ -116,6 +123,22 @@ def test_conflicting_source_delta_is_visible_and_does_not_publish_a_result(
     assert code_input_case.store.inspect_materialization(receipt.operation_id) == receipt
 
 
+def test_text_ack_cannot_replace_a_code_input_receipt(code_input_case) -> None:
+    class TextAckMaterializer:
+        def materialize(self, **_: object) -> object:
+            return {"status": "accepted"}
+
+    manifest = code_input_case.manifest_for(("A",))
+
+    with pytest.raises(ResultError, match="code_input_receipt_invalid"):
+        materialize_code_inputs(
+            workspace_manifest=code_input_case.workspace_manifest,
+            code_inputs=manifest,
+            materializer=cast(CodeResultMaterializationPort, TextAckMaterializer()),
+            operation_id=uuid4(),
+        )
+
+
 def test_resolve_code_inputs_rejects_a_result_not_in_the_fixed_selection() -> None:
     manifest = CodeInputManifestV1.from_mapping(
         {
@@ -158,6 +181,18 @@ def test_resolve_code_inputs_rejects_a_result_not_in_the_fixed_selection() -> No
     uow = SimpleNamespace(
         input_selections=SimpleNamespace(
             get=lambda workspace_id, selection_id: selection
+        ),
+        execution_requests=SimpleNamespace(
+            get=lambda request_id, workspace_id: SimpleNamespace(
+                worker_item_id=UUID("40000000-0000-0000-0000-000000000001"),
+                subtask_id=manifest.root_task_id,
+            )
+        ),
+        executions=SimpleNamespace(
+            get=lambda execution_id, workspace_id: SimpleNamespace(
+                worker_item_id=UUID("40000000-0000-0000-0000-000000000001"),
+                task_id=manifest.root_task_id,
+            )
         ),
         results=SimpleNamespace(
             get_record=lambda kind, record_id, workspace_id: snapshot

@@ -17,9 +17,22 @@ from sidera_control_plane.application.code_result_capture import (
     code_capture_operation_id,
 )
 from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.context_requests import (
+    build_execution_context_assembly_request,
+)
+from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
-from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
+from sidera_control_plane.application.result_input_evaluation import (
+    build_code_input_manifest,
+)
+from sidera_control_plane.application.worker_gateway import GatewayMessageError
+from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
+from sidera_control_plane.domain.code_results import (
+    CodeInputManifestV1,
+    CodeResultSnapshotV1,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
+from sidera_control_plane.domain.context_packages import ResultInputBudgetV1
 from sidera_control_plane.domain.result_operations import TaskResultHead
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
@@ -71,6 +84,8 @@ class ResultIntegrationScenario:
             tmp_path / "result-integration-artifacts"
         )
         self._capture_service: CodeResultCaptureService | None = None
+        self.code_provider_failure: str | None = None
+        self.worker_context_versions: tuple[int, ...] = (1, 2, 3)
         self._base_commit = self._init_repository()
 
     @property
@@ -147,7 +162,7 @@ class ResultIntegrationScenario:
         execution_id = self._planning._execution_id(source_key)
         if execution_id is None:
             raise AssertionError(f"source execution {source_key!r} was not created")
-        worker_id, lease_id, _session_id, execution_version = self._planning._start_source(
+        worker_id, lease_id, session_id, execution_version = self._planning._start_source(
             execution_id, key=source_key
         )
         del execution_version
@@ -221,8 +236,174 @@ class ResultIntegrationScenario:
                     correlation_id=self.root_task_id,
                 )
             )
+            artifact_body = b"".join(
+                relative.encode("utf-8") + b"\0" + body
+                for relative, body in sorted(files.items())
+            )
+            artifact_hash = hashlib.sha256(artifact_body).hexdigest()
+            storage_ref = self._planning.artifact_store.put(
+                self.workspace_id,
+                execution_id,
+                artifact_hash,
+                artifact_body,
+            )
+            ArtifactRegistry(
+                lambda: self.uow(),
+                clock=lambda: self._planning.now,
+            ).register(
+                workspace_id=self.workspace_id,
+                task_id=self._planning._execution_task_id(execution_id),
+                execution_id=execution_id,
+                session_id=session_id,
+                candidates=(
+                    ArtifactCandidate(
+                        artifact_type=ArtifactType.BUILD,
+                        storage_ref=storage_ref,
+                        content_hash=artifact_hash,
+                        size_bytes=len(artifact_body),
+                        media_type="text/plain",
+                        provenance={
+                            "producer": f"scenario:{source_key}",
+                            "environment_ref": "env://result-integration-scenario",
+                            "acceptance_criterion_ref": "build",
+                            "conclusion": f"{source_key} produced its build result",
+                        },
+                    ),
+                ),
+                acceptance_criteria=("build",),
+                producer=f"scenario:{source_key}",
+                environment_ref="env://result-integration-scenario",
+            )
             return snapshot
         return None
+
+    def code_input_manifest(self) -> CodeInputManifestV1:
+        """Build the exact code input manifest for the integration WorkerItem."""
+
+        self._planning.reconcile()
+        self._planning.activate()
+        summary_execution_id = self._planning._execution_id("summary")
+        if summary_execution_id is None:
+            raise AssertionError("integration execution was not activated")
+        with self.uow() as uow:
+            execution_request = uow.execution_requests.get(
+                self.request_ids["summary"],
+                self.workspace_id,
+            )
+            execution = uow.executions.get(summary_execution_id, self.workspace_id)
+            selection = (
+                None
+                if execution_request is None
+                or execution_request.input_selection_id is None
+                else uow.input_selections.get(
+                    self.workspace_id,
+                    execution_request.input_selection_id,
+                )
+            )
+            snapshots = uow.results.retained_code_results(self.workspace_id)
+        if execution_request is None or execution is None or selection is None:
+            raise AssertionError("integration input Selection is not ready")
+        selected_execution_ids = {
+            source.effective_execution_id
+            for group in selection.groups
+            for source in group.sources
+        }
+        selected_execution_ids.update(
+            item.source.effective_execution_id for item in selection.hard_inputs
+        )
+        selected_snapshots = tuple(
+            snapshot
+            for snapshot in snapshots
+            if snapshot.execution_id in selected_execution_ids
+        )
+        return build_code_input_manifest(
+            selection=selection,
+            snapshots=selected_snapshots,
+            request_id=execution_request.id,
+            execution_id=execution.id,
+            repository_ref="repo://integration-test",
+            base_commit="a" * 40,
+        )
+
+    def drive(self, *, limit: int = 30) -> object:
+        """Prepare the V3 code package and drive the real Gateway start path."""
+
+        if type(limit) is not int or limit < 1:
+            raise ValueError("drive limit must be positive")
+        del limit
+        self._planning.worker_context_versions = self.worker_context_versions
+        self._planning.code_provider_failure = self.code_provider_failure
+        code_manifest = self.code_input_manifest()
+        self._install_code_context(code_manifest)
+        context_result = self._planning.run_context_worker("summary")
+        if context_result.ready < 1 or context_result.failed != 0:
+            raise AssertionError(
+                f"code context package was not materialized: {context_result}"
+            )
+        try:
+            return self._planning.start_worker("summary")
+        except GatewayMessageError as exc:
+            if exc.code == "context_adapter_unsupported":
+                return exc
+            if exc.code is not None and exc.code.startswith("code_input_"):
+                return exc
+            raise
+
+    def _install_code_context(self, code_manifest: CodeInputManifestV1) -> None:
+        with self.uow() as uow:
+            execution_request = uow.execution_requests.get(
+                code_manifest.request_id,
+                self.workspace_id,
+            )
+            execution = uow.executions.get(code_manifest.execution_id, self.workspace_id)
+            worker_item = (
+                None
+                if execution_request is None
+                else uow.worker_items.get(
+                    execution_request.worker_item_id,
+                    self.workspace_id,
+                )
+            )
+            context = (
+                None
+                if execution_request is None
+                else uow.work_contexts.get_by_planning_request(
+                    execution_request.planning_request_id,
+                    self.workspace_id,
+                )
+            )
+            revision = (
+                None
+                if context is None
+                else uow.work_contexts.get_revision(
+                    context.current_revision_id,
+                    self.workspace_id,
+                )
+            )
+        if execution_request is None or execution is None or worker_item is None:
+            raise AssertionError("integration execution facts are unavailable")
+        if revision is None:
+            raise AssertionError("integration WorkContext revision is unavailable")
+        with self.uow() as uow:
+            assembly = build_execution_context_assembly_request(
+                execution=execution,
+                execution_request=execution_request,
+                worker_item=worker_item,
+                work_context_revision=revision,
+                ttl_seconds=3600,
+                created_at=NOW,
+                manifest_schema_version=3,
+                input_selection=uow.input_selections.get(
+                    self.workspace_id,
+                    code_manifest.selection_id,
+                ),
+                result_input_budget=ResultInputBudgetV1(),
+                code_input_manifest=code_manifest,
+                idempotency_key=(
+                    f"result-code-context:{execution.id}:v3:{code_manifest.input_hash}"
+                ),
+            )
+            uow.context_assemblies.add(assembly)
 
     def reopen_services(self) -> None:
         self._capture_service = self._new_capture_service()
@@ -230,6 +411,12 @@ class ResultIntegrationScenario:
     def retained_code_results(self) -> tuple[CodeResultSnapshotV1, ...]:
         with self.uow() as uow:
             return uow.results.retained_code_results(self.workspace_id)
+
+    def code_materialization_attempts(self, key: str) -> int:
+        return self._planning.code_materialization_attempts(key)
+
+    def adapter_start_count(self, key: str) -> int:
+        return self._planning.start_call_count(key)
 
     def _new_capture_service(self) -> CodeResultCaptureService:
         return CodeResultCaptureService(
