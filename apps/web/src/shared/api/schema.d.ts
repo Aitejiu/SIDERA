@@ -6113,6 +6113,12 @@ export interface components {
             result_tree: string | null;
             /** Source Result Ids */
             source_result_ids: string[];
+            /**
+             * Storage Status
+             * @default unknown
+             * @enum {string}
+             */
+            storage_status: "available" | "missing" | "unknown";
         };
         /** ResultCriterionDecisionResponse */
         ResultCriterionDecisionResponse: {
@@ -6608,6 +6614,12 @@ export interface components {
              * Format: uuid
              */
             snapshot_id: string;
+            /**
+             * Storage Status
+             * @default unknown
+             * @enum {string}
+             */
+            storage_status: "available" | "missing" | "unknown";
             /**
              * Worker Item Id
              * Format: uuid

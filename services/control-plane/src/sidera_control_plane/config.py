@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     result_apply_on_accept: bool = False
     result_apply_target_ref: str | None = Field(default=None, min_length=1, max_length=255)
     result_repository_ref: str = Field(default="repo://sidera", min_length=1, max_length=255)
+    result_repository_path: Path | None = None
     result_base_commit: str | None = Field(default=None, min_length=1, max_length=64)
     result_environment_ref: str = Field(default="env://local", min_length=1, max_length=255)
     result_store_root: Path = Path(".sidera/results")

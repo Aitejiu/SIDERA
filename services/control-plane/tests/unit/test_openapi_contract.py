@@ -146,6 +146,10 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "MarkNotificationThreadRead": "MarkNotificationThreadReadPayload",
     "ArchiveNotificationThread": "ArchiveNotificationThreadPayload",
     "RequeueNotificationDelivery": "RequeueNotificationDeliveryPayload",
+    "RequestTaskRework": "RequestTaskReworkPayload",
+    "AuthorizeAdditionalRework": "AuthorizeAdditionalReworkPayload",
+    "RetryResultVerification": "RetryResultVerificationPayload",
+    "ReintegrateTaskResult": "ReintegrateTaskResultPayload",
 }
 
 EXPECTED_PLANNING_RESPONSE_SCHEMAS = {

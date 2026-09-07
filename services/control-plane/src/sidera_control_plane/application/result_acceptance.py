@@ -67,11 +67,13 @@ class ResultAcceptanceService:
         local_actor_type: str = "local",
         local_actor_id: str = "operator",
         fault_injector: Callable[[str], None] | None = None,
+        result_integration_enabled: bool = False,
     ) -> None:
         self._clock = clock
         self._local_actor_type = local_actor_type
         self._local_actor_id = local_actor_id
         self._fault_injector = fault_injector
+        self._result_integration_enabled = result_integration_enabled
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -83,6 +85,11 @@ class ResultAcceptanceService:
 
         head = uow.results.get_head(envelope.workspace_id, envelope.target_id)
         if head is None:
+            if self._result_integration_enabled:
+                raise ResultError(
+                    "result_integration_cutover_required",
+                    {"root_task_id": str(envelope.target_id)},
+                )
             # Result-enabled roots use this service. Legacy tasks retain the original
             # waiting -> succeeded command contract until they opt into result heads.
             return TaskCommandHandler._mutate_task(uow, envelope)

@@ -16,6 +16,7 @@ from sidera_control_plane.application.result_apply import (
 )
 from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.result_operations import ResultOperationStatus
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -31,6 +32,9 @@ class ResultWorkerRunResult:
     blocked: int
     unknown: int
     failed: int
+    oldest_waiting_at: datetime | None = None
+    budget_exhausted: bool = False
+    storage_missing: bool = False
 
     @property
     def state(self) -> str:
@@ -124,30 +128,73 @@ class ResultWorker:
 
         processed = len(outcomes)
         completed = sum(item.state == "completed" for item in outcomes)
-        pending = sum(item.state == "pending" for item in outcomes)
-        blocked = sum(
-            item.state == "blocked"
-            and item.failure_code != "result_operation_inspect_required"
-            for item in outcomes
-        )
-        unknown = sum(
-            item.state == "blocked"
-            and item.failure_code == "result_operation_inspect_required"
-            for item in outcomes
-        )
         for operation in claimed_attempts:
             handler = self._operation_handlers[operation.operation_kind]
             handler(operation)
         processed += len(claimed_attempts)
+        observation = self._observe()
         return ResultWorkerRunResult(
             claimed=len(claimed_apply) + len(unknown_apply) + len(claimed_attempts),
             processed=processed,
             completed=completed,
-            pending=pending,
-            blocked=blocked,
-            unknown=unknown,
-            failed=0,
+            pending=observation.pending,
+            blocked=observation.blocked,
+            unknown=observation.unknown,
+            failed=observation.failed,
+            oldest_waiting_at=observation.oldest_waiting_at,
+            budget_exhausted=observation.budget_exhausted,
+            storage_missing=observation.storage_missing,
         )
+
+    def _observe(self) -> _ResultWorkerObservation:
+        with self._uow_factory() as uow:
+            items = uow.results.list_operations_for_observation()
+        waiting = tuple(
+            item
+            for item in items
+            if item.status in {ResultOperationStatus.PENDING, ResultOperationStatus.RUNNING}
+        )
+        failure_codes = {
+            item.failure_code for item in items if item.failure_code is not None
+        }
+        return _ResultWorkerObservation(
+            pending=len(waiting),
+            blocked=sum(item.status is ResultOperationStatus.BLOCKED for item in items),
+            unknown=sum(item.status is ResultOperationStatus.UNKNOWN for item in items),
+            failed=sum(item.status is ResultOperationStatus.FAILED for item in items),
+            oldest_waiting_at=(
+                min(item.created_at for item in waiting) if waiting else None
+            ),
+            budget_exhausted=bool(
+                failure_codes
+                & {
+                    "rework_budget_exhausted",
+                    "rework_deadline_exceeded",
+                    "real_run_budget_exhausted",
+                }
+            ),
+            storage_missing=bool(
+                failure_codes
+                & {
+                    "result_capture_receipt_corrupt",
+                    "result_capture_not_found",
+                    "result_apply_receipt_missing",
+                    "result_apply_receipt_corrupt",
+                    "result_apply_repository_unavailable",
+                }
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultWorkerObservation:
+    pending: int
+    blocked: int
+    unknown: int
+    failed: int
+    oldest_waiting_at: datetime | None
+    budget_exhausted: bool
+    storage_missing: bool
 
 
 @dataclass(slots=True)
@@ -200,6 +247,13 @@ def summary_json(result: ResultWorkerRunResult) -> str:
             "blocked": result.blocked,
             "unknown": result.unknown,
             "failed": result.failed,
+            "oldest_waiting_at": (
+                None
+                if result.oldest_waiting_at is None
+                else result.oldest_waiting_at.astimezone(UTC).isoformat()
+            ),
+            "budget_exhausted": result.budget_exhausted,
+            "storage_missing": result.storage_missing,
         },
         sort_keys=True,
         separators=(",", ":"),

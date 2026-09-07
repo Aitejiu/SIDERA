@@ -6,8 +6,13 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.result_queries import ResultQueryService
 from sidera_control_plane.config import Settings
+from sidera_control_plane.persistence.result_query_store import (
+    SqlAlchemyResultQueryStore,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -137,3 +142,35 @@ def test_result_queries_enforce_workspace_candidate_and_cursor_scope(
     }
     assert invalid_limit.status_code == 422
     assert invalid_limit.json()["error"]["code"] == "validation_error"
+
+
+def test_result_overview_marks_missing_git_capture_as_unavailable(
+    result_scenario,
+) -> None:
+    result_scenario.seed_plan()
+    candidate = result_scenario.candidate()
+    snapshot = result_scenario.latest_source("login")
+    result_scenario._git(
+        result_scenario._repository,
+        "update-ref",
+        "-d",
+        f"refs/sidera/results/{snapshot.capture_operation_id}",
+    )
+
+    service = ResultQueryService(
+        SqlAlchemyResultQueryStore(result_scenario.database),
+        storage_inspector=GitResultStore(
+            {"repo://integration-test": result_scenario._repository}
+        ),
+    )
+    detail = service.get_detail(
+        result_scenario.workspace_id,
+        result_scenario.root_task_id,
+        candidate.id,
+        verification_cursor=None,
+        rework_cursor=None,
+        limit=20,
+    )
+
+    assert detail.source_results
+    assert detail.source_results[0].storage_status == "missing"

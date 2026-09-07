@@ -1164,6 +1164,47 @@ class ResultIntegrationScenario:
         with self.uow() as uow:
             return uow.results.retained_code_results(self.workspace_id)
 
+    def release_terminal_workspaces(self) -> None:
+        """Release scenario worktrees while leaving captured Git objects reachable."""
+
+        for location in sorted(self._worktree_root.iterdir()):
+            if not location.is_dir():
+                continue
+            self._git(
+                self._repository,
+                "worktree",
+                "remove",
+                "--force",
+                str(location),
+            )
+        self._source_worktrees.clear()
+
+    def restore_candidate(self, candidate: IntegrationCandidateV1) -> str:
+        """Restore a candidate commit into a fresh independent Git worktree."""
+
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise TypeError("candidate must be a typed integration candidate")
+        restore_root = self.tmp_path / "result-integration-restored" / str(uuid4())
+        restore_root.parent.mkdir(parents=True, exist_ok=True)
+        self._git(
+            self._repository,
+            "worktree",
+            "add",
+            "--detach",
+            str(restore_root),
+            self.candidate_commit(candidate),
+        )
+        try:
+            return self._git(restore_root, "rev-parse", "HEAD^{tree}")
+        finally:
+            self._git(
+                self._repository,
+                "worktree",
+                "remove",
+                "--force",
+                str(restore_root),
+            )
+
     def code_materialization_attempts(self, key: str) -> int:
         return self._planning.code_materialization_attempts(key)
 

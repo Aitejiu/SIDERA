@@ -3,7 +3,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response
 
-from sidera_control_plane.api.dependencies import get_command_service, get_settings
+from sidera_control_plane.api.dependencies import (
+    get_command_service,
+    get_settings,
+    require_result_integration_enabled,
+)
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
 from sidera_control_plane.application.collaboration_governance_commands import (
     CollaborationGovernanceCommandError,
@@ -144,6 +148,7 @@ def _execute_command(
             details={"actor_type": settings.local_actor_type},
         )
     if request.command_type in _REWORK_COMMAND_TYPES:
+        require_result_integration_enabled(settings)
         if request.actor.type != settings.local_actor_type or request.actor.id != settings.local_actor_id:
             raise ValidationError(
                 "result recovery commands require the configured local actor",

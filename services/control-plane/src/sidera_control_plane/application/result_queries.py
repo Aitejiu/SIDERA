@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
@@ -21,6 +21,7 @@ from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.result_integration import IntegrationSpecV1
 from sidera_control_plane.domain.result_operations import (
+    ResultError,
     ResultOperationStatus,
     ReworkRecordV1,
     TaskResultHead,
@@ -207,6 +208,14 @@ class ResultQueryStore(Protocol):
         raise NotImplementedError
 
 
+ResultStorageStatus = Literal["available", "missing", "unknown"]
+
+
+class ResultStorageInspector(Protocol):
+    def inspect_capture(self, operation_id: UUID) -> object | None:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True, slots=True)
 class ResultArtifactView:
     artifact_id: UUID
@@ -228,6 +237,7 @@ class ResultSourceView:
     content_hash: str
     artifact_ids: tuple[UUID, ...]
     created_at: datetime
+    storage_status: ResultStorageStatus = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +256,7 @@ class ResultCandidateView:
     created_at: datetime
     is_current: bool
     artifacts: tuple[ResultArtifactView, ...]
+    storage_status: ResultStorageStatus = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,8 +437,14 @@ def _as_utc(value: datetime) -> datetime:
 
 
 class ResultQueryService:
-    def __init__(self, store: ResultQueryStore) -> None:
+    def __init__(
+        self,
+        store: ResultQueryStore,
+        *,
+        storage_inspector: ResultStorageInspector | None = None,
+    ) -> None:
         self._store = store
+        self._storage_inspector = storage_inspector
 
     def get_overview(
         self,
@@ -453,7 +470,12 @@ class ResultQueryService:
         )
         if snapshot is None:
             raise NotFound("task result not found")
-        return _overview(snapshot, workspace_id, root_task_id)
+        return _overview(
+            snapshot,
+            workspace_id,
+            root_task_id,
+            storage_inspector=self._storage_inspector,
+        )
 
     def get_detail(
         self,
@@ -490,7 +512,12 @@ class ResultQueryService:
         )
         if snapshot is None:
             raise NotFound("task result candidate not found")
-        return _detail(snapshot, workspace_id, root_task_id)
+        return _detail(
+            snapshot,
+            workspace_id,
+            root_task_id,
+            storage_inspector=self._storage_inspector,
+        )
 
     def get_verifications(
         self,
@@ -720,7 +747,11 @@ def _next_cursor(
 
 
 def _overview(
-    snapshot: ResultRootSnapshot, workspace_id: UUID, root_task_id: UUID
+    snapshot: ResultRootSnapshot,
+    workspace_id: UUID,
+    root_task_id: UUID,
+    *,
+    storage_inspector: ResultStorageInspector | None,
 ) -> TaskResultOverview:
     head = snapshot.head
     current = snapshot.current_candidate
@@ -742,6 +773,11 @@ def _overview(
                     snapshot.artifacts
                     if current is not None and item.id == current.id
                     else ()
+                ),
+                storage_inspector=(
+                    storage_inspector
+                    if current is not None and item.id == current.id
+                    else None
                 ),
             )
             for item in snapshot.candidate_history.items
@@ -771,6 +807,7 @@ def _overview(
                 is_current=True,
                 sources=snapshot.current_sources,
                 artifacts=snapshot.artifacts,
+                storage_inspector=storage_inspector,
             )
         ),
         acceptance=acceptance,
@@ -787,7 +824,11 @@ def _overview(
 
 
 def _detail(
-    snapshot: ResultDetailSnapshot, workspace_id: UUID, root_task_id: UUID
+    snapshot: ResultDetailSnapshot,
+    workspace_id: UUID,
+    root_task_id: UUID,
+    *,
+    storage_inspector: ResultStorageInspector | None,
 ) -> TaskResultDetail:
     current_id = None if snapshot.head is None else snapshot.head.current_candidate_id
     candidate = _candidate(
@@ -795,12 +836,16 @@ def _detail(
         is_current=snapshot.candidate.id == current_id,
         sources=snapshot.source_results,
         artifacts=snapshot.artifacts,
+        storage_inspector=storage_inspector,
     )
     return TaskResultDetail(
         workspace_id=workspace_id,
         root_task_id=root_task_id,
         candidate=candidate,
-        source_results=tuple(_source(item) for item in snapshot.source_results),
+        source_results=tuple(
+            _source(item, storage_inspector=storage_inspector)
+            for item in snapshot.source_results
+        ),
         verifications=ResultHistoryView(
             items=tuple(_verification(item) for item in snapshot.verifications.items),
             next_cursor=_next_cursor(
@@ -835,6 +880,7 @@ def _candidate(
     is_current: bool,
     sources: Sequence[CodeResultSnapshotV1],
     artifacts: Sequence[ResultArtifactFact],
+    storage_inspector: ResultStorageInspector | None,
 ) -> ResultCandidateView:
     code_result = next(
         (item for item in sources if item.id == candidate.code_result_id), None
@@ -854,10 +900,19 @@ def _candidate(
         created_at=_as_utc(candidate.created_at),
         is_current=is_current,
         artifacts=tuple(_artifact(item) for item in artifacts),
+        storage_status=(
+            "unknown"
+            if code_result is None
+            else _storage_status(code_result, storage_inspector)
+        ),
     )
 
 
-def _source(snapshot: CodeResultSnapshotV1) -> ResultSourceView:
+def _source(
+    snapshot: CodeResultSnapshotV1,
+    *,
+    storage_inspector: ResultStorageInspector | None,
+) -> ResultSourceView:
     return ResultSourceView(
         snapshot_id=snapshot.id,
         worker_item_id=snapshot.worker_item_id,
@@ -868,7 +923,32 @@ def _source(snapshot: CodeResultSnapshotV1) -> ResultSourceView:
         content_hash=snapshot.content_hash,
         artifact_ids=snapshot.artifact_ids,
         created_at=_as_utc(snapshot.created_at),
+        storage_status=_storage_status(snapshot, storage_inspector),
     )
+
+
+def _storage_status(
+    snapshot: CodeResultSnapshotV1,
+    inspector: ResultStorageInspector | None,
+) -> ResultStorageStatus:
+    if inspector is None:
+        return "unknown"
+    try:
+        captured = inspector.inspect_capture(snapshot.capture_operation_id)
+    except (OSError, ResultError):
+        return "missing"
+    if captured is None:
+        return "missing"
+    for name in (
+        "repository_ref",
+        "input_commit",
+        "input_tree",
+        "result_commit",
+        "result_tree",
+    ):
+        if getattr(captured, name, None) != getattr(snapshot, name, None):
+            return "missing"
+    return "available"
 
 
 def _criterion_status(
@@ -1319,6 +1399,8 @@ __all__ = [
     "ResultReworkView",
     "ResultRootSnapshot",
     "ResultSourceView",
+    "ResultStorageInspector",
+    "ResultStorageStatus",
     "ResultTaskFact",
     "ResultVerificationView",
     "TaskResultDetail",

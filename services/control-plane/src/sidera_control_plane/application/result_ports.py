@@ -798,6 +798,29 @@ class ResultOperationAttemptV1:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ResultOperationObservationV1:
+    """Safe queue observation used by the result worker runtime summary."""
+
+    operation_id: UUID
+    operation_kind: str
+    status: ResultOperationStatus
+    created_at: datetime
+    failure_code: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation_id, UUID):
+            raise TypeError("operation observation id must be a UUID")
+        if not isinstance(self.operation_kind, str) or not self.operation_kind.strip():
+            raise ValueError("operation observation kind is required")
+        if not isinstance(self.status, ResultOperationStatus):
+            raise TypeError("operation observation status is invalid")
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("operation observation created_at must be timezone-aware")
+        if self.failure_code is not None and not self.failure_code.strip():
+            raise ValueError("operation observation failure_code must not be empty")
+
+
 type ResultRecord = (
     CodeResultSnapshotV1
     | IntegrationCandidateV1
@@ -881,6 +904,11 @@ class ResultRepositoryPort(Protocol):
     ) -> tuple[CodeResultSnapshotV1, ...]:
         raise NotImplementedError
 
+    def list_operations_for_observation(
+        self, *, limit: int = 10_000
+    ) -> tuple[ResultOperationObservationV1, ...]:
+        raise NotImplementedError
+
 
 class CodeResultApplyPort(Protocol):
     def apply(self, operation: ResultApplyOperationV1) -> ApplyReceipt:
@@ -909,6 +937,7 @@ __all__ = [
     "ResultError",
     "ResultOperation",
     "ResultOperationAttemptV1",
+    "ResultOperationObservationV1",
     "ResultOperationStatus",
     "ResultRecord",
     "ResultRepositoryPort",

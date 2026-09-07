@@ -5,6 +5,7 @@ from typing import Annotated, cast
 
 from fastapi import Depends, Request
 
+from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
 from sidera_control_plane.application.artifact_content import ArtifactContentService
@@ -251,6 +252,7 @@ def get_command_service(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
+                result_integration_enabled=settings.result_integration_enabled,
             ),
             TaskCommandHandler(),
             AcknowledgeAttentionItemHandler(lambda: datetime.now(UTC)),
@@ -504,8 +506,18 @@ def get_result_input_query_service(
 
 def get_result_query_service(
     database: Annotated[Database, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ResultQueryService:
-    return ResultQueryService(SqlAlchemyResultQueryStore(database))
+    storage_inspector = None
+    if settings.result_repository_path is not None:
+        storage_inspector = GitResultStore(
+            {settings.result_repository_ref: settings.result_repository_path},
+            git_executable=settings.git_executable,
+        )
+    return ResultQueryService(
+        SqlAlchemyResultQueryStore(database),
+        storage_inspector=storage_inspector,
+    )
 
 
 def get_task_console_query_service(

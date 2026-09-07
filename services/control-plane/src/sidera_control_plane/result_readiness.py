@@ -109,6 +109,7 @@ def inspect_result_readiness(
         )
     )
     checks.append(_result_store_check(settings.result_store_root))
+    checks.append(_retention_policy_check())
     checks.append(_apply_policy_check(settings))
     return ResultReadinessReport(
         enabled=True,
@@ -445,6 +446,15 @@ def _result_store_check(path_value: Path) -> ResultReadinessCheck:
         "ok",
         "ok",
         "the result store has a writable directory boundary",
+    )
+
+
+def _retention_policy_check() -> ResultReadinessCheck:
+    return _check(
+        "retention",
+        "retention_conservative",
+        "ok",
+        "managed result refs are retained and historical snapshots are not auto-GC'd",
     )
 
 

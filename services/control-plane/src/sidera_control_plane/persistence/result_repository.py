@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from sidera_control_plane.application.result_ports import (
     ResultOperation,
     ResultOperationAttemptV1,
+    ResultOperationObservationV1,
     ResultRecord,
 )
 from sidera_control_plane.domain.code_results import (
@@ -380,6 +381,50 @@ class ResultRepository:
             )
         ).all()
         return tuple(_to_snapshot(row) for row in rows)
+
+    def list_operations_for_observation(
+        self, *, limit: int = 10_000
+    ) -> tuple[ResultOperationObservationV1, ...]:
+        if type(limit) is not int or limit < 1:
+            raise ValidationError("operation observation limit must be positive")
+        attempt_rows = self._session.scalars(
+            select(ResultOperationAttemptModel)
+            .order_by(
+                ResultOperationAttemptModel.created_at.asc(),
+                ResultOperationAttemptModel.operation_id.asc(),
+            )
+            .limit(limit)
+        ).all()
+        apply_rows = self._session.scalars(
+            select(ResultApplyOperationModel)
+            .order_by(
+                ResultApplyOperationModel.created_at.asc(),
+                ResultApplyOperationModel.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+        observations = [
+            ResultOperationObservationV1(
+                operation_id=row.operation_id,
+                operation_kind=row.operation_kind,
+                status=ResultOperationStatus(row.status),
+                created_at=_aware(row.created_at, "operation created_at"),
+                failure_code=row.failure_code,
+            )
+            for row in attempt_rows
+        ]
+        observations.extend(
+            ResultOperationObservationV1(
+                operation_id=row.id,
+                operation_kind="apply",
+                status=ResultOperationStatus(row.status),
+                created_at=_aware(row.created_at, "apply operation created_at"),
+                failure_code=row.failure_code,
+            )
+            for row in apply_rows
+        )
+        observations.sort(key=lambda item: (item.created_at, item.operation_id))
+        return tuple(observations[:limit])
 
     def _save_attempt(
         self,

@@ -1127,6 +1127,7 @@ class ResultSourceResponse(BaseModel):
     content_hash: str
     artifact_ids: tuple[UUID, ...]
     created_at: datetime
+    storage_status: Literal["available", "missing", "unknown"] = "unknown"
 
 
 class ResultCandidateResponse(BaseModel):
@@ -1146,6 +1147,7 @@ class ResultCandidateResponse(BaseModel):
     created_at: datetime
     is_current: bool
     artifacts: tuple[ResultArtifactResponse, ...]
+    storage_status: Literal["available", "missing", "unknown"] = "unknown"
 
 
 class ResultCriterionResponse(BaseModel):
