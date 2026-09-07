@@ -300,6 +300,22 @@ class ResultRepository:
         ).all()
         return tuple(_to_rework(row) for row in rows)
 
+    def get_rework_by_source_command(
+        self,
+        source_command_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ReworkRecordV1 | None:
+        statement = select(ResultReworkRecordModel).where(
+            ResultReworkRecordModel.source_command_id == source_command_id,
+            ResultReworkRecordModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_rework(row) if row is not None else None
+
     def retained_code_results(
         self, workspace_id: UUID
     ) -> tuple[CodeResultSnapshotV1, ...]:

@@ -695,6 +695,11 @@ class ResultRepositoryPort(Protocol):
     ) -> tuple[ReworkRecordV1, ...]:
         raise NotImplementedError
 
+    def get_rework_by_source_command(
+        self, source_command_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> ReworkRecordV1 | None:
+        raise NotImplementedError
+
     def retained_code_results(
         self, workspace_id: UUID
     ) -> tuple[CodeResultSnapshotV1, ...]:

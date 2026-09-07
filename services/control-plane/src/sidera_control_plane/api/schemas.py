@@ -179,6 +179,37 @@ class EmptyPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ReworkSuggestionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    candidate_hash: NonEmptyString
+    issue_keys: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    target_worker_item_ids: tuple[UUID, ...] = Field(min_length=1)
+    reason: NonEmptyString = Field(max_length=2000)
+
+
+class RequestTaskReworkPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    candidate_hash: NonEmptyString
+    mode: Literal["automatic", "user"]
+    issue_keys: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    target_worker_item_ids: tuple[UUID, ...] = Field(default_factory=tuple)
+    impact_worker_item_ids: tuple[UUID, ...] = Field(default_factory=tuple)
+    reason: str = Field(default="", max_length=2000)
+    suggestion: ReworkSuggestionPayload | None = None
+
+
+class AuthorizeAdditionalReworkPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    additional_rounds: int = Field(ge=0)
+    additional_seconds: int = Field(ge=0)
+    reason: NonEmptyString = Field(max_length=2000)
+
+
 class PlannerCapabilityPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2624,6 +2655,12 @@ class CommandRequest(BaseModel):
         elif self.command_type == "AcknowledgeAttentionItem":
             self._require_mutation_target("task")
             parsed = AcknowledgeAttentionItemPayload.model_validate(self.payload)
+        elif self.command_type == "RequestTaskRework":
+            self._require_mutation_target("task")
+            parsed = RequestTaskReworkPayload.model_validate(self.payload)
+        elif self.command_type == "AuthorizeAdditionalRework":
+            self._require_mutation_target("task")
+            parsed = AuthorizeAdditionalReworkPayload.model_validate(self.payload)
         elif self.command_type == "RequeueNotificationDelivery":
             self._require_requeue_target()
             parsed = RequeueNotificationDeliveryPayload.model_validate(self.payload)

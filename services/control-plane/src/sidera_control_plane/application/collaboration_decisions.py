@@ -57,6 +57,7 @@ from sidera_control_plane.domain.input_selections import (
     CollaborationInputSelectionV1,
 )
 from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
+from sidera_control_plane.domain.result_operations import ReworkSuggestionV1
 
 if TYPE_CHECKING:
     from sidera_control_plane.application.collaboration_reconciler import (
@@ -69,6 +70,20 @@ if TYPE_CHECKING:
 
 FactStoreFactory = Callable[[ControlPlaneUnitOfWork], CollaborationFactStorePort]
 PlanTransitionCheck = Callable[[ControlPlaneUnitOfWork, ExecutionRequest], bool]
+
+
+def rework_suggestion_from_intent(
+    intent: RuntimeIntent,
+) -> ReworkSuggestionV1 | None:
+    """Decode an optional Runtime suggestion without authorizing it."""
+
+    raw = intent.payload_json.get("rework_suggestion")
+    if raw is None:
+        return None
+    try:
+        return ReworkSuggestionV1.from_mapping(raw)
+    except ValidationError as exc:
+        raise ValidationError("runtime rework suggestion is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)

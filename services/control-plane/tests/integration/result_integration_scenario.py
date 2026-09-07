@@ -42,6 +42,7 @@ from sidera_control_plane.application.result_ports import (
     CheckRunStatus,
     ResultOperationAttemptV1,
 )
+from sidera_control_plane.application.result_rework import ResultReworkService
 from sidera_control_plane.application.result_verification import (
     ResultVerificationService,
 )
@@ -60,6 +61,7 @@ from sidera_control_plane.domain.context_packages import (
 from sidera_control_plane.domain.gateway import AdapterEvent
 from sidera_control_plane.domain.result_operations import (
     ResultOperationStatus,
+    ReworkRecordV1,
     TaskResultHead,
 )
 from sidera_control_plane.domain.result_verification import VerificationResultV1
@@ -121,6 +123,7 @@ class ResultIntegrationScenario:
         self._modify_source_during_check = False
         self._verification_runner: LocalCheckRunner | None = None
         self._verification_operation_ids: tuple[UUID, ...] = ()
+        self._command_expected_versions: dict[str, int] = {}
         self._base_commit = self._init_repository()
 
     @property
@@ -440,6 +443,87 @@ class ResultIntegrationScenario:
             )
         return candidate
 
+    def rework_payload(
+        self,
+        candidate: IntegrationCandidateV1,
+        *,
+        mode: str = "user",
+        target_worker_item_keys: tuple[str, ...] = ("login",),
+        impact_worker_item_keys: tuple[str, ...] | None = None,
+        reason: str = "repair the failed result",
+    ) -> dict[str, object]:
+        def worker_id(key: str) -> UUID:
+            normalized = "summary" if key == "integrate" else ("a" if key == "login" else key)
+            value = self.worker_item_ids.get(normalized)
+            if value is None:
+                raise KeyError(normalized)
+            return value
+
+        target_ids = tuple(worker_id(key) for key in target_worker_item_keys)
+        impact_keys = (
+            target_worker_item_keys
+            if impact_worker_item_keys is None
+            else impact_worker_item_keys
+        )
+        return {
+            "candidate_id": str(candidate.id),
+            "candidate_hash": candidate.content_hash,
+            "mode": mode,
+            "issue_keys": ["check:unit"],
+            "target_worker_item_ids": [str(item) for item in target_ids],
+            "impact_worker_item_ids": [str(worker_id(key)) for key in impact_keys],
+            "reason": reason,
+        }
+
+    def command(
+        self,
+        command_type: str,
+        payload: dict[str, object],
+        *,
+        actor_type: str = "local",
+        actor_id: str = "operator",
+        idempotency_key: str | None = None,
+        command_id: UUID | None = None,
+        expected_version: int | None = None,
+    ):
+        key = idempotency_key or f"scenario:{command_type}:{uuid4()}"
+        command_id = command_id or uuid5(NAMESPACE_URL, f"result-scenario-command:{key}")
+        if expected_version is None:
+            version = self._command_expected_versions.setdefault(
+                key, self.head().result_version
+            )
+        else:
+            version = expected_version
+        service = CommandService(
+            lambda: self.uow(),
+            (
+                ResultReworkService(
+                    clock=lambda: self._planning.now,
+                    local_actor_type="local",
+                    local_actor_id="operator",
+                ),
+            ),
+        )
+        return service.handle(
+            CommandEnvelope(
+                id=command_id,
+                workspace_id=self.workspace_id,
+                command_type=command_type,
+                target_type="task",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                target_id=self.root_task_id,
+                payload=payload,
+                expected_version=version,
+                idempotency_key=key,
+                correlation_id=self.root_task_id,
+            )
+        )
+
+    def rework_records(self) -> tuple[ReworkRecordV1, ...]:
+        with self.uow() as uow:
+            return uow.results.list_rework(self.root_task_id, self.workspace_id)
+
     def revise_plan(self, *, minimum_count: int) -> object:
         """Advance the planning head so an older integration execution is stale."""
 
@@ -758,7 +842,7 @@ class ResultIntegrationScenario:
                 self._verification_operation_ids[0], self.workspace_id
             )
         if not isinstance(operation, ResultOperationAttemptV1):
-            raise AssertionError("verification operation was not found")
+            raise TypeError("verification operation was not found")
         return operation
 
     def verification_log_snapshot(self) -> tuple[tuple[str, bytes], ...]:
@@ -797,7 +881,7 @@ class ResultIntegrationScenario:
                 operation.operation_id, self.workspace_id, for_update=True
             )
             if not isinstance(current, ResultOperationAttemptV1):
-                raise AssertionError("verification operation was not found")
+                raise TypeError("verification operation was not found")
             updated = replace(
                 current,
                 status=ResultOperationStatus.FAILED,

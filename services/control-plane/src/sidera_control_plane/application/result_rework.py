@@ -1,13 +1,526 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from uuid import UUID
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
+from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
-from sidera_control_plane.domain.result_operations import ResultError, ReworkImpactV1
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.domain.code_results import (
+    CodeResultSnapshotV1,
+    IntegrationCandidateV1,
+)
+from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.errors import ValidationError
+from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
+from sidera_control_plane.domain.result_integration import IntegrationSpecV1
+from sidera_control_plane.domain.result_operations import (
+    ResultError,
+    ReworkImpactV1,
+    ReworkMode,
+    ReworkRecordV1,
+    ReworkStatus,
+    ReworkSuggestionV1,
+    TaskResultHead,
+    extend_rework_budget,
+    reserve_rework_round,
+)
 
 type ResultProvenance = Mapping[UUID, CodeResultSnapshotV1]
 type HardResultEdge = tuple[UUID, UUID]
+
+_REWORK_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-rework:v1")
+
+
+class ResultReworkService:
+    """Authorize bounded rework without mutating old result facts."""
+
+    command_types = frozenset({"RequestTaskRework", "AuthorizeAdditionalRework"})
+
+    def __init__(
+        self,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        *,
+        local_actor_type: str = "local",
+        local_actor_id: str = "operator",
+    ) -> None:
+        self._clock = clock
+        self._local_actor_type = local_actor_type
+        self._local_actor_id = local_actor_id
+
+    def handle(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        return self.request(uow, envelope)
+
+    def request(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if envelope.command_type == "AuthorizeAdditionalRework":
+            return self._authorize_additional_rework(uow, envelope)
+        if envelope.command_type != "RequestTaskRework":
+            raise ResultError("rework_command_unsupported", {})
+
+        head, candidate, plan, spec = self._load_scope(uow, envelope)
+        mode = _mode(envelope.payload)
+        _validate_actor_for_mode(envelope, mode)
+        issue_keys, target_ids, reason, suggestion = _rework_inputs(
+            envelope.payload,
+            candidate=candidate,
+        )
+        worker_plan = {
+            item.worker_item_id: item
+            for item in plan.worker_item_plans
+            if item.worker_item_id is not None
+        }
+        _validate_worker_scope(
+            target_ids,
+            impact_ids=_uuid_tuple(
+                envelope.payload.get("impact_worker_item_ids", target_ids),
+                "impact_worker_item_ids",
+            ),
+            worker_plan=worker_plan,
+            allowed_keys=frozenset(spec.rework_policy.allowed_worker_item_keys),
+        )
+
+        if not target_ids:
+            return self._record_attention(
+                uow,
+                envelope,
+                head=head,
+                candidate=candidate,
+                mode=mode,
+                issue_keys=issue_keys,
+                reason="rework_owner_required",
+            )
+
+        impact_ids = _uuid_tuple(
+            envelope.payload.get("impact_worker_item_ids", target_ids),
+            "impact_worker_item_ids",
+        )
+        next_head = head
+        round_number: int | None = None
+        if mode is ReworkMode.AUTOMATIC:
+            next_head = reserve_rework_round(head, self._now())
+            round_number = next_head.auto_rounds_used
+
+        record = self._record(
+            envelope,
+            candidate=candidate,
+            mode=mode,
+            round_number=round_number,
+            issue_keys=issue_keys,
+            target_ids=target_ids,
+            impact_ids=impact_ids,
+            reason=reason,
+            status=ReworkStatus.REQUESTED,
+        )
+        stored = uow.results.add_immutable("rework", record)
+        if not isinstance(stored, ReworkRecordV1):
+            raise ResultError("rework_record_conflict", {"record_id": str(record.id)})
+        if next_head != head:
+            uow.results.save_head(next_head, expected_version=head.result_version)
+        event = _rework_event(
+            envelope,
+            record=stored,
+            aggregate_version=next_head.result_version,
+            candidate_hash=candidate.content_hash,
+            suggestion=suggestion,
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=head.root_task_id,
+            aggregate_version=next_head.result_version,
+            event_ids=(event.id,),
+            data={
+                "rework_record_id": str(stored.id),
+                "request_ids": [str(item) for item in stored.request_ids],
+                "target_worker_item_ids": [str(item) for item in stored.target_worker_item_ids],
+                "impact_worker_item_ids": [str(item) for item in stored.impact_worker_item_ids],
+                "status": stored.status.value,
+                "round_number": stored.round_number,
+            },
+        )
+
+    def _authorize_additional_rework(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        if (
+            envelope.actor_type != self._local_actor_type
+            or envelope.actor_id != self._local_actor_id
+        ):
+            raise ResultError("rework_authorization_actor_forbidden", {})
+        head = self._load_head(uow, envelope)
+        additional_rounds = _non_negative_int(
+            envelope.payload.get("additional_rounds"), "additional_rounds"
+        )
+        additional_seconds = _non_negative_int(
+            envelope.payload.get("additional_seconds"), "additional_seconds"
+        )
+        reason = _required_text(envelope.payload.get("reason"), "reason")
+        next_head = extend_rework_budget(
+            head,
+            additional_rounds=additional_rounds,
+            additional_seconds=additional_seconds,
+        )
+        uow.results.save_head(next_head, expected_version=head.result_version)
+        event = EventData(
+            id=uuid5(_REWORK_NAMESPACE, f"budget:{envelope.id}"),
+            workspace_id=envelope.workspace_id,
+            aggregate_type="result_rework",
+            aggregate_id=head.root_task_id,
+            aggregate_version=next_head.result_version,
+            event_type="ResultReworkBudgetAuthorized",
+            payload={
+                "root_task_id": str(head.root_task_id),
+                "additional_rounds": additional_rounds,
+                "additional_seconds": additional_seconds,
+                "auto_rounds_limit": next_head.auto_rounds_limit,
+                "auto_seconds_limit": next_head.auto_seconds_limit,
+                "reason": reason,
+            },
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            causation_id=envelope.id,
+            correlation_id=envelope.correlation_id,
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=head.root_task_id,
+            aggregate_version=next_head.result_version,
+            event_ids=(event.id,),
+            data={
+                "auto_rounds_used": next_head.auto_rounds_used,
+                "auto_rounds_limit": next_head.auto_rounds_limit,
+                "auto_seconds_limit": next_head.auto_seconds_limit,
+                "auto_deadline": (
+                    None
+                    if next_head.auto_deadline is None
+                    else next_head.auto_deadline.isoformat()
+                ),
+            },
+        )
+
+    def _load_scope(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> tuple[TaskResultHead, IntegrationCandidateV1, Any, IntegrationSpecV1]:
+        head = self._load_head(uow, envelope)
+        candidate_id = _payload_uuid(envelope.payload, "candidate_id")
+        candidate = uow.results.get_record("candidate", candidate_id, envelope.workspace_id)
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise ResultError("rework_candidate_not_found", {"candidate_id": str(candidate_id)})
+        if candidate.root_task_id != head.root_task_id:
+            raise ResultError("rework_candidate_scope_mismatch", {})
+        candidate_hash = envelope.payload.get("candidate_hash")
+        if candidate_hash != candidate.content_hash:
+            raise ResultError("rework_candidate_hash_mismatch", {})
+        if head.current_candidate_id != candidate.id:
+            raise ResultError(
+                "rework_candidate_not_current", {"candidate_id": str(candidate.id)}
+            )
+        if head.current_acceptance_id is not None:
+            raise ResultError("rework_acceptance_exists", {})
+        if head.active_operation_id is not None:
+            raise ResultError(
+                "result_operation_in_progress",
+                {"operation_id": str(head.active_operation_id)},
+            )
+
+        plan_head = uow.plans.get_head(head.root_task_id, envelope.workspace_id, for_update=True)
+        if plan_head is None:
+            raise ResultError("rework_plan_not_found", {})
+        plan = uow.plans.get(plan_head.active_snapshot_id, envelope.workspace_id)
+        if plan is None or plan.id != candidate.plan_snapshot_id:
+            raise ResultError("rework_plan_stale", {})
+        if candidate.plan_content_hash != plan_snapshot_content_hash(plan):
+            raise ResultError("rework_plan_hash_mismatch", {})
+        spec = plan.integration_spec
+        if not isinstance(spec, IntegrationSpecV1):
+            raise ResultError("integration_spec_required", {})
+        return head, candidate, plan, spec
+
+    @staticmethod
+    def _load_head(
+        uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> TaskResultHead:
+        if envelope.target_id is None or envelope.expected_version is None:
+            raise ResultError("rework_target_required", {})
+        head = uow.results.get_head(
+            envelope.workspace_id, envelope.target_id, for_update=True
+        )
+        if head is None:
+            raise ResultError("rework_result_head_not_found", {})
+        if envelope.expected_version != head.result_version:
+            raise ResultError(
+                "rework_result_version_conflict",
+                {"expected_version": envelope.expected_version, "actual_version": head.result_version},
+            )
+        return head
+
+    def _record_attention(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        envelope: CommandEnvelope,
+        *,
+        head: TaskResultHead,
+        candidate: IntegrationCandidateV1,
+        mode: ReworkMode,
+        issue_keys: tuple[str, ...],
+        reason: str,
+    ) -> CommandResult:
+        record = self._record(
+            envelope,
+            candidate=candidate,
+            mode=mode,
+            round_number=None,
+            issue_keys=issue_keys,
+            target_ids=(),
+            impact_ids=(),
+            reason=reason,
+            status=ReworkStatus.BLOCKED,
+        )
+        stored = uow.results.add_immutable("rework", record)
+        if not isinstance(stored, ReworkRecordV1):
+            raise ResultError("rework_record_conflict", {"record_id": str(record.id)})
+        event = _rework_event(
+            envelope,
+            record=stored,
+            aggregate_version=head.result_version,
+            candidate_hash=candidate.content_hash,
+            suggestion=None,
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=head.root_task_id,
+            aggregate_version=head.result_version,
+            event_ids=(event.id,),
+            data={
+                "rework_record_id": str(stored.id),
+                "request_ids": [],
+                "status": stored.status.value,
+                "attention_required": True,
+                "reason": reason,
+            },
+        )
+
+    def _record(
+        self,
+        envelope: CommandEnvelope,
+        *,
+        candidate: IntegrationCandidateV1,
+        mode: ReworkMode,
+        round_number: int | None,
+        issue_keys: tuple[str, ...],
+        target_ids: tuple[UUID, ...],
+        impact_ids: tuple[UUID, ...],
+        reason: str,
+        status: ReworkStatus,
+    ) -> ReworkRecordV1:
+        record_id = uuid5(_REWORK_NAMESPACE, f"record:{envelope.id}")
+        request_ids = tuple(
+            uuid5(_REWORK_NAMESPACE, f"request:{record_id}:{worker_id}")
+            for worker_id in sorted(target_ids, key=str)
+        )
+        return ReworkRecordV1(
+            id=record_id,
+            workspace_id=envelope.workspace_id,
+            root_task_id=candidate.root_task_id,
+            candidate_id=candidate.id,
+            source_issue_keys=tuple(sorted(issue_keys)),
+            target_worker_item_ids=tuple(sorted(target_ids, key=str)),
+            impact_worker_item_ids=tuple(sorted(impact_ids, key=str)),
+            reason=reason,
+            mode=mode,
+            round_number=round_number,
+            source_command_id=envelope.id,
+            request_ids=request_ids,
+            status=status,
+            created_at=self._now(),
+        )
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("rework clock must return an aware datetime")
+        return value.astimezone(UTC)
+
+
+def _payload_uuid(payload: Mapping[str, object], name: str) -> UUID:
+    value = payload.get(name)
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        raise ResultError("rework_payload_invalid", {"field": name})
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ResultError("rework_payload_invalid", {"field": name}) from exc
+
+
+def _uuid_tuple(value: object, label: str) -> tuple[UUID, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, (tuple, list)):
+        raise ResultError("rework_payload_invalid", {"field": label})
+    result: list[UUID] = []
+    for item in value:
+        if isinstance(item, UUID):
+            parsed = item
+        elif isinstance(item, str):
+            try:
+                parsed = UUID(item)
+            except ValueError as exc:
+                raise ResultError("rework_payload_invalid", {"field": label}) from exc
+        else:
+            raise ResultError("rework_payload_invalid", {"field": label})
+        if parsed in result:
+            raise ResultError("rework_payload_duplicate", {"field": label})
+        result.append(parsed)
+    return tuple(result)
+
+
+def _mode(payload: Mapping[str, object]) -> ReworkMode:
+    value = payload.get("mode")
+    try:
+        return ReworkMode(value)
+    except (TypeError, ValueError) as exc:
+        raise ResultError("rework_mode_invalid", {}) from exc
+
+
+def _required_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ResultError("rework_payload_invalid", {"field": label})
+    return value.strip()
+
+
+def _issue_keys(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, (tuple, list)):
+        raise ResultError("rework_payload_invalid", {"field": "issue_keys"})
+    result = tuple(_required_text(item, "issue_keys") for item in value)
+    if len(set(result)) != len(result):
+        raise ResultError("rework_payload_duplicate", {"field": "issue_keys"})
+    return result
+
+
+def _rework_inputs(
+    payload: Mapping[str, object], *, candidate: IntegrationCandidateV1
+) -> tuple[tuple[str, ...], tuple[UUID, ...], str, ReworkSuggestionV1 | None]:
+    raw_suggestion = payload.get("suggestion")
+    suggestion: ReworkSuggestionV1 | None = None
+    if raw_suggestion is not None:
+        try:
+            suggestion = ReworkSuggestionV1.from_mapping(raw_suggestion)
+        except ValidationError as exc:
+            raise ResultError("rework_suggestion_invalid", {}) from exc
+        if (
+            suggestion.candidate_id != candidate.id
+            or suggestion.candidate_hash != candidate.content_hash
+        ):
+            raise ResultError("rework_suggestion_scope_mismatch", {})
+
+    raw_issues = payload.get("issue_keys")
+    issues = _issue_keys(raw_issues) if raw_issues is not None else ()
+    if not issues and suggestion is not None:
+        issues = suggestion.issue_keys
+
+    raw_targets = payload.get("target_worker_item_ids")
+    targets = _uuid_tuple(raw_targets, "target_worker_item_ids") if raw_targets is not None else ()
+    if not targets and suggestion is not None:
+        targets = suggestion.target_worker_item_ids
+
+    raw_reason = payload.get("reason")
+    reason = (
+        _required_text(raw_reason, "reason")
+        if raw_reason is not None and raw_reason != ""
+        else suggestion.reason if suggestion is not None else ""
+    )
+    if not reason:
+        raise ResultError("rework_reason_required", {})
+    return issues, targets, reason, suggestion
+
+
+def _validate_actor_for_mode(envelope: CommandEnvelope, mode: ReworkMode) -> None:
+    if mode is ReworkMode.AUTOMATIC:
+        if envelope.actor_type == "system" and envelope.actor_id not in {
+            "collaboration",
+            "result-rework",
+        }:
+            raise ResultError("rework_automatic_authority_required", {})
+        if envelope.actor_type not in {"system", "collaboration"}:
+            raise ResultError("rework_automatic_authority_required", {})
+    elif envelope.actor_type == "system":
+        raise ResultError("rework_user_actor_required", {})
+
+
+def _validate_worker_scope(
+    target_ids: tuple[UUID, ...],
+    *,
+    impact_ids: tuple[UUID, ...],
+    worker_plan: Mapping[UUID, Any],
+    allowed_keys: frozenset[str],
+) -> None:
+    for worker_id in (*target_ids, *impact_ids):
+        if worker_id not in worker_plan:
+            raise ResultError(
+                "rework_worker_not_found", {"worker_item_id": str(worker_id)}
+            )
+    for worker_id in target_ids:
+        item = worker_plan[worker_id]
+        if item.key not in allowed_keys:
+            raise ResultError(
+                "rework_worker_not_allowed", {"worker_item_id": str(worker_id)}
+            )
+
+
+def _non_negative_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ResultError("rework_payload_invalid", {"field": label})
+    return value
+
+
+def _rework_event(
+    envelope: CommandEnvelope,
+    *,
+    record: ReworkRecordV1,
+    aggregate_version: int,
+    candidate_hash: str,
+    suggestion: ReworkSuggestionV1 | None,
+) -> EventData:
+    return EventData(
+        id=uuid5(_REWORK_NAMESPACE, f"event:{record.id}"),
+        workspace_id=record.workspace_id,
+        aggregate_type="result_rework",
+        aggregate_id=record.id,
+        aggregate_version=aggregate_version,
+        event_type=(
+            "ResultReworkAttentionRequired"
+            if record.status is ReworkStatus.BLOCKED
+            else "ResultReworkRequested"
+        ),
+        payload={
+            "rework_record_id": str(record.id),
+            "root_task_id": str(record.root_task_id),
+            "candidate_id": str(record.candidate_id),
+            "candidate_hash": candidate_hash,
+            "source_issue_keys": list(record.source_issue_keys),
+            "target_worker_item_ids": [str(item) for item in record.target_worker_item_ids],
+            "impact_worker_item_ids": [str(item) for item in record.impact_worker_item_ids],
+            "request_ids": [str(item) for item in record.request_ids],
+            "mode": record.mode.value,
+            "round_number": record.round_number,
+            "status": record.status.value,
+            "reason": record.reason,
+            "suggestion": None if suggestion is None else suggestion.to_mapping(),
+        },
+        actor_type=envelope.actor_type,
+        actor_id=envelope.actor_id,
+        causation_id=envelope.id,
+        correlation_id=envelope.correlation_id,
+    )
 
 
 def compute_rework_impact(
@@ -151,4 +664,9 @@ def _same_code_and_input(
     )
 
 
-__all__ = ["HardResultEdge", "ResultProvenance", "compute_rework_impact"]
+__all__ = [
+    "HardResultEdge",
+    "ResultProvenance",
+    "ResultReworkService",
+    "compute_rework_impact",
+]

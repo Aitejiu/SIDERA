@@ -43,6 +43,62 @@ class ResultOperationStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ReworkSuggestionV1:
+    """A structured rework proposal that still requires control-plane authorization."""
+
+    candidate_id: UUID
+    candidate_hash: str
+    issue_keys: tuple[str, ...]
+    target_worker_item_ids: tuple[UUID, ...]
+    reason: str
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ReworkSuggestionV1:
+        fields = frozenset(
+            {
+                "candidate_id",
+                "candidate_hash",
+                "issue_keys",
+                "target_worker_item_ids",
+                "reason",
+            }
+        )
+        mapping = _mapping(value, "rework suggestion", fields)
+        return cls(
+            candidate_id=_parse_uuid(mapping["candidate_id"], "suggestion candidate_id"),
+            candidate_hash=_hash(mapping["candidate_hash"], "suggestion candidate_hash"),
+            issue_keys=tuple(
+                _text(item, "suggestion issue key")
+                for item in _sequence(mapping["issue_keys"], "suggestion issue_keys")
+            ),
+            target_worker_item_ids=_unique_uuids(
+                mapping["target_worker_item_ids"],
+                "suggestion target_worker_item_ids",
+            ),
+            reason=_text(mapping["reason"], "suggestion reason"),
+        )
+
+    def __post_init__(self) -> None:
+        _uuid(self.candidate_id, "suggestion candidate_id")
+        _hash(self.candidate_hash, "suggestion candidate_hash")
+        if not isinstance(self.issue_keys, tuple) or any(
+            not isinstance(item, str) or not item.strip() for item in self.issue_keys
+        ):
+            raise ValidationError("suggestion issue_keys must contain non-empty strings")
+        _unique_uuids(self.target_worker_item_ids, "suggestion target_worker_item_ids")
+        _text(self.reason, "suggestion reason")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "candidate_id": str(self.candidate_id),
+            "candidate_hash": self.candidate_hash,
+            "issue_keys": list(self.issue_keys),
+            "target_worker_item_ids": [str(item) for item in self.target_worker_item_ids],
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ReworkImpactV1:
     """The deterministic impact report for replacing one code result."""
 
@@ -178,7 +234,7 @@ def _sequence(value: object, label: str) -> tuple[object, ...]:
 
 
 def _unique_uuids(value: object, label: str) -> tuple[UUID, ...]:
-    result = tuple(_uuid(item, f"{label} item") for item in _sequence(value, label))
+    result = tuple(_parse_uuid(item, f"{label} item") for item in _sequence(value, label))
     if len(set(result)) != len(result):
         raise ValidationError(f"{label} must not contain duplicates")
     return result
@@ -587,6 +643,7 @@ __all__ = [
     "ReworkMode",
     "ReworkRecordV1",
     "ReworkStatus",
+    "ReworkSuggestionV1",
     "TaskResultHead",
     "extend_rework_budget",
     "reserve_rework_round",

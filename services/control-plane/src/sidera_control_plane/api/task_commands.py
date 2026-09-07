@@ -33,6 +33,10 @@ _GOVERNANCE_COMMAND_TYPES = frozenset(
     }
 )
 
+_REWORK_COMMAND_TYPES = frozenset(
+    {"RequestTaskRework", "AuthorizeAdditionalRework"}
+)
+
 
 @router.post("/commands", response_model=CommandResponse, status_code=201)
 def execute_command(
@@ -134,6 +138,20 @@ def _execute_command(
             "handoff commands require the configured local actor",
             details={"actor_type": settings.local_actor_type},
         )
+    if request.command_type in _REWORK_COMMAND_TYPES:
+        if request.command_type == "RequestTaskRework" and (
+            request.payload.get("mode") == "automatic"
+        ):
+            raise ValidationError(
+                "automatic rework requires a trusted internal command path"
+            )
+        if request.command_type == "AuthorizeAdditionalRework" and (
+            request.actor.type != settings.local_actor_type
+            or request.actor.id != settings.local_actor_id
+        ):
+            raise ValidationError(
+                "additional rework authorization requires the configured local actor"
+            )
     if (
         request.actor.type == settings.local_actor_type
         and request.actor.id != settings.local_actor_id
