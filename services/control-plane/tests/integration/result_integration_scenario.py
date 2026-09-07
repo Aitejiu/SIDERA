@@ -4,12 +4,13 @@ import hashlib
 import json
 import os
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.application.code_result_capture import (
@@ -25,6 +26,7 @@ from sidera_control_plane.application.execution_commands import ExecutionCommand
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
+from sidera_control_plane.application.result_integration import ResultIntegrationService
 from sidera_control_plane.application.worker_gateway import GatewayMessageError
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.code_results import (
@@ -42,7 +44,7 @@ from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
 )
 from sidera_control_plane.persistence.database import Database
-from sidera_control_plane.persistence.models import EventModel
+from sidera_control_plane.persistence.models import EventModel, ExecutionRequestModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from tests.unit.result_integration_fixtures import snapshot_mapping
 
@@ -78,6 +80,8 @@ class ResultIntegrationScenario:
         self.request_ids: dict[str, UUID] = {}
         self._source_execution_ids: dict[str, UUID] = {}
         self._source_worktrees: dict[str, Path] = {}
+        self._integration_execution_id: UUID | None = None
+        self._integration_operation_id: UUID | None = None
         self._repository = tmp_path / "result-integration-repository"
         self._worktree_root = tmp_path / "result-integration-worktrees"
         self._artifact_store = LocalArtifactContentStore(
@@ -99,6 +103,18 @@ class ResultIntegrationScenario:
     @property
     def capture_operation_id(self) -> UUID:
         return code_capture_operation_id(self.execution_id)
+
+    @property
+    def integration_execution_id(self) -> UUID:
+        if self._integration_execution_id is None:
+            raise AssertionError("integration execution has not been started")
+        return self._integration_execution_id
+
+    @property
+    def integration_operation_id(self) -> UUID:
+        if self._integration_operation_id is None:
+            raise AssertionError("integration operation has not been created")
+        return self._integration_operation_id
 
     @property
     def capture_service(self) -> CodeResultCaptureService:
@@ -277,7 +293,9 @@ class ResultIntegrationScenario:
             return snapshot
         return None
 
-    def code_input_manifest(self) -> CodeInputManifestV1:
+    def code_input_manifest(
+        self, *, base_commit: str | None = None
+    ) -> CodeInputManifestV1:
         """Build the exact code input manifest for the integration WorkerItem."""
 
         self._planning.reconcile()
@@ -322,8 +340,93 @@ class ResultIntegrationScenario:
             request_id=execution_request.id,
             execution_id=execution.id,
             repository_ref="repo://integration-test",
-            base_commit="a" * 40,
+            base_commit=self._base_commit if base_commit is not None else "a" * 40,
         )
+
+    def candidate(self, *, run_checks: bool = False):
+        """Run the real code integration WorkerItem and publish its candidate."""
+
+        if type(run_checks) is not bool:
+            raise ValueError("run_checks must be a boolean")
+        if run_checks:
+            raise NotImplementedError("result integration checks are added in Task 18")
+        self.seed_plan()
+        if "a" not in self._source_execution_ids:
+            self.source(
+                "a",
+                files={"login.py": b"ALLOW_EXPIRED = False\n"},
+                commit=True,
+            )
+        if "b" not in self._source_execution_ids:
+            self.source(
+                "b",
+                files={"profile.py": b"PROFILE_ENABLED = True\n"},
+                commit=True,
+            )
+        if self._integration_execution_id is None:
+            self._run_integration_execution()
+        if self._integration_operation_id is None:
+            self._integration_operation_id = uuid5(
+                NAMESPACE_URL,
+                f"sidera.integration-candidate-operation:{self.integration_execution_id}",
+            )
+        return ResultIntegrationService(
+            self.uow,
+            clock=lambda: self._planning.now,
+        ).publish_candidate(
+            workspace_id=self.workspace_id,
+            execution_id=self.integration_execution_id,
+            operation_id=self.integration_operation_id,
+        )
+
+    def revise_plan(self, *, minimum_count: int) -> object:
+        """Advance the planning head so an older integration execution is stale."""
+
+        if type(minimum_count) is not int or minimum_count < 1:
+            raise ValueError("minimum_count must be a positive integer")
+        with self.uow() as uow:
+            head = uow.plans.get_head(
+                self.root_task_id, self.workspace_id, for_update=True
+            )
+            current = (
+                None
+                if head is None
+                else uow.plans.get(head.active_snapshot_id, self.workspace_id)
+            )
+            if head is None or current is None:
+                raise AssertionError("current plan is unavailable")
+            revised_id = uuid4()
+            revised = replace(
+                current,
+                id=revised_id,
+                generation=current.generation + 1,
+                parent_snapshot_id=current.id,
+                source_ref=f"test:plan-revision:{revised_id}",
+                goal_summary=(
+                    f"{current.goal_summary} (revision quorum {minimum_count})"
+                ),
+                published_at=self._planning.now,
+            )
+            uow.plans.add_snapshot_and_advance_head(revised, expected_head=head)
+        self.ids["plan_snapshot"] = revised.id
+        return revised
+
+    def corrupt_current_selection_hash(self) -> None:
+        """Corrupt only the request's persisted selection reference for a stale-input test."""
+
+        request_id = self.request_ids.get("summary")
+        if request_id is None:
+            raise AssertionError("summary request is not available")
+        with self.database.session() as session:
+            session.execute(
+                update(ExecutionRequestModel)
+                .where(
+                    ExecutionRequestModel.workspace_id == self.workspace_id,
+                    ExecutionRequestModel.id == request_id,
+                )
+                .values(input_selection_hash="f" * 64)
+            )
+            session.commit()
 
     def drive(self, *, limit: int = 30) -> object:
         """Prepare the V3 code package and drive the real Gateway start path."""
@@ -404,6 +507,91 @@ class ResultIntegrationScenario:
                 ),
             )
             uow.context_assemblies.add(assembly)
+
+    def _run_integration_execution(self) -> None:
+        self._planning.reconcile()
+        self._planning.activate()
+        execution_id = self._planning._execution_id("summary")
+        if execution_id is None:
+            raise AssertionError("integration execution was not activated")
+        worker_id, lease_id, _session_id, execution_version = self._planning._start_source(
+            execution_id, key="summary"
+        )
+        worktree, manifest = self._create_worktree(execution_id)
+        with self.uow() as uow:
+            uow.workspaces.add(manifest)
+        code_inputs = self.code_input_manifest(base_commit=self._base_commit)
+        materialization_operation_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.integration-input:{execution_id}:{code_inputs.input_hash}",
+        )
+        receipt = GitResultStore({"repo://integration-test": self._repository}).materialize(
+            workspace_manifest=manifest,
+            code_inputs=code_inputs,
+            operation_id=materialization_operation_id,
+        )
+        if not receipt.succeeded:
+            raise AssertionError(f"integration inputs conflicted: {receipt.conflict_paths}")
+        self._integration_execution_id = execution_id
+        self._integration_operation_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.integration-candidate-operation:{execution_id}",
+        )
+        capture_operation_id = code_capture_operation_id(execution_id)
+        service = self.capture_service
+        service.record_execution_start(
+            manifest=manifest,
+            input_commit=receipt.actual_commit,
+            writable_paths=(".",),
+            operation_id=capture_operation_id,
+        )
+        output = worktree / "integration.txt"
+        output.write_text("integrated source results\n", encoding="utf-8")
+        self._git(worktree, "add", "-A")
+        self._git(
+            worktree,
+            "-c",
+            "user.name=Result Integration Worker",
+            "-c",
+            "user.email=worker@sidera.local",
+            "commit",
+            "-m",
+            "integrate source results",
+        )
+        service.observe_terminal(
+            workspace_id=self.workspace_id,
+            execution_id=execution_id,
+            operation_id=capture_operation_id,
+            outcome="succeeded",
+            fencing_token=1,
+        )
+        service.capture_execution(
+            workspace_id=self.workspace_id,
+            execution_id=execution_id,
+            operation_id=capture_operation_id,
+        )
+        CommandService(
+            lambda: self.uow(),
+            (ExecutionCommandHandler(lambda: self._planning.now),),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ReportExecutionSucceeded",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(worker_id),
+                target_id=execution_id,
+                payload={
+                    "worker_id": str(worker_id),
+                    "lease_id": str(lease_id),
+                    "fencing_token": 1,
+                },
+                expected_version=execution_version,
+                idempotency_key=f"result-capture-integration-succeeded:{execution_id}",
+                correlation_id=self.root_task_id,
+            )
+        )
 
     def reopen_services(self) -> None:
         self._capture_service = self._new_capture_service()

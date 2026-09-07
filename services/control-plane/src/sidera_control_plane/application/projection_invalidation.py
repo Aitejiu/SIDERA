@@ -185,6 +185,35 @@ def projection_targets_for_event(
                 change_type,
             ),
         )
+    if event.aggregate_type == "integration_candidate" or event.event_type == (
+        "IntegrationCandidatePrepared"
+    ):
+        worker_item_id = worker_item_id or _payload_uuid(payload, "worker_item_id")
+        root_task_id = root_task_id or _payload_uuid(payload, "root_task_id")
+        execution_id = _payload_uuid(payload, "integration_execution_id")
+        if execution_id is None:
+            execution_id = _payload_uuid(payload, "execution_id")
+        targets = _targets(
+            (
+                "executions",
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "worker_item_workspace",
+                "worker_item_activity",
+            ),
+            worker_item_id,
+            root_task_id,
+            execution_id=execution_id,
+        )
+        return tuple(
+            ProjectionInvalidationTarget(
+                target.projection_type,
+                target.resource_id,
+                "integration_candidate_prepared",
+            )
+            for target in targets
+        )
     if event.aggregate_type in {"work_context", "work_context_binding"}:
         change_type = {
             "WorkContextCreated": "work_context_created",

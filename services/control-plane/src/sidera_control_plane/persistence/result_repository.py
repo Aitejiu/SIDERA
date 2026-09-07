@@ -105,7 +105,7 @@ class ResultRepository:
                 TaskResultHeadModel.root_task_id == head.root_task_id,
                 TaskResultHeadModel.result_version == expected_version,
             )
-            .values(**values)
+            .values(**_head_update_values(head, now=now))
         )
         if not isinstance(result, CursorResult) or result.rowcount != 1:
             current = self.get_head(head.workspace_id, head.root_task_id)
@@ -479,6 +479,12 @@ def _head_values(head: TaskResultHead, *, now: datetime) -> dict[str, object]:
         "created_at": now,
         "updated_at": now,
     }
+
+
+def _head_update_values(head: TaskResultHead, *, now: datetime) -> dict[str, object]:
+    values = _head_values(head, now=now)
+    values.pop("created_at")
+    return values
 
 
 def _snapshot_values(value: CodeResultSnapshotV1) -> dict[str, object]:
