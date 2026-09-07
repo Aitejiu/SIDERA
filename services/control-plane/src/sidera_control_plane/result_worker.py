@@ -38,7 +38,9 @@ class ResultWorkerRunResult:
 
     @property
     def state(self) -> str:
-        if self.unknown or self.blocked or self.failed:
+        # ``failed`` is an observation count over durable history. It must not
+        # block a run that has reconciled its current operation successfully.
+        if self.unknown or self.blocked:
             return "blocked"
         if self.pending or self.processed == 0:
             return "pending"
@@ -50,8 +52,6 @@ class ResultWorkerRunResult:
             return "result_operation_inspect_required"
         if self.blocked:
             return "result_apply_blocked"
-        if self.failed:
-            return "result_apply_failed"
         return None
 
 

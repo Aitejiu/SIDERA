@@ -1020,13 +1020,20 @@ def _validate_source_request(
 ) -> ExecutionRequest:
     if request is None:
         raise ResultError("verification_source_request_not_found", {})
+    is_reintegration_request = (
+        request.purpose == "reintegrate"
+        and request.result_derivation_kind == "rework"
+    )
     if (
         request.workspace_id != candidate.workspace_id
         or request.root_task_id != candidate.root_task_id
         or request.subtask_id != execution.task_id
         or request.worker_item_id != execution.worker_item_id
         or request.execution_lineage_id != execution.lineage_id
-        or request.result_derivation_kind is not None
+        or (
+            request.result_derivation_kind is not None
+            and not is_reintegration_request
+        )
         or request.worker_item_key != spec.integration_worker_item_key
     ):
         raise ResultError("verification_source_scope_changed", {})

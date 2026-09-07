@@ -117,6 +117,8 @@ class ResultIntegrationScenario:
         tmp_path: Path,
         ids: dict[str, UUID],
         request_id: UUID,
+        *,
+        base_commit: str | None = None,
     ) -> None:
         self.database = database
         self.workspace_id = workspace_id
@@ -147,10 +149,12 @@ class ResultIntegrationScenario:
         self.worker_context_versions: tuple[int, ...] = (1, 2, 3)
         self._check_exit_code: int | None = None
         self._modify_source_during_check = False
+        self._repairable_candidate = False
         self._verification_runner: LocalCheckRunner | None = None
         self._verification_operation_ids: tuple[UUID, ...] = ()
         self._command_expected_versions: dict[str, int] = {}
-        self._base_commit = self._init_repository()
+        initial_commit = self._init_repository()
+        self._base_commit = base_commit or initial_commit
 
     @property
     def root_task_id(self) -> UUID:
@@ -227,6 +231,25 @@ class ResultIntegrationScenario:
         self.request_ids = dict(self._planning.request_ids)
         self._capture_service = self._new_capture_service()
         self._apply_enabled = apply
+        self._seeded = True
+
+    def load_materialized_plan(
+        self,
+        planning_request_id: UUID,
+        *,
+        apply_enabled: bool = False,
+        repairable_candidate: bool = False,
+    ) -> None:
+        """Restore durable plan and result-driver state after a process restart."""
+
+        self._planning.load_materialized_plan(planning_request_id)
+        self.ids.update(self._planning.ids)
+        self.request_id = planning_request_id
+        self.worker_item_ids = dict(self._planning.worker_item_ids)
+        self.request_ids = dict(self._planning.request_ids)
+        self._capture_service = self._new_capture_service()
+        self._apply_enabled = apply_enabled
+        self._repairable_candidate = repairable_candidate
         self._seeded = True
 
     def fail_once(self, point: str) -> None:
@@ -525,6 +548,31 @@ class ResultIntegrationScenario:
             )
         return candidate
 
+    def seed_repairable_candidate(
+        self, *, apply: bool | None = None
+    ) -> IntegrationCandidateV1:
+        """Create a failed candidate whose only repair is the login source file."""
+
+        if apply is not None and type(apply) is not bool:
+            raise ValueError("apply must be a boolean or null")
+        self.seed_plan() if apply is None else self.seed_plan(apply=apply)
+        self._repairable_candidate = True
+        if "a" not in self._source_execution_ids:
+            self.source(
+                "login",
+                files={"login.py": b"ALLOW_EXPIRED = True\n"},
+                commit=True,
+            )
+        if "b" not in self._source_execution_ids:
+            self.source(
+                "b",
+                files={"profile.py": b"PROFILE_ENABLED = True\n"},
+                commit=True,
+            )
+        candidate = self.candidate(run_checks=False)
+        self._run_verification_checks(candidate)
+        return candidate
+
     def rework_payload(
         self,
         candidate: IntegrationCandidateV1,
@@ -697,6 +745,15 @@ class ResultIntegrationScenario:
         if not isinstance(candidate, IntegrationCandidateV1):
             raise TypeError("current integration candidate is not typed")
         return candidate
+
+    def current_candidate(self) -> IntegrationCandidateV1:
+        """Read the immutable candidate selected by the durable result head."""
+
+        return self.latest_candidate()
+
+    def result_operations(self):
+        with self.uow() as uow:
+            return uow.results.list_operations_for_observation()
 
     def latest_source(self, key: str) -> CodeResultSnapshotV1:
         source_key = "a" if key == "login" else key
@@ -915,6 +972,8 @@ class ResultIntegrationScenario:
                 execution_id=self.integration_execution_id,
                 operation_id=self.integration_operation_id,
             )
+            if self._repairable_candidate:
+                self._run_verification_checks(candidate)
             self._pending_reintegration_request_id = None
             return candidate
         self._planning.worker_context_versions = self.worker_context_versions
@@ -1054,7 +1113,19 @@ class ResultIntegrationScenario:
         )
         output = worktree / "integration.txt"
         output.write_text("integrated source results\n", encoding="utf-8")
-        if self._check_exit_code is not None:
+        if self._repairable_candidate:
+            (worktree / "test_sidera_result_check.py").write_text(
+                "import unittest\n"
+                "\n"
+                "import login\n"
+                "\n"
+                "\n"
+                "class ResultIntegrationCheck(unittest.TestCase):\n"
+                "    def test_expired_credentials_are_rejected(self):\n"
+                "        self.assertFalse(login.ALLOW_EXPIRED)\n",
+                encoding="utf-8",
+            )
+        elif self._check_exit_code is not None:
             if self._modify_source_during_check:
                 script = (
                     "from pathlib import Path\n"
@@ -1517,6 +1588,35 @@ class ResultIntegrationScenario:
                 occurred_at=observation.finished_at or NOW,
             ),
         )
+        with self.uow() as uow:
+            current_execution = uow.executions.get(execution_id, self.workspace_id)
+        if current_execution is None:
+            raise AssertionError("verification execution disappeared")
+        CommandService(
+            lambda: self.uow(),
+            (ExecutionCommandHandler(lambda: self._planning.now),),
+        ).handle(
+            CommandEnvelope(
+                id=uuid5(
+                    NAMESPACE_URL,
+                    f"result-verification-succeeded:{execution_id}",
+                ),
+                workspace_id=self.workspace_id,
+                command_type="ReportExecutionSucceeded",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(_worker_id),
+                target_id=execution_id,
+                payload={
+                    "worker_id": str(_worker_id),
+                    "lease_id": str(lease_id),
+                    "fencing_token": 1,
+                },
+                expected_version=current_execution.version,
+                idempotency_key=f"result-verification-succeeded:{execution_id}",
+                correlation_id=self.root_task_id,
+            )
+        )
         self._verification_operation_ids = (operation_id,)
 
     def tick(self, *, limit: int = 20):
@@ -1552,6 +1652,8 @@ class ResultIntegrationScenario:
     def _init_repository(self) -> str:
         self._repository.mkdir(parents=True, exist_ok=True)
         self._worktree_root.mkdir(parents=True, exist_ok=True)
+        if (self._repository / ".git").exists():
+            return self._git(self._repository, "rev-parse", "HEAD")
         self._git(self._repository, "init", "--initial-branch=main")
         (self._repository / ".gitignore").write_text(
             "*.ignored\n__pycache__/\n", encoding="utf-8"

@@ -34,7 +34,8 @@ WORKSPACE_B = UUID("00000000-0000-0000-0000-000000000002")
 def seed_execution_request_facts(
     database: Database, workspace_id: UUID
 ) -> dict[str, UUID]:
-    assert workspace_id == WORKSPACE_A
+    if not isinstance(workspace_id, UUID):
+        raise TypeError("workspace_id must be a UUID")
     ids = {
         "module_definition": uuid4(),
         "module_instance": uuid4(),
@@ -51,18 +52,24 @@ def seed_execution_request_facts(
         "workspace_b_task": uuid4(),
     }
     with database.session() as session:
-        session.add(
-            WorkspaceModel(
-                id=WORKSPACE_B,
-                name="R5.1 Secondary Workspace",
-                status="active",
-                version=1,
-            )
-        )
+        for workspace, name in (
+            (workspace_id, "R5.1 Result Integration Workspace"),
+            (WORKSPACE_B, "R5.1 Secondary Workspace"),
+        ):
+            if session.get(WorkspaceModel, workspace) is None:
+                session.add(
+                    WorkspaceModel(
+                        id=workspace,
+                        name=name,
+                        status="active",
+                        version=1,
+                    )
+                )
+        session.flush()
         session.add(
             ModuleDefinitionModel(
                 id=ids["module_definition"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 module_type="planner_adapter",
                 provider="test",
                 interface_version="sidera.planner.v1",
@@ -75,7 +82,7 @@ def seed_execution_request_facts(
         session.add(
             ModuleInstanceModel(
                 id=ids["module_instance"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 definition_id=ids["module_definition"],
                 instance_name="r5-planner",
                 config_version=1,
@@ -89,7 +96,7 @@ def seed_execution_request_facts(
         session.add(
             PlanningProfileModel(
                 id=ids["profile"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 profile_key="default",
                 version=1,
                 display_name="Default planner",
@@ -105,7 +112,7 @@ def seed_execution_request_facts(
         session.add(
             PlanningRequestModel(
                 id=ids["request"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 kind="create",
                 status="proposal_ready",
                 planning_profile_id=ids["profile"],
@@ -123,7 +130,7 @@ def seed_execution_request_facts(
             PlanningBriefRevisionModel(
                 planning_request_id=ids["request"],
                 revision=1,
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 payload={"objective": "test"},
                 created_by="integration",
             )
@@ -132,7 +139,7 @@ def seed_execution_request_facts(
         session.add(
             PlanningRunModel(
                 id=ids["run"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 planning_request_id=ids["request"],
                 brief_revision=1,
                 planning_profile_id=ids["profile"],
@@ -158,7 +165,7 @@ def seed_execution_request_facts(
                 id=ids["proposal"],
                 planning_request_id=ids["request"],
                 revision=1,
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 brief_revision=1,
                 planning_run_id=ids["run"],
                 proposal_schema_version=2,
@@ -188,7 +195,7 @@ def seed_execution_request_facts(
                     workspace_id=(
                         WORKSPACE_B
                         if task_id == ids["workspace_b_task"]
-                        else WORKSPACE_A
+                        else workspace_id
                     ),
                     title=title,
                     description="test",
@@ -204,7 +211,7 @@ def seed_execution_request_facts(
             PlanSnapshotModel(
                 id=ids["plan"],
                 schema_version=2,
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 root_task_id=ids["root_task"],
                 generation=1,
                 parent_snapshot_id=None,
@@ -221,7 +228,7 @@ def seed_execution_request_facts(
         session.add(
             WorkerItemModel(
                 id=ids["worker_item"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 root_task_id=ids["root_task"],
                 stable_key="backend",
                 title="Backend",
@@ -237,7 +244,7 @@ def seed_execution_request_facts(
         session.add(
             ExecutionModel(
                 id=ids["execution"],
-                workspace_id=WORKSPACE_A,
+                workspace_id=workspace_id,
                 task_id=ids["subtask"],
                 lineage_id=ids["execution"],
                 attempt=1,
