@@ -121,6 +121,25 @@ def test_immediate_action_matrix_creates_safe_facts() -> None:
         assert "provider" not in str(mutation).lower()
 
 
+def test_result_acceptance_recorded_is_progress_and_not_task_completion() -> None:
+    mutation = _policy().evaluate(
+        _observation(
+            kind="result_acceptance_recorded",
+            status="accepted",
+            topic="result:accepted",
+            transition=NotificationTransition.COMPLETED,
+        ),
+        now=NOW,
+        mode=NotificationEvaluationMode.LIVE,
+    )
+
+    assert mutation.fact is not None
+    assert mutation.fact.kind == "result_acceptance_recorded"
+    assert mutation.fact.priority is NotificationPriority.PROGRESS
+    assert mutation.fact.transition is NotificationTransition.COMPLETED
+    assert mutation.fact.kind != NotificationKind.TASK_COMPLETED.value
+
+
 def test_policy_is_deterministic_and_rejects_secret_like_observation_text() -> None:
     observation = _observation()
     first = _policy().evaluate(observation, now=NOW)

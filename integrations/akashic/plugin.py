@@ -599,6 +599,16 @@ class SideraTaskBridge(Plugin):
         return await self._toolset().sidera_get_task_status(event, task_id)
 
     @tool(
+        name="sidera_get_task_results",
+        risk="read-only",
+        always_on=True,
+    )
+    async def sidera_get_task_results(self, event: object, task_id: str) -> str:
+        """Read the bounded result evidence summary for a materialized task."""
+
+        return await self._toolset().sidera_get_task_results(event, task_id)
+
+    @tool(
         name="sidera_get_collaboration_governance",
         risk="read-only",
         always_on=True,

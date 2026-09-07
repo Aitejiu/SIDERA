@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -17,14 +18,19 @@ from sidera_control_plane.application.notification_observations import (
     observation_subject_key,
     projection_change_is_observable,
 )
+from sidera_control_plane.application.result_notifications import (
+    result_notification_facts,
+)
 from sidera_control_plane.domain.notifications import (
     NotificationKind,
     NotificationTransition,
 )
 from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.persistence.models import (
+    EventModel,
     ExecutionModel,
     ExecutionRequestModel,
+    IntegrationCandidateModel,
     NotificationDeliveryIntentModel,
     NotificationFactModel,
     NotificationPolicyStateModel,
@@ -32,8 +38,13 @@ from sidera_control_plane.persistence.models import (
     NotificationSourceBindingModel,
     NotificationThreadModel,
     PlanningRequestModel,
+    ResultApplyOperationModel,
+    ResultReworkRecordModel,
+    ResultVerificationResultModel,
     SchedulingBlockModel,
+    TaskAcceptanceDecisionModel,
     TaskModel,
+    TaskResultHeadModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
 )
@@ -546,6 +557,31 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         )
         if root_task is None:
             return None
+        if change.projection_type == "result_overview":
+            source_type, origin_route_active = self._origin_source(
+                workspace_id=change.workspace_id,
+                root_task_id=root_task.id,
+                planning_request_id=None,
+            )
+            overview = self._result_notification_overview(
+                change,
+                root_task=root_task,
+                source_type=source_type,
+                origin_route_active=origin_route_active,
+            )
+            observations = result_notification_facts(
+                overview["event"], overview["view"]
+            )
+            if not observations:
+                return None
+            return replace(
+                observations[0],
+                source_projection_cursor=change.cursor,
+                source_resource_version=(change.resource_version or 1),
+                correlation_id=str(change.correlation_id),
+                source_type=source_type,
+                origin_route_active=origin_route_active,
+            )
         if subject.subject_type.value == "root_task":
             source_resource_version = root_task.version
 
@@ -668,6 +704,199 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             authoritative_fields=authoritative_fields,
             source_resource_version=source_resource_version,
         )
+
+    def _result_notification_overview(
+        self,
+        change: ProjectionChange,
+        *,
+        root_task: TaskModel,
+        source_type: str,
+        origin_route_active: bool,
+    ) -> dict[str, object]:
+        """Build the bounded result state consumed by result notifications."""
+
+        head = self._session.scalar(
+            select(TaskResultHeadModel).where(
+                TaskResultHeadModel.workspace_id == change.workspace_id,
+                TaskResultHeadModel.root_task_id == root_task.id,
+            )
+        )
+        candidate = None
+        acceptance = None
+        active_operation = None
+        verification_status: str | None = None
+        rework_status: str | None = None
+        if head is not None and head.current_candidate_id is not None:
+            candidate = self._session.scalar(
+                select(IntegrationCandidateModel).where(
+                    IntegrationCandidateModel.workspace_id == change.workspace_id,
+                    IntegrationCandidateModel.id == head.current_candidate_id,
+                )
+            )
+        if head is not None and head.current_acceptance_id is not None:
+            acceptance = self._session.scalar(
+                select(TaskAcceptanceDecisionModel).where(
+                    TaskAcceptanceDecisionModel.workspace_id == change.workspace_id,
+                    TaskAcceptanceDecisionModel.id == head.current_acceptance_id,
+                )
+            )
+        if head is not None and head.active_operation_id is not None:
+            active_operation = self._session.scalar(
+                select(ResultApplyOperationModel).where(
+                    ResultApplyOperationModel.workspace_id == change.workspace_id,
+                    ResultApplyOperationModel.id == head.active_operation_id,
+                )
+            )
+        if candidate is not None:
+            verification = self._session.scalars(
+                select(ResultVerificationResultModel)
+                .where(
+                    ResultVerificationResultModel.workspace_id == change.workspace_id,
+                    ResultVerificationResultModel.candidate_id == candidate.id,
+                )
+                .order_by(
+                    ResultVerificationResultModel.created_at.desc(),
+                    ResultVerificationResultModel.id.desc(),
+                )
+                .limit(1)
+            ).first()
+            verification_status = None if verification is None else verification.status
+            rework = self._session.scalars(
+                select(ResultReworkRecordModel)
+                .where(
+                    ResultReworkRecordModel.workspace_id == change.workspace_id,
+                    ResultReworkRecordModel.candidate_id == candidate.id,
+                )
+                .order_by(
+                    ResultReworkRecordModel.created_at.desc(),
+                    ResultReworkRecordModel.id.desc(),
+                )
+                .limit(1)
+            ).first()
+            rework_status = None if rework is None else rework.status
+
+        event = self._session.scalars(
+            select(EventModel)
+            .where(
+                EventModel.workspace_id == change.workspace_id,
+                EventModel.correlation_id == change.correlation_id,
+            )
+            .order_by(EventModel.created_at.desc(), EventModel.id.desc())
+            .limit(1)
+        ).first()
+        event_type = (
+            event.event_type
+            if event is not None
+            else change.change_type
+        )
+        stage = "legacy"
+        blocking: list[str] = []
+        if head is not None:
+            stage = "waiting_for_result"
+            if active_operation is not None:
+                if active_operation.status in {"unknown", "blocked", "failed"}:
+                    stage = "attention"
+                    blocking.append(
+                        f"apply_{active_operation.status}"
+                    )
+                else:
+                    stage = "applying"
+            elif verification_status in {
+                "unknown",
+                "interrupted",
+                "blocked",
+                "failed",
+            }:
+                stage = "attention"
+                blocking.append(f"verification_{verification_status}")
+            elif rework_status in {"blocked", "failed"}:
+                stage = "attention"
+                blocking.append(f"rework_{rework_status}")
+            elif acceptance is not None:
+                stage = "finalizing"
+            elif candidate is not None:
+                stage = "awaiting_acceptance"
+
+        attention_items: list[dict[str, object]] = []
+        payload = event.payload if event is not None else {}
+        worker_item_value = (
+            payload.get("worker_item_id") if isinstance(payload, dict) else None
+        )
+        try:
+            worker_item_id = (
+                worker_item_value
+                if isinstance(worker_item_value, UUID)
+                else UUID(str(worker_item_value))
+            )
+        except (TypeError, ValueError):
+            worker_item_id = None
+        if stage == "attention" and worker_item_id is not None:
+            worker_item = self._session.scalar(
+                select(WorkerItemModel).where(
+                    WorkerItemModel.workspace_id == change.workspace_id,
+                    WorkerItemModel.id == worker_item_id,
+                )
+            )
+            if worker_item is not None:
+                placement = self._session.scalar(
+                    select(WorkerItemPlacementModel)
+                    .where(
+                        WorkerItemPlacementModel.workspace_id == change.workspace_id,
+                        WorkerItemPlacementModel.worker_item_id == worker_item.id,
+                    )
+                    .order_by(WorkerItemPlacementModel.plan_generation.desc())
+                    .limit(1)
+                )
+                subtask = (
+                    self._session.scalar(
+                        select(TaskModel).where(
+                            TaskModel.workspace_id == change.workspace_id,
+                            TaskModel.id == placement.subtask_task_id,
+                        )
+                    )
+                    if placement is not None and placement.subtask_task_id is not None
+                    else None
+                )
+                attention_items.append(
+                    {
+                        "cause_key": f"result:{candidate.id if candidate else root_task.id}:{blocking[0] if blocking else 'attention'}",
+                        "subtask_id": None if subtask is None else str(subtask.id),
+                        "subtask_title": None if subtask is None else subtask.title,
+                        "worker_item_id": str(worker_item.id),
+                        "worker_item_title": worker_item.title,
+                        "resource_version": worker_item.version,
+                    }
+                )
+        return {
+            "event": {
+                "event_type": event_type,
+                "workspace_id": str(change.workspace_id),
+                "root_task_id": str(root_task.id),
+                "cursor": change.cursor,
+                "resource_version": change.resource_version,
+                "correlation_id": str(change.correlation_id),
+            },
+            "view": {
+                "workspace_id": str(change.workspace_id),
+                "root_task_id": str(root_task.id),
+                "task_title": root_task.title,
+                "task_status": root_task.status,
+                "result_version": None if head is None else head.result_version,
+                "result_stage": stage,
+                "current_candidate": (
+                    None
+                    if candidate is None
+                    else {
+                        "candidate_id": str(candidate.id),
+                        "candidate_hash": candidate.content_hash,
+                    }
+                ),
+                "blocking_reasons": blocking,
+                "attention_items": attention_items,
+                "source_type": source_type,
+                "origin_route_active": origin_route_active,
+            },
+        }
 
     def _classify(
         self,

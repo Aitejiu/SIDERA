@@ -20,6 +20,7 @@ from .contracts import (
     JsonValue,
     PlanRevisionBrief,
     PlanRevisionConfirmation,
+    TaskResultOverviewView,
     ToolEnvelope,
 )
 from .source_routes import (
@@ -1126,6 +1127,13 @@ class SideraTaskTools:
             }
         )
 
+    def _with_task_results_ref(
+        self, envelope: ToolEnvelope, resource_ref: str, web_url: str
+    ) -> ToolEnvelope:
+        return envelope.model_copy(
+            update={"resource_ref": resource_ref, "web_url": web_url}
+        )
+
     async def sidera_get_task_status(self, event: object, task_id: str) -> str:
         """Read the bounded Task First overview for a materialized root task."""
 
@@ -1155,6 +1163,60 @@ class SideraTaskTools:
             )
         except ControlPlaneRejected as exc:
             return _encode(_rejected_envelope(exc.code, "Task status"))
+
+    async def sidera_get_task_results(self, event: object, task_id: str) -> str:
+        """Read the bounded result overview without exposing acceptance writes."""
+
+        del event
+        root_task_id = _parse_uuid(task_id)
+        if root_task_id is None:
+            return _encode(_invalid_resource("Task"))
+        resource_ref = f"task:{root_task_id}:results"
+        try:
+            raw_view = await self._client.get_task_results(root_task_id)
+            data = _result_summary(
+                raw_view,
+                expected_workspace_id=self._config.workspace_id,
+                expected_root_task_id=root_task_id,
+            )
+            if data is None:
+                return _encode(
+                    self._with_task_results_ref(
+                        ToolEnvelope(
+                            outcome="failed",
+                            summary="The control plane returned an invalid result view.",
+                            error_code="invalid_control_plane_response",
+                        ),
+                        resource_ref,
+                        self._task_results_url(root_task_id, None),
+                    )
+                )
+            candidate_id = _parse_uuid(data.get("current_candidate_id"))
+            return _encode(
+                ToolEnvelope(
+                    outcome="ok",
+                    summary=_result_summary_text(data),
+                    resource_ref=resource_ref,
+                    web_url=self._task_results_url(root_task_id, candidate_id),
+                    data=data,
+                )
+            )
+        except TransportUnavailable:
+            return _encode(
+                self._with_task_results_ref(
+                    _unavailable_error(),
+                    resource_ref,
+                    self._task_results_url(root_task_id, None),
+                )
+            )
+        except ControlPlaneRejected as exc:
+            return _encode(
+                self._with_task_results_ref(
+                    _rejected_envelope(exc.code, "Task results"),
+                    resource_ref,
+                    self._task_results_url(root_task_id, None),
+                )
+            )
 
     async def sidera_get_collaboration_governance(
         self, event: object, worker_item_id: str
@@ -1794,6 +1856,12 @@ class SideraTaskTools:
             f"{str(self._config.web_base_url).rstrip('/')}/workspaces/"
             f"{self._config.workspace_id}/tasks/{task_id}"
         )
+
+    def _task_results_url(self, task_id: UUID, candidate_id: UUID | None) -> str:
+        url = self._task_url(task_id) + "?view=results"
+        if candidate_id is not None:
+            url += f"&candidate={candidate_id}"
+        return url
 
     def _worker_item_url(self, worker_item_id: UUID) -> str:
         return (
@@ -3641,6 +3709,139 @@ def _task_summary(overview: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
                 attention.append(entry)
     data["attention"] = attention
     return data
+
+
+def _result_summary(
+    raw: object,
+    *,
+    expected_workspace_id: UUID,
+    expected_root_task_id: UUID,
+) -> dict[str, JsonValue] | None:
+    """Project a result overview into a bounded Main Agent summary."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        view = TaskResultOverviewView.model_validate(raw)
+    except ValueError:
+        return None
+    if view.workspace_id != expected_workspace_id or view.root_task_id != expected_root_task_id:
+        return None
+
+    data: dict[str, JsonValue] = {
+        "root_task_id": str(view.root_task_id),
+        "task_title": view.task_title,
+        "task_status": view.task_status,
+        "task_version": view.task_version,
+        "result_version": view.result_version,
+        "result_stage": view.result_stage,
+        "blocking_reasons": _bounded_strings(view.blocking_reasons, limit=20),
+        "last_change_cursor": view.last_change_cursor,
+        "current_candidate_id": None,
+        "current_candidate_hash": None,
+        "available_actions": [],
+        "criteria": [],
+    }
+    candidate = view.current_candidate
+    if candidate is not None:
+        candidate_id = _parse_uuid(candidate.get("candidate_id"))
+        candidate_hash = _selection_hash(candidate.get("candidate_hash"))
+        if candidate_id is None or candidate_hash is None:
+            return None
+        data["current_candidate_id"] = str(candidate_id)
+        data["current_candidate_hash"] = candidate_hash
+
+    criteria: list[JsonValue] = []
+    for item in view.criteria[:32]:
+        criterion_key = _string(item.get("criterion_key"), limit=200)
+        text = _string(item.get("text"), limit=500)
+        observed_status = _string(item.get("observed_status"), limit=64)
+        verification_status = _string(item.get("verification_status"), limit=64)
+        if criterion_key is None or text is None or observed_status is None:
+            return None
+        entry: dict[str, JsonValue] = {
+            "criterion_key": criterion_key,
+            "text": text,
+            "observed_status": observed_status,
+        }
+        if verification_status is not None:
+            entry["verification_status"] = verification_status
+        for key in ("mode", "decision"):
+            value = _string(item.get(key), limit=64)
+            if value is not None:
+                entry[key] = value
+        reason = _string(item.get("decision_reason"), limit=500)
+        if reason is not None:
+            entry["decision_reason"] = reason
+        criteria.append(entry)
+    data["criteria"] = criteria
+
+    actions: list[JsonValue] = []
+    for item in view.available_actions[:16]:
+        if not isinstance(item, Mapping):
+            return None
+        entry: dict[str, JsonValue] = {}
+        for key, limit in (
+            ("action", 100),
+            ("command_type", 100),
+            ("target_type", 100),
+        ):
+            value = _string(item.get(key), limit=limit)
+            if value is not None:
+                entry[key] = value
+        target_id = _parse_uuid(item.get("target_id"))
+        if target_id is not None:
+            entry["target_id"] = str(target_id)
+        for key in ("expected_version", "expected_result_version"):
+            value = _positive_int(item.get(key))
+            if value is not None:
+                entry[key] = value
+        for key in ("candidate_id",):
+            value = _parse_uuid(item.get(key))
+            if value is not None:
+                entry[key] = str(value)
+        for key in ("candidate_hash", "plan_content_hash", "expected_fingerprint"):
+            value = _selection_hash(item.get(key))
+            if value is not None:
+                entry[key] = value
+        if isinstance(item.get("requires_reason"), bool):
+            entry["requires_reason"] = item["requires_reason"]
+        if entry:
+            actions.append(entry)
+    data["available_actions"] = actions
+
+    if view.active_operation is not None:
+        operation: dict[str, JsonValue] = {}
+        for key, limit in (
+            ("operation_kind", 100),
+            ("status", 64),
+            ("failure_code", 128),
+            ("receipt_ref", 300),
+        ):
+            value = _string(view.active_operation.get(key), limit=limit)
+            if value is not None:
+                operation[key] = value
+        operation_id = _parse_uuid(view.active_operation.get("operation_id"))
+        if operation_id is not None:
+            operation["operation_id"] = str(operation_id)
+        attempt = _positive_int(view.active_operation.get("attempt"))
+        if attempt is not None:
+            operation["attempt"] = attempt
+        data["active_operation"] = operation
+    else:
+        data["active_operation"] = None
+    return data
+
+
+def _result_summary_text(data: Mapping[str, JsonValue]) -> str:
+    stage = _string(data.get("result_stage"), limit=64) or "unknown"
+    if stage == "awaiting_acceptance":
+        return "A result candidate is ready for review."
+    if stage in {"attention", "blocked", "unknown"}:
+        return "The task result needs attention."
+    if stage in {"applying", "finalizing", "verifying"}:
+        return "The task result is still being finalized."
+    return "Task result progress loaded."
 
 
 def _result_data(result: DispatchResult) -> dict[str, JsonValue]:

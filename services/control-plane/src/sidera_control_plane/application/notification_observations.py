@@ -25,6 +25,7 @@ NOTIFICATION_OBSERVATION_PROJECTION_TYPES = frozenset(
     {
         "planning_request",
         "task_overview",
+        "result_overview",
         "task_graph",
         "subtask_workspace",
         "worker_item_workspace",
@@ -51,6 +52,7 @@ NOTIFICATION_OBSERVATION_IGNORED_PROJECTION_TYPES = frozenset(
 _ROOT_TASK_PROJECTION_TYPES = frozenset(
     {
         "task_overview",
+        "result_overview",
         "task_graph",
         "subtask_workspace",
         "collaboration_runtime",

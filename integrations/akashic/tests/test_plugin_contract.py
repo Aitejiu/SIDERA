@@ -67,7 +67,7 @@ def test_plugin_declares_exact_twenty_six_tools_and_risks() -> None:
         for item in plugin_registry.get_handlers_by_module_path(plugin.__name__)
         if item.kind is MetadataKind.TOOL
     ]
-    assert len(metadata) == 26
+    assert len(metadata) == 27
     assert {item.tool_name for item in metadata} == {
         "sidera_submit_brief",
         "sidera_get_planning_status",
@@ -83,6 +83,7 @@ def test_plugin_declares_exact_twenty_six_tools_and_risks() -> None:
         "sidera_cancel_plan_revision",
         "sidera_get_plan_transition",
         "sidera_get_task_status",
+        "sidera_get_task_results",
         "sidera_get_collaboration_governance",
         "sidera_get_worker_result_inputs",
         "sidera_list_inbox",
@@ -99,6 +100,7 @@ def test_plugin_declares_exact_twenty_six_tools_and_risks() -> None:
     read_only = {
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_get_task_results",
         "sidera_get_plan_revision",
         "sidera_get_plan_transition",
         "sidera_get_collaboration_governance",
@@ -120,6 +122,7 @@ def test_plugin_declares_exact_twenty_six_tools_and_risks() -> None:
         "sidera_submit_brief",
         "sidera_get_planning_status",
         "sidera_get_task_status",
+        "sidera_get_task_results",
         "sidera_get_collaboration_governance",
         "sidera_get_worker_result_inputs",
         "sidera_list_inbox",

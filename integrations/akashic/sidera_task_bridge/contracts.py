@@ -94,6 +94,29 @@ class ToolEnvelope(BaseModel):
         return value
 
 
+class TaskResultOverviewView(BaseModel):
+    """Strict outer contract for the bounded Task First result overview."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    task_title: str = Field(min_length=1, max_length=300)
+    task_status: str = Field(min_length=1, max_length=64)
+    task_version: int = Field(ge=1)
+    result_version: int | None = Field(default=None, ge=1)
+    result_stage: str = Field(min_length=1, max_length=64)
+    current_candidate: dict[str, JsonValue] | None
+    acceptance: dict[str, JsonValue] | None
+    active_operation: dict[str, JsonValue] | None
+    criteria: tuple[dict[str, JsonValue], ...]
+    blocking_reasons: tuple[str, ...]
+    available_actions: tuple[dict[str, JsonValue], ...]
+    candidate_history: dict[str, JsonValue]
+    last_change_cursor: int = Field(ge=0)
+    as_of: datetime
+
+
 class GovernanceWorkerItemView(BaseModel):
     """Strict outer contract for the bounded Control Plane governance view."""
 

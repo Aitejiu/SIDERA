@@ -19,6 +19,7 @@ from .contracts import (
     NotificationThreadDetail,
     NotificationThreadPage,
     ProjectionChange,
+    TaskResultOverviewView,
 )
 from .state import (
     BridgeStateStore,
@@ -793,6 +794,22 @@ class ControlPlaneClient:
             params={"workspace_id": str(self._config.workspace_id)},
         )
         return self._parse_json_object(response)
+
+    async def get_task_results(
+        self, task_id: UUID, *, cursor: str | None = None, limit: int = 20
+    ) -> dict[str, JsonValue]:
+        """Read the bounded root-task result overview for the Main Agent."""
+
+        params: dict[str, str] = {"limit": str(limit)}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{self._config.workspace_id}/tasks/{task_id}/results",
+            params=params,
+        )
+        view = self._parse_model(response, TaskResultOverviewView)
+        return cast(dict[str, JsonValue], view.model_dump(mode="json"))
 
     async def get_collaboration_governance_worker_item(
         self, worker_item_id: UUID

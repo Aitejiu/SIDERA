@@ -38,6 +38,9 @@ type NoticeKind = Literal[
     "result_inputs_blocked",
     "task_milestone_completed",
     "task_completed",
+    "result_candidate_ready",
+    "result_attention",
+    "result_acceptance_recorded",
 ]
 type NotificationMode = Literal["live", "resync"]
 
@@ -313,6 +316,23 @@ class NotificationRunner:
                     await self._delivery.deliver(evaluation, advance_cursor=False)
                 )
 
+            result_evaluation = await self._evaluator.evaluate(
+                _synthetic_change(
+                    workspace_id=self._config.workspace_id,
+                    cursor=seed_cursor,
+                    projection_type="result_overview",
+                    resource_id=binding.resource_id,
+                ),
+                mode="resync",
+            )
+            if result_evaluation is not None:
+                max_cursor = max(max_cursor, result_evaluation.cursor)
+                self._require_delivery(
+                    await self._delivery.deliver(
+                        result_evaluation, advance_cursor=False
+                    )
+                )
+
             list_transitions = getattr(self._client, "list_plan_transitions", None)
             if callable(list_transitions):
                 transitions = await cast(
@@ -369,6 +389,7 @@ class NotificationRunner:
             "planning_request": "planning_request",
             "plan_transition": "plan_transition",
             "task": "task_overview",
+            "result": "result_overview",
         }.get(kind, "task_overview")
         current = await self._evaluator.evaluate(
             _synthetic_change(
@@ -497,6 +518,8 @@ class NotificationEvaluator:
             return await self._evaluate_planning(change, mode=mode)
         if change.projection_type == "task_overview":
             return await self._evaluate_task(change, mode=mode)
+        if change.projection_type == "result_overview":
+            return await self._evaluate_result(change, mode=mode)
         if change.projection_type == "plan_transition":
             return await self._evaluate_transition(change, mode=mode)
         return None
@@ -672,6 +695,51 @@ class NotificationEvaluator:
             notice=notice,
         )
 
+    async def _evaluate_result(
+        self,
+        change: ProjectionChange,
+        *,
+        mode: NotificationMode,
+    ) -> NotificationEvaluation | None:
+        task_id = change.resource_id
+        assert task_id is not None
+        binding = await self._private_binding("task", task_id)
+        if binding is None:
+            return None
+        if not callable(getattr(self._client, "get_task_results", None)):
+            return None
+        overview = await self._read_task_results(task_id)
+        if overview is None:
+            return None
+        resource_key = f"result:{task_id}"
+        previous = (await self._state.snapshot()).notification_snapshots.get(
+            resource_key
+        )
+        cursor = _cursor_value(overview.get("last_change_cursor"), change.cursor)
+        fact = _result_fact(
+            overview,
+            task_id=task_id,
+            version=_non_negative_int(
+                overview.get("result_version"), change.resource_version
+            ),
+            web_url=self._task_results_url(task_id, overview),
+        )
+        notice = _notice_for_fact(
+            fact,
+            previous=previous,
+            source_ref=binding.source_ref,
+            cursor=cursor,
+            resource_key=resource_key,
+            mode=mode,
+        )
+        return NotificationEvaluation(
+            resource_key=resource_key,
+            source_ref=binding.source_ref,
+            cursor=cursor,
+            snapshot=fact.snapshot,
+            notice=notice,
+        )
+
     async def _private_binding(
         self, kind: Literal["planning_request", "task"], resource_id: UUID
     ) -> ResourceSourceBinding | None:
@@ -705,6 +773,20 @@ class NotificationEvaluator:
     async def _read_task_overview(self, task_id: UUID) -> dict[str, Any] | None:
         try:
             return await self._client.get_task_overview(task_id)
+        except TransportUnavailable:
+            raise NotificationQueryUnavailable from None
+        except ControlPlaneRejected as exc:
+            if exc.code == "not_found":
+                return None
+            raise
+
+    async def _read_task_results(self, task_id: UUID) -> dict[str, Any] | None:
+        try:
+            reader = cast(
+                Callable[[UUID], Awaitable[dict[str, JsonValue]]],
+                self._client.get_task_results,
+            )
+            return await reader(task_id)
         except TransportUnavailable:
             raise NotificationQueryUnavailable from None
         except ControlPlaneRejected as exc:
@@ -863,6 +945,18 @@ class NotificationEvaluator:
             f"{self._config.workspace_id}/tasks/{task_id}"
         )
 
+    def _task_results_url(
+        self, task_id: UUID, overview: Mapping[str, Any]
+    ) -> str:
+        candidate = overview.get("current_candidate")
+        candidate_id = (
+            _uuid_value(candidate.get("candidate_id"))
+            if isinstance(candidate, Mapping)
+            else None
+        )
+        url = self._task_url(task_id) + "?view=results"
+        return url if candidate_id is None else f"{url}&candidate={candidate_id}"
+
     def _revision_url(self, request_id: UUID, root_task_id: UUID | None) -> str:
         if root_task_id is None:
             return self._planning_url(request_id)
@@ -976,6 +1070,128 @@ def _task_fact(
         subtitle=subtitle,
         fact_text=fact_text,
         next_step=next_step,
+        web_url=web_url,
+    )
+
+
+def _result_fact(
+    overview: Mapping[str, Any],
+    *,
+    task_id: UUID,
+    version: int | None,
+    web_url: str,
+) -> _Fact:
+    """Turn the bounded result view into one stable user-facing fact."""
+
+    title = _text(overview.get("task_title")) or "任务成果"
+    stage = (_text(overview.get("result_stage")) or "unknown").lower()
+    candidate = overview.get("current_candidate")
+    candidate_id = (
+        _uuid_value(candidate.get("candidate_id"))
+        if isinstance(candidate, Mapping)
+        else None
+    )
+    candidate_hash = (
+        _text(candidate.get("candidate_hash"))
+        if isinstance(candidate, Mapping)
+        else None
+    )
+    acceptance = overview.get("acceptance")
+    acceptance_recorded = isinstance(acceptance, Mapping) and bool(acceptance)
+    blocking_values = overview.get("blocking_reasons")
+    raw_blocking_values = (
+        blocking_values if isinstance(blocking_values, (list, tuple)) else ()
+    )
+    blocking_reasons = tuple(
+        reason
+        for reason in (_text(value) for value in raw_blocking_values)
+        if reason is not None
+    )
+    operation = overview.get("active_operation")
+    operation_status = (
+        _text(operation.get("status"))
+        if isinstance(operation, Mapping)
+        else None
+    )
+    fingerprint = _fingerprint(
+        [
+            str(task_id),
+            stage,
+            version,
+            str(candidate_id) if candidate_id is not None else None,
+            candidate_hash,
+            blocking_reasons,
+            operation_status,
+            acceptance_recorded,
+        ]
+    )
+
+    if (
+        stage in {"awaiting_acceptance", "candidate_ready", "ready_for_acceptance"}
+        and candidate_id is not None
+    ):
+        return _Fact(
+            kind="result_candidate_ready",
+            version=version,
+            fingerprint=fingerprint,
+            snapshot=NotificationSnapshot(
+                status="result_candidate_ready",
+                version=version,
+                attention_fingerprint=fingerprint,
+            ),
+            title=title,
+            subtitle=f"候选成果 {str(candidate_id)[:8]}",
+            fact_text="新的成果候选已准备好，等待你逐条审阅。",
+            next_step="打开成果并确认每条标准",
+            web_url=web_url,
+        )
+
+    if acceptance_recorded and stage not in {"completed", "succeeded", "complete"}:
+        return _Fact(
+            kind="result_acceptance_recorded",
+            version=version,
+            fingerprint=fingerprint,
+            snapshot=NotificationSnapshot(
+                status="result_acceptance_recorded",
+                version=version,
+                attention_fingerprint=fingerprint,
+            ),
+            title=title,
+            subtitle="验收决定已记录",
+            fact_text="用户验收决定已记录，任务仍等待真实收尾结果。",
+            next_step="查看收尾状态",
+            web_url=web_url,
+        )
+
+    if stage in {"attention", "blocked", "unknown", "failed", "ambiguous"} or (
+        blocking_reasons and stage not in {"waiting_for_result", "legacy"}
+    ):
+        reason = blocking_reasons[0] if blocking_reasons else stage
+        return _Fact(
+            kind="result_attention",
+            version=version,
+            fingerprint=fingerprint,
+            snapshot=NotificationSnapshot(
+                status="result_attention",
+                version=version,
+                attention_fingerprint=fingerprint,
+            ),
+            title=title,
+            subtitle=reason,
+            fact_text="成果处理遇到需要确认的问题。",
+            next_step="打开成果查看证据和可用恢复动作",
+            web_url=web_url,
+        )
+
+    return _Fact(
+        kind=None,
+        version=version,
+        fingerprint=fingerprint,
+        snapshot=NotificationSnapshot(status=stage, version=version),
+        title=title,
+        subtitle=None,
+        fact_text=None,
+        next_step="可在 SIDERA 查看",
         web_url=web_url,
     )
 

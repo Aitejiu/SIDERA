@@ -616,6 +616,7 @@ class NotificationPolicyV1:
             "plan_generation_converged",
             "handoff_converged",
             "planning_materialized",
+            "result_acceptance_recorded",
         }
 
     @staticmethod
@@ -849,6 +850,9 @@ _STATIC_COPY: dict[str, tuple[str, str]] = {
     "plan_generation_converged": ("计划已完成收敛。", "查看计划结果"),
     "handoff_converged": ("WorkerItem 的 agent 切换已完成。", "查看 WorkerItem"),
     "planning_materialized": ("任务已从计划生成。", "打开根任务"),
+    "result_candidate_ready": ("新的成果候选已就绪。", "审阅成果候选"),
+    "result_attention": ("成果处理需要关注。", "检查成果状态"),
+    "result_acceptance_recorded": ("成果验收决定已记录。", "查看收尾状态"),
 }
 
 
