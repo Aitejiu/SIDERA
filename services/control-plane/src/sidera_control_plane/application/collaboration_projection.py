@@ -98,6 +98,7 @@ class CollaborationRequestFact:
     handoff_transition_id: UUID | None = None
     result_derivation_kind: str | None = None
     source_candidate_id: UUID | None = None
+    purpose: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,6 +722,7 @@ class CollaborationProjectionAssembler:
             "subtask_task_id": str(item.subtask_task_id),
             "worker_item_id": str(item.worker_item_id),
             "version": item.version,
+            "purpose": item.purpose,
             "status": item.status,
             "collaboration_gate_mode": item.collaboration_gate_mode,
             "gate_reason": item.gate_reason,
@@ -879,6 +881,16 @@ def _current_consumer_request_id(
         and item.subtask_task_id == placement.subtask_task_id
         and item.handoff_transition_id is None
     )
+    reintegration_requests = tuple(
+        item for item in requests if item.purpose == "reintegrate"
+    )
+    if len(reintegration_requests) == 1:
+        return reintegration_requests[0].id
+    if len(reintegration_requests) > 1:
+        raise ValidationError(
+            "input group consumer must have one current reintegration request"
+        )
+    requests = tuple(item for item in requests if item.purpose != "rework")
     if len(requests) != 1:
         raise ValidationError(
             "input group consumer must have one current execution request"

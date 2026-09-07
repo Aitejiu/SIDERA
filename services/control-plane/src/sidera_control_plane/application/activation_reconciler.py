@@ -24,6 +24,9 @@ from sidera_control_plane.application.plan_transition_gate import (
     PlanTransitionGateResult,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_integration import (
+    build_reintegration_context,
+)
 from sidera_control_plane.application.result_rework import (
     build_rework_context,
     require_authorized_source_candidate,
@@ -356,7 +359,20 @@ class ActivationReconciler:
             if request.result_derivation_kind == "verification"
             else None
         )
-        if request.result_derivation_kind == "rework":
+        if (
+            request.result_derivation_kind == "rework"
+            and request.purpose == "reintegrate"
+        ):
+            context_assembly = build_reintegration_context(
+                uow,
+                request,
+                execution,
+                context.worker_item,
+                context.work_context_revision,
+                ttl_seconds=self._execution_context_ttl_seconds,
+                created_at=now,
+            )
+        elif request.result_derivation_kind == "rework":
             source_candidate = require_authorized_source_candidate(uow, request)
             context_assembly = build_rework_context(
                 uow,

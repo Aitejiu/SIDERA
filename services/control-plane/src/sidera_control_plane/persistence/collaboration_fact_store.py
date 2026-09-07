@@ -283,6 +283,7 @@ class SqlAlchemyCollaborationFactStore:
             select(
                 ExecutionRequestModel.id,
                 ExecutionRequestModel.worker_item_key,
+                ExecutionRequestModel.purpose,
                 ExecutionRequestModel.subtask_task_id,
                 ExecutionRequestModel.worker_item_id,
                 ExecutionRequestModel.version,
@@ -346,8 +347,9 @@ class SqlAlchemyCollaborationFactStore:
         }
         statement = select(
             ExecutionRequestModel.id,
-            ExecutionRequestModel.worker_item_key,
-            ExecutionRequestModel.subtask_task_id,
+                ExecutionRequestModel.worker_item_key,
+                ExecutionRequestModel.purpose,
+                ExecutionRequestModel.subtask_task_id,
             ExecutionRequestModel.worker_item_id,
             ExecutionRequestModel.version,
             ExecutionRequestModel.status,
@@ -425,6 +427,7 @@ class SqlAlchemyCollaborationFactStore:
             id=row.id,
             subtask_key=subtask_keys.get(row.subtask_task_id, str(row.subtask_task_id)),
             worker_item_key=worker_item_key or row.worker_item_key,
+            purpose=row.purpose,
             subtask_task_id=row.subtask_task_id,
             worker_item_id=row.worker_item_id,
             version=row.version,

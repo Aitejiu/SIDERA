@@ -110,7 +110,9 @@ class ResultIntegrationScenario:
         self._source_execution_ids: dict[str, UUID] = {}
         self._source_worktrees: dict[str, Path] = {}
         self._integration_execution_id: UUID | None = None
+        self._integration_request_id: UUID | None = None
         self._integration_operation_id: UUID | None = None
+        self._pending_reintegration_request_id: UUID | None = None
         self._repository = tmp_path / "result-integration-repository"
         self._worktree_root = tmp_path / "result-integration-worktrees"
         self._artifact_store = LocalArtifactContentStore(
@@ -335,21 +337,28 @@ class ResultIntegrationScenario:
         return None
 
     def code_input_manifest(
-        self, *, base_commit: str | None = None
+        self,
+        *,
+        base_commit: str | None = None,
+        request_id: UUID | None = None,
+        execution_id: UUID | None = None,
     ) -> CodeInputManifestV1:
         """Build the exact code input manifest for the integration WorkerItem."""
 
         self._planning.reconcile()
         self._planning.activate()
-        summary_execution_id = self._planning._execution_id("summary")
-        if summary_execution_id is None:
+        integration_request_id = request_id or self._integration_request_id
+        if integration_request_id is None:
+            integration_request_id = self.request_ids["summary"]
+        integration_execution_id = execution_id or self._planning._execution_id("summary")
+        if integration_execution_id is None:
             raise AssertionError("integration execution was not activated")
         with self.uow() as uow:
             execution_request = uow.execution_requests.get(
-                self.request_ids["summary"],
+                integration_request_id,
                 self.workspace_id,
             )
-            execution = uow.executions.get(summary_execution_id, self.workspace_id)
+            execution = uow.executions.get(integration_execution_id, self.workspace_id)
             selection = (
                 None
                 if execution_request is None
@@ -509,9 +518,13 @@ class ResultIntegrationScenario:
                     local_actor_type="local",
                     local_actor_id="operator",
                 ),
+                ResultIntegrationService(
+                    lambda: self.uow(),
+                    clock=lambda: self._planning.now,
+                ),
             ),
         )
-        return service.handle(
+        result = service.handle(
             CommandEnvelope(
                 id=command_id,
                 workspace_id=self.workspace_id,
@@ -526,6 +539,172 @@ class ResultIntegrationScenario:
                 correlation_id=self.root_task_id,
             )
         )
+        if command_type == "ReintegrateTaskResult":
+            request_id = UUID(str(result.data["execution_request_id"]))
+            self._pending_reintegration_request_id = request_id
+            self._integration_request_id = request_id
+            self._integration_execution_id = None
+            self._integration_operation_id = UUID(
+                str(result.data["integration_operation_id"])
+            )
+        return result
+
+    def selection(self, selection_id: UUID):
+        with self.uow() as uow:
+            selection = uow.input_selections.get(self.workspace_id, selection_id)
+        if selection is None:
+            raise AssertionError(f"input selection {selection_id} was not found")
+        return selection
+
+    def release_for_request(self, request_id: UUID):
+        with self.uow() as uow:
+            release = uow.collaboration_ledger.get_release_for_request(
+                self.workspace_id, request_id
+            )
+        if release is None:
+            raise AssertionError(f"release for request {request_id} was not found")
+        return release
+
+    def latest_candidate(self) -> IntegrationCandidateV1:
+        head = self.head()
+        if head.current_candidate_id is None:
+            raise AssertionError("current integration candidate is not available")
+        with self.uow() as uow:
+            candidate = uow.results.get_record(
+                "candidate", head.current_candidate_id, self.workspace_id
+            )
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise TypeError("current integration candidate is not typed")
+        return candidate
+
+    def latest_source(self, key: str) -> CodeResultSnapshotV1:
+        source_key = "a" if key == "login" else key
+        if source_key not in self.worker_item_ids:
+            raise KeyError(source_key)
+        execution_id = self._planning._execution_id(source_key)
+        if execution_id is None:
+            raise AssertionError(f"source execution {source_key!r} was not created")
+        with self.uow() as uow:
+            snapshot = uow.results.get_code_result_by_capture_operation(
+                code_capture_operation_id(execution_id), self.workspace_id
+            )
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise TypeError(f"source result {source_key!r} was not captured")
+        return snapshot
+
+    def reintegration_payload(
+        self,
+        candidate: IntegrationCandidateV1,
+        replacement: CodeResultSnapshotV1,
+        *,
+        target_observation_id: UUID | None = None,
+        reason: str = "reintegrate repaired source results",
+    ) -> dict[str, object]:
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise TypeError("candidate must be a typed integration candidate")
+        if not isinstance(replacement, CodeResultSnapshotV1):
+            raise TypeError("replacement must be a typed code result snapshot")
+        return {
+            "source_candidate_id": str(candidate.id),
+            "source_candidate_hash": candidate.content_hash,
+            "replacement_result_ids": [str(replacement.id)],
+            "expected_result_version": self.head().result_version,
+            "target_observation_id": (
+                None
+                if target_observation_id is None
+                else str(target_observation_id)
+            ),
+            "reason": reason,
+        }
+
+    def rework_source(
+        self, request_id: UUID, *, files: dict[str, bytes]
+    ) -> CodeResultSnapshotV1:
+        """Run a rework ExecutionRequest through the real capture boundary."""
+
+        if not isinstance(request_id, UUID):
+            raise TypeError("request_id must be a UUID")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("rework files are required")
+        self.seed_plan()
+        self.tick()
+        request = self.request(request_id)
+        if request.result_derivation_kind != "rework":
+            raise AssertionError("request is not a rework request")
+        execution_id = request.first_execution_id
+        if execution_id is None:
+            raise AssertionError("rework execution was not materialized")
+        worker_id, lease_id, session_id, execution_version = self._planning._start_source(
+            execution_id, key=request.worker_item_key
+        )
+        worktree, manifest = self._create_worktree(execution_id)
+        with self.uow() as uow:
+            uow.workspaces.add(manifest)
+        capture_operation = code_capture_operation_id(execution_id)
+        service = self.capture_service
+        service.record_execution_start(
+            manifest=manifest,
+            input_commit=self._base_commit,
+            writable_paths=(".",),
+            operation_id=capture_operation,
+        )
+        for relative, body in files.items():
+            path = (worktree / relative).resolve()
+            if worktree not in path.parents or path == worktree:
+                raise ValueError("rework file escapes the worktree")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        self._git(worktree, "add", "-A")
+        self._git(
+            worktree,
+            "-c",
+            "user.name=Result Integration Worker",
+            "-c",
+            "user.email=worker@sidera.local",
+            "commit",
+            "-m",
+            f"rework result {request.worker_item_key}",
+        )
+        service.observe_terminal(
+            workspace_id=self.workspace_id,
+            execution_id=execution_id,
+            operation_id=capture_operation,
+            outcome="succeeded",
+            fencing_token=1,
+        )
+        snapshot = service.capture_execution(
+            workspace_id=self.workspace_id,
+            execution_id=execution_id,
+            operation_id=capture_operation,
+        )
+        with self.uow() as uow:
+            current = uow.executions.get(execution_id, self.workspace_id)
+        if current is None:
+            raise AssertionError("rework execution disappeared")
+        CommandService(
+            lambda: self.uow(),
+            (ExecutionCommandHandler(lambda: self._planning.now),),
+        ).handle(
+            CommandEnvelope(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                command_type="ReportExecutionSucceeded",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(worker_id),
+                target_id=execution_id,
+                payload={
+                    "worker_id": str(worker_id),
+                    "lease_id": str(lease_id),
+                    "fencing_token": 1,
+                },
+                expected_version=current.version,
+                idempotency_key=f"result-capture-rework-succeeded:{execution_id}",
+                correlation_id=self.root_task_id,
+            )
+        )
+        del session_id, execution_version
+        return snapshot
 
     def rework_records(self) -> tuple[ReworkRecordV1, ...]:
         with self.uow() as uow:
@@ -586,6 +765,19 @@ class ResultIntegrationScenario:
         if type(limit) is not int or limit < 1:
             raise ValueError("drive limit must be positive")
         del limit
+        if self._pending_reintegration_request_id is not None:
+            request_id = self._pending_reintegration_request_id
+            self._run_integration_execution(request_id=request_id)
+            candidate = ResultIntegrationService(
+                self.uow,
+                clock=lambda: self._planning.now,
+            ).publish_candidate(
+                workspace_id=self.workspace_id,
+                execution_id=self.integration_execution_id,
+                operation_id=self.integration_operation_id,
+            )
+            self._pending_reintegration_request_id = None
+            return candidate
         self._planning.worker_context_versions = self.worker_context_versions
         self._planning.code_provider_failure = self.code_provider_failure
         code_manifest = self.code_input_manifest()
@@ -660,19 +852,31 @@ class ResultIntegrationScenario:
             )
             uow.context_assemblies.add(assembly)
 
-    def _run_integration_execution(self) -> None:
+    def _run_integration_execution(self, *, request_id: UUID | None = None) -> None:
+        request_id = request_id or self._integration_request_id or self.request_ids["summary"]
         self._planning.reconcile()
         self._planning.activate()
         execution_id = self._planning._execution_id("summary")
         if execution_id is None:
             raise AssertionError("integration execution was not activated")
+        with self.uow() as uow:
+            execution_request = uow.execution_requests.get(request_id, self.workspace_id)
+            execution = uow.executions.get(execution_id, self.workspace_id)
+        if execution_request is None or execution is None:
+            raise AssertionError("integration execution facts are unavailable")
+        if execution_request.first_execution_id != execution_id:
+            raise AssertionError("latest integration execution does not match request")
         worker_id, lease_id, _session_id, execution_version = self._planning._start_source(
             execution_id, key="summary"
         )
         worktree, manifest = self._create_worktree(execution_id)
         with self.uow() as uow:
             uow.workspaces.add(manifest)
-        code_inputs = self.code_input_manifest(base_commit=self._base_commit)
+        code_inputs = self.code_input_manifest(
+            base_commit=self._base_commit,
+            request_id=request_id,
+            execution_id=execution_id,
+        )
         materialization_operation_id = uuid5(
             NAMESPACE_URL,
             f"sidera.integration-input:{execution_id}:{code_inputs.input_hash}",
@@ -685,10 +889,12 @@ class ResultIntegrationScenario:
         if not receipt.succeeded:
             raise AssertionError(f"integration inputs conflicted: {receipt.conflict_paths}")
         self._integration_execution_id = execution_id
-        self._integration_operation_id = uuid5(
-            NAMESPACE_URL,
-            f"sidera.integration-candidate-operation:{execution_id}",
-        )
+        self._integration_request_id = request_id
+        if self._integration_operation_id is None:
+            self._integration_operation_id = uuid5(
+                NAMESPACE_URL,
+                f"sidera.integration-candidate-operation:{execution_id}",
+            )
         capture_operation_id = code_capture_operation_id(execution_id)
         service = self.capture_service
         service.record_execution_start(

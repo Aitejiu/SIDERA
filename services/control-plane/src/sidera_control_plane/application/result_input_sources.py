@@ -115,6 +115,17 @@ def resolve_result_input_source(
         and item.handoff_transition_id is None
         and item.result_derivation_kind != "verification"
     )
+    reintegration_requests = tuple(
+        item for item in current_requests if item.purpose == "reintegrate"
+    )
+    if reintegration_requests:
+        current_requests = reintegration_requests
+    else:
+        rework_requests = tuple(
+            item for item in current_requests if item.purpose == "rework"
+        )
+        if rework_requests:
+            current_requests = rework_requests
     if len(current_requests) != 1:
         return _unresolved(
             worker_item_key,

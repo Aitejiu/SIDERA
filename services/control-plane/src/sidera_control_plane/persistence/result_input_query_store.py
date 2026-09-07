@@ -408,6 +408,7 @@ def _request_fact(
         id=row.id,
         subtask_key=subtask_key,
         worker_item_key=row.worker_item_key,
+        purpose=row.purpose,
         subtask_task_id=row.subtask_task_id,
         worker_item_id=row.worker_item_id,
         version=row.version,

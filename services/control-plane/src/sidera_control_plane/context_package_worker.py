@@ -219,6 +219,7 @@ class ContextPackageWorker:
                 if (
                     execution_request is None
                     or execution_request.result_derivation_kind != "rework"
+                    or execution_request.purpose == "reintegrate"
                 ):
                     raise ContextAssemblyError(
                         "context_input_selection_missing",

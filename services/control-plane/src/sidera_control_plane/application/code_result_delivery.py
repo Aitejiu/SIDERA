@@ -47,7 +47,10 @@ def resolve_code_inputs(
             "code_input_consumer_mismatch",
             {"execution_id": str(manifest.execution_id)},
         )
-    if execution_request.result_derivation_kind == "rework":
+    if (
+        execution_request.result_derivation_kind == "rework"
+        and execution_request.purpose != "reintegrate"
+    ):
         return _resolve_rework_code_inputs(uow, manifest, execution_request)
 
     selection = uow.input_selections.get(manifest.workspace_id, manifest.selection_id)

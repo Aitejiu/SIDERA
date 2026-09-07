@@ -74,6 +74,7 @@ from sidera_control_plane.application.resource_queries import ResourceQueryServi
 from sidera_control_plane.application.result_input_queries import (
     ResultInputQueryService,
 )
+from sidera_control_plane.application.result_integration import ResultIntegrationService
 from sidera_control_plane.application.result_rework import ResultReworkService
 from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
 from sidera_control_plane.application.runtime_metrics import RuntimeMetricsService
@@ -243,6 +244,10 @@ def get_command_service(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
+            ),
+            ResultIntegrationService(
+                factory,
+                clock=lambda: datetime.now(UTC),
             ),
             PlanningCommandHandler(
                 local_actor_type=settings.local_actor_type,
