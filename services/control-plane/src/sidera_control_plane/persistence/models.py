@@ -3041,6 +3041,31 @@ class ExecutionRequestModel(TimestampMixin, Base):
             "status",
             "not_before",
         ),
+        CheckConstraint(
+            "(result_derivation_kind IS NULL AND source_candidate_id IS NULL AND rework_record_id IS NULL) OR "
+            "(result_derivation_kind = 'verification' AND source_candidate_id IS NOT NULL AND rework_record_id IS NULL) OR "
+            "(result_derivation_kind = 'rework' AND source_candidate_id IS NOT NULL AND rework_record_id IS NOT NULL)",
+            name="ck_execution_requests_result_derivation",
+        ),
+        ForeignKeyConstraint(
+            ["source_candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_source_candidate_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["rework_record_id", "workspace_id"],
+            ["result_rework_records.id", "result_rework_records.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_execution_requests_rework_record_workspace",
+        ),
+        Index(
+            "ix_execution_requests_result_derivation",
+            "workspace_id",
+            "root_task_id",
+            "result_derivation_kind",
+            "created_at",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -3109,6 +3134,13 @@ class ExecutionRequestModel(TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True)
     )
     input_selection_hash: Mapped[str | None] = mapped_column(String(64))
+    result_derivation_kind: Mapped[str | None] = mapped_column(String(32))
+    source_candidate_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    rework_record_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -6273,3 +6305,626 @@ class NotificationReconciliationCursorModel(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(255))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ResultOperationAttemptModel(TimestampMixin, Base):
+    __tablename__ = "result_operation_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt >= 1 AND version >= 1",
+            name="ck_result_operation_attempts_versions",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'blocked', 'unknown', 'failed')",
+            name="ck_result_operation_attempts_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload) = 'object'",
+            name="ck_result_operation_attempts_payload_object",
+        ),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_token IS NULL AND lease_expiry IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expiry IS NOT NULL)",
+            name="ck_result_operation_attempts_lease_pair",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_operation_attempts_root_task_workspace",
+        ),
+        PrimaryKeyConstraint("operation_id", name="pk_result_operation_attempts"),
+        UniqueConstraint(
+            "operation_id",
+            "workspace_id",
+            name="uq_result_operation_attempts_identity",
+        ),
+        Index(
+            "ix_result_operation_attempts_claims",
+            "workspace_id",
+            "status",
+            "lease_expiry",
+            "created_at",
+        ),
+    )
+
+    operation_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    operation_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_token: Mapped[str | None] = mapped_column(String(255))
+    lease_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    receipt_ref: Mapped[str | None] = mapped_column(String(1024))
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class CodeResultSnapshotModel(TimestampMixin, Base):
+    __tablename__ = "code_result_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version = 1 AND content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_code_result_snapshots_protocol",
+        ),
+        CheckConstraint(
+            "input_commit ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' AND "
+            "input_tree ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' AND "
+            "result_commit ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' AND "
+            "result_tree ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'",
+            name="ck_code_result_snapshots_git_oids",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(consumed_result_ids) = 'array' AND "
+            "jsonb_typeof(artifact_ids) = 'array' AND jsonb_typeof(payload) = 'object'",
+            name="ck_code_result_snapshots_json_arrays",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_code_result_snapshots_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["worker_item_id", "workspace_id"],
+            ["worker_items.id", "worker_items.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_code_result_snapshots_worker_item_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["request_id", "workspace_id"],
+            ["execution_requests.id", "execution_requests.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_code_result_snapshots_request_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_code_result_snapshots_execution_workspace",
+        ),
+        PrimaryKeyConstraint("id", name="pk_code_result_snapshots"),
+        UniqueConstraint("id", "workspace_id", name="uq_code_result_snapshots_identity"),
+        UniqueConstraint(
+            "workspace_id",
+            "capture_operation_id",
+            name="uq_code_result_snapshots_capture_operation",
+        ),
+        Index(
+            "ix_code_result_snapshots_worker_history",
+            "workspace_id",
+            "worker_item_id",
+            "created_at",
+        ),
+        Index(
+            "ix_code_result_snapshots_root_history",
+            "workspace_id",
+            "root_task_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    worker_item_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    repository_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    input_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_tree: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_tree: Mapped[str] = mapped_column(String(64), nullable=False)
+    consumed_result_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    artifact_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    capture_operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class IntegrationCandidateModel(TimestampMixin, Base):
+    __tablename__ = "integration_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version = 1 AND plan_content_hash ~ '^[0-9a-f]{64}$' AND "
+            "input_selection_hash ~ '^[0-9a-f]{64}$' AND content_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_integration_candidates_protocol",
+        ),
+        CheckConstraint(
+            "base_commit ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'",
+            name="ck_integration_candidates_base_oid",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(source_result_ids) = 'array' AND jsonb_array_length(source_result_ids) >= 1 "
+            "AND jsonb_typeof(payload) = 'object'",
+            name="ck_integration_candidates_sources_array",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_integration_candidates_root_task_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["plan_snapshot_id", "workspace_id"],
+            ["task_plan_snapshots.id", "task_plan_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_integration_candidates_plan_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["integration_execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_integration_candidates_execution_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["input_selection_id", "workspace_id"],
+            [
+                "collaboration_input_selections.id",
+                "collaboration_input_selections.workspace_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_integration_candidates_selection_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["code_result_id", "workspace_id"],
+            ["code_result_snapshots.id", "code_result_snapshots.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_integration_candidates_code_result_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["previous_candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_integration_candidates_previous_workspace",
+        ),
+        PrimaryKeyConstraint("id", name="pk_integration_candidates"),
+        UniqueConstraint("id", "workspace_id", name="uq_integration_candidates_identity"),
+        Index(
+            "ix_integration_candidates_root_history",
+            "workspace_id",
+            "root_task_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    integration_execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    base_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_result_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    input_selection_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    input_selection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_result_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    previous_candidate_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class ResultVerificationResultModel(TimestampMixin, Base):
+    __tablename__ = "result_verification_results"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version = 1 AND check_version >= 1 AND attempt >= 1 AND "
+            "check_hash ~ '^[0-9a-f]{64}$' AND environment_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_result_verification_results_protocol",
+        ),
+        CheckConstraint(
+            "status IN ('passed', 'failed', 'not_run', 'unknown', 'interrupted', 'blocked')",
+            name="ck_result_verification_results_status",
+        ),
+        CheckConstraint(
+            "actual_commit ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' AND "
+            "actual_tree ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' AND "
+            "jsonb_typeof(artifact_ids) = 'array' AND jsonb_typeof(payload) = 'object'",
+            name="ck_result_verification_results_evidence",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_verification_results_root_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_verification_results_candidate_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_verification_results_execution_workspace",
+        ),
+        PrimaryKeyConstraint("id", name="pk_result_verification_results"),
+        UniqueConstraint("id", "workspace_id", name="uq_result_verification_results_identity"),
+        UniqueConstraint(
+            "workspace_id",
+            "candidate_id",
+            "check_key",
+            "attempt",
+            name="uq_result_verification_results_attempt",
+        ),
+        Index(
+            "ix_result_verification_results_candidate",
+            "workspace_id",
+            "candidate_id",
+            "check_key",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    check_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    check_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    check_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    environment_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    actual_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    actual_tree: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    artifact_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class TaskAcceptanceDecisionModel(TimestampMixin, Base):
+    __tablename__ = "task_acceptance_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "candidate_hash ~ '^[0-9a-f]{64}$' AND plan_content_hash ~ '^[0-9a-f]{64}$' "
+            "AND acceptance_basis_hash ~ '^[0-9a-f]{64}$' AND result_version >= 1",
+            name="ck_task_acceptance_decisions_protocol",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(criteria_json) = 'array' AND jsonb_array_length(criteria_json) >= 1",
+            name="ck_task_acceptance_decisions_criteria_array",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_task_acceptance_decisions_root_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_task_acceptance_decisions_candidate_workspace",
+        ),
+        PrimaryKeyConstraint("id", name="pk_task_acceptance_decisions"),
+        UniqueConstraint("id", "workspace_id", name="uq_task_acceptance_decisions_identity"),
+        Index(
+            "ix_task_acceptance_decisions_root_history",
+            "workspace_id",
+            "root_task_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    candidate_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    acceptance_basis_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    criteria_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    command_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+
+
+class ResultReworkRecordModel(TimestampMixin, Base):
+    __tablename__ = "result_rework_records"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('automatic', 'user') AND (round_number IS NULL OR round_number >= 1)",
+            name="ck_result_rework_records_mode",
+        ),
+        CheckConstraint(
+            "status IN ('requested', 'running', 'succeeded', 'blocked', 'failed')",
+            name="ck_result_rework_records_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(source_issue_keys_json) = 'array' AND "
+            "jsonb_typeof(target_worker_item_ids_json) = 'array' AND "
+            "jsonb_typeof(impact_worker_item_ids_json) = 'array' AND "
+            "jsonb_typeof(request_ids_json) = 'array'",
+            name="ck_result_rework_records_json_arrays",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_rework_records_root_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_rework_records_candidate_workspace",
+        ),
+        PrimaryKeyConstraint("id", name="pk_result_rework_records"),
+        UniqueConstraint("id", "workspace_id", name="uq_result_rework_records_identity"),
+        Index(
+            "ix_result_rework_records_root_history",
+            "workspace_id",
+            "root_task_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    source_issue_keys_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    target_worker_item_ids_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    impact_worker_item_ids_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    round_number: Mapped[int | None] = mapped_column(Integer)
+    source_command_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    request_ids_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class ResultApplyOperationModel(TimestampMixin, Base):
+    __tablename__ = "result_apply_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "target_ref LIKE 'refs/%' AND expected_old_commit ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' "
+            "AND accepted_commit ~ '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'",
+            name="ck_result_apply_operations_git_identity",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'blocked', 'unknown', 'failed') "
+            "AND attempt >= 1 AND version >= 1",
+            name="ck_result_apply_operations_state",
+        ),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_token IS NULL AND lease_expiry IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expiry IS NOT NULL)",
+            name="ck_result_apply_operations_lease_pair",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_apply_operations_root_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["acceptance_id", "workspace_id"],
+            ["task_acceptance_decisions.id", "task_acceptance_decisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_apply_operations_acceptance_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_result_apply_operations_candidate_workspace",
+        ),
+        PrimaryKeyConstraint("id", name="pk_result_apply_operations"),
+        UniqueConstraint("id", "workspace_id", name="uq_result_apply_operations_identity"),
+        Index(
+            "uq_result_apply_operations_active_root",
+            "workspace_id",
+            "root_task_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('pending', 'running', 'blocked', 'unknown')"
+            ),
+        ),
+        Index(
+            "ix_result_apply_operations_claims",
+            "workspace_id",
+            "status",
+            "lease_expiry",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    acceptance_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    repository_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_ref: Mapped[str] = mapped_column(String(1024), nullable=False)
+    expected_old_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    accepted_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_token: Mapped[str | None] = mapped_column(String(255))
+    lease_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    receipt_ref: Mapped[str | None] = mapped_column(String(1024))
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class TaskResultHeadModel(TimestampMixin, Base):
+    __tablename__ = "task_result_heads"
+    __table_args__ = (
+        CheckConstraint(
+            "result_version >= 1 AND auto_rounds_used >= 0 AND auto_rounds_limit >= 0 "
+            "AND auto_seconds_limit >= 1",
+            name="ck_task_result_heads_versions",
+        ),
+        CheckConstraint(
+            "(auto_started_at IS NULL AND auto_deadline IS NULL) OR "
+            "(auto_started_at IS NOT NULL AND auto_deadline IS NOT NULL AND auto_deadline > auto_started_at)",
+            name="ck_task_result_heads_timer",
+        ),
+        ForeignKeyConstraint(
+            ["root_task_id", "workspace_id"],
+            ["tasks.id", "tasks.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_task_result_heads_root_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["current_candidate_id", "workspace_id"],
+            ["integration_candidates.id", "integration_candidates.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_task_result_heads_candidate_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["current_acceptance_id", "workspace_id"],
+            ["task_acceptance_decisions.id", "task_acceptance_decisions.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_task_result_heads_acceptance_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["active_operation_id", "workspace_id"],
+            ["result_apply_operations.id", "result_apply_operations.workspace_id"],
+            ondelete="RESTRICT",
+            name="fk_task_result_heads_operation_workspace",
+        ),
+        PrimaryKeyConstraint(
+            "workspace_id",
+            "root_task_id",
+            name="pk_task_result_heads_identity",
+        ),
+        Index(
+            "ix_task_result_heads_active_operation",
+            "workspace_id",
+            "active_operation_id",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    root_task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    current_candidate_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    current_acceptance_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    result_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    active_operation_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    auto_rounds_used: Mapped[int] = mapped_column(Integer, nullable=False)
+    auto_rounds_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    auto_seconds_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    auto_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auto_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
