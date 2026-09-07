@@ -1254,6 +1254,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Task Result Overview */
+        get: operations["get_task_result_overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Task Result Detail */
+        get: operations["get_task_result_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/rework": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Task Result Rework */
+        get: operations["list_task_result_rework"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/verifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Task Result Verifications */
+        get: operations["list_task_result_verifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/work-context": {
         parameters: {
             query?: never;
@@ -2380,6 +2448,10 @@ export interface components {
         ContextMaterializationResponse: {
             /** Artifact And Evidence Refs */
             artifact_and_evidence_refs: components["schemas"]["MaterializedContextRefResponse"][];
+            /** Code Input Manifest */
+            code_input_manifest?: {
+                [key: string]: unknown;
+            } | null;
             /** Control Plane Facts */
             control_plane_facts: {
                 [key: string]: unknown;
@@ -2401,6 +2473,10 @@ export interface components {
             system_constraints: components["schemas"]["MaterializationSystemConstraintsResponse"];
             /** Total Byte Count */
             total_byte_count: number;
+            /** Verification Manifest */
+            verification_manifest?: {
+                [key: string]: unknown;
+            } | null;
             work_context: components["schemas"]["MaterializationWorkContextResponse"];
         };
         /** ContextPackageAcknowledgementResponse */
@@ -2572,6 +2648,10 @@ export interface components {
             artifact_refs: components["schemas"]["ContextPackageReferenceResponse"][];
             assembly: components["schemas"]["ContextPackageAssemblyResponse"];
             budget: components["schemas"]["ContextPackageBudgetResponse"];
+            /** Code Input Manifest */
+            code_input_manifest: {
+                [key: string]: unknown;
+            } | null;
             /**
              * Consumer Id
              * Format: uuid
@@ -2628,6 +2708,10 @@ export interface components {
             revoked_at: string | null;
             /** Status */
             status: string;
+            /** Verification Manifest */
+            verification_manifest: {
+                [key: string]: unknown;
+            } | null;
             /** Work Context Content Hash */
             work_context_content_hash: string;
             /**
@@ -5740,6 +5824,210 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** ResultAcceptanceResponse */
+        ResultAcceptanceResponse: {
+            /** Acceptance Basis Hash */
+            acceptance_basis_hash: string;
+            /**
+             * Acceptance Id
+             * Format: uuid
+             */
+            acceptance_id: string;
+            /** Actor Id */
+            actor_id: string;
+            /** Actor Type */
+            actor_type: string;
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /**
+             * Command Id
+             * Format: uuid
+             */
+            command_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Criteria */
+            criteria: components["schemas"]["ResultCriterionDecisionResponse"][];
+            /** Plan Content Hash */
+            plan_content_hash: string;
+            /** Result Version */
+            result_version: number;
+        };
+        /** ResultActionResponse */
+        ResultActionResponse: {
+            /** Action */
+            action: string;
+            /** Candidate Hash */
+            candidate_hash: string | null;
+            /** Candidate Id */
+            candidate_id: string | null;
+            /** Command Type */
+            command_type: string;
+            /** Expected Fingerprint */
+            expected_fingerprint: string | null;
+            /** Expected Result Version */
+            expected_result_version: number;
+            /** Expected Version */
+            expected_version: number;
+            /** Plan Content Hash */
+            plan_content_hash: string | null;
+            /** Requires Reason */
+            requires_reason: boolean;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /** Target Type */
+            target_type: string;
+        };
+        /** ResultApplyResponse */
+        ResultApplyResponse: {
+            /** Accepted Commit */
+            accepted_commit: string;
+            /** Attempt */
+            attempt: number;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Failure Code */
+            failure_code: string | null;
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /** Receipt Ref */
+            receipt_ref: string | null;
+            /** Status */
+            status: string;
+            /** Target Ref */
+            target_ref: string;
+            /** Version */
+            version: number;
+        };
+        /** ResultArtifactResponse */
+        ResultArtifactResponse: {
+            /**
+             * Artifact Id
+             * Format: uuid
+             */
+            artifact_id: string;
+            /** Artifact Type */
+            artifact_type: string;
+            /** Content Available */
+            content_available: boolean;
+            /** Content Hash */
+            content_hash: string;
+            /** Media Type */
+            media_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
+        /** ResultCandidateHistoryResponse */
+        ResultCandidateHistoryResponse: {
+            /** Items */
+            items: components["schemas"]["ResultCandidateResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** ResultCandidateResponse */
+        ResultCandidateResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["ResultArtifactResponse"][];
+            /** Base Commit */
+            base_commit: string;
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /**
+             * Code Result Id
+             * Format: uuid
+             */
+            code_result_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Integration Execution Id
+             * Format: uuid
+             */
+            integration_execution_id: string;
+            /** Is Current */
+            is_current: boolean;
+            /** Plan Content Hash */
+            plan_content_hash: string;
+            /**
+             * Plan Snapshot Id
+             * Format: uuid
+             */
+            plan_snapshot_id: string;
+            /** Previous Candidate Id */
+            previous_candidate_id: string | null;
+            /** Result Commit */
+            result_commit: string | null;
+            /** Result Tree */
+            result_tree: string | null;
+            /** Source Result Ids */
+            source_result_ids: string[];
+        };
+        /** ResultCriterionDecisionResponse */
+        ResultCriterionDecisionResponse: {
+            /** Criterion Key */
+            criterion_key: string;
+            /** Decision */
+            decision: string;
+            /** Reason */
+            reason: string | null;
+        };
+        /** ResultCriterionResponse */
+        ResultCriterionResponse: {
+            /** Check Keys */
+            check_keys: string[];
+            /** Criterion Key */
+            criterion_key: string;
+            /** Decision */
+            decision: string | null;
+            /** Decision Reason */
+            decision_reason: string | null;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "automatic" | "manual";
+            /**
+             * Observed Status
+             * @enum {string}
+             */
+            observed_status: "passed" | "failed" | "pending";
+            /** Text */
+            text: string;
+            /** Verification Result Ids */
+            verification_result_ids: string[];
+            /** Verification Status */
+            verification_status: string;
+        };
         /** ResultInputActionResponse */
         ResultInputActionResponse: {
             /** Action */
@@ -6081,6 +6369,176 @@ export interface components {
             worker_item_key: string;
             /** Worker Item Title */
             worker_item_title: string;
+        };
+        /** ResultOperationResponse */
+        ResultOperationResponse: {
+            /** Attempt */
+            attempt: number;
+            /** Candidate Id */
+            candidate_id: string | null;
+            /** Failure Code */
+            failure_code: string | null;
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /** Operation Kind */
+            operation_kind: string;
+            /** Receipt Ref */
+            receipt_ref: string | null;
+            /** Status */
+            status: string;
+            /** Version */
+            version: number;
+        };
+        /** ResultReworkPageResponse */
+        ResultReworkPageResponse: {
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Items */
+            items: components["schemas"]["ResultReworkResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** ResultReworkResponse */
+        ResultReworkResponse: {
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Impact Worker Item Ids */
+            impact_worker_item_ids: string[];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "automatic" | "user";
+            /** Reason */
+            reason: string;
+            /** Request Ids */
+            request_ids: string[];
+            /**
+             * Rework Id
+             * Format: uuid
+             */
+            rework_id: string;
+            /** Round Number */
+            round_number: number | null;
+            /** Source Issue Keys */
+            source_issue_keys: string[];
+            /** Status */
+            status: string;
+            /** Target Worker Item Ids */
+            target_worker_item_ids: string[];
+        };
+        /** ResultSourceResponse */
+        ResultSourceResponse: {
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /** Result Commit */
+            result_commit: string;
+            /** Result Tree */
+            result_tree: string;
+            /**
+             * Snapshot Id
+             * Format: uuid
+             */
+            snapshot_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** ResultVerificationPageResponse */
+        ResultVerificationPageResponse: {
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Items */
+            items: components["schemas"]["ResultVerificationResponse"][];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** ResultVerificationResponse */
+        ResultVerificationResponse: {
+            /** Actual Commit */
+            actual_commit: string;
+            /** Actual Tree */
+            actual_tree: string;
+            /** Artifact Ids */
+            artifact_ids: string[];
+            /** Attempt */
+            attempt: number;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Check Key */
+            check_key: string;
+            /** Check Version */
+            check_version: number;
+            /** Environment Ref */
+            environment_ref: string;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Exit Code */
+            exit_code: number | null;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Verification Id
+             * Format: uuid
+             */
+            verification_id: string;
         };
         /** ResumeAutomaticCollaborationPayload */
         ResumeAutomaticCollaborationPayload: {
@@ -7184,6 +7642,78 @@ export interface components {
             updated_at: string;
             /** Version */
             version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** TaskResultDetailResponse */
+        TaskResultDetailResponse: {
+            acceptance: components["schemas"]["ResultAcceptanceResponse"] | null;
+            /** Apply Operations */
+            apply_operations: components["schemas"]["ResultApplyResponse"][];
+            /** Artifacts */
+            artifacts: components["schemas"]["ResultArtifactResponse"][];
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            candidate: components["schemas"]["ResultCandidateResponse"];
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Rework */
+            rework: components["schemas"]["ResultReworkResponse"][];
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Source Results */
+            source_results: components["schemas"]["ResultSourceResponse"][];
+            /** Verifications */
+            verifications: components["schemas"]["ResultVerificationResponse"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** TaskResultOverviewResponse */
+        TaskResultOverviewResponse: {
+            acceptance: components["schemas"]["ResultAcceptanceResponse"] | null;
+            active_operation: components["schemas"]["ResultOperationResponse"] | null;
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Available Actions */
+            available_actions: components["schemas"]["ResultActionResponse"][];
+            /** Blocking Reasons */
+            blocking_reasons: string[];
+            candidate_history: components["schemas"]["ResultCandidateHistoryResponse"];
+            /** Criteria */
+            criteria: components["schemas"]["ResultCriterionResponse"][];
+            current_candidate: components["schemas"]["ResultCandidateResponse"] | null;
+            /** Last Change Cursor */
+            last_change_cursor: number;
+            /** Result Stage */
+            result_stage: string;
+            /** Result Version */
+            result_version: number | null;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Task Status */
+            task_status: string;
+            /** Task Title */
+            task_title: string;
+            /** Task Version */
+            task_version: number;
             /**
              * Workspace Id
              * Format: uuid
@@ -10950,6 +11480,150 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PlanTransitionSummaryResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_result_overview: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResultOverviewResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_result_detail: {
+        parameters: {
+            query?: {
+                verification_cursor?: string | null;
+                rework_cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResultDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_task_result_rework: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResultReworkPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_task_result_verifications: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                root_task_id: string;
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResultVerificationPageResponse"];
                 };
             };
             /** @description Validation Error */

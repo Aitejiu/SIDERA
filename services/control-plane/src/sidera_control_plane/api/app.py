@@ -38,6 +38,7 @@ from sidera_control_plane.api.projection_stream import (
 from sidera_control_plane.api.result_input_queries import (
     router as result_input_queries_router,
 )
+from sidera_control_plane.api.result_queries import router as result_queries_router
 from sidera_control_plane.api.runtime_queries import router as runtime_queries_router
 from sidera_control_plane.api.subtask_queries import (
     router as subtask_queries_router,
@@ -93,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(command_queries_router)
     app.include_router(collaboration_queries_router)
     app.include_router(result_input_queries_router)
+    app.include_router(result_queries_router)
     app.include_router(context_package_queries_router)
     app.include_router(task_first_queries_router)
     app.include_router(subtask_queries_router)

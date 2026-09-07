@@ -76,6 +76,7 @@ from sidera_control_plane.application.result_input_queries import (
     ResultInputQueryService,
 )
 from sidera_control_plane.application.result_integration import ResultIntegrationService
+from sidera_control_plane.application.result_queries import ResultQueryService
 from sidera_control_plane.application.result_rework import ResultReworkService
 from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
 from sidera_control_plane.application.runtime_metrics import RuntimeMetricsService
@@ -145,6 +146,9 @@ from sidera_control_plane.persistence.resource_query_store import (
 )
 from sidera_control_plane.persistence.result_input_query_store import (
     SqlAlchemyResultInputQueryStore,
+)
+from sidera_control_plane.persistence.result_query_store import (
+    SqlAlchemyResultQueryStore,
 )
 from sidera_control_plane.persistence.runtime_metrics_store import (
     SqlAlchemyRuntimeMetricsStore,
@@ -477,6 +481,12 @@ def get_result_input_query_service(
         SqlAlchemyResultInputQueryStore(database),
         governance_enabled=settings.collaboration_governance_enabled,
     )
+
+
+def get_result_query_service(
+    database: Annotated[Database, Depends(get_database)],
+) -> ResultQueryService:
+    return ResultQueryService(SqlAlchemyResultQueryStore(database))
 
 
 def get_task_console_query_service(

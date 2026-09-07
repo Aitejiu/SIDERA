@@ -135,6 +135,42 @@ def test_projection_change_targets_only_affected_resources(
         assert subtask_resources == set()
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "CodeResultCaptured",
+        "IntegrationCandidatePrepared",
+        "TaskResultReintegrationRequested",
+        "VerificationExecutionScheduled",
+        "VerificationResultFinished",
+        "ResultReworkRequested",
+        "ResultApplyRequested",
+        "ResultApplyReceiptRecorded",
+        "TaskCompleted",
+    ],
+)
+def test_result_events_invalidate_result_and_task_views(event_type: str) -> None:
+    targets = projection_targets_for_event(
+        _event(
+            event_type,
+            payload={
+                "root_task_id": str(ROOT_TASK_ID),
+                "worker_item_id": str(WORKER_ITEM_ID),
+                "execution_id": str(EXECUTION_ID),
+            },
+        )
+    )
+
+    target_types = {target.projection_type for target in targets}
+    assert {
+        "result_overview",
+        "task_overview",
+        "task_graph",
+        "subtask_workspace",
+    } <= target_types
+    assert all(target.projection_type in PROJECTION_TYPES for target in targets)
+
+
 def test_projection_targets_use_workspace_scope_when_identity_is_unavailable() -> None:
     event = _event("ExecutionStarted")
     event = EventData(

@@ -1079,6 +1079,231 @@ class ResultInputArtifactResponse(BaseModel):
     media_type: str
 
 
+class ResultArtifactResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+    artifact_type: str
+    content_hash: str
+    size_bytes: int = Field(ge=0)
+    media_type: str
+    content_available: bool
+
+
+class ResultSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: UUID
+    worker_item_id: UUID
+    request_id: UUID
+    execution_id: UUID
+    result_commit: str
+    result_tree: str
+    content_hash: str
+    artifact_ids: tuple[UUID, ...]
+    created_at: datetime
+
+
+class ResultCandidateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    candidate_hash: str
+    plan_snapshot_id: UUID
+    plan_content_hash: str
+    integration_execution_id: UUID
+    base_commit: str
+    result_commit: str | None
+    result_tree: str | None
+    source_result_ids: tuple[UUID, ...]
+    code_result_id: UUID
+    previous_candidate_id: UUID | None
+    created_at: datetime
+    is_current: bool
+    artifacts: tuple[ResultArtifactResponse, ...]
+
+
+class ResultCriterionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    criterion_key: str
+    text: str
+    mode: Literal["automatic", "manual"]
+    check_keys: tuple[str, ...]
+    observed_status: Literal["passed", "failed", "pending"]
+    verification_status: str
+    verification_result_ids: tuple[UUID, ...]
+    decision: str | None
+    decision_reason: str | None
+
+
+class ResultCriterionDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    criterion_key: str
+    decision: str
+    reason: str | None
+
+
+class ResultAcceptanceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    acceptance_id: UUID
+    candidate_id: UUID
+    candidate_hash: str
+    plan_content_hash: str
+    acceptance_basis_hash: str
+    result_version: int = Field(ge=1)
+    criteria: tuple[ResultCriterionDecisionResponse, ...]
+    actor_type: str
+    actor_id: str
+    command_id: UUID
+    created_at: datetime
+
+
+class ResultOperationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: UUID
+    operation_kind: str
+    status: str
+    attempt: int = Field(ge=1)
+    failure_code: str | None
+    receipt_ref: str | None
+    version: int = Field(ge=1)
+    candidate_id: UUID | None
+
+
+class ResultActionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+    command_type: str
+    target_type: str
+    target_id: UUID
+    expected_version: int = Field(ge=1)
+    expected_result_version: int = Field(ge=1)
+    expected_fingerprint: str | None
+    candidate_id: UUID | None
+    candidate_hash: str | None
+    plan_content_hash: str | None
+    requires_reason: bool
+
+
+class ResultVerificationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verification_id: UUID
+    candidate_id: UUID
+    execution_id: UUID
+    check_key: str
+    check_version: int = Field(ge=1)
+    environment_ref: str
+    actual_commit: str
+    actual_tree: str
+    operation_id: UUID
+    attempt: int = Field(ge=1)
+    status: str
+    exit_code: int | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    artifact_ids: tuple[UUID, ...]
+    failure_code: str | None
+
+
+class ResultReworkResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rework_id: UUID
+    candidate_id: UUID
+    source_issue_keys: tuple[str, ...]
+    target_worker_item_ids: tuple[UUID, ...]
+    impact_worker_item_ids: tuple[UUID, ...]
+    reason: str
+    mode: Literal["automatic", "user"]
+    round_number: int | None
+    request_ids: tuple[UUID, ...]
+    status: str
+    created_at: datetime
+
+
+class ResultApplyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: UUID
+    candidate_id: UUID
+    status: str
+    attempt: int = Field(ge=1)
+    target_ref: str
+    accepted_commit: str
+    receipt_ref: str | None
+    failure_code: str | None
+    version: int = Field(ge=1)
+    created_at: datetime
+
+
+class ResultCandidateHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: tuple[ResultCandidateResponse, ...]
+    next_cursor: str | None
+
+
+class TaskResultOverviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    task_title: str
+    task_status: str
+    task_version: int = Field(ge=1)
+    result_version: int | None
+    result_stage: str
+    current_candidate: ResultCandidateResponse | None
+    acceptance: ResultAcceptanceResponse | None
+    active_operation: ResultOperationResponse | None
+    criteria: tuple[ResultCriterionResponse, ...]
+    blocking_reasons: tuple[str, ...]
+    available_actions: tuple[ResultActionResponse, ...]
+    candidate_history: ResultCandidateHistoryResponse
+    last_change_cursor: int = Field(ge=0)
+    as_of: datetime
+
+
+class ResultVerificationPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    items: tuple[ResultVerificationResponse, ...]
+    next_cursor: str | None
+    last_change_cursor: int = Field(ge=0)
+
+
+class ResultReworkPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    items: tuple[ResultReworkResponse, ...]
+    next_cursor: str | None
+    last_change_cursor: int = Field(ge=0)
+
+
+class TaskResultDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    root_task_id: UUID
+    candidate: ResultCandidateResponse
+    source_results: tuple[ResultSourceResponse, ...]
+    verifications: tuple[ResultVerificationResponse, ...]
+    rework: tuple[ResultReworkResponse, ...]
+    acceptance: ResultAcceptanceResponse | None
+    apply_operations: tuple[ResultApplyResponse, ...]
+    artifacts: tuple[ResultArtifactResponse, ...]
+    last_change_cursor: int = Field(ge=0)
+    as_of: datetime
+
+
 class ResultInputEvidenceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

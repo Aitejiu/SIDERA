@@ -29,6 +29,7 @@ PROJECTION_TYPES = frozenset(
         "collaboration_governance",
         "notification_thread",
         "notification_delivery",
+        "result_overview",
     }
 )
 
@@ -110,6 +111,21 @@ _COLLABORATION_GOVERNANCE_EVENT_TYPES = {
     "CollaborationReleaseProposalStale",
     "CollaborationAutomaticReleaseResumed",
     "CollaborationGovernanceHoldSuperseded",
+}
+
+_RESULT_EVENT_TYPES = {
+    "CodeResultCaptured",
+    "IntegrationCandidatePrepared",
+    "TaskResultReintegrationRequested",
+    "VerificationExecutionScheduled",
+    "VerificationRetryRequested",
+    "VerificationResultFinished",
+    "ResultReworkRequested",
+    "ResultReworkAttentionRequired",
+    "ResultReworkBudgetAuthorized",
+    "ResultApplyRequested",
+    "ResultApplyReceiptRecorded",
+    "TaskCompleted",
 }
 
 
@@ -197,6 +213,7 @@ def projection_targets_for_event(
         targets = _targets(
             (
                 "executions",
+                "result_overview",
                 "task_overview",
                 "task_graph",
                 "subtask_workspace",
@@ -215,11 +232,67 @@ def projection_targets_for_event(
             )
             for target in targets
         )
+    if event.aggregate_type in {
+        "task_result",
+        "result_rework",
+        "verification_operation",
+        "verification_result",
+        "result_apply_operation",
+    } or event.event_type in _RESULT_EVENT_TYPES:
+        root_task_id = root_task_id or _payload_uuid(payload, "root_task_id")
+        if root_task_id is None and event.event_type in _RESULT_EVENT_TYPES:
+            root_task_id = event.correlation_id
+        if root_task_id is None and event.aggregate_type == "task_result":
+            root_task_id = event.aggregate_id
+        worker_item_id = worker_item_id or _payload_uuid(payload, "worker_item_id")
+        execution_id = (
+            _payload_uuid(payload, "execution_id")
+            or _payload_uuid(payload, "integration_execution_id")
+            or _payload_uuid(payload, "verification_execution_id")
+        )
+        targets = [
+            ProjectionInvalidationTarget(
+                "result_overview", root_task_id, "result_updated"
+            ),
+            ProjectionInvalidationTarget(
+                "task_overview", root_task_id, "result_updated"
+            ),
+            ProjectionInvalidationTarget(
+                "task_graph", root_task_id, "result_updated"
+            ),
+            ProjectionInvalidationTarget(
+                "subtask_workspace", root_task_id, "result_updated"
+            ),
+        ]
+        if worker_item_id is not None:
+            targets.extend(
+                (
+                    ProjectionInvalidationTarget(
+                        "worker_item_workspace", worker_item_id, "result_updated"
+                    ),
+                    ProjectionInvalidationTarget(
+                        "worker_item_activity", worker_item_id, "result_updated"
+                    ),
+                )
+            )
+        if execution_id is not None:
+            targets.extend(
+                (
+                    ProjectionInvalidationTarget(
+                        "executions", execution_id, "result_updated"
+                    ),
+                    ProjectionInvalidationTarget(
+                        "worker_trace", execution_id, "result_updated"
+                    ),
+                )
+            )
+        return tuple(target for target in targets if target.resource_id is not None)
     if event.aggregate_type == "result_acceptance" or event.event_type == (
         "TaskAcceptanceRecorded"
     ):
         return _targets(
             (
+                "result_overview",
                 "task_overview",
                 "task_graph",
                 "subtask_workspace",
