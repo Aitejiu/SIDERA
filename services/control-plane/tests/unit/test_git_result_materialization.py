@@ -186,6 +186,8 @@ def test_resolve_code_inputs_rejects_a_result_not_in_the_fixed_selection() -> No
             get=lambda request_id, workspace_id: SimpleNamespace(
                 worker_item_id=UUID("40000000-0000-0000-0000-000000000001"),
                 subtask_id=manifest.root_task_id,
+                result_derivation_kind=None,
+                purpose="execution",
             )
         ),
         executions=SimpleNamespace(

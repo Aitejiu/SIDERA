@@ -10,11 +10,14 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
 from subprocess import CompletedProcess
 from uuid import UUID
 
 from sidera_control_plane.application.result_ports import (
+    ApplyOutcome,
+    ApplyReceipt,
     CapturedCode,
     CodeInputReceipt,
 )
@@ -22,7 +25,11 @@ from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
     CodeInputSourceV1,
 )
-from sidera_control_plane.domain.result_operations import ResultError
+from sidera_control_plane.domain.result_operations import (
+    ResultApplyOperationV1,
+    ResultError,
+    ResultOperationStatus,
+)
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
@@ -299,6 +306,175 @@ class GitResultStore:
             repository, revision, code="result_input_commit_invalid"
         )
         return commit, self._resolve_tree(repository, commit)
+
+    def apply(self, operation: ResultApplyOperationV1) -> ApplyReceipt:
+        """Fast-forward a reviewed result and persist its durable Git receipt."""
+
+        if not isinstance(operation, ResultApplyOperationV1):
+            raise ResultError("result_apply_operation_invalid", {})
+
+        existing = self.inspect_apply(operation)
+        if existing is not None:
+            return existing
+        if operation.status is ResultOperationStatus.SUCCEEDED:
+            raise ResultError(
+                "result_apply_receipt_missing",
+                {"operation_id": str(operation.id)},
+            )
+        if operation.status not in {
+            ResultOperationStatus.PENDING,
+            ResultOperationStatus.RUNNING,
+        }:
+            raise ResultError(
+                "result_apply_operation_not_runnable",
+                {"operation_id": str(operation.id)},
+            )
+
+        repository = self._resolve_repository(operation.repository_ref)
+        with self._apply_repository_lock(repository):
+            existing = self.inspect_apply(operation)
+            if existing is not None:
+                return existing
+
+            target_ref = self._validate_apply_target_ref(
+                repository, operation.target_ref
+            )
+            expected_old_commit = self._resolve_commit(
+                repository,
+                operation.expected_old_commit,
+                code="result_apply_expected_old_commit_invalid",
+            )
+            accepted_commit = self._resolve_commit(
+                repository,
+                operation.accepted_commit,
+                code="result_apply_accepted_commit_invalid",
+            )
+            current_target = self._resolve_ref_commit(
+                repository,
+                target_ref,
+                error_code="result_apply_target_missing",
+            )
+            if current_target != expected_old_commit:
+                raise ResultError(
+                    "result_apply_target_changed",
+                    {"operation_id": str(operation.id)},
+                )
+            if not self._is_ancestor(
+                repository, expected_old_commit, accepted_commit
+            ):
+                raise ResultError(
+                    "result_apply_not_fast_forward",
+                    {"operation_id": str(operation.id)},
+                )
+            if self._target_checked_out(repository, target_ref):
+                raise ResultError(
+                    "result_apply_target_checked_out",
+                    {"operation_id": str(operation.id)},
+                )
+
+            receipt = ApplyReceipt(
+                operation_id=operation.id,
+                workspace_id=operation.workspace_id,
+                root_task_id=operation.root_task_id,
+                acceptance_id=operation.acceptance_id,
+                candidate_id=operation.candidate_id,
+                repository_ref=operation.repository_ref,
+                target_ref=target_ref,
+                old_commit=expected_old_commit,
+                old_tree=self._resolve_tree(repository, expected_old_commit),
+                new_commit=accepted_commit,
+                new_tree=self._resolve_tree(repository, accepted_commit),
+                receipt_ref=_apply_receipt_ref(operation.id),
+                outcome=ApplyOutcome.SUCCEEDED,
+                applied_at=self._apply_time(),
+                _repository_path=repository,
+            )
+            receipt_oid = self._write_apply_receipt(repository, receipt)
+            transaction = (
+                "start\n"
+                f"update {target_ref} {accepted_commit} {expected_old_commit}\n"
+                f"create {receipt.receipt_ref} {receipt_oid}\n"
+                "prepare\n"
+                "commit\n"
+            ).encode()
+            result = self._run_git(
+                repository,
+                ["update-ref", "--stdin"],
+                input_bytes=transaction,
+                check=False,
+                error_code="result_apply_ref_write_failed",
+            )
+            if result.returncode == 0:
+                return receipt
+
+            existing = self.inspect_apply(operation)
+            if existing is not None:
+                return existing
+            try:
+                current_target = self._resolve_ref_commit(
+                    repository,
+                    target_ref,
+                    error_code="result_apply_target_missing",
+                )
+            except ResultError as exc:
+                if exc.code == "result_apply_target_missing":
+                    raise ResultError(
+                        "result_apply_target_changed",
+                        {"operation_id": str(operation.id)},
+                    ) from exc
+                raise
+            if current_target != expected_old_commit:
+                raise ResultError(
+                    "result_apply_target_changed",
+                    {"operation_id": str(operation.id)},
+                )
+            raise ResultError(
+                "result_apply_ref_write_failed",
+                {"operation_id": str(operation.id)},
+            )
+
+    def inspect_apply(
+        self, operation: ResultApplyOperationV1
+    ) -> ApplyReceipt | None:
+        """Inspect an application receipt without trusting the mutable target ref."""
+
+        if not isinstance(operation, ResultApplyOperationV1):
+            raise ResultError("result_apply_operation_invalid", {})
+        repository = self._resolve_repository(operation.repository_ref)
+        receipt_ref = _apply_receipt_ref(operation.id)
+        if not self._apply_ref_exists(repository, receipt_ref):
+            return None
+        receipt_oid = self._git_output(
+            repository,
+            ["rev-parse", "--verify", receipt_ref],
+            error_code="result_apply_receipt_corrupt",
+        )
+        receipt_type = self._git_output(
+            repository,
+            ["cat-file", "-t", receipt_oid],
+            error_code="result_apply_receipt_corrupt",
+        )
+        if receipt_type != "blob":
+            raise ResultError(
+                "result_apply_receipt_corrupt",
+                {"operation_id": str(operation.id)},
+            )
+        raw = self._run_git(
+            repository,
+            ["cat-file", "-p", receipt_oid],
+            error_code="result_apply_receipt_corrupt",
+        ).stdout
+        try:
+            mapping = json.loads(raw.decode("utf-8"))
+            receipt = ApplyReceipt.from_mapping(mapping)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ResultError(
+                "result_apply_receipt_corrupt",
+                {"operation_id": str(operation.id)},
+            ) from exc
+        receipt = replace(receipt, _repository_path=repository)
+        self._validate_apply_receipt(repository, operation, receipt)
+        return receipt
 
     def materialize(
         self,
@@ -1065,6 +1241,17 @@ class GitResultStore:
             raise ResultError(code, {})
         return resolved.lower()
 
+    def _resolve_ref_commit(
+        self, repository: Path, ref: str, *, error_code: str
+    ) -> str:
+        if not isinstance(ref, str) or not ref.startswith("refs/"):
+            raise ResultError(error_code, {})
+        return self._git_output(
+            repository,
+            ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+            error_code=error_code,
+        ).lower()
+
     def _resolve_tree(self, repository: Path, commit: str) -> str:
         return self._git_output(
             repository,
@@ -1176,6 +1363,12 @@ class GitResultStore:
         value = self._clock()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ResultError("result_capture_clock_invalid", {})
+        return value.astimezone(UTC)
+
+    def _apply_time(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ResultError("result_apply_clock_invalid", {})
         return value.astimezone(UTC)
 
     def _commit_result(
@@ -1438,6 +1631,142 @@ class GitResultStore:
         )
         return result.returncode == 0
 
+    def _apply_ref_exists(self, repository: Path, ref: str) -> bool:
+        result = self._run_git(
+            repository,
+            ["show-ref", "--verify", "--quiet", ref],
+            check=False,
+            error_code="result_apply_receipt_inspection_failed",
+        )
+        if result.returncode not in {0, 1}:
+            raise ResultError("result_apply_receipt_inspection_failed", {})
+        return result.returncode == 0
+
+    def _validate_apply_target_ref(self, repository: Path, target_ref: str) -> str:
+        if not isinstance(target_ref, str) or not target_ref.startswith("refs/heads/"):
+            raise ResultError("result_apply_target_ref_invalid", {})
+        result = self._run_git(
+            repository,
+            ["check-ref-format", target_ref],
+            check=False,
+            error_code="result_apply_target_ref_invalid",
+        )
+        if result.returncode != 0:
+            raise ResultError("result_apply_target_ref_invalid", {})
+        return target_ref
+
+    def _target_checked_out(self, repository: Path, target_ref: str) -> bool:
+        output = self._run_git(
+            repository,
+            ["worktree", "list", "--porcelain"],
+            error_code="result_apply_worktree_inspection_failed",
+        ).stdout.decode("utf-8", errors="strict")
+        return any(
+            line == f"branch {target_ref}"
+            for line in output.splitlines()
+        )
+
+    @contextmanager
+    def _apply_repository_lock(self, repository: Path) -> Iterator[None]:
+        try:
+            common_dir = Path(
+                self._git_output(
+                    repository,
+                    ["rev-parse", "--git-common-dir"],
+                    error_code="result_apply_lock_unavailable",
+                )
+            )
+            if not common_dir.is_absolute():
+                common_dir = repository / common_dir
+            lock_path = common_dir.resolve() / "sidera-apply.lock"
+            with lock_path.open("a+b") as handle:
+                flock(handle.fileno(), LOCK_EX)
+                try:
+                    yield
+                finally:
+                    flock(handle.fileno(), LOCK_UN)
+        except ResultError:
+            raise
+        except OSError as exc:
+            raise ResultError("result_apply_lock_unavailable", {}) from exc
+
+    def _write_apply_receipt(
+        self, repository: Path, receipt: ApplyReceipt
+    ) -> str:
+        encoded = (
+            json.dumps(
+                receipt.to_mapping(),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        return self._git_output(
+            repository,
+            ["hash-object", "-w", "--stdin"],
+            input_bytes=encoded,
+            error_code="result_apply_receipt_write_failed",
+        ).lower()
+
+    def _validate_apply_receipt(
+        self,
+        repository: Path,
+        operation: ResultApplyOperationV1,
+        receipt: ApplyReceipt,
+    ) -> None:
+        receipt_ref = _apply_receipt_ref(operation.id)
+        if operation.receipt_ref is not None and operation.receipt_ref != receipt_ref:
+            raise ResultError(
+                "result_apply_identity_changed",
+                {"operation_id": str(operation.id)},
+            )
+        if (
+            receipt.operation_id != operation.id
+            or receipt.workspace_id != operation.workspace_id
+            or receipt.root_task_id != operation.root_task_id
+            or receipt.acceptance_id != operation.acceptance_id
+            or receipt.candidate_id != operation.candidate_id
+            or receipt.repository_ref != operation.repository_ref
+            or receipt.target_ref != operation.target_ref
+            or receipt.receipt_ref != receipt_ref
+            or receipt.old_commit.lower() != operation.expected_old_commit.lower()
+            or receipt.new_commit.lower() != operation.accepted_commit.lower()
+        ):
+            raise ResultError(
+                "result_apply_identity_changed",
+                {"operation_id": str(operation.id)},
+            )
+        try:
+            old_commit = self._resolve_commit(
+                repository,
+                receipt.old_commit,
+                code="result_apply_receipt_corrupt",
+            )
+            new_commit = self._resolve_commit(
+                repository,
+                receipt.new_commit,
+                code="result_apply_receipt_corrupt",
+            )
+            old_tree = self._resolve_tree(repository, old_commit)
+            new_tree = self._resolve_tree(repository, new_commit)
+            if (
+                old_commit != receipt.old_commit.lower()
+                or new_commit != receipt.new_commit.lower()
+                or old_tree != receipt.old_tree.lower()
+                or new_tree != receipt.new_tree.lower()
+                or not self._is_ancestor(repository, old_commit, new_commit)
+            ):
+                raise ResultError("result_apply_receipt_corrupt", {})
+        except ResultError as exc:
+            if exc.code == "result_apply_identity_changed":
+                raise
+            raise ResultError(
+                "result_apply_receipt_corrupt",
+                {"operation_id": str(operation.id)},
+            ) from exc
+
     def _git_output(
         self,
         repository: Path,
@@ -1620,6 +1949,10 @@ def _metadata_oid(metadata: Mapping[str, object], name: str) -> str:
 
 def _metadata_ref(operation_id: UUID) -> str:
     return f"refs/sidera/results/{operation_id}.metadata"
+
+
+def _apply_receipt_ref(operation_id: UUID) -> str:
+    return f"refs/sidera/applications/{operation_id}"
 
 
 def _input_ref(operation_id: UUID) -> str:

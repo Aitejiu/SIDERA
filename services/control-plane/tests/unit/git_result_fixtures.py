@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -14,6 +14,10 @@ from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
     CodeInputSourceV1,
+)
+from sidera_control_plane.domain.result_operations import (
+    ResultApplyOperationV1,
+    ResultOperationStatus,
 )
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
@@ -70,6 +74,71 @@ class GitResultCase:
 
     def read_commit(self, commit: str, path: str) -> bytes:
         return git_bytes(self.repository, "show", f"{commit}:{path}")
+
+
+@dataclass(slots=True)
+class GitApplyCase:
+    repository: Path
+    store: GitResultStore
+    operation: ResultApplyOperationV1
+    base_commit: str
+    accepted_commit: str
+
+    def target_commit(self) -> str:
+        return git(self.repository, "rev-parse", self.operation.target_ref)
+
+    def advance_target_after_acceptance(self) -> str:
+        git(self.repository, "switch", "target")
+        self.write("after-acceptance.txt", "normal follow-up\n")
+        git(self.repository, "add", "after-acceptance.txt")
+        git(self.repository, "commit", "-m", "follow-up target change")
+        git(self.repository, "switch", "main")
+        return self.target_commit()
+
+    def write(self, path: str, content: str) -> None:
+        target = self.repository / path
+        target.write_text(content)
+
+    def checked_out_target(self) -> Path:
+        worktree = self.repository.parent / "target-worktree"
+        git(self.repository, "worktree", "add", str(worktree), "target")
+        return worktree
+
+    def operation_with_unrelated_commit(self) -> ResultApplyOperationV1:
+        tree = git(self.repository, "rev-parse", f"{self.base_commit}^{{tree}}")
+        result = subprocess.run(
+            ["git", "-C", str(self.repository), "commit-tree", tree, "-m", "unrelated"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        unrelated = result.stdout.strip()
+        git(self.repository, "update-ref", "refs/heads/unrelated", unrelated)
+        return replace(self.operation, accepted_commit=unrelated)
+
+    def set_target_to_accepted_without_receipt(self) -> None:
+        git(
+            self.repository,
+            "update-ref",
+            self.operation.target_ref,
+            self.accepted_commit,
+            self.base_commit,
+        )
+
+    def corrupt_receipt(self) -> None:
+        result = subprocess.run(
+            ["git", "-C", str(self.repository), "hash-object", "-w", "--stdin"],
+            check=True,
+            capture_output=True,
+            input=b"{\"corrupt\":true}\n",
+        )
+        blob = result.stdout.decode().strip()
+        git(
+            self.repository,
+            "update-ref",
+            f"refs/sidera/applications/{self.operation.id}",
+            blob,
+        )
 
 
 @dataclass(slots=True)
@@ -346,4 +415,51 @@ def git_case(tmp_path: Path) -> GitResultCase:
         store=GitResultStore({"repo://fixture": repository}),
         manifest=manifest,
         input_commit=input_commit,
+    )
+
+
+@pytest.fixture
+def apply_case(tmp_path: Path) -> GitApplyCase:
+    repository = tmp_path / "apply-repository"
+    repository.mkdir()
+    git(repository, "init", "--initial-branch=main")
+    git(repository, "config", "user.name", "SIDERA Apply Test")
+    git(repository, "config", "user.email", "apply@sidera.local")
+
+    (repository / "README.md").write_text("base\n")
+    git(repository, "add", "README.md")
+    git(repository, "commit", "-m", "base")
+    base_commit = git(repository, "rev-parse", "HEAD")
+
+    (repository / "accepted.txt").write_text("accepted\n")
+    git(repository, "add", "accepted.txt")
+    git(repository, "commit", "-m", "accepted result")
+    accepted_commit = git(repository, "rev-parse", "HEAD")
+    git(repository, "branch", "target", base_commit)
+
+    operation = ResultApplyOperationV1(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        root_task_id=uuid4(),
+        acceptance_id=uuid4(),
+        candidate_id=uuid4(),
+        repository_ref="repo://apply",
+        target_ref="refs/heads/target",
+        expected_old_commit=base_commit,
+        accepted_commit=accepted_commit,
+        status=ResultOperationStatus.PENDING,
+        attempt=1,
+        lease_owner=None,
+        lease_token=None,
+        lease_expiry=None,
+        receipt_ref=None,
+        failure_code=None,
+        version=1,
+    )
+    return GitApplyCase(
+        repository=repository,
+        store=GitResultStore({"repo://apply": repository}, clock=lambda: NOW),
+        operation=operation,
+        base_commit=base_commit,
+        accepted_commit=accepted_commit,
     )

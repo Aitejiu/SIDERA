@@ -95,6 +95,15 @@ def _require_relative_reference(value: object, label: str) -> str:
     return result
 
 
+def _require_full_ref(value: object, label: str) -> str:
+    result = _require_text(value, label)
+    if not result.startswith("refs/") or any(
+        marker in result for marker in ("\x00", "\n", "\r", " ", "\t")
+    ):
+        raise ValueError(f"{label} must be a full Git ref")
+    return result
+
+
 def _require_aware_datetime(value: object, label: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
@@ -559,6 +568,163 @@ class CodeResultMaterializationPort(Protocol):
         raise NotImplementedError
 
 
+class ApplyOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyReceipt:
+    """Immutable receipt for one atomic fast-forward application."""
+
+    operation_id: UUID
+    workspace_id: UUID
+    root_task_id: UUID
+    acceptance_id: UUID
+    candidate_id: UUID
+    repository_ref: str
+    target_ref: str
+    old_commit: str
+    old_tree: str
+    new_commit: str
+    new_tree: str
+    receipt_ref: str
+    outcome: ApplyOutcome
+    applied_at: datetime
+    _repository_path: Path | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ApplyReceipt:
+        fields = frozenset(
+            {
+                "operation_id",
+                "workspace_id",
+                "root_task_id",
+                "acceptance_id",
+                "candidate_id",
+                "repository_ref",
+                "target_ref",
+                "old_commit",
+                "old_tree",
+                "new_commit",
+                "new_tree",
+                "receipt_ref",
+                "outcome",
+                "applied_at",
+            }
+        )
+        if not isinstance(value, Mapping):
+            raise TypeError("apply receipt must be an object")
+        keys = set(value)
+        unknown = sorted(keys - fields)
+        missing = sorted(fields - keys)
+        if unknown:
+            raise ValueError(f"unknown apply receipt fields: {', '.join(unknown)}")
+        if missing:
+            raise ValueError(f"missing apply receipt fields: {', '.join(missing)}")
+        if not all(isinstance(key, str) for key in keys):
+            raise ValueError("apply receipt field names must be strings")
+        applied_at = value["applied_at"]
+        if isinstance(applied_at, str):
+            applied_at = datetime.fromisoformat(applied_at)
+        return cls(
+            operation_id=UUID(str(value["operation_id"])),
+            workspace_id=UUID(str(value["workspace_id"])),
+            root_task_id=UUID(str(value["root_task_id"])),
+            acceptance_id=UUID(str(value["acceptance_id"])),
+            candidate_id=UUID(str(value["candidate_id"])),
+            repository_ref=value["repository_ref"],  # type: ignore[arg-type]
+            target_ref=value["target_ref"],  # type: ignore[arg-type]
+            old_commit=value["old_commit"],  # type: ignore[arg-type]
+            old_tree=value["old_tree"],  # type: ignore[arg-type]
+            new_commit=value["new_commit"],  # type: ignore[arg-type]
+            new_tree=value["new_tree"],  # type: ignore[arg-type]
+            receipt_ref=value["receipt_ref"],  # type: ignore[arg-type]
+            outcome=ApplyOutcome(value["outcome"]),  # type: ignore[arg-type]
+            applied_at=applied_at,  # type: ignore[arg-type]
+        )
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.operation_id, "apply receipt operation_id"),
+            (self.workspace_id, "apply receipt workspace_id"),
+            (self.root_task_id, "apply receipt root_task_id"),
+            (self.acceptance_id, "apply receipt acceptance_id"),
+            (self.candidate_id, "apply receipt candidate_id"),
+        ):
+            _require_uuid(value, label)
+        object.__setattr__(
+            self,
+            "repository_ref",
+            _require_text(self.repository_ref, "apply receipt repository_ref"),
+        )
+        object.__setattr__(
+            self,
+            "target_ref",
+            _require_full_ref(self.target_ref, "apply receipt target_ref"),
+        )
+        for value, label in (
+            (self.old_commit, "apply receipt old_commit"),
+            (self.old_tree, "apply receipt old_tree"),
+            (self.new_commit, "apply receipt new_commit"),
+            (self.new_tree, "apply receipt new_tree"),
+        ):
+            object.__setattr__(
+                self,
+                label.removeprefix("apply receipt "),
+                _require_git_oid(value, label),
+            )
+        expected_receipt_ref = f"refs/sidera/applications/{self.operation_id}"
+        if self.receipt_ref != expected_receipt_ref:
+            raise ValueError("apply receipt receipt_ref does not match operation_id")
+        if not isinstance(self.outcome, ApplyOutcome):
+            object.__setattr__(self, "outcome", ApplyOutcome(self.outcome))
+        object.__setattr__(
+            self,
+            "applied_at",
+            _require_aware_datetime(self.applied_at, "apply receipt applied_at"),
+        )
+        if self._repository_path is not None and not isinstance(
+            self._repository_path, Path
+        ):
+            raise TypeError("apply receipt repository path must be a Path")
+
+    @property
+    def expected_old_commit(self) -> str:
+        return self.old_commit
+
+    @property
+    def accepted_commit(self) -> str:
+        return self.new_commit
+
+    @property
+    def old_content_hash(self) -> str:
+        return self.old_tree
+
+    @property
+    def new_content_hash(self) -> str:
+        return self.new_tree
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "operation_id": str(self.operation_id),
+            "workspace_id": str(self.workspace_id),
+            "root_task_id": str(self.root_task_id),
+            "acceptance_id": str(self.acceptance_id),
+            "candidate_id": str(self.candidate_id),
+            "repository_ref": self.repository_ref,
+            "target_ref": self.target_ref,
+            "old_commit": self.old_commit,
+            "old_tree": self.old_tree,
+            "new_commit": self.new_commit,
+            "new_tree": self.new_tree,
+            "receipt_ref": self.receipt_ref,
+            "outcome": self.outcome.value,
+            "applied_at": self.applied_at.astimezone(UTC).isoformat(),
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class ResultOperationAttemptV1:
     """Durable identity and observation for a non-task result operation."""
@@ -706,12 +872,23 @@ class ResultRepositoryPort(Protocol):
         raise NotImplementedError
 
 
+class CodeResultApplyPort(Protocol):
+    def apply(self, operation: ResultApplyOperationV1) -> ApplyReceipt:
+        raise NotImplementedError
+
+    def inspect_apply(self, operation: ResultApplyOperationV1) -> ApplyReceipt | None:
+        raise NotImplementedError
+
+
 __all__ = [
+    "ApplyOutcome",
+    "ApplyReceipt",
     "CapturedCode",
     "CheckRunObservation",
     "CheckRunRequest",
     "CheckRunStatus",
     "CodeInputReceipt",
+    "CodeResultApplyPort",
     "CodeResultCapturePort",
     "CodeResultMaterializationPort",
     "LocalCheckRunnerPort",
