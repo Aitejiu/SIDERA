@@ -2015,6 +2015,148 @@ h1 {
   color: var(--complete);
 }
 
+.result-operation-actions {
+  gap: 11px;
+}
+
+.result-operation-actions__heading,
+.result-operation-form__heading,
+.result-operation-form__actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.result-operation-actions__heading h3,
+.result-operation-form h4 {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.result-operation-actions__budget {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 9px;
+  padding: 10px;
+  border-left: 2px solid var(--dispatch);
+  background: #f4f7fb;
+  font-size: 11px;
+}
+
+.result-operation-actions__budget strong {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.result-operation-actions__budget small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.result-operation-actions__buttons {
+  display: grid;
+  gap: 7px;
+}
+
+.result-operation-actions__revision,
+.result-operation-actions__readonly,
+.result-operation-actions__state,
+.result-operation-actions__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--attention);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.result-operation-actions__readonly,
+.result-operation-actions__error {
+  padding-top: 4px;
+}
+
+.result-operation-actions__state {
+  align-items: center;
+}
+
+.result-operation-actions__state .quiet-button {
+  margin-left: auto;
+}
+
+.result-operation-form {
+  display: grid;
+  gap: 11px;
+  padding: 11px;
+  border: 1px solid var(--structure);
+  background: var(--surface);
+}
+
+.result-operation-form__scope,
+.result-operation-form label,
+.result-operation-form fieldset {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.result-operation-form fieldset {
+  display: grid;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+}
+
+.result-operation-form legend {
+  margin-bottom: 5px;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.result-operation-form fieldset label {
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  color: var(--ink);
+}
+
+.result-operation-form input[type="checkbox"] {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.result-operation-form input[type="number"],
+.result-operation-form textarea {
+  width: 100%;
+  min-width: 0;
+  margin-top: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--structure);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.result-operation-form > label {
+  display: grid;
+  gap: 0;
+}
+
+.result-operation-form__error {
+  color: var(--blocked);
+  font-size: 11px;
+}
+
+.result-operation-form__actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
 @media (max-width: 680px) {
   .task-result-panel__heading,
   .task-result-panel__candidate {

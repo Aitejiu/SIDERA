@@ -78,6 +78,9 @@ from sidera_control_plane.application.result_input_queries import (
 from sidera_control_plane.application.result_integration import ResultIntegrationService
 from sidera_control_plane.application.result_queries import ResultQueryService
 from sidera_control_plane.application.result_rework import ResultReworkService
+from sidera_control_plane.application.result_verification import (
+    ResultVerificationService,
+)
 from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
 from sidera_control_plane.application.runtime_metrics import RuntimeMetricsService
 from sidera_control_plane.application.subtask_workspace_queries import (
@@ -266,6 +269,10 @@ def get_command_service(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
+            ),
+            ResultVerificationService(
+                factory,
+                clock=lambda: datetime.now(UTC),
             ),
             ResultIntegrationService(
                 factory,

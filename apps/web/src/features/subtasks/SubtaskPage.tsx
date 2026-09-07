@@ -186,6 +186,15 @@ function SubtaskContent({
                       阻塞于 {formatBlockedSince(item.blocked_since)}
                     </span>
                     {item.requires_operator ? <strong>需要我处理</strong> : <span>等待执行节点恢复</span>}
+                    {item.worker_item_id ? (
+                      <button
+                        className="quiet-button"
+                        type="button"
+                        onClick={() => onOpenWorker(item.worker_item_id!)}
+                      >
+                        打开 WorkerItem 工作区
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </article>

@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
 import { workerResultInputsFixture } from "@/test/resultInputFixtures";
+import { resultAction as taskResultAction, resultView as taskResultView } from "../results/testFixtures";
 
 import { WorkerItemPage } from "./WorkerItemPage";
 
@@ -22,6 +23,17 @@ const WORKER_TRANSITION_ID = "a0000000-0000-0000-0000-000000000001";
 const PLAN_TRANSITION_ID = "b0000000-0000-0000-0000-000000000001";
 const PATCH_ID = "c0000000-0000-0000-0000-000000000001";
 const HANDOFF_TARGET_ID = "80000000-0000-0000-0000-000000000002";
+
+const workerResultOverview = taskResultView({
+  workspace_id: WORKSPACE_ID,
+  root_task_id: ROOT_TASK_ID,
+  task_title: "支付重构",
+  available_actions: [{
+    ...taskResultAction("RequestTaskRework"),
+    target_id: ROOT_TASK_ID,
+    allowed_worker_item_ids: [WORKER_ITEM_ID],
+  }],
+});
 
 const workspace = {
   workspace_id: WORKSPACE_ID,
@@ -460,6 +472,10 @@ describe("WorkerItemPage", () => {
         }),
       ),
       http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/results`,
+        () => HttpResponse.json(workerResultOverview),
+      ),
+      http.get(
         `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
         () => HttpResponse.json(workspace),
       ),
@@ -557,6 +573,8 @@ describe("WorkerItemPage", () => {
     expect(screen.getByText("当前执行已绑定；更换节点需要停止并创建新的执行尝试")).toBeVisible();
     expect(screen.getByText("运行回调测试")).toBeVisible();
     expect(await screen.findByRole("region", { name: "结果输入" })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "结果恢复与局部返工" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "局部返工" })).toBeVisible();
     expect(screen.getByText("Research reports")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
   });

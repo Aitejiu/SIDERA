@@ -34,7 +34,12 @@ _GOVERNANCE_COMMAND_TYPES = frozenset(
 )
 
 _REWORK_COMMAND_TYPES = frozenset(
-    {"RequestTaskRework", "AuthorizeAdditionalRework"}
+    {
+        "RequestTaskRework",
+        "AuthorizeAdditionalRework",
+        "RetryResultVerification",
+        "ReintegrateTaskResult",
+    }
 )
 
 
@@ -139,6 +144,11 @@ def _execute_command(
             details={"actor_type": settings.local_actor_type},
         )
     if request.command_type in _REWORK_COMMAND_TYPES:
+        if request.actor.type != settings.local_actor_type or request.actor.id != settings.local_actor_id:
+            raise ValidationError(
+                "result recovery commands require the configured local actor",
+                details={"actor_type": settings.local_actor_type},
+            )
         if request.command_type == "RequestTaskRework" and (
             request.payload.get("mode") == "automatic"
         ):

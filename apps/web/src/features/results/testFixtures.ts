@@ -8,8 +8,11 @@ type ResultAction = components["schemas"]["ResultActionResponse"];
 export const RESULT_WORKSPACE_ID = "71000000-0000-0000-0000-000000000001";
 export const RESULT_ROOT_TASK_ID = "71000000-0000-0000-0000-000000000002";
 export const RESULT_CANDIDATE_ID = "71000000-0000-0000-0000-000000000003";
+export const RESULT_OPERATION_ID = "71000000-0000-0000-0000-000000000022";
 
-export function resultAction(commandType: "CompleteTask" | "RequestTaskRework" = "CompleteTask"): ResultAction {
+export function resultAction(
+  commandType: "CompleteTask" | "RequestTaskRework" = "CompleteTask",
+): ResultAction {
   return {
     action: commandType === "CompleteTask" ? "accept_candidate" : "request_rework",
     command_type: commandType,
@@ -22,6 +25,8 @@ export function resultAction(commandType: "CompleteTask" | "RequestTaskRework" =
     candidate_hash: "c".repeat(64),
     plan_content_hash: "d".repeat(64),
     requires_reason: commandType === "RequestTaskRework",
+    allowed_worker_item_ids: commandType === "RequestTaskRework" ? [] : [],
+    replacement_result_ids: [],
   };
 }
 
@@ -79,6 +84,13 @@ export function resultView(
       mode: "fast_forward_only",
       target_ref: null,
     },
+    rework_budget: {
+      auto_rounds_used: 0,
+      auto_rounds_limit: 2,
+      auto_seconds_limit: 900,
+      auto_started_at: null,
+      auto_deadline: null,
+    },
     active_operation: null,
     criteria: [criterion],
     blocking_reasons: [],
@@ -88,6 +100,35 @@ export function resultView(
     as_of: "2026-09-08T01:05:00Z",
     ...overrides,
   } satisfies TaskResultOverview;
+}
+
+export function resultViewScenario(scenario: "unknown-apply"): TaskResultOverview {
+  if (scenario !== "unknown-apply") {
+    throw new Error(`unsupported result scenario: ${scenario}`);
+  }
+  const action: ResultAction = {
+    ...resultAction(),
+    action: "inspect_result_operation",
+    command_type: "InspectResultOperation",
+    target_type: "result_operation",
+    target_id: RESULT_OPERATION_ID,
+    expected_version: 3,
+    requires_reason: true,
+  };
+  return resultView({
+    result_stage: "attention",
+    active_operation: {
+      operation_id: RESULT_OPERATION_ID,
+      operation_kind: "apply",
+      status: "unknown",
+      attempt: 1,
+      failure_code: "process_state_unknown",
+      receipt_ref: null,
+      version: 3,
+      candidate_id: RESULT_CANDIDATE_ID,
+    },
+    available_actions: [action],
+  });
 }
 
 export function completeTaskInput(

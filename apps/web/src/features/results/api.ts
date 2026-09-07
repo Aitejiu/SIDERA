@@ -38,9 +38,36 @@ export type RequestTaskReworkPayload = {
   } | null;
 };
 
+export type AuthorizeAdditionalReworkPayload = {
+  additional_rounds: number;
+  additional_seconds: number;
+  reason: string;
+};
+
+export type RetryResultVerificationPayload = {
+  verification_operation_id: string;
+  expected_operation_version: number;
+  expected_result_version: number;
+  candidate_id: string;
+  candidate_hash: string;
+  reason: string;
+};
+
+export type ReintegrateTaskResultPayload = {
+  source_candidate_id: string;
+  source_candidate_hash: string;
+  replacement_result_ids: string[];
+  expected_result_version: number;
+  target_observation_id: string | null;
+  reason: string;
+};
+
 export type ResultActionInput =
   | { command_type: "CompleteTask"; payload: CompleteTaskPayload }
-  | { command_type: "RequestTaskRework"; payload: RequestTaskReworkPayload };
+  | { command_type: "RequestTaskRework"; payload: RequestTaskReworkPayload }
+  | { command_type: "AuthorizeAdditionalRework"; payload: AuthorizeAdditionalReworkPayload }
+  | { command_type: "RetryResultVerification"; payload: RetryResultVerificationPayload }
+  | { command_type: "ReintegrateTaskResult"; payload: ReintegrateTaskResultPayload };
 
 const TASK_RESULTS_PATH =
   "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results" as const;
@@ -96,20 +123,47 @@ export async function executeTaskResultAction(
   if (action.command_type !== input.command_type) {
     throw new Error("结果动作与命令输入不一致，请刷新后重试");
   }
-  if (action.target_type !== "task") {
+  if (action.target_type !== "task" && action.target_type !== "result_operation") {
     throw new Error("结果动作目标不受支持，请刷新后重试");
   }
-  if (action.candidate_id === null || action.candidate_hash === null) {
-    throw new Error("结果动作缺少候选版本，请刷新后重试");
+  if (input.command_type === "CompleteTask"
+    || input.command_type === "RequestTaskRework"
+    || input.command_type === "RetryResultVerification") {
+    if (action.candidate_id === null || action.candidate_hash === null) {
+      throw new Error("结果动作缺少候选版本，请刷新后重试");
+    }
+    if (input.payload.candidate_id !== action.candidate_id) {
+      throw new Error("结果候选已变化，请刷新后重试");
+    }
+    if (input.payload.candidate_hash !== action.candidate_hash) {
+      throw new Error("结果候选指纹已变化，请刷新后重试");
+    }
   }
-  if (input.payload.candidate_id !== action.candidate_id) {
-    throw new Error("结果候选已变化，请刷新后重试");
-  }
-  if (input.payload.candidate_hash !== action.candidate_hash) {
-    throw new Error("结果候选指纹已变化，请刷新后重试");
+  if (input.command_type === "ReintegrateTaskResult") {
+    if (action.candidate_id === null || action.candidate_hash === null) {
+      throw new Error("结果动作缺少候选版本，请刷新后重试");
+    }
+    if (input.payload.source_candidate_id !== action.candidate_id) {
+      throw new Error("结果候选已变化，请刷新后重试");
+    }
+    if (input.payload.source_candidate_hash !== action.candidate_hash) {
+      throw new Error("结果候选指纹已变化，请刷新后重试");
+    }
   }
   if (
     input.command_type === "CompleteTask"
+    && input.payload.expected_result_version !== action.expected_result_version
+  ) {
+    throw new Error("结果版本已变化，请刷新后重试");
+  }
+  if (
+    input.command_type === "RetryResultVerification"
+    && input.payload.expected_operation_version !== action.expected_version
+  ) {
+    throw new Error("检查操作版本已变化，请刷新后重试");
+  }
+  if (
+    input.command_type === "ReintegrateTaskResult"
     && input.payload.expected_result_version !== action.expected_result_version
   ) {
     throw new Error("结果版本已变化，请刷新后重试");
@@ -120,7 +174,7 @@ export async function executeTaskResultAction(
     workspace_id: workspaceId,
     command_type: action.command_type,
     actor: { type: "local", id: "aitejiu" },
-    target_type: "task",
+    target_type: action.target_type as "task" | "result_operation",
     target_id: action.target_id,
     expected_version: action.expected_version,
     idempotency_key: identity.idempotencyKey,

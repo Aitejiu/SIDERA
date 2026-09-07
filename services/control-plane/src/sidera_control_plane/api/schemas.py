@@ -150,6 +150,7 @@ AggregateType = Literal[
     "notification_delivery",
     "notification_route",
     "notification_thread",
+    "result_operation",
 ]
 
 
@@ -227,6 +228,30 @@ class AuthorizeAdditionalReworkPayload(BaseModel):
 
     additional_rounds: int = Field(ge=0)
     additional_seconds: int = Field(ge=0)
+    reason: NonEmptyString = Field(max_length=2000)
+
+
+class RetryResultVerificationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verification_operation_id: UUID
+    expected_operation_version: int = Field(ge=1)
+    expected_result_version: int = Field(ge=1)
+    candidate_id: UUID
+    candidate_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    reason: NonEmptyString = Field(max_length=2000)
+
+
+class ReintegrateTaskResultPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_candidate_id: UUID
+    source_candidate_hash: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+    replacement_result_ids: tuple[UUID, ...] = Field(min_length=1)
+    expected_result_version: int = Field(ge=1)
+    target_observation_id: UUID | None
     reason: NonEmptyString = Field(max_length=2000)
 
 
@@ -1186,6 +1211,16 @@ class ResultApplyPolicyResponse(BaseModel):
     target_ref: str | None
 
 
+class ResultReworkBudgetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    auto_rounds_used: int = Field(ge=0)
+    auto_rounds_limit: int = Field(ge=0)
+    auto_seconds_limit: int = Field(gt=0)
+    auto_started_at: datetime | None
+    auto_deadline: datetime | None
+
+
 class ResultOperationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1213,6 +1248,8 @@ class ResultActionResponse(BaseModel):
     candidate_hash: str | None
     plan_content_hash: str | None
     requires_reason: bool
+    allowed_worker_item_ids: tuple[UUID, ...] = ()
+    replacement_result_ids: tuple[UUID, ...] = ()
 
 
 class ResultVerificationResponse(BaseModel):
@@ -1287,6 +1324,7 @@ class TaskResultOverviewResponse(BaseModel):
     current_candidate: ResultCandidateResponse | None
     acceptance: ResultAcceptanceResponse | None
     apply_policy: ResultApplyPolicyResponse | None
+    rework_budget: ResultReworkBudgetResponse | None
     active_operation: ResultOperationResponse | None
     criteria: tuple[ResultCriterionResponse, ...]
     blocking_reasons: tuple[str, ...]
@@ -2932,6 +2970,20 @@ class CommandRequest(BaseModel):
         elif self.command_type == "AuthorizeAdditionalRework":
             self._require_mutation_target("task")
             parsed = AuthorizeAdditionalReworkPayload.model_validate(self.payload)
+        elif self.command_type == "RetryResultVerification":
+            self._require_mutation_target("result_operation")
+            parsed = RetryResultVerificationPayload.model_validate(self.payload)
+            if parsed.verification_operation_id != self.target_id:
+                raise ValueError(
+                    "RetryResultVerification operation id must match target_id"
+                )
+        elif self.command_type == "ReintegrateTaskResult":
+            self._require_mutation_target("task")
+            parsed = ReintegrateTaskResultPayload.model_validate(self.payload)
+            if parsed.expected_result_version != self.expected_version:
+                raise ValueError(
+                    "ReintegrateTaskResult expected_result_version must match expected_version"
+                )
         elif self.command_type == "RequeueNotificationDelivery":
             self._require_requeue_target()
             parsed = RequeueNotificationDeliveryPayload.model_validate(self.payload)

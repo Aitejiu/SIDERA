@@ -118,7 +118,9 @@ class ResultRootSnapshot:
     current_candidate: IntegrationCandidateV1 | None
     current_sources: tuple[CodeResultSnapshotV1, ...]
     current_verifications: tuple[VerificationResultV1, ...]
+    verification_operation_versions: tuple[tuple[UUID, int], ...]
     current_rework: tuple[ReworkRecordV1, ...]
+    replacement_result_ids: tuple[UUID, ...]
     acceptance: TaskAcceptanceDecisionV1 | None
     active_operation: ResultOperationFact | None
     candidate_history: ResultPage[IntegrationCandidateV1]
@@ -314,6 +316,8 @@ class ResultActionView:
     candidate_hash: str | None
     plan_content_hash: str | None
     requires_reason: bool
+    allowed_worker_item_ids: tuple[UUID, ...] = ()
+    replacement_result_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +387,7 @@ class TaskResultOverview:
     current_candidate: ResultCandidateView | None
     acceptance: ResultAcceptanceView | None
     apply_policy: ResultApplyPolicyView | None
+    rework_budget: ResultReworkBudgetView | None
     active_operation: ResultOperationView | None
     criteria: tuple[ResultCriterionView, ...]
     blocking_reasons: tuple[str, ...]
@@ -390,6 +395,15 @@ class TaskResultOverview:
     candidate_history: ResultHistoryView[ResultCandidateView]
     last_change_cursor: int
     as_of: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ResultReworkBudgetView:
+    auto_rounds_used: int
+    auto_rounds_limit: int
+    auto_seconds_limit: int
+    auto_started_at: datetime | None
+    auto_deadline: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,6 +775,7 @@ def _overview(
         ),
         acceptance=acceptance,
         apply_policy=_apply_policy(snapshot.plan),
+        rework_budget=_rework_budget(snapshot.head),
         active_operation=active_operation,
         criteria=criteria,
         blocking_reasons=_blocking_reasons(snapshot),
@@ -993,10 +1008,23 @@ def _actions(snapshot: ResultRootSnapshot, stage: str) -> tuple[ResultActionView
                     requires_reason=True,
                 ),
             )
+        if (
+            snapshot.active_operation.operation_kind == "verification"
+            and snapshot.active_operation.status
+            == ResultOperationStatus.BLOCKED.value
+        ):
+            return (
+                _retry_verification_action(
+                    candidate,
+                    head,
+                    operation_id=snapshot.active_operation.operation_id,
+                    operation_version=snapshot.active_operation.version,
+                ),
+            )
         return ()
     if snapshot.acceptance is not None or stage == "completed":
         return ()
-    return (
+    actions: list[ResultActionView] = [
         ResultActionView(
             action="accept_candidate",
             command_type="CompleteTask",
@@ -1022,7 +1050,141 @@ def _actions(snapshot: ResultRootSnapshot, stage: str) -> tuple[ResultActionView
             candidate_hash=candidate.content_hash,
             plan_content_hash=candidate.plan_content_hash,
             requires_reason=True,
+            allowed_worker_item_ids=_rework_worker_ids(snapshot.plan),
         ),
+        ResultActionView(
+            action="authorize_additional_rework",
+            command_type="AuthorizeAdditionalRework",
+            target_type="task",
+            target_id=snapshot.task.task_id,
+            expected_version=head.result_version,
+            expected_result_version=head.result_version,
+            expected_fingerprint=candidate.content_hash,
+            candidate_id=candidate.id,
+            candidate_hash=candidate.content_hash,
+            plan_content_hash=candidate.plan_content_hash,
+            requires_reason=True,
+        ),
+    ]
+    actions.extend(
+        _retry_verification_actions(
+            snapshot.current_verifications,
+            snapshot.verification_operation_versions,
+            candidate,
+            head,
+        )
+    )
+    if snapshot.replacement_result_ids:
+        actions.append(
+            ResultActionView(
+                action="reintegrate_result",
+                command_type="ReintegrateTaskResult",
+                target_type="task",
+                target_id=snapshot.task.task_id,
+                expected_version=head.result_version,
+                expected_result_version=head.result_version,
+                expected_fingerprint=candidate.content_hash,
+                candidate_id=candidate.id,
+                candidate_hash=candidate.content_hash,
+                plan_content_hash=candidate.plan_content_hash,
+                requires_reason=True,
+                replacement_result_ids=snapshot.replacement_result_ids,
+            )
+        )
+    return tuple(actions)
+
+
+_RETRYABLE_FAILURE_CODES = frozenset(
+    {
+        "deadline_exceeded",
+        "log_limit_exceeded",
+        "log_read_error",
+        "prepare_start_failed",
+        "prepare_failed",
+        "process_state_unknown",
+        "process_exit_code_unavailable",
+        "source_state_unavailable",
+        "stopped_by_request",
+        "verification_observation_unavailable",
+    }
+)
+
+
+def _retry_verification_actions(
+    verifications: Sequence[VerificationResultV1],
+    operation_versions: Sequence[tuple[UUID, int]],
+    candidate: IntegrationCandidateV1,
+    head: TaskResultHead,
+) -> tuple[ResultActionView, ...]:
+    versions = dict(operation_versions)
+    latest: dict[str, VerificationResultV1] = {}
+    for item in verifications:
+        previous = latest.get(item.check_key)
+        if previous is None or item.attempt > previous.attempt:
+            latest[item.check_key] = item
+    return tuple(
+        _retry_verification_action(
+            candidate,
+            head,
+            operation_id=item.operation_id,
+            operation_version=versions.get(item.operation_id, 1),
+        )
+        for item in latest.values()
+        if item.status.value in {"failed", "interrupted", "blocked"}
+        and (
+            item.status.value == "interrupted"
+            or item.failure_code in _RETRYABLE_FAILURE_CODES
+        )
+    )
+
+
+def _retry_verification_action(
+    candidate: IntegrationCandidateV1,
+    head: TaskResultHead,
+    *,
+    operation_id: UUID,
+    operation_version: int,
+) -> ResultActionView:
+    return ResultActionView(
+        action="retry_verification",
+        command_type="RetryResultVerification",
+        target_type="result_operation",
+        target_id=operation_id,
+        expected_version=operation_version,
+        expected_result_version=head.result_version,
+        expected_fingerprint=candidate.content_hash,
+        candidate_id=candidate.id,
+        candidate_hash=candidate.content_hash,
+        plan_content_hash=candidate.plan_content_hash,
+        requires_reason=True,
+    )
+
+
+def _rework_worker_ids(plan: TaskPlanSnapshot | None) -> tuple[UUID, ...]:
+    if plan is None or not isinstance(plan.integration_spec, IntegrationSpecV1):
+        return ()
+    allowed_keys = frozenset(plan.integration_spec.rework_policy.allowed_worker_item_keys)
+    return tuple(
+        sorted(
+            (
+                item.worker_item_id
+                for item in plan.worker_item_plans
+                if item.worker_item_id is not None and item.key in allowed_keys
+            ),
+            key=str,
+        )
+    )
+
+
+def _rework_budget(head: TaskResultHead | None) -> ResultReworkBudgetView | None:
+    if head is None:
+        return None
+    return ResultReworkBudgetView(
+        auto_rounds_used=head.auto_rounds_used,
+        auto_rounds_limit=head.auto_rounds_limit,
+        auto_seconds_limit=head.auto_seconds_limit,
+        auto_started_at=None if head.auto_started_at is None else _as_utc(head.auto_started_at),
+        auto_deadline=None if head.auto_deadline is None else _as_utc(head.auto_deadline),
     )
 
 
@@ -1153,6 +1315,7 @@ __all__ = [
     "ResultPageMarker",
     "ResultQueryService",
     "ResultQueryStore",
+    "ResultReworkBudgetView",
     "ResultReworkView",
     "ResultRootSnapshot",
     "ResultSourceView",

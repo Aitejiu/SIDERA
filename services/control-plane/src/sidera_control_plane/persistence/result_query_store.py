@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -131,6 +131,12 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 if current_candidate is not None
                 else ()
             )
+            verification_operation_versions = _operation_versions(
+                session,
+                workspace_id,
+                root_task_id,
+                current_verifications,
+            )
             current_rework = (
                 _rework_records(
                     session,
@@ -141,6 +147,12 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 )
                 if current_candidate is not None
                 else ()
+            )
+            replacement_result_ids = _replacement_result_ids(
+                session,
+                workspace_id,
+                root_task_id,
+                current_rework,
             )
             acceptance = (
                 _acceptance_by_id(
@@ -172,7 +184,9 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 current_candidate=current_candidate,
                 current_sources=current_sources,
                 current_verifications=current_verifications,
+                verification_operation_versions=verification_operation_versions,
                 current_rework=current_rework,
+                replacement_result_ids=replacement_result_ids,
                 acceptance=acceptance,
                 active_operation=active_operation,
                 candidate_history=history,
@@ -532,6 +546,26 @@ def _verification_results(
     return tuple(_verification(row) for row in rows)
 
 
+def _operation_versions(
+    session: Session,
+    workspace_id: UUID,
+    root_task_id: UUID,
+    verifications: Sequence[VerificationResultV1],
+) -> tuple[tuple[UUID, int], ...]:
+    operation_ids = tuple(dict.fromkeys(item.operation_id for item in verifications))
+    if not operation_ids:
+        return ()
+    rows = session.execute(
+        select(ResultOperationAttemptModel.operation_id, ResultOperationAttemptModel.version)
+        .where(
+            ResultOperationAttemptModel.workspace_id == workspace_id,
+            ResultOperationAttemptModel.root_task_id == root_task_id,
+            ResultOperationAttemptModel.operation_id.in_(operation_ids),
+        )
+    ).all()
+    return tuple((operation_id, version) for operation_id, version in rows)
+
+
 def _rework_records(
     session: Session,
     workspace_id: UUID,
@@ -554,6 +588,29 @@ def _rework_records(
         .limit(limit)
     ).all()
     return tuple(_rework(row) for row in rows)
+
+
+def _replacement_result_ids(
+    session: Session,
+    workspace_id: UUID,
+    root_task_id: UUID,
+    rework: Sequence[ReworkRecordV1],
+) -> tuple[UUID, ...]:
+    request_ids = tuple(
+        dict.fromkeys(request_id for record in rework for request_id in record.request_ids)
+    )
+    if not request_ids:
+        return ()
+    rows = session.scalars(
+        select(CodeResultSnapshotModel.id)
+        .where(
+            CodeResultSnapshotModel.workspace_id == workspace_id,
+            CodeResultSnapshotModel.root_task_id == root_task_id,
+            CodeResultSnapshotModel.request_id.in_(request_ids),
+        )
+        .order_by(CodeResultSnapshotModel.created_at.asc(), CodeResultSnapshotModel.id.asc())
+    ).all()
+    return tuple(rows)
 
 
 def _acceptance_by_id(

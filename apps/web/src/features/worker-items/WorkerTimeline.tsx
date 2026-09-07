@@ -165,6 +165,7 @@ function WorkerActivityRow({
         <div className="worker-timeline-item__topline">
           <span className="eyebrow">{activityLabel(activity.kind)}</span>
           <time dateTime={activity.occurred_at}>{formatTime(activity.occurred_at)}</time>
+          {activity.execution_id ? <span className="mono-label">EXEC {shortId(activity.execution_id)}</span> : null}
           {activity.trace_descriptor ? (
             <button
               className="worker-timeline-item__trace"
@@ -263,4 +264,8 @@ function formatTime(value: string): string {
       hour: "2-digit",
       minute: "2-digit",
     });
+}
+
+function shortId(value: string): string {
+  return value.slice(0, 8);
 }

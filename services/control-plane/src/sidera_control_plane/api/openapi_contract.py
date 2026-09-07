@@ -41,6 +41,7 @@ from sidera_control_plane.api.schemas import (
     ReconcileWorkerTransitionPayload,
     RecoverWorkerHandoffPayload,
     RecoverWorkerTransitionPayload,
+    ReintegrateTaskResultPayload,
     RegisterCollaborationRuntimeModulePayload,
     RegisterPlannerModulePayload,
     RegisterPlanningProfilePayload,
@@ -51,8 +52,11 @@ from sidera_control_plane.api.schemas import (
     ResumeAutomaticCollaborationPayload,
     RetryBlockedPlanningRunPayload,
     RetryContextAssemblyPayload,
+    RetryResultVerificationPayload,
     ReviseWorkContextPayload,
     RevokeContextPackagePayload,
+    AuthorizeAdditionalReworkPayload,
+    RequestTaskReworkPayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
     SubmitPlanRevisionPayload,
@@ -121,6 +125,13 @@ _NOTIFICATION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("RequeueNotificationDelivery", RequeueNotificationDeliveryPayload),
 )
 
+_RESULT_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("RequestTaskRework", RequestTaskReworkPayload),
+    ("AuthorizeAdditionalRework", AuthorizeAdditionalReworkPayload),
+    ("RetryResultVerification", RetryResultVerificationPayload),
+    ("ReintegrateTaskResult", ReintegrateTaskResultPayload),
+)
+
 _COMMAND_PAYLOADS = (
     _PLANNING_COMMAND_PAYLOADS
     + _RUNTIME_COMMAND_PAYLOADS
@@ -128,6 +139,7 @@ _COMMAND_PAYLOADS = (
     + _HANDOFF_COMMAND_PAYLOADS
     + _GOVERNANCE_COMMAND_PAYLOADS
     + _NOTIFICATION_COMMAND_PAYLOADS
+    + _RESULT_COMMAND_PAYLOADS
 )
 
 _NOTIFICATION_WORKFLOW_SCHEMAS: tuple[type[BaseModel], ...] = (

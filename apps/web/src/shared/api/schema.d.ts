@@ -1854,6 +1854,15 @@ export interface components {
             /** Selection Reason */
             selection_reason: string;
         };
+        /** AuthorizeAdditionalReworkPayload */
+        AuthorizeAdditionalReworkPayload: {
+            /** Additional Rounds */
+            additional_rounds: number;
+            /** Additional Seconds */
+            additional_seconds: number;
+            /** Reason */
+            reason: string;
+        };
         /** BlockedSubtaskResponse */
         BlockedSubtaskResponse: {
             /** Href */
@@ -2344,7 +2353,7 @@ export interface components {
              * Target Type
              * @enum {string}
              */
-            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition" | "collaboration_governance_hold" | "collaboration_release_proposal" | "notification_delivery" | "notification_route" | "notification_thread";
+            target_type: "task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition" | "collaboration_governance_hold" | "collaboration_release_proposal" | "notification_delivery" | "notification_route" | "notification_thread" | "result_operation";
             /**
              * Workspace Id
              * Format: uuid
@@ -5801,6 +5810,24 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** ReintegrateTaskResultPayload */
+        ReintegrateTaskResultPayload: {
+            /** Expected Result Version */
+            expected_result_version: number;
+            /** Reason */
+            reason: string;
+            /** Replacement Result Ids */
+            replacement_result_ids: string[];
+            /** Source Candidate Hash */
+            source_candidate_hash: string;
+            /**
+             * Source Candidate Id
+             * Format: uuid
+             */
+            source_candidate_id: string;
+            /** Target Observation Id */
+            target_observation_id: string | null;
+        };
         /** RejectCollaborationReleaseProposalPayload */
         RejectCollaborationReleaseProposalPayload: {
             /**
@@ -5840,6 +5867,34 @@ export interface components {
             current_proposal_revision: number;
             /** Feedback */
             feedback: string;
+        };
+        /** RequestTaskReworkPayload */
+        RequestTaskReworkPayload: {
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Impact Worker Item Ids */
+            impact_worker_item_ids?: string[];
+            /** Issue Keys */
+            issue_keys?: string[];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "automatic" | "user";
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /** @default null */
+            suggestion: components["schemas"]["ReworkSuggestionPayload"] | null;
+            /** Target Worker Item Ids */
+            target_worker_item_ids?: string[];
         };
         /** RequeueNotificationDeliveryPayload */
         RequeueNotificationDeliveryPayload: {
@@ -5913,6 +5968,11 @@ export interface components {
         ResultActionResponse: {
             /** Action */
             action: string;
+            /**
+             * Allowed Worker Item Ids
+             * @default []
+             */
+            allowed_worker_item_ids: string[];
             /** Candidate Hash */
             candidate_hash: string | null;
             /** Candidate Id */
@@ -5927,6 +5987,11 @@ export interface components {
             expected_version: number;
             /** Plan Content Hash */
             plan_content_hash: string | null;
+            /**
+             * Replacement Result Ids
+             * @default []
+             */
+            replacement_result_ids: string[];
             /** Requires Reason */
             requires_reason: boolean;
             /**
@@ -6449,6 +6514,19 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** ResultReworkBudgetResponse */
+        ResultReworkBudgetResponse: {
+            /** Auto Deadline */
+            auto_deadline: string | null;
+            /** Auto Rounds Limit */
+            auto_rounds_limit: number;
+            /** Auto Rounds Used */
+            auto_rounds_used: number;
+            /** Auto Seconds Limit */
+            auto_seconds_limit: number;
+            /** Auto Started At */
+            auto_started_at: string | null;
+        };
         /** ResultReworkPageResponse */
         ResultReworkPageResponse: {
             /**
@@ -6622,6 +6700,27 @@ export interface components {
         RetryContextAssemblyPayload: {
             /** Request Fingerprint */
             request_fingerprint: string;
+        };
+        /** RetryResultVerificationPayload */
+        RetryResultVerificationPayload: {
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Expected Operation Version */
+            expected_operation_version: number;
+            /** Expected Result Version */
+            expected_result_version: number;
+            /** Reason */
+            reason: string;
+            /**
+             * Verification Operation Id
+             * Format: uuid
+             */
+            verification_operation_id: string;
         };
         /** ReviseWorkContextPayload */
         ReviseWorkContextPayload: {
@@ -6886,6 +6985,22 @@ export interface components {
              * @enum {string}
              */
             revocation_scope: "new_starts" | "all_materialization";
+        };
+        /** ReworkSuggestionPayload */
+        ReworkSuggestionPayload: {
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Id
+             * Format: uuid
+             */
+            candidate_id: string;
+            /** Issue Keys */
+            issue_keys?: string[];
+            /** Reason */
+            reason: string;
+            /** Target Worker Item Ids */
+            target_worker_item_ids: string[];
         };
         /** RootCollaborationSummaryResponse */
         RootCollaborationSummaryResponse: {
@@ -7761,6 +7876,7 @@ export interface components {
             result_stage: string;
             /** Result Version */
             result_version: number | null;
+            rework_budget: components["schemas"]["ResultReworkBudgetResponse"] | null;
             /**
              * Root Task Id
              * Format: uuid

@@ -255,6 +255,7 @@ describe("SubtaskPage", () => {
     expect(screen.getByText("需要我处理")).toBeVisible();
     expect(screen.getByText("协同门槛")).toBeVisible();
     expect(screen.getByText(/阻塞于/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "打开 WorkerItem 工作区" })).toBeVisible();
     expect(screen.getByText("实现幂等写入和重试策略")).toBeVisible();
     expect(screen.queryByTestId("worker-graph-canvas")).not.toBeInTheDocument();
 

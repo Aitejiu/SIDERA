@@ -24,6 +24,8 @@ import { WorkerGovernancePanel } from "../collaboration/WorkerGovernancePanel";
 import { WorkerContextSummary } from "../context/WorkerContextSummary";
 import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
 import { ResultInputPanel } from "../result-inputs/ResultInputPanel";
+import { ResultOperationActions } from "../results/ResultOperationActions";
+import type { TaskResultOverview } from "../results/api";
 import { ExecutionRoutingPanel } from "./ExecutionRoutingPanel";
 import type { WorkerItemCollaborationSummary, WorkerPlacement, WorkerWorkspace } from "./types";
 
@@ -42,6 +44,11 @@ export function WorkerSidebar({
   onOpenArtifact,
   onResultInputAction,
   resultInputActionState,
+  resultView,
+  resultViewLoading,
+  resultViewError,
+  onRetryResultView,
+  onOpenResults,
 }: {
   workspace: WorkerWorkspace;
   taskTitle: string;
@@ -60,6 +67,11 @@ export function WorkerSidebar({
     status: "idle" | "submitting" | "success" | "error";
     message: string | null;
   };
+  resultView: TaskResultOverview | undefined;
+  resultViewLoading: boolean;
+  resultViewError: boolean;
+  onRetryResultView: () => void;
+  onOpenResults: (candidateId: string | undefined) => void;
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
   const currentExecution = workspace.execution_history[0] ?? null;
@@ -115,6 +127,19 @@ export function WorkerSidebar({
           ) : null}
         </div>
       </details>
+
+      <ResultOperationActions
+        workspaceId={workspace.workspace_id}
+        rootTaskId={workerItem.root_task_id}
+        workerItemId={workerItem.id}
+        view={resultView}
+        isLoading={resultViewLoading}
+        isError={resultViewError}
+        canIntervene={workspace.can_intervene}
+        onRetry={onRetryResultView}
+        onRefresh={onRefresh}
+        onOpenResults={onOpenResults}
+      />
 
       <WorkerGovernancePanel
         workspaceId={workspace.workspace_id}

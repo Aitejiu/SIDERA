@@ -18,6 +18,7 @@ import {
 import { subtaskWorkspaceQueryKey } from "../subtasks/api";
 import { collaborationDecisionsQueryKey, collaborationDetailQueryKey } from "../collaboration/api";
 import { planningRequestsQueryKey } from "../planning/api";
+import { getTaskResults, taskResultsQueryKey, type TaskResultOverview } from "../results/api";
 import { executionQueryKey, getExecution } from "../trace/api";
 import {
   executeResultInputAction,
@@ -76,6 +77,12 @@ export function WorkerItemPage() {
     queryFn: ({ signal }) => getTaskGraph(workspaceId, rootTaskId, signal),
     enabled: rootTaskId.length > 0,
   });
+  const resultQuery = useQuery({
+    queryKey: taskResultsQueryKey(workspaceId, rootTaskId),
+    queryFn: ({ signal }) => getTaskResults(workspaceId, rootTaskId, { signal }),
+    enabled: rootTaskId.length > 0,
+    retry: false,
+  });
   const activityQuery = useInfiniteQuery({
     queryKey: workerActivityQueryKey(workspaceId, workerItemId),
     initialPageParam: undefined as string | undefined,
@@ -126,6 +133,7 @@ export function WorkerItemPage() {
     if (rootTaskId) {
       queryKeys.push(
         taskGraphQueryKey(workspaceId, rootTaskId),
+        taskResultsQueryKey(workspaceId, rootTaskId),
         taskOverviewDetailQueryKey(workspaceId, rootTaskId),
         taskQueryKey(workspaceId, rootTaskId),
         taskActivityQueryKey(workspaceId, rootTaskId),
@@ -176,6 +184,17 @@ export function WorkerItemPage() {
             resultInputsLoading={resultInputsQuery.isPending}
             resultInputsError={resultInputsQuery.isError}
             onRetryResultInputs={() => void resultInputsQuery.refetch()}
+            resultView={resultQuery.data}
+            resultViewLoading={resultQuery.isPending}
+            resultViewError={resultQuery.isError}
+            onRetryResultView={() => void resultQuery.refetch()}
+            onOpenResults={(candidateId) => {
+              const search = new URLSearchParams({ view: "results" });
+              if (candidateId) search.set("candidate", candidateId);
+              navigate(
+                `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(rootTaskId)}?${search.toString()}`,
+              );
+            }}
             onOpenWorkerItem={(targetWorkerItemId) => navigate(
               `/workspaces/${encodeURIComponent(workspaceId)}/worker-items/${encodeURIComponent(targetWorkerItemId)}`,
             )}
@@ -210,6 +229,11 @@ function WorkerItemContent({
   resultInputsLoading,
   resultInputsError,
   onRetryResultInputs,
+  resultView,
+  resultViewLoading,
+  resultViewError,
+  onRetryResultView,
+  onOpenResults,
   onOpenWorkerItem,
   onOpenArtifact,
 }: {
@@ -233,6 +257,11 @@ function WorkerItemContent({
   resultInputsLoading: boolean;
   resultInputsError: boolean;
   onRetryResultInputs: () => void;
+  resultView: TaskResultOverview | undefined;
+  resultViewLoading: boolean;
+  resultViewError: boolean;
+  onRetryResultView: () => void;
+  onOpenResults: (candidateId: string | undefined) => void;
   onOpenWorkerItem: (workerItemId: string) => void;
   onOpenArtifact: (artifactId: string) => void;
 }) {
@@ -344,8 +373,13 @@ function WorkerItemContent({
           resultInputsLoading={resultInputsLoading}
           resultInputsError={resultInputsError}
           onRetryResultInputs={onRetryResultInputs}
+          resultView={resultView}
+          resultViewLoading={resultViewLoading}
+          resultViewError={resultViewError}
+          onRetryResultView={onRetryResultView}
           onOpenWorkerItem={onOpenWorkerItem}
           onOpenArtifact={onOpenArtifact}
+          onOpenResults={onOpenResults}
           onResultInputAction={(action) => void handleResultInputAction(action)}
           resultInputActionState={resultInputActionState}
         />

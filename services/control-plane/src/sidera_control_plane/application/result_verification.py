@@ -74,6 +74,8 @@ _RETRYABLE_FAILURE_CODES = frozenset(
 class ResultVerificationService:
     """Derive one authorized verification request from an immutable candidate."""
 
+    command_types = frozenset({"RetryResultVerification"})
+
     def __init__(
         self,
         uow_factory: Callable[[], ControlPlaneUnitOfWork],
@@ -82,6 +84,11 @@ class ResultVerificationService:
     ) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
+
+    def handle(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        return self.retry(uow, envelope)
 
     def schedule(
         self,
