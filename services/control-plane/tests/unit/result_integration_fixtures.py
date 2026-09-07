@@ -4,6 +4,8 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sidera_control_plane.domain.result_operations import TaskResultHead
+
 
 def integration_mapping() -> dict[str, object]:
     return {
@@ -207,6 +209,48 @@ def acceptance_mapping(**overrides: object) -> dict[str, object]:
         "actor_id": "aitejiu",
         "command_id": "a3000000-0000-0000-0000-000000000001",
         "created_at": "2026-09-07T12:03:00+00:00",
+    }
+    value.update(overrides)
+    return value
+
+
+def head_fixture(**overrides: object) -> TaskResultHead:
+    value: dict[str, object] = {
+        "workspace_id": fixed_uuid("20000000-0000-0000-0000-000000000001"),
+        "root_task_id": fixed_uuid("30000000-0000-0000-0000-000000000001"),
+        "current_candidate_id": None,
+        "current_acceptance_id": None,
+        "result_version": 1,
+        "active_operation_id": None,
+        "auto_rounds_used": 0,
+        "auto_rounds_limit": 2,
+        "auto_seconds_limit": 1800,
+        "auto_started_at": None,
+        "auto_deadline": None,
+    }
+    value.update(overrides)
+    return TaskResultHead(**value)  # type: ignore[arg-type]
+
+
+def apply_operation_mapping(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "id": "b1000000-0000-0000-0000-000000000001",
+        "workspace_id": "20000000-0000-0000-0000-000000000001",
+        "root_task_id": "30000000-0000-0000-0000-000000000001",
+        "acceptance_id": "a2000000-0000-0000-0000-000000000001",
+        "candidate_id": "90000000-0000-0000-0000-000000000001",
+        "repository_ref": "repo://integration-test",
+        "target_ref": "refs/heads/main",
+        "expected_old_commit": "a" * 40,
+        "accepted_commit": "c" * 40,
+        "status": "pending",
+        "attempt": 1,
+        "lease_owner": None,
+        "lease_token": None,
+        "lease_expiry": None,
+        "receipt_ref": None,
+        "failure_code": None,
+        "version": 1,
     }
     value.update(overrides)
     return value
