@@ -12,6 +12,9 @@ from sidera_control_plane.application.result_source_fence import (
     discover_result_source_fence,
     lock_result_source_fence,
 )
+from sidera_control_plane.application.result_verification import (
+    record_verification_observation,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -209,6 +212,11 @@ class SessionEventIngestor:
                 session.record_activity(sequence=event.sequence, now=self._clock())
                 uow.sessions.save(session, previous_version)
                 uow.execution_events.add(normalized)
+                record_verification_observation(
+                    uow,
+                    execution=execution,
+                    event=normalized,
+                )
                 return EventIngestionResult(
                     event=normalized,
                     ingested=True,

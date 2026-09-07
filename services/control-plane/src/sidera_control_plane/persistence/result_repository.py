@@ -199,6 +199,40 @@ class ResultRepository:
         row = self._session.scalar(statement)
         return _to_apply(row) if row is not None else None
 
+    def get_verification_by_operation(
+        self,
+        operation_id: UUID,
+        workspace_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> VerificationResultV1 | None:
+        statement = select(ResultVerificationResultModel).where(
+            ResultVerificationResultModel.operation_id == operation_id,
+            ResultVerificationResultModel.workspace_id == workspace_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_verification(row) if row is not None else None
+
+    def list_verification_results(
+        self, candidate_id: UUID, workspace_id: UUID
+    ) -> tuple[VerificationResultV1, ...]:
+        rows = self._session.scalars(
+            select(ResultVerificationResultModel)
+            .where(
+                ResultVerificationResultModel.candidate_id == candidate_id,
+                ResultVerificationResultModel.workspace_id == workspace_id,
+            )
+            .order_by(
+                ResultVerificationResultModel.check_key.asc(),
+                ResultVerificationResultModel.attempt.asc(),
+                ResultVerificationResultModel.created_at.asc(),
+                ResultVerificationResultModel.id.asc(),
+            )
+        ).all()
+        return tuple(_to_verification(row) for row in rows)
+
     def claim_operations(
         self, kind: str, now: datetime, limit: int
     ) -> tuple[ResultOperationAttemptV1, ...]:

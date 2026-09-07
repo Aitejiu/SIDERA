@@ -4,8 +4,9 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -13,21 +14,34 @@ import pytest
 from sqlalchemy import select, update
 
 from sidera_control_plane.adapters.git_results import GitResultStore
+from sidera_control_plane.adapters.local_verification import LocalCheckRunner
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.application.code_result_capture import (
     CodeResultCaptureService,
     code_capture_operation_id,
 )
-from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.command_service import (
+    CommandService,
+    hash_request,
+)
 from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
 )
-from sidera_control_plane.application.event_ingestor import ArtifactRegistry
+from sidera_control_plane.application.event_ingestor import (
+    ArtifactRegistry,
+    SessionEventIngestor,
+)
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
 from sidera_control_plane.application.result_integration import ResultIntegrationService
+from sidera_control_plane.application.result_ports import (
+    CheckRunObservation,
+    CheckRunRequest,
+    CheckRunStatus,
+    ResultOperationAttemptV1,
+)
 from sidera_control_plane.application.result_verification import (
     ResultVerificationService,
 )
@@ -36,13 +50,19 @@ from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactTyp
 from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
     CodeResultSnapshotV1,
+    IntegrationCandidateV1,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_packages import (
     ContextPurpose,
     ResultInputBudgetV1,
 )
-from sidera_control_plane.domain.result_operations import TaskResultHead
+from sidera_control_plane.domain.gateway import AdapterEvent
+from sidera_control_plane.domain.result_operations import (
+    ResultOperationStatus,
+    TaskResultHead,
+)
+from sidera_control_plane.domain.result_verification import VerificationResultV1
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
@@ -97,6 +117,10 @@ class ResultIntegrationScenario:
         self._capture_service: CodeResultCaptureService | None = None
         self.code_provider_failure: str | None = None
         self.worker_context_versions: tuple[int, ...] = (1, 2, 3)
+        self._check_exit_code: int | None = None
+        self._modify_source_during_check = False
+        self._verification_runner: LocalCheckRunner | None = None
+        self._verification_operation_ids: tuple[UUID, ...] = ()
         self._base_commit = self._init_repository()
 
     @property
@@ -350,13 +374,37 @@ class ResultIntegrationScenario:
             base_commit=self._base_commit if base_commit is not None else "a" * 40,
         )
 
-    def candidate(self, *, run_checks: bool = False):
+    def candidate(
+        self,
+        *,
+        check_exit_code: int | None = None,
+        run_checks: bool = False,
+        tamper_actual_tree: bool = False,
+        modify_source_during_check: bool = False,
+    ):
         """Run the real code integration WorkerItem and publish its candidate."""
 
         if type(run_checks) is not bool:
             raise ValueError("run_checks must be a boolean")
-        if run_checks:
-            raise NotImplementedError("result integration checks are added in Task 18")
+        if type(tamper_actual_tree) is not bool:
+            raise ValueError("tamper_actual_tree must be a boolean")
+        if type(modify_source_during_check) is not bool:
+            raise ValueError("modify_source_during_check must be a boolean")
+        if check_exit_code is not None and (
+            isinstance(check_exit_code, bool) or not isinstance(check_exit_code, int)
+        ):
+            raise ValueError("check_exit_code must be an integer or null")
+        if check_exit_code is not None:
+            run_checks = True
+        if run_checks and check_exit_code is None:
+            check_exit_code = 0
+        if self._integration_execution_id is not None and (
+            (check_exit_code is not None and self._check_exit_code != check_exit_code)
+            or self._modify_source_during_check != modify_source_during_check
+        ):
+            raise AssertionError("the integration candidate already has a check setup")
+        self._check_exit_code = check_exit_code
+        self._modify_source_during_check = modify_source_during_check
         self.seed_plan()
         if "a" not in self._source_execution_ids:
             self.source(
@@ -377,7 +425,7 @@ class ResultIntegrationScenario:
                 NAMESPACE_URL,
                 f"sidera.integration-candidate-operation:{self.integration_execution_id}",
             )
-        return ResultIntegrationService(
+        candidate = ResultIntegrationService(
             self.uow,
             clock=lambda: self._planning.now,
         ).publish_candidate(
@@ -385,6 +433,12 @@ class ResultIntegrationScenario:
             execution_id=self.integration_execution_id,
             operation_id=self.integration_operation_id,
         )
+        if run_checks:
+            self._run_verification_checks(
+                candidate,
+                tamper_actual_tree=tamper_actual_tree,
+            )
+        return candidate
 
     def revise_plan(self, *, minimum_count: int) -> object:
         """Advance the planning head so an older integration execution is stale."""
@@ -554,6 +608,19 @@ class ResultIntegrationScenario:
         )
         output = worktree / "integration.txt"
         output.write_text("integrated source results\n", encoding="utf-8")
+        if self._check_exit_code is not None:
+            if self._modify_source_during_check:
+                script = (
+                    "from pathlib import Path\n"
+                    "import os\n"
+                    "Path('integration.txt').write_text('tampered\\n')\n"
+                    f"os._exit({self._check_exit_code})\n"
+                )
+            else:
+                script = f"import os\n\nos._exit({self._check_exit_code})\n"
+            (worktree / "test_sidera_result_check.py").write_text(
+                script, encoding="utf-8"
+            )
         self._git(worktree, "add", "-A")
         self._git(
             worktree,
@@ -638,6 +705,275 @@ class ResultIntegrationScenario:
             raise AssertionError(f"WorkerItem {normalized_key!r} was not found")
         return worker_item
 
+    def verification_results(
+        self, candidate_id: UUID
+    ) -> tuple[VerificationResultV1, ...]:
+        with self.uow() as uow:
+            return uow.results.list_verification_results(candidate_id, self.workspace_id)
+
+    def candidate_commit(self, candidate: object) -> str:
+        candidate_id = getattr(candidate, "id", None)
+        code_result_id = getattr(candidate, "code_result_id", None)
+        if not isinstance(candidate_id, UUID) or not isinstance(code_result_id, UUID):
+            raise TypeError("candidate is not a typed integration candidate")
+        with self.uow() as uow:
+            snapshot = uow.results.get_record(
+                "code_snapshot", code_result_id, self.workspace_id
+            )
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise TypeError(f"candidate {candidate_id} has no code snapshot")
+        return snapshot.result_commit
+
+    def candidate_tree(self, candidate: object) -> str:
+        code_result_id = getattr(candidate, "code_result_id", None)
+        if not isinstance(code_result_id, UUID):
+            raise TypeError("candidate is not a typed integration candidate")
+        with self.uow() as uow:
+            snapshot = uow.results.get_record(
+                "code_snapshot", code_result_id, self.workspace_id
+            )
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise TypeError("candidate code snapshot is unavailable")
+        return snapshot.result_tree
+
+    def finish_verification(
+        self, candidate_id: UUID
+    ) -> tuple[VerificationResultV1, ...]:
+        del candidate_id
+        if not self._verification_operation_ids:
+            return ()
+        results: tuple[VerificationResultV1, ...] = ()
+        for operation_id in self._verification_operation_ids:
+            results = self.verification_service.finish(
+                workspace_id=self.workspace_id,
+                operation_id=operation_id,
+            )
+        return results
+
+    def verification_operation(self):
+        if len(self._verification_operation_ids) != 1:
+            raise AssertionError("verification operation is not available")
+        with self.uow() as uow:
+            operation = uow.results.get_operation(
+                self._verification_operation_ids[0], self.workspace_id
+            )
+        if not isinstance(operation, ResultOperationAttemptV1):
+            raise AssertionError("verification operation was not found")
+        return operation
+
+    def verification_log_snapshot(self) -> tuple[tuple[str, bytes], ...]:
+        operation = self.verification_operation()
+        observation = operation.payload.get("observation")
+        if not isinstance(observation, dict):
+            raise TypeError("verification observation is unavailable")
+        execution_id = UUID(str(operation.payload["execution_id"]))
+        log_refs = observation.get("log_refs")
+        if not isinstance(log_refs, list):
+            raise TypeError("verification log refs are unavailable")
+        return tuple(
+            (
+                str(log_ref),
+                (self._worktree_root / str(execution_id) / str(log_ref)).read_bytes(),
+            )
+            for log_ref in log_refs
+        )
+
+    def mark_verification_interrupted(self) -> None:
+        operation = self.verification_operation()
+        raw_observation = operation.payload.get("observation")
+        if not isinstance(raw_observation, dict):
+            raise TypeError("verification observation is unavailable")
+        observation = CheckRunObservation.from_mapping(
+            {
+                **raw_observation,
+                "status": CheckRunStatus.INTERRUPTED.value,
+                "finished_at": NOW.isoformat(),
+                "exit_code": -15,
+                "failure_code": "stopped_by_request",
+            }
+        )
+        with self.uow() as uow:
+            current = uow.results.get_operation(
+                operation.operation_id, self.workspace_id, for_update=True
+            )
+            if not isinstance(current, ResultOperationAttemptV1):
+                raise AssertionError("verification operation was not found")
+            updated = replace(
+                current,
+                status=ResultOperationStatus.FAILED,
+                payload={**dict(current.payload), "observation": observation.to_mapping()},
+                failure_code="stopped_by_request",
+                version=current.version + 1,
+                updated_at=NOW,
+            )
+            uow.results.save_operation(updated, expected_version=current.version)
+
+    def retry_verification(self, *, reason: str = "check failed"):
+        operation = self.verification_operation()
+        with self.uow() as uow:
+            head = uow.results.get_head(
+                self.workspace_id, self.root_task_id, for_update=True
+            )
+            candidate = uow.results.get_record(
+                "candidate",
+                UUID(str(operation.payload["candidate_id"])),
+                self.workspace_id,
+            )
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise TypeError("verification candidate was not found")
+        candidate_id = UUID(str(operation.payload["candidate_id"]))
+        if candidate.id != candidate_id:
+            raise AssertionError("verification operation candidate changed")
+        command = CommandEnvelope(
+            id=uuid5(
+                NAMESPACE_URL,
+                f"result-integration-verification-retry:{operation.operation_id}",
+            ),
+            workspace_id=self.workspace_id,
+            command_type="RetryResultVerification",
+            target_type="verification_operation",
+            actor_type="user",
+            actor_id="result-integration-test",
+            target_id=operation.operation_id,
+            payload={
+                "verification_operation_id": str(operation.operation_id),
+                "expected_operation_version": operation.version,
+                "expected_result_version": head.result_version if head else 0,
+                "candidate_id": str(candidate.id),
+                "candidate_hash": candidate.content_hash,
+                "reason": reason,
+            },
+            expected_version=operation.version,
+            idempotency_key=f"result-integration-verification-retry:{operation.operation_id}",
+            correlation_id=self.root_task_id,
+        )
+        with self.uow() as uow:
+            existing_command = uow.commands.find_by_id(self.workspace_id, command.id)
+            result = self.verification_service.retry(uow, command)
+            if existing_command is None:
+                uow.commands.record_applied(command, hash_request(command), result)
+        return result
+
+    def _run_verification_checks(
+        self,
+        candidate: object,
+        *,
+        tamper_actual_tree: bool = False,
+    ) -> None:
+        candidate_id = getattr(candidate, "id", None)
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise TypeError("candidate is not typed")
+        candidate_id = candidate.id
+        request_id = self.verification_service.schedule(
+            workspace_id=self.workspace_id,
+            candidate_id=candidate_id,
+            command_id=uuid5(
+                NAMESPACE_URL,
+                f"result-integration-verification-schedule:{candidate_id}",
+            ),
+        )
+        self.tick()
+        request = self.request(request_id)
+        execution_id = request.first_execution_id
+        if execution_id is None:
+            raise AssertionError("verification request was not materialized")
+        _worker_id, lease_id, session_id, _execution_version = self._planning._start_source(
+            execution_id,
+            key="summary",
+        )
+        result_commit = self.candidate_commit(candidate)
+        result_tree = self.candidate_tree(candidate)
+        worktree, manifest = self._create_worktree(
+            execution_id,
+            base_revision=result_commit,
+        )
+        with self.uow() as uow:
+            uow.workspaces.add(manifest)
+            plan = uow.plans.get(candidate.plan_snapshot_id, self.workspace_id)
+        if plan is None or plan.integration_spec is None:
+            raise AssertionError("verification integration spec is unavailable")
+        check = plan.integration_spec.checks[0]
+        operation_id = uuid5(
+            NAMESPACE_URL,
+            f"result-integration-verification-check:{execution_id}:{check.key}",
+        )
+        runner = self._verification_runner
+        if runner is None:
+            runner = LocalCheckRunner(
+                state_root=self.tmp_path / "verification-state",
+                clock=lambda: NOW,
+            )
+            self._verification_runner = runner
+        observation = runner.start(
+            CheckRunRequest(
+                operation_id=operation_id,
+                candidate_id=candidate_id,
+                candidate_hash=candidate.content_hash,
+                actual_commit=result_commit,
+                actual_tree=result_tree,
+                check=check,
+                workspace_location=worktree,
+                deadline=NOW + timedelta(seconds=check.timeout_seconds),
+                log_ref=f"verification/{operation_id}/{check.key}",
+            )
+        )
+        deadline = time.monotonic() + 10
+        while observation.status is CheckRunStatus.RUNNING and time.monotonic() < deadline:
+            time.sleep(0.01)
+            refreshed = runner.inspect(operation_id)
+            if refreshed is None:
+                raise AssertionError("verification observation disappeared")
+            observation = refreshed
+        if observation.status is CheckRunStatus.RUNNING:
+            observation = runner.stop(operation_id)
+        if observation is None or observation.status is CheckRunStatus.RUNNING:
+            raise AssertionError("verification check did not reach a terminal state")
+        event_type = (
+            "session.succeeded"
+            if observation.status is CheckRunStatus.PASSED
+            else "session.canceled"
+            if observation.status is CheckRunStatus.INTERRUPTED
+            else "session.failed"
+        )
+        payload = observation.to_mapping()
+        payload.update(
+            {
+                "purpose": "verification",
+                "provider": "local_verification",
+                "candidate_id": str(candidate_id),
+                "candidate_hash": candidate.content_hash,
+                "check_key": check.key,
+                "check_hash": hashlib.sha256(
+                    json.dumps(
+                        check.to_mapping(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "attempt": 1,
+            }
+        )
+        if tamper_actual_tree:
+            payload["actual_tree"] = "0" * 40 if result_tree != "0" * 40 else "1" * 40
+        SessionEventIngestor(
+            self.uow,
+            clock=lambda: self._planning.now,
+        ).ingest_event(
+            workspace_id=self.workspace_id,
+            execution_id=execution_id,
+            session_id=session_id,
+            lease_id=lease_id,
+            fencing_token=1,
+            event=AdapterEvent(
+                event_type=event_type,
+                sequence=1,
+                payload=payload,
+                occurred_at=observation.finished_at or NOW,
+            ),
+        )
+        self._verification_operation_ids = (operation_id,)
+
     def tick(self, *, limit: int = 20):
         return ActivationReconciler(
             uow_factory=self.uow,
@@ -672,7 +1008,9 @@ class ResultIntegrationScenario:
         self._repository.mkdir(parents=True, exist_ok=True)
         self._worktree_root.mkdir(parents=True, exist_ok=True)
         self._git(self._repository, "init", "--initial-branch=main")
-        (self._repository / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+        (self._repository / ".gitignore").write_text(
+            "*.ignored\n__pycache__/\n", encoding="utf-8"
+        )
         (self._repository / "README.md").write_text("base\n", encoding="utf-8")
         self._git(self._repository, "add", "-A")
         self._git(
@@ -688,10 +1026,11 @@ class ResultIntegrationScenario:
         return self._git(self._repository, "rev-parse", "HEAD")
 
     def _create_worktree(
-        self, execution_id: UUID
+        self, execution_id: UUID, *, base_revision: str | None = None
     ) -> tuple[Path, ExecutionWorkspaceManifest]:
         worktree = self._worktree_root / str(execution_id)
         branch = f"sidera/execution/{execution_id}"
+        revision = base_revision or self._base_commit
         self._git(
             self._repository,
             "worktree",
@@ -699,7 +1038,7 @@ class ResultIntegrationScenario:
             "-b",
             branch,
             str(worktree),
-            self._base_commit,
+            revision,
         )
         manifest = ExecutionWorkspaceManifest.create(
             id=uuid4(),
@@ -709,9 +1048,9 @@ class ResultIntegrationScenario:
             checkouts=(
                 WorkspaceCheckout(
                     repository_ref="repo://integration-test",
-                    base_revision=self._base_commit,
+                    base_revision=revision,
                     branch=branch,
-                    current_head=self._base_commit,
+                    current_head=revision,
                 ),
             ),
             location_ref=f"git-worktree://{execution_id}",

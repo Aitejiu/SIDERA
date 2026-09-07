@@ -667,6 +667,16 @@ class ResultRepositoryPort(Protocol):
     ) -> ResultOperation | None:
         raise NotImplementedError
 
+    def get_verification_by_operation(
+        self, operation_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> VerificationResultV1 | None:
+        raise NotImplementedError
+
+    def list_verification_results(
+        self, candidate_id: UUID, workspace_id: UUID
+    ) -> tuple[VerificationResultV1, ...]:
+        raise NotImplementedError
+
     def save_head(self, head: TaskResultHead, *, expected_version: int) -> None:
         raise NotImplementedError
 
