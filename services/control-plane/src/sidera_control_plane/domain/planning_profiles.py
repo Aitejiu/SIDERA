@@ -249,6 +249,9 @@ class PlanningProfile:
         if not self.user_selectable:
             raise ValidationError("planning profile is not user-selectable")
 
+    def requires_result_integration(self) -> bool:
+        return self.proposal_schema_version in {5, 6}
+
     def snapshot(
         self,
         planner_capabilities: PlannerAdapterCapabilityProfile,
@@ -297,6 +300,14 @@ class PlanningProfile:
             planner_capabilities=planner_capabilities,
             collaboration_runtime_binding=self.collaboration_runtime_binding,
         )
+
+
+def profile_requires_result_integration(
+    profile: PlanningProfile | PlanningProfileSnapshot,
+) -> bool:
+    if not isinstance(profile, (PlanningProfile, PlanningProfileSnapshot)):
+        raise ValidationError("planning profile is required")
+    return profile.proposal_schema_version in {5, 6}
 
 
 def _validate_collaboration_binding(

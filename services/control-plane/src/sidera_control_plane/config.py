@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     collaboration_recovery_sweep_seconds: int = Field(default=30, gt=0, le=3600)
     collaboration_governance_enabled: bool = False
     result_inputs_enabled: bool = False
+    result_integration_enabled: bool = False
+    result_apply_on_accept: bool = False
+    result_apply_target_ref: str | None = Field(default=None, min_length=1, max_length=255)
+    result_repository_ref: str = Field(default="repo://sidera", min_length=1, max_length=255)
+    result_base_commit: str | None = Field(default=None, min_length=1, max_length=64)
+    result_environment_ref: str = Field(default="env://local", min_length=1, max_length=255)
+    result_store_root: Path = Path(".sidera/results")
+    result_readiness_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     collaboration_max_projection_bytes: int = Field(
         default=262_144, gt=0, le=1_048_576
     )
@@ -174,5 +182,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "collaboration evaluation timeout must be below collaboration "
                 "lease ttl with a safety margin"
+            )
+        return self
+
+    @field_validator("result_store_root", mode="before")
+    @classmethod
+    def validate_result_store_root(cls, value: object) -> object:
+        if isinstance(value, Path):
+            if not str(value).strip():
+                raise ValueError("result_store_root must not be empty")
+            return value
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("result_store_root must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_result_apply_target(self) -> "Settings":
+        if self.result_apply_on_accept and not self.result_apply_target_ref:
+            raise ValueError(
+                "result_apply_target_ref is required when result_apply_on_accept is enabled"
             )
         return self

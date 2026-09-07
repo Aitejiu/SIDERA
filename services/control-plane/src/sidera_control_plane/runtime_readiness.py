@@ -12,10 +12,23 @@ from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.runtime_metrics_store import (
     SqlAlchemyRuntimeMetricsStore,
 )
+from sidera_control_plane.result_readiness import (
+    RepositoryResolver,
+    ResultReadinessReport,
+    inspect_result_readiness,
+)
 
 
 def audit_readiness(database: Database, workspace_id: UUID) -> RuntimeReadinessView:
     return SqlAlchemyRuntimeMetricsStore(database).get_readiness(workspace_id)
+
+
+def audit_result_readiness(
+    settings: Settings,
+    module_catalog: object,
+    repository_resolver: RepositoryResolver,
+) -> ResultReadinessReport:
+    return inspect_result_readiness(settings, module_catalog, repository_resolver)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

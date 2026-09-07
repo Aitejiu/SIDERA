@@ -204,6 +204,18 @@ def require_loopback_adapter_workflow(settings: Settings) -> None:
         )
 
 
+class ResultIntegrationDisabled(ValidationError):
+    code = "result_integration_disabled"
+
+
+def require_result_integration_enabled(settings: Settings) -> None:
+    if not settings.result_integration_enabled:
+        raise ResultIntegrationDisabled(
+            "result integration is disabled by configuration",
+            details={"feature": "result_integration"},
+        )
+
+
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
