@@ -8,15 +8,24 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
 from uuid import UUID
 
-from sidera_control_plane.application.result_ports import CapturedCode
+from sidera_control_plane.application.result_ports import (
+    CapturedCode,
+    CodeInputReceipt,
+)
+from sidera_control_plane.domain.code_results import (
+    CodeInputManifestV1,
+    CodeInputSourceV1,
+)
 from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
+    WorkspaceCheckout,
     WorkspaceLifecycle,
 )
 
@@ -43,6 +52,21 @@ _METADATA_FIELDS = frozenset(
         "author_name",
         "author_email",
         "workspace_base_revision",
+    }
+)
+_INPUT_METADATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "operation_id",
+        "execution_id",
+        "repository_ref",
+        "base_commit",
+        "input_hash",
+        "actual_commit",
+        "actual_tree",
+        "conflict_paths",
+        "author_name",
+        "author_email",
     }
 )
 
@@ -275,6 +299,643 @@ class GitResultStore:
             repository, revision, code="result_input_commit_invalid"
         )
         return commit, self._resolve_tree(repository, commit)
+
+    def materialize(
+        self,
+        *,
+        workspace_manifest: ExecutionWorkspaceManifest,
+        code_inputs: CodeInputManifestV1,
+        operation_id: UUID,
+    ) -> CodeInputReceipt:
+        """Materialize fixed code results into a managed workspace exactly once."""
+
+        if not isinstance(operation_id, UUID):
+            raise ResultError("code_input_operation_invalid", {})
+        if not isinstance(code_inputs, CodeInputManifestV1):
+            raise ResultError("code_input_manifest_invalid", {})
+        repository_ref = self._manifest_repository_ref(workspace_manifest)
+        if code_inputs.repository_ref != repository_ref:
+            raise ResultError(
+                "code_repository_mismatch",
+                {"repository_ref": code_inputs.repository_ref},
+            )
+        checkout = workspace_manifest.checkouts[0]
+        if code_inputs.base_commit.lower() != checkout.base_revision.lower():
+            raise ResultError("code_input_base_mismatch", {})
+        repository_root = self._resolve_repository(repository_ref)
+        base_commit = self._resolve_commit(
+            repository_root,
+            code_inputs.base_commit,
+            code="code_input_base_invalid",
+        )
+
+        existing = self.inspect_materialization(operation_id)
+        if existing is not None:
+            if (
+                existing.execution_id != workspace_manifest.execution_id
+                or existing.input_hash != code_inputs.input_hash
+            ):
+                raise ResultError(
+                    "code_input_operation_conflict",
+                    {"operation_id": str(operation_id)},
+                )
+            if not existing.conflict_paths:
+                workspace = self._resolve_workspace(workspace_manifest, repository_root)
+                self._ensure_materialized_workspace(
+                    workspace,
+                    checkout,
+                    base_commit=base_commit,
+                    actual_commit=existing.actual_commit,
+                )
+            return existing
+
+        workspace = self._resolve_workspace(workspace_manifest, repository_root)
+        self._validate_materialization_workspace(
+            workspace,
+            checkout,
+            expected_head=base_commit,
+        )
+        sources = self._validate_code_input_sources(
+            repository_root,
+            code_inputs,
+            base_commit=base_commit,
+        )
+        ordered_sources = self._order_code_input_sources(repository_root, sources)
+        actual_tree, conflict_paths = self._materialize_input_tree(
+            repository_root,
+            base_commit=base_commit,
+            sources=ordered_sources,
+        )
+        actual_commit = base_commit
+        if not conflict_paths:
+            created_at = self._capture_time()
+            actual_commit = self._commit_materialized_tree(
+                repository_root,
+                actual_tree=actual_tree,
+                base_commit=base_commit,
+                operation_id=operation_id,
+                created_at=created_at,
+            )
+            self._install_materialized_tree(
+                workspace,
+                checkout,
+                expected_head=base_commit,
+                actual_commit=actual_commit,
+            )
+        else:
+            actual_tree = self._resolve_tree(repository_root, base_commit)
+
+        receipt = CodeInputReceipt(
+            execution_id=workspace_manifest.execution_id,
+            input_hash=code_inputs.input_hash,
+            actual_commit=actual_commit,
+            actual_tree=actual_tree,
+            conflict_paths=conflict_paths,
+            operation_id=operation_id,
+            _repository_path=repository_root,
+        )
+        metadata = self._input_metadata_document(
+            receipt=receipt,
+            repository_ref=repository_ref,
+            base_commit=base_commit,
+        )
+        metadata_oid = self._write_metadata(repository_root, metadata)
+        if not self._update_input_refs(
+            repository_root,
+            operation_id=operation_id,
+            actual_commit=actual_commit,
+            metadata_oid=metadata_oid,
+        ):
+            existing = self.inspect_materialization(operation_id)
+            if (
+                existing is not None
+                and existing.execution_id == receipt.execution_id
+                and existing.input_hash == receipt.input_hash
+            ):
+                if not existing.conflict_paths:
+                    self._ensure_materialized_workspace(
+                        workspace,
+                        checkout,
+                        base_commit=base_commit,
+                        actual_commit=existing.actual_commit,
+                    )
+                return existing
+            raise ResultError(
+                "code_input_ref_conflict",
+                {"operation_id": str(operation_id)},
+            )
+        if not receipt.conflict_paths:
+            self._ensure_materialized_workspace(
+                workspace,
+                checkout,
+                base_commit=base_commit,
+                actual_commit=receipt.actual_commit,
+            )
+        return receipt
+
+    def inspect_materialization(self, operation_id: UUID) -> CodeInputReceipt | None:
+        """Read a persisted input receipt without touching the workspace."""
+
+        if not isinstance(operation_id, UUID):
+            raise ResultError("code_input_operation_invalid", {})
+        matches: list[CodeInputReceipt] = []
+        for repository_ref, repository in self._known_repositories():
+            input_ref = _input_ref(operation_id)
+            metadata_ref = _input_metadata_ref(operation_id)
+            has_input = self._ref_exists(repository, input_ref)
+            has_metadata = self._ref_exists(repository, metadata_ref)
+            if not has_input and not has_metadata:
+                continue
+            if not has_input or not has_metadata:
+                raise ResultError(
+                    "code_input_receipt_corrupt",
+                    {"operation_id": str(operation_id)},
+                )
+            matches.append(
+                self._inspect_repository_materialization(
+                    repository,
+                    repository_ref=repository_ref,
+                    operation_id=operation_id,
+                )
+            )
+        if len(matches) > 1:
+            raise ResultError(
+                "code_input_receipt_ambiguous",
+                {"operation_id": str(operation_id)},
+            )
+        return matches[0] if matches else None
+
+    def _validate_materialization_workspace(
+        self,
+        workspace: Path,
+        checkout: WorkspaceCheckout,
+        *,
+        expected_head: str,
+    ) -> None:
+        head = self._resolve_commit(
+            workspace,
+            "HEAD",
+            code="code_input_workspace_changed",
+        )
+        if head != expected_head or head != checkout.current_head.lower():
+            raise ResultError("code_input_workspace_changed", {})
+        status = self._run_git(
+            workspace,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            error_code="code_input_workspace_inspection_failed",
+        ).stdout
+        if status:
+            raise ResultError("code_input_workspace_dirty", {})
+
+    def _validate_code_input_sources(
+        self,
+        repository: Path,
+        code_inputs: CodeInputManifestV1,
+        *,
+        base_commit: str,
+    ) -> tuple[CodeInputSourceV1, ...]:
+        validated: list[CodeInputSourceV1] = []
+        for source in code_inputs.sources:
+            input_commit = self._resolve_commit(
+                repository,
+                source.input_commit,
+                code="code_input_source_commit_invalid",
+            )
+            result_commit = self._resolve_commit(
+                repository,
+                source.result_commit,
+                code="code_input_source_commit_invalid",
+            )
+            input_tree = self._resolve_tree(repository, input_commit)
+            result_tree = self._resolve_tree(repository, result_commit)
+            if input_tree != source.input_tree.lower():
+                raise ResultError(
+                    "code_input_source_tree_invalid",
+                    {"result_id": str(source.result_id), "tree": "input"},
+                )
+            if result_tree != source.result_tree.lower():
+                raise ResultError(
+                    "code_input_source_tree_invalid",
+                    {"result_id": str(source.result_id), "tree": "result"},
+                )
+            parents = self._commit_parents(repository, result_commit)
+            if parents != (input_commit,):
+                raise ResultError(
+                    "code_input_source_ancestry_invalid",
+                    {"result_id": str(source.result_id)},
+                )
+            if not self._is_ancestor(repository, base_commit, input_commit):
+                raise ResultError(
+                    "code_input_source_outside_base",
+                    {"result_id": str(source.result_id)},
+                )
+            validated.append(
+                replace(
+                    source,
+                    input_commit=input_commit,
+                    input_tree=input_tree,
+                    result_commit=result_commit,
+                    result_tree=result_tree,
+                )
+            )
+        return tuple(validated)
+
+    def _order_code_input_sources(
+        self,
+        repository: Path,
+        sources: tuple[CodeInputSourceV1, ...],
+    ) -> tuple[CodeInputSourceV1, ...]:
+        edges: dict[int, set[int]] = {index: set() for index in range(len(sources))}
+        indegree = {index: 0 for index in range(len(sources))}
+        for left_index, left in enumerate(sources):
+            for right_index, right in enumerate(sources):
+                if left_index == right_index:
+                    continue
+                if left.result_commit == right.input_commit:
+                    dependency = True
+                else:
+                    dependency = self._is_ancestor(
+                        repository,
+                        left.result_commit,
+                        right.input_commit,
+                    )
+                if dependency and right_index not in edges[left_index]:
+                    edges[left_index].add(right_index)
+                    indegree[right_index] += 1
+
+        ready = [index for index, value in indegree.items() if value == 0]
+        ordered: list[CodeInputSourceV1] = []
+        while ready:
+            ready.sort()
+            current = ready.pop(0)
+            ordered.append(sources[current])
+            for child in sorted(edges[current]):
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    ready.append(child)
+        if len(ordered) != len(sources):
+            raise ResultError("code_input_dependency_cycle", {})
+        return tuple(ordered)
+
+    def _materialize_input_tree(
+        self,
+        repository: Path,
+        *,
+        base_commit: str,
+        sources: tuple[CodeInputSourceV1, ...],
+    ) -> tuple[str, tuple[str, ...]]:
+        temp_dir = Path(tempfile.mkdtemp(prefix="sidera-code-input-index-"))
+        index = temp_dir / "index"
+        environment = os.environ.copy()
+        environment.pop("GIT_INDEX_FILE", None)
+        environment["GIT_INDEX_FILE"] = str(index)
+        try:
+            self._run_git(
+                repository,
+                ["read-tree", base_commit],
+                env=environment,
+                error_code="code_input_tree_materialization_failed",
+            )
+            current_tree = self._git_output(
+                repository,
+                ["write-tree"],
+                env=environment,
+                error_code="code_input_tree_materialization_failed",
+            ).lower()
+            applied_trees: set[str] = set()
+            for source in sources:
+                if source.result_tree in applied_trees or source.result_tree == current_tree:
+                    continue
+                patch = self._run_git(
+                    repository,
+                    [
+                        "diff",
+                        "--binary",
+                        "--full-index",
+                        "--no-ext-diff",
+                        source.input_tree,
+                        source.result_tree,
+                        "--",
+                    ],
+                    error_code="code_input_delta_unavailable",
+                ).stdout
+                if not patch:
+                    applied_trees.add(source.result_tree)
+                    continue
+                check = self._run_git(
+                    repository,
+                    ["apply", "--cached", "--check", "--binary"],
+                    env=environment,
+                    input_bytes=patch,
+                    check=False,
+                    error_code="code_input_delta_check_failed",
+                )
+                if check.returncode != 0:
+                    three_way = self._run_git(
+                        repository,
+                        ["apply", "--cached", "--3way", "--binary"],
+                        env=environment,
+                        input_bytes=patch,
+                        check=False,
+                        error_code="code_input_delta_check_failed",
+                    )
+                    if three_way.returncode != 0:
+                        conflict_paths = self._unmerged_paths(
+                            repository,
+                            environment,
+                        )
+                        if not conflict_paths:
+                            conflict_paths = self._diff_paths(
+                                repository,
+                                source.input_tree,
+                                source.result_tree,
+                            )
+                        return (
+                            current_tree,
+                            conflict_paths,
+                        )
+                else:
+                    self._run_git(
+                        repository,
+                        ["apply", "--cached", "--binary"],
+                        env=environment,
+                        input_bytes=patch,
+                        error_code="code_input_delta_apply_failed",
+                    )
+                current_tree = self._git_output(
+                    repository,
+                    ["write-tree"],
+                    env=environment,
+                    error_code="code_input_tree_materialization_failed",
+                ).lower()
+                applied_trees.add(source.result_tree)
+            return current_tree, ()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _commit_materialized_tree(
+        self,
+        repository: Path,
+        *,
+        actual_tree: str,
+        base_commit: str,
+        operation_id: UUID,
+        created_at: datetime,
+    ) -> str:
+        timestamp = int(created_at.timestamp())
+        environment = os.environ.copy()
+        environment.pop("GIT_INDEX_FILE", None)
+        environment.update(
+            {
+                "GIT_AUTHOR_NAME": self._author_name,
+                "GIT_AUTHOR_EMAIL": self._author_email,
+                "GIT_COMMITTER_NAME": self._author_name,
+                "GIT_COMMITTER_EMAIL": self._author_email,
+                "GIT_AUTHOR_DATE": f"@{timestamp} +0000",
+                "GIT_COMMITTER_DATE": f"@{timestamp} +0000",
+            }
+        )
+        return self._git_output(
+            repository,
+            [
+                "commit-tree",
+                actual_tree,
+                "-p",
+                base_commit,
+                "-m",
+                f"SIDERA code input materialization {operation_id}",
+            ],
+            env=environment,
+            error_code="code_input_commit_failed",
+        ).lower()
+
+    def _install_materialized_tree(
+        self,
+        workspace: Path,
+        checkout: WorkspaceCheckout,
+        *,
+        expected_head: str,
+        actual_commit: str,
+    ) -> None:
+        branch_ref = _branch_ref(checkout.branch)
+        self._run_git(
+            workspace,
+            ["update-ref", branch_ref, actual_commit, expected_head],
+            error_code="code_input_workspace_changed",
+        )
+        self._run_git(
+            workspace,
+            ["reset", "--hard", actual_commit],
+            error_code="code_input_workspace_install_failed",
+        )
+
+    def _ensure_materialized_workspace(
+        self,
+        workspace: Path,
+        checkout: WorkspaceCheckout,
+        *,
+        base_commit: str,
+        actual_commit: str,
+    ) -> None:
+        current_head = self._resolve_commit(
+            workspace,
+            "HEAD",
+            code="code_input_workspace_changed",
+        )
+        if current_head == actual_commit:
+            current_tree = self._resolve_tree(workspace, current_head)
+            expected_tree = self._resolve_tree(workspace, actual_commit)
+            if current_tree != expected_tree:
+                raise ResultError("code_input_workspace_changed", {})
+            return
+        self._validate_materialization_workspace(
+            workspace,
+            checkout,
+            expected_head=base_commit,
+        )
+        self._install_materialized_tree(
+            workspace,
+            checkout,
+            expected_head=base_commit,
+            actual_commit=actual_commit,
+        )
+
+    def _input_metadata_document(
+        self,
+        *,
+        receipt: CodeInputReceipt,
+        repository_ref: str,
+        base_commit: str,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "operation_id": str(receipt.operation_id),
+            "execution_id": str(receipt.execution_id),
+            "repository_ref": repository_ref,
+            "base_commit": base_commit,
+            "input_hash": receipt.input_hash,
+            "actual_commit": receipt.actual_commit,
+            "actual_tree": receipt.actual_tree,
+            "conflict_paths": list(receipt.conflict_paths),
+            "author_name": self._author_name,
+            "author_email": self._author_email,
+        }
+
+    def _update_input_refs(
+        self,
+        repository: Path,
+        *,
+        operation_id: UUID,
+        actual_commit: str,
+        metadata_oid: str,
+    ) -> bool:
+        zero = "0" * len(actual_commit)
+        transaction = (
+            "start\n"
+            f"update {_input_ref(operation_id)} {actual_commit} {zero}\n"
+            f"update {_input_metadata_ref(operation_id)} {metadata_oid} {zero}\n"
+            "prepare\n"
+            "commit\n"
+        ).encode()
+        result = self._run_git(
+            repository,
+            ["update-ref", "--stdin"],
+            input_bytes=transaction,
+            check=False,
+            error_code="code_input_ref_write_failed",
+        )
+        return result.returncode == 0
+
+    def _inspect_repository_materialization(
+        self,
+        repository: Path,
+        *,
+        repository_ref: str,
+        operation_id: UUID,
+    ) -> CodeInputReceipt:
+        metadata_oid = self._git_output(
+            repository,
+            ["rev-parse", "--verify", _input_metadata_ref(operation_id)],
+            error_code="code_input_receipt_corrupt",
+        )
+        if self._git_output(
+            repository,
+            ["cat-file", "-t", metadata_oid],
+            error_code="code_input_receipt_corrupt",
+        ) != "blob":
+            raise ResultError("code_input_receipt_corrupt", {})
+        raw = self._run_git(
+            repository,
+            ["cat-file", "-p", metadata_oid],
+            error_code="code_input_receipt_corrupt",
+        ).stdout
+        try:
+            metadata = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResultError("code_input_receipt_corrupt", {}) from exc
+        if not isinstance(metadata, dict) or set(metadata) != _INPUT_METADATA_FIELDS:
+            raise ResultError("code_input_receipt_corrupt", {})
+        if metadata.get("schema_version") != 1:
+            raise ResultError("code_input_receipt_corrupt", {})
+        if metadata.get("operation_id") != str(operation_id):
+            raise ResultError("code_input_receipt_corrupt", {})
+        if metadata.get("repository_ref") != repository_ref:
+            raise ResultError("code_input_receipt_corrupt", {})
+        if metadata.get("author_name") != self._author_name or metadata.get(
+            "author_email"
+        ) != self._author_email:
+            raise ResultError("code_input_receipt_corrupt", {})
+        execution_id = _metadata_uuid(metadata, "execution_id")
+        base_commit = _metadata_oid_value(metadata, "base_commit")
+        actual_commit = _metadata_oid_value(metadata, "actual_commit")
+        actual_tree = _metadata_oid_value(metadata, "actual_tree")
+        input_hash = _metadata_hash_value(metadata, "input_hash")
+        conflict_paths = _metadata_paths_value(metadata, "conflict_paths")
+        ref_commit = self._git_output(
+            repository,
+            ["rev-parse", "--verify", f"{_input_ref(operation_id)}^{{commit}}"],
+            error_code="code_input_receipt_corrupt",
+        ).lower()
+        if ref_commit != actual_commit:
+            raise ResultError("code_input_receipt_corrupt", {})
+        commit_tree = self._git_output(
+            repository,
+            ["show", "-s", "--format=%T", actual_commit],
+            error_code="code_input_receipt_corrupt",
+        ).lower()
+        if commit_tree != actual_tree:
+            raise ResultError("code_input_receipt_corrupt", {})
+        if not conflict_paths and self._commit_parents(repository, actual_commit) != (
+            base_commit,
+        ):
+            raise ResultError("code_input_receipt_corrupt", {})
+        try:
+            return CodeInputReceipt(
+                execution_id=execution_id,
+                input_hash=input_hash,
+                actual_commit=actual_commit,
+                actual_tree=actual_tree,
+                conflict_paths=conflict_paths,
+                operation_id=operation_id,
+                _repository_path=repository,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ResultError("code_input_receipt_corrupt", {}) from exc
+
+    def _commit_parents(self, repository: Path, commit: str) -> tuple[str, ...]:
+        output = self._git_output(
+            repository,
+            ["show", "-s", "--format=%P", commit],
+            error_code="code_input_source_commit_invalid",
+        )
+        return tuple(item.lower() for item in output.split())
+
+    def _is_ancestor(self, repository: Path, ancestor: str, descendant: str) -> bool:
+        result = self._run_git(
+            repository,
+            ["merge-base", "--is-ancestor", ancestor, descendant],
+            check=False,
+            error_code="code_input_ancestry_inspection_failed",
+        )
+        if result.returncode not in {0, 1}:
+            raise ResultError("code_input_ancestry_inspection_failed", {})
+        return result.returncode == 0
+
+    def _unmerged_paths(
+        self,
+        repository: Path,
+        environment: Mapping[str, str],
+    ) -> tuple[str, ...]:
+        output = self._run_git(
+            repository,
+            ["ls-files", "-u", "-z"],
+            env=environment,
+            check=False,
+            error_code="code_input_conflict_inspection_failed",
+        ).stdout
+        paths: set[str] = set()
+        for raw in output.split(b"\0"):
+            if not raw:
+                continue
+            try:
+                _stage, path = raw.split(b"\t", maxsplit=1)
+            except ValueError as exc:
+                raise ResultError("code_input_conflict_inspection_failed", {}) from exc
+            paths.add(path.decode("utf-8", errors="surrogateescape"))
+        return tuple(sorted(paths))
+
+    def _diff_paths(
+        self,
+        repository: Path,
+        input_tree: str,
+        result_tree: str,
+    ) -> tuple[str, ...]:
+        output = self._run_git(
+            repository,
+            ["diff", "--name-only", "-z", input_tree, result_tree, "--"],
+            error_code="code_input_conflict_inspection_failed",
+        ).stdout
+        return tuple(sorted(_decode_paths(output)))
 
     def _known_repositories(self) -> tuple[tuple[str, Path], ...]:
         values: dict[str, Path] = {}
@@ -959,6 +1620,74 @@ def _metadata_oid(metadata: Mapping[str, object], name: str) -> str:
 
 def _metadata_ref(operation_id: UUID) -> str:
     return f"refs/sidera/results/{operation_id}.metadata"
+
+
+def _input_ref(operation_id: UUID) -> str:
+    return f"refs/sidera/inputs/{operation_id}"
+
+
+def _input_metadata_ref(operation_id: UUID) -> str:
+    return f"refs/sidera/inputs/{operation_id}.metadata"
+
+
+def _branch_ref(branch: str) -> str:
+    if (
+        not isinstance(branch, str)
+        or not branch.strip()
+        or "\x00" in branch
+        or branch.startswith("/")
+        or branch.endswith("/")
+        or ".." in branch
+    ):
+        raise ResultError("code_input_workspace_invalid", {})
+    return f"refs/heads/{branch.strip()}"
+
+
+def _metadata_uuid(metadata: Mapping[str, object], name: str) -> UUID:
+    value = metadata.get(name)
+    try:
+        parsed = UUID(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ResultError("code_input_receipt_corrupt", {"field": name}) from exc
+    if str(parsed) != value:
+        raise ResultError("code_input_receipt_corrupt", {"field": name})
+    return parsed
+
+
+def _metadata_oid_value(metadata: Mapping[str, object], name: str) -> str:
+    value = metadata.get(name)
+    if not isinstance(value, str) or _GIT_OID_PATTERN.fullmatch(value) is None:
+        raise ResultError("code_input_receipt_corrupt", {"field": name})
+    return value.lower()
+
+
+def _metadata_hash_value(metadata: Mapping[str, object], name: str) -> str:
+    value = metadata.get(name)
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ResultError("code_input_receipt_corrupt", {"field": name})
+    return value
+
+
+def _metadata_paths_value(
+    metadata: Mapping[str, object], name: str
+) -> tuple[str, ...]:
+    value = metadata.get(name)
+    if not isinstance(value, list):
+        raise ResultError("code_input_receipt_corrupt", {"field": name})
+    paths = tuple(value)
+    if any(
+        not isinstance(path, str)
+        or not path.strip()
+        or path.startswith("/")
+        or "\x00" in path
+        or any(part in {"", ".", ".."} for part in path.split("/")
+        )
+        for path in paths
+    ):
+        raise ResultError("code_input_receipt_corrupt", {"field": name})
+    if len(set(paths)) != len(paths) or tuple(sorted(paths)) != paths:
+        raise ResultError("code_input_receipt_corrupt", {"field": name})
+    return paths
 
 
 __all__ = ["DEFAULT_MAX_EXPORT_BYTES", "GitResultStore", "export_patch"]

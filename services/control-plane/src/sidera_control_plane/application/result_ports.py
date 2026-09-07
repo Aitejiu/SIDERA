@@ -25,10 +25,12 @@ from sidera_control_plane.domain.result_verification import (
 )
 
 if TYPE_CHECKING:
+    from sidera_control_plane.domain.code_results import CodeInputManifestV1
     from sidera_control_plane.domain.workspace import ExecutionWorkspaceManifest
 
 
 _GIT_OID_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,70 @@ class CapturedCode:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CodeInputReceipt:
+    """Immutable receipt for one physical code-input materialization."""
+
+    execution_id: UUID
+    input_hash: str
+    actual_commit: str
+    actual_tree: str
+    conflict_paths: tuple[str, ...]
+    operation_id: UUID
+    _repository_path: Path | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.execution_id, "input execution_id"),
+            (self.operation_id, "input operation_id"),
+        ):
+            if not isinstance(value, UUID):
+                raise TypeError(f"{label} must be a UUID")
+        if not isinstance(self.input_hash, str) or _SHA256_PATTERN.fullmatch(
+            self.input_hash
+        ) is None:
+            raise ValueError("input input_hash must be a lowercase SHA-256 hash")
+        for value, label in (
+            (self.actual_commit, "input actual_commit"),
+            (self.actual_tree, "input actual_tree"),
+        ):
+            if not isinstance(value, str) or _GIT_OID_PATTERN.fullmatch(value) is None:
+                raise ValueError(f"{label} must be a Git object id")
+        if not isinstance(self.conflict_paths, tuple):
+            raise TypeError("input conflict_paths must be a tuple")
+        normalized = tuple(sorted(set(self.conflict_paths)))
+        if any(
+            not isinstance(path, str)
+            or not path.strip()
+            or path.startswith("/")
+            or "\x00" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in normalized
+        ):
+            raise ValueError("input conflict_paths must be relative Git paths")
+        object.__setattr__(self, "conflict_paths", normalized)
+        if self._repository_path is not None and not isinstance(
+            self._repository_path, Path
+        ):
+            raise TypeError("input repository path must be a Path")
+
+    @property
+    def succeeded(self) -> bool:
+        return not self.conflict_paths
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "execution_id": str(self.execution_id),
+            "input_hash": self.input_hash,
+            "actual_commit": self.actual_commit,
+            "actual_tree": self.actual_tree,
+            "conflict_paths": list(self.conflict_paths),
+            "operation_id": str(self.operation_id),
+        }
+
+
 class CodeResultCapturePort(Protocol):
     def capture(
         self,
@@ -115,6 +181,17 @@ class CodeResultCapturePort(Protocol):
         self, *, repository_ref: str, revision: str
     ) -> tuple[str, str]:
         """Resolve an exact commit and its tree without inspecting a worktree."""
+        raise NotImplementedError
+
+
+class CodeResultMaterializationPort(Protocol):
+    def materialize(
+        self,
+        *,
+        workspace_manifest: ExecutionWorkspaceManifest,
+        code_inputs: CodeInputManifestV1,
+        operation_id: UUID,
+    ) -> CodeInputReceipt:
         raise NotImplementedError
 
 
@@ -252,7 +329,9 @@ class ResultRepositoryPort(Protocol):
 
 __all__ = [
     "CapturedCode",
+    "CodeInputReceipt",
     "CodeResultCapturePort",
+    "CodeResultMaterializationPort",
     "ResultApplyOperationV1",
     "ResultError",
     "ResultOperation",
