@@ -41,6 +41,10 @@ from sidera_control_plane.domain.execution_requests import (
     ExecutionRequestDependency,
     collaboration_gate_mode_for_policy,
 )
+from sidera_control_plane.domain.modules import (
+    WorkerAdapterCapabilityProfile,
+    WorkspaceProviderCapabilityProfile,
+)
 from sidera_control_plane.domain.planning import (
     PlanningRequest,
     PlanningRequestStatus,
@@ -51,6 +55,7 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
     PlanningProposalPayloadV5,
+    PlanningProposalPayloadV6,
     ProposalRevision,
     proposal_content_hash,
 )
@@ -58,6 +63,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
     PlanningRevisionProposalPayloadV5,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import (
     DependencyKind,
@@ -66,6 +72,7 @@ from sidera_control_plane.domain.plans import (
     WorkerItemDependency,
     WorkerItemPlanItem,
 )
+from sidera_control_plane.domain.result_operations import TaskResultHead
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.work_context import WorkContextRevisionReason
 
@@ -131,6 +138,11 @@ class ProposalMaterializer:
                 event_ids=(),
             )
         self._assert_result_input_writes_enabled(proposal, profile)
+        self._validate_integration_modules(
+            uow,
+            workspace_id=request.workspace_id,
+            proposal=proposal,
+        )
 
         if request.status is not PlanningRequestStatus.PROPOSAL_READY:
             raise InvalidTransition("only a proposal-ready request can materialize")
@@ -203,6 +215,7 @@ class ProposalMaterializer:
         uow.plans.add_snapshot_and_advance_head(
             materialized_plan.snapshot, expected_head=None
         )
+        self._initialize_result_head(uow, materialized_plan.snapshot)
 
         execution_requests, dependencies = self._execution_requests(
             request=request,
@@ -325,8 +338,8 @@ class ProposalMaterializer:
         if self._result_inputs_enabled:
             return
         if (
-            proposal.proposal_schema_version != 5
-            and profile.proposal_schema_version != 5
+            proposal.proposal_schema_version not in {5, 6}
+            and profile.proposal_schema_version not in {5, 6}
         ):
             return
         raise ResultInputsDisabled(
@@ -431,7 +444,7 @@ class ProposalMaterializer:
                 request.profile_snapshot.collaboration_runtime_binding,
                 subtask_keys=frozenset(item.key for item in payload.subtasks),
             )
-        if isinstance(payload, PlanningProposalPayloadV5):
+        if isinstance(payload, (PlanningProposalPayloadV5, PlanningProposalPayloadV6)):
             return resolve_collaboration_policy_v2(
                 payload.collaboration_policy_request,
                 request.profile_snapshot.collaboration_runtime_binding,
@@ -490,7 +503,9 @@ class ProposalMaterializer:
         return TaskPlanSnapshot.create(
             snapshot_id=uuid4(),
             schema_version=(
-                4
+                5
+                if isinstance(payload, PlanningProposalPayloadV6)
+                else 4
                 if isinstance(payload, PlanningProposalPayloadV5)
                 else 3
                 if isinstance(payload, PlanningProposalPayloadV4)
@@ -513,7 +528,89 @@ class ProposalMaterializer:
             subtask_dependencies=payload.subtask_dependencies,
             worker_item_dependencies=_plan_worker_dependencies(payload),
             collaboration_policy=collaboration_policy,
+            integration_spec=(
+                payload.integration_spec
+                if isinstance(payload, PlanningProposalPayloadV6)
+                else None
+            ),
         )
+
+    @staticmethod
+    def _initialize_result_head(
+        uow: ControlPlaneUnitOfWork, snapshot: TaskPlanSnapshot
+    ) -> None:
+        spec = snapshot.integration_spec
+        if spec is None:
+            return
+        head = TaskResultHead(
+            workspace_id=snapshot.workspace_id,
+            root_task_id=snapshot.root_task_id,
+            current_candidate_id=None,
+            current_acceptance_id=None,
+            result_version=1,
+            active_operation_id=None,
+            auto_rounds_used=0,
+            auto_rounds_limit=spec.rework_policy.max_auto_rework_rounds,
+            auto_seconds_limit=spec.rework_policy.max_auto_rework_seconds,
+            auto_started_at=None,
+            auto_deadline=None,
+        )
+        uow.results.save_head(head, expected_version=0)
+
+    @staticmethod
+    def _validate_integration_modules(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        workspace_id: UUID,
+        proposal: ProposalRevision,
+    ) -> None:
+        payload = proposal.payload
+        if not isinstance(payload, PlanningProposalPayloadV6):
+            return
+        binding = payload.integration_spec.verification_binding
+        bindings = (
+            (
+                "verification adapter",
+                binding.adapter_module_ref,
+                binding.adapter_config_version,
+                "worker_adapter",
+            ),
+            (
+                "verification workspace provider",
+                binding.workspace_module_ref,
+                binding.workspace_config_version,
+                "workspace_provider",
+            ),
+        )
+        for label, instance_id, config_version, module_type in bindings:
+            instance = uow.modules.get_instance(instance_id, workspace_id)
+            if instance is None:
+                raise ValidationError(f"{label} module instance is unavailable")
+            if instance.config_version != config_version:
+                raise ValidationError(f"{label} module config version does not match")
+            definition = uow.modules.get_definition(
+                instance.definition_id, workspace_id
+            )
+            if definition is None or definition.module_type != module_type:
+                raise ValidationError(f"{label} module type is unsupported")
+            if (
+                definition.lifecycle.value != "active"
+                or instance.lifecycle.value != "active"
+            ):
+                raise ValidationError(f"{label} module must be active")
+            if module_type == "worker_adapter":
+                if not isinstance(
+                    definition.capabilities, WorkerAdapterCapabilityProfile
+                ) or not definition.capabilities.supports_verification_version(1):
+                    raise ValidationError(
+                        f"{label} module does not support verification version 1"
+                    )
+            elif not isinstance(
+                definition.capabilities, WorkspaceProviderCapabilityProfile
+            ) or not definition.capabilities.supports_code_input_version(1):
+                raise ValidationError(
+                    f"{label} module does not support code input version 1"
+                )
 
     @staticmethod
     def _execution_requests(
@@ -853,9 +950,11 @@ def _plan_worker_dependencies(
         PlanningProposalPayload
         | PlanningProposalPayloadV4
         | PlanningProposalPayloadV5
+        | PlanningProposalPayloadV6
         | PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
         | PlanningRevisionProposalPayloadV5
+        | PlanningRevisionProposalPayloadV6
     ),
 ) -> tuple[WorkerItemDependency, ...]:
     edges: dict[tuple[str, str], WorkerItemDependency] = {}

@@ -27,6 +27,10 @@ from sidera_control_plane.domain.errors import (
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution
+from sidera_control_plane.domain.modules import (
+    WorkerAdapterCapabilityProfile,
+    WorkspaceProviderCapabilityProfile,
+)
 from sidera_control_plane.domain.plan_revisions import (
     ContextDisposition,
     IdentityStrategy,
@@ -57,6 +61,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
     PlanningRevisionProposalPayloadV5,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import (
     SubtaskPlanItem,
@@ -136,7 +141,11 @@ class RevisionMaterializer:
             proposal_payload.as_v3()
             if isinstance(
                 proposal_payload,
-                (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+                (
+                    PlanningRevisionProposalPayloadV4,
+                    PlanningRevisionProposalPayloadV5,
+                    PlanningRevisionProposalPayloadV6,
+                ),
             )
             else proposal_payload
         )
@@ -186,6 +195,11 @@ class RevisionMaterializer:
                 event_ids=(),
             )
         self._assert_result_input_writes_enabled(proposal, profile)
+        self._validate_integration_modules(
+            uow,
+            workspace_id=request.workspace_id,
+            proposal=proposal,
+        )
 
         if request.status is not PlanningRequestStatus.PROPOSAL_READY:
             raise InvalidTransition("only a proposal-ready revision can materialize")
@@ -478,6 +492,7 @@ class RevisionMaterializer:
         PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
         | PlanningRevisionProposalPayloadV5
+        | PlanningRevisionProposalPayloadV6
     ):
         if request.kind is not PlanningRequestKind.REVISION:
             raise ValidationError("ConfirmPlanRevision requires a revision request")
@@ -492,9 +507,12 @@ class RevisionMaterializer:
                 PlanningRevisionProposalPayloadV3,
                 PlanningRevisionProposalPayloadV4,
                 PlanningRevisionProposalPayloadV5,
+                PlanningRevisionProposalPayloadV6,
             ),
         ):
-            raise ValidationError("revision proposal schema v3, v4, or v5 is required")
+            raise ValidationError(
+                "revision proposal schema v3, v4, v5, or v6 is required"
+            )
         if request.base_descriptor != payload.base_descriptor:
             raise ValidationError("proposal base does not match the planning request")
         if request.current_proposal_revision != proposal.revision:
@@ -583,10 +601,13 @@ class RevisionMaterializer:
             PlanningRevisionProposalPayloadV3
             | PlanningRevisionProposalPayloadV4
             | PlanningRevisionProposalPayloadV5
+            | PlanningRevisionProposalPayloadV6
         ),
     ) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
         subtask_keys = frozenset(item.key for item in payload.subtasks)
-        if isinstance(payload, PlanningRevisionProposalPayloadV5):
+        if isinstance(
+            payload, (PlanningRevisionProposalPayloadV5, PlanningRevisionProposalPayloadV6)
+        ):
             return resolve_collaboration_policy_v2(
                 payload.collaboration_policy_request,
                 request.profile_snapshot.collaboration_runtime_binding,
@@ -914,7 +935,9 @@ class RevisionMaterializer:
         return TaskPlanSnapshot.create(
             snapshot_id=uuid4(),
             schema_version=(
-                4
+                5
+                if isinstance(proposal.payload, PlanningRevisionProposalPayloadV6)
+                else 4
                 if isinstance(
                     proposal.payload,
                     (
@@ -944,6 +967,11 @@ class RevisionMaterializer:
             subtask_dependencies=payload.subtask_dependencies,
             worker_item_dependencies=payload.worker_item_dependencies,
             collaboration_policy=collaboration_policy,
+            integration_spec=(
+                proposal.payload.integration_spec
+                if isinstance(proposal.payload, PlanningRevisionProposalPayloadV6)
+                else None
+            ),
         )
 
     @staticmethod
@@ -1195,8 +1223,8 @@ class RevisionMaterializer:
         if self._result_inputs_enabled:
             return
         if (
-            proposal.proposal_schema_version != 5
-            and profile.proposal_schema_version != 5
+            proposal.proposal_schema_version not in {5, 6}
+            and profile.proposal_schema_version not in {5, 6}
         ):
             return
         raise ResultInputsDisabled(
@@ -1204,6 +1232,61 @@ class RevisionMaterializer:
                 proposal.proposal_schema_version, profile.proposal_schema_version
             )
         )
+
+    @staticmethod
+    def _validate_integration_modules(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        workspace_id: UUID,
+        proposal: ProposalRevision,
+    ) -> None:
+        payload = proposal.payload
+        if not isinstance(payload, PlanningRevisionProposalPayloadV6):
+            return
+        binding = payload.integration_spec.verification_binding
+        bindings = (
+            (
+                "verification adapter",
+                binding.adapter_module_ref,
+                binding.adapter_config_version,
+                "worker_adapter",
+            ),
+            (
+                "verification workspace provider",
+                binding.workspace_module_ref,
+                binding.workspace_config_version,
+                "workspace_provider",
+            ),
+        )
+        for label, instance_id, config_version, module_type in bindings:
+            instance = uow.modules.get_instance(instance_id, workspace_id)
+            if instance is None:
+                raise ValidationError(f"{label} module instance is unavailable")
+            if instance.config_version != config_version:
+                raise ValidationError(f"{label} module config version does not match")
+            definition = uow.modules.get_definition(
+                instance.definition_id, workspace_id
+            )
+            if definition is None or definition.module_type != module_type:
+                raise ValidationError(f"{label} module type is unsupported")
+            if (
+                definition.lifecycle.value != "active"
+                or instance.lifecycle.value != "active"
+            ):
+                raise ValidationError(f"{label} module must be active")
+            if module_type == "worker_adapter":
+                if not isinstance(
+                    definition.capabilities, WorkerAdapterCapabilityProfile
+                ) or not definition.capabilities.supports_verification_version(1):
+                    raise ValidationError(
+                        f"{label} module does not support verification version 1"
+                    )
+            elif not isinstance(
+                definition.capabilities, WorkspaceProviderCapabilityProfile
+            ) or not definition.capabilities.supports_code_input_version(1):
+                raise ValidationError(
+                    f"{label} module does not support code input version 1"
+                )
 
 
 def _task_lock_ids(

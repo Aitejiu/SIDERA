@@ -59,12 +59,14 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
     PlanningProposalPayloadV5,
+    PlanningProposalPayloadV6,
     ProposalRevision,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
     PlanningRevisionProposalPayloadV5,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.proposal_validation import validate_proposal
@@ -90,7 +92,7 @@ class OpenCodePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.EXPERIMENTAL,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2, 3, 4, 5),
+        proposal_schema_versions=(2, 3, 4, 5, 6),
         context_package_versions=(1,),
     )
     provider_ref = "opencode-acp-planner"
@@ -538,6 +540,15 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
             "the policy modes and strategy_ids provided in policy.collaboration_policy; "
             "do not emit runtime module, provider, config, or secret identifiers."
         )
+    if planner_input.proposal_schema_version == 6:
+        prompt += (
+            "\nSchema v6 requires the complete schema-version 2 collaboration_policy_request "
+            "and an integration_spec. The integration spec must name exactly one existing "
+            "integration WorkerItem, its input groups, criteria, checks, verification binding, "
+            "bounded rework policy, apply policy, and stop_unused finalization policy. Copy "
+            "verification module references from the configured planning environment; never "
+            "invent module IDs or host paths."
+        )
     if not is_revision:
         return prompt
     revision_prompt = (
@@ -564,6 +575,14 @@ def _planner_prompt(planner_input: PlannerInput) -> str:
             "consumer/candidate relationship unless the revised requirement changes "
             "it; any changed group must be reflected in the target plan and is not "
             "an execution-preserve decision by itself."
+        )
+    if planner_input.proposal_schema_version == 6:
+        revision_prompt += (
+            " Include the complete integration_spec as well as the schema-version 2 "
+            "collaboration policy. Preserve its criteria, checks, verification binding, "
+            "apply policy, and rework limits unless the revised requirement explicitly "
+            "changes them; all changed integration fields must be visible in the revision "
+            "diff."
         )
     return prompt + revision_prompt
 
@@ -717,6 +736,21 @@ def _proposal_shape_hint(schema_version: int = 2) -> dict[str, object]:
             "subtask_overrides": [],
             "input_groups": [],
         }
+    if schema_version == 6:
+        proposal = cast(dict[str, object], shape["proposal"])
+        proposal.pop("base_descriptor", None)
+        proposal["schema_version"] = 6
+        proposal["collaboration_policy_request"] = {
+            "schema_version": 2,
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [],
+        }
+        proposal["integration_spec"] = _integration_spec_shape(
+            integration_worker_item_key="worker-one",
+            allowed_worker_item_keys=["worker-one"],
+        )
     return shape
 
 
@@ -797,7 +831,72 @@ def _revision_proposal_shape_hint(schema_version: int = 3) -> dict[str, object]:
             "subtask_overrides": [],
             "input_groups": [],
         }
+    if schema_version == 6:
+        proposal = cast(dict[str, object], shape["proposal"])
+        proposal["schema_version"] = 6
+        proposal["collaboration_policy_request"] = {
+            "schema_version": 2,
+            "mode": "disabled",
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [],
+        }
+        proposal["integration_spec"] = _integration_spec_shape(
+            integration_worker_item_key="worker-one",
+            allowed_worker_item_keys=["worker-one"],
+        )
     return shape
+
+
+def _integration_spec_shape(
+    *, integration_worker_item_key: str, allowed_worker_item_keys: list[str]
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "repository_ref": "configured-repository-ref",
+        "base_commit": "40-lowercase-hex-characters",
+        "integration_worker_item_key": integration_worker_item_key,
+        "input_group_keys": [],
+        "criteria": [
+            {
+                "key": "implementation",
+                "text": "The implementation is ready",
+                "mode": "automatic",
+                "check_keys": ["unit"],
+            }
+        ],
+        "checks": [
+            {
+                "key": "unit",
+                "version": 1,
+                "argv": ["python3", "-m", "unittest"],
+                "cwd": ".",
+                "environment_ref": "configured-environment-ref",
+                "prepare_argvs": [],
+                "timeout_seconds": 60,
+                "success_exit_codes": [0],
+                "report_paths": [],
+                "required": True,
+            }
+        ],
+        "verification_binding": {
+            "adapter_module_ref": "verification-adapter-module-uuid",
+            "adapter_config_version": 1,
+            "workspace_module_ref": "workspace-provider-module-uuid",
+            "workspace_config_version": 1,
+        },
+        "rework_policy": {
+            "max_auto_rework_rounds": 2,
+            "max_auto_rework_seconds": 1800,
+            "allowed_worker_item_keys": allowed_worker_item_keys,
+        },
+        "apply_policy": {
+            "apply_on_accept": False,
+            "mode": "fast_forward_only",
+            "target_ref": None,
+        },
+        "finalization_policy": "stop_unused",
+    }
 
 
 def _repair_diagnostic(error: OpenCodePlannerError) -> str | None:
@@ -853,9 +952,11 @@ def _parse_result(
                 PlanningProposalPayload
                 | PlanningProposalPayloadV4
                 | PlanningProposalPayloadV5
+                | PlanningProposalPayloadV6
                 | PlanningRevisionProposalPayloadV3
                 | PlanningRevisionProposalPayloadV4
                 | PlanningRevisionProposalPayloadV5
+                | PlanningRevisionProposalPayloadV6
             )
             if planner_input.kind is PlanningRequestKind.REVISION:
                 if not isinstance(
@@ -863,7 +964,9 @@ def _parse_result(
                 ):
                     raise ValueError("revision planner context is missing")
                 payload = (
-                    PlanningRevisionProposalPayloadV5.from_mapping(raw_payload)
+                    PlanningRevisionProposalPayloadV6.from_mapping(raw_payload)
+                    if planner_input.proposal_schema_version == 6
+                    else PlanningRevisionProposalPayloadV5.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 5
                     else PlanningRevisionProposalPayloadV4.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 4
@@ -886,7 +989,13 @@ def _parse_result(
                         planner_input.profile_snapshot.collaboration_runtime_binding,
                         subtask_keys=frozenset(item.key for item in payload.subtasks),
                     )
-                    if isinstance(payload, PlanningRevisionProposalPayloadV5)
+                    if isinstance(
+                        payload,
+                        (
+                            PlanningRevisionProposalPayloadV5,
+                            PlanningRevisionProposalPayloadV6,
+                        ),
+                    )
                     else resolve_collaboration_policy(
                         payload.collaboration_policy_request,
                         planner_input.profile_snapshot.collaboration_runtime_binding,
@@ -902,7 +1011,9 @@ def _parse_result(
                 )
             else:
                 payload = (
-                    PlanningProposalPayloadV5.from_mapping(raw_payload)
+                    PlanningProposalPayloadV6.from_mapping(raw_payload)
+                    if planner_input.proposal_schema_version == 6
+                    else PlanningProposalPayloadV5.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 5
                     else PlanningProposalPayloadV4.from_mapping(raw_payload)
                     if planner_input.proposal_schema_version == 4

@@ -29,6 +29,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.result_integration import IntegrationSpecV1
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +138,7 @@ class NormalizedRevisionDiff:
     root_changes: tuple[FieldChange, ...]
     collaboration_policy_changes: tuple[FieldChange, ...]
     input_group_changes: tuple[InputGroupChange, ...]
+    integration_spec_changes: tuple[FieldChange, ...]
     subtask_changes: tuple[SubtaskChange, ...]
     worker_changes: tuple[WorkerItemChange, ...]
     subtask_dependency_changes: tuple[DependencyChange, ...]
@@ -197,6 +199,10 @@ class NormalizedRevisionDiff:
             mapping["collaboration_policy_changes"] = [
                 _field_mapping(item) for item in self.collaboration_policy_changes
             ]
+        if self.integration_spec_changes:
+            mapping["integration_spec_changes"] = [
+                _field_mapping(item) for item in self.integration_spec_changes
+            ]
         return mapping
 
     @classmethod
@@ -213,6 +219,9 @@ class NormalizedRevisionDiff:
             ),
             input_group_changes=_input_group_changes_from_mapping(
                 raw.get("input_group_changes", [])
+            ),
+            integration_spec_changes=_field_changes_from_mapping(
+                raw.get("integration_spec_changes", [])
             ),
             subtask_changes=_subtask_changes_from_mapping(raw.get("subtask_changes")),
             worker_changes=_worker_changes_from_mapping(raw.get("worker_changes")),
@@ -305,6 +314,12 @@ class RevisionDiffNormalizer:
             target_policy,
         )
         input_group_changes = _input_group_changes(base_policy, target_policy)
+        integration_spec_changes = _integration_spec_changes(
+            base_plan.integration_spec,
+            payload.integration_spec
+            if isinstance(payload, PlanningRevisionProposalPayloadV6)
+            else None,
+        )
         input_group_consumers = _input_group_change_consumers(input_group_changes)
         subtask_changes = tuple(
             _subtask_change(
@@ -360,6 +375,7 @@ class RevisionDiffNormalizer:
             worker_dependency_changes,
             legacy_payload,
             input_group_changes,
+            integration_spec_changes,
         )
         target_hash = _target_plan_hash(payload, target_policy)
         preview = TargetPlanDescriptorPreview(
@@ -373,6 +389,7 @@ class RevisionDiffNormalizer:
             root_changes=root_changes,
             collaboration_policy_changes=collaboration_policy_changes,
             input_group_changes=input_group_changes,
+            integration_spec_changes=integration_spec_changes,
             subtask_changes=subtask_changes,
             worker_changes=worker_changes,
             subtask_dependency_changes=subtask_dependency_changes,
@@ -390,6 +407,7 @@ class RevisionDiffNormalizer:
             root_changes=diff.root_changes,
             collaboration_policy_changes=diff.collaboration_policy_changes,
             input_group_changes=diff.input_group_changes,
+            integration_spec_changes=diff.integration_spec_changes,
             subtask_changes=diff.subtask_changes,
             worker_changes=diff.worker_changes,
             subtask_dependency_changes=diff.subtask_dependency_changes,
@@ -661,6 +679,7 @@ def _risk_flags(
     worker_dependencies: tuple[DependencyChange, ...],
     payload: PlanningRevisionProposalPayloadV3,
     input_group_changes: tuple[InputGroupChange, ...],
+    integration_spec_changes: tuple[FieldChange, ...],
 ) -> tuple[str, ...]:
     risks: set[str] = set()
     if root_changes:
@@ -678,6 +697,8 @@ def _risk_flags(
         risks.add("dependency_graph_changed")
     if input_group_changes:
         risks.add("input_group_rules_changed")
+    if integration_spec_changes:
+        risks.add("integration_spec_changed")
     if any(item.field_changes for item in subtask_changes):
         risks.add("subtask_context_changed")
     return tuple(sorted(risks))
@@ -981,6 +1002,23 @@ def _input_group_change_consumers(
     return frozenset(consumers)
 
 
+def _integration_spec_changes(
+    before: IntegrationSpecV1 | None,
+    after: IntegrationSpecV1 | None,
+) -> tuple[FieldChange, ...]:
+    before_mapping = before.to_mapping() if before is not None else {}
+    after_mapping = after.to_mapping() if after is not None else {}
+    return tuple(
+        FieldChange(
+            f"integration_spec.{key}",
+            before_mapping.get(key),
+            after_mapping.get(key),
+        )
+        for key in sorted(set(before_mapping) | set(after_mapping))
+        if before_mapping.get(key) != after_mapping.get(key)
+    )
+
+
 def _target_plan_hash(
     payload: (
         PlanningRevisionProposalPayloadV3
@@ -1004,6 +1042,8 @@ def _target_plan_hash(
             if collaboration_policy is not None
             else None
         )
+        if isinstance(payload, PlanningRevisionProposalPayloadV6):
+            target["integration_spec"] = payload.integration_spec.to_mapping()
     else:
         target = payload.canonical_payload()
     target.pop("decision_summary", None)

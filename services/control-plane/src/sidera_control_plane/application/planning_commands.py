@@ -612,9 +612,9 @@ class PlanningCommandHandler:
         if profile is None:
             raise NotFound("planning profile not found")
         profile.assert_user_selectable()
-        if profile.proposal_schema_version not in {3, 4, 5}:
+        if profile.proposal_schema_version not in {3, 4, 5, 6}:
             raise ValidationError(
-                "plan revision requires a planning profile with proposal schema v3, v4, or v5"
+                "plan revision requires a planning profile with proposal schema v3, v4, v5, or v6"
             )
         instance = uow.modules.get_instance(
             profile.planner_module_instance_id, envelope.workspace_id
@@ -1537,8 +1537,8 @@ class PlanningCommandHandler:
         proposal_schema_version = getattr(proposal, "proposal_schema_version", 0)
         profile_schema_version = getattr(profile, "proposal_schema_version", 0)
         if (
-            proposal_schema_version != 5
-            and profile_schema_version != 5
+            proposal_schema_version not in {5, 6}
+            and profile_schema_version not in {5, 6}
         ):
             return
         existing = uow.proposal_materializations.get_by_request(
@@ -1655,9 +1655,9 @@ def _resolve_collaboration_runtime_binding(
         raise ValidationError(
             "collaboration runtime references must be supplied together"
         )
-    if _positive_int(payload, "proposal_schema_version") not in {4, 5}:
+    if _positive_int(payload, "proposal_schema_version") not in {4, 5, 6}:
         raise ValidationError(
-            "collaboration runtime binding requires proposal schema version 4 or 5"
+            "collaboration runtime binding requires proposal schema version 4, 5, or 6"
         )
 
     definition_id = _uuid_value(definition_value, "collaboration_runtime_definition_id")

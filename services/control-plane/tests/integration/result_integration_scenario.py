@@ -16,6 +16,7 @@ from sidera_control_plane.persistence.models import EventModel
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from tests.unit.result_integration_fixtures import snapshot_mapping
 
+from .result_input_scenario import ResultInputScenario
 from .test_r5_1_execution_request_schema import (
     request_row,
     seed_execution_request_facts,
@@ -41,6 +42,10 @@ class ResultIntegrationScenario:
         self.ids = ids
         self.request_id = request_id
         self.operation_id = UUID("80000000-0000-0000-0000-000000000002")
+        self._planning = ResultInputScenario(database, workspace_id, tmp_path)
+        self._seeded = False
+        self.worker_item_ids: dict[str, UUID] = {}
+        self.request_ids: dict[str, UUID] = {}
 
     @property
     def root_task_id(self) -> UUID:
@@ -49,6 +54,50 @@ class ResultIntegrationScenario:
     @property
     def execution_id(self) -> UUID:
         return self.ids["execution"]
+
+    @property
+    def root_id(self) -> UUID:
+        return self.root_task_id
+
+    @property
+    def plan_snapshot_id(self) -> UUID:
+        return self.ids["plan_snapshot"]
+
+    @property
+    def worker_ids(self) -> tuple[UUID, ...]:
+        return tuple(self.worker_item_ids.values())
+
+    def seed_plan(self, *, apply: bool = False) -> None:
+        if apply:
+            raise NotImplementedError("result integration apply is added in Task 25")
+        if self._seeded:
+            return
+        self._planning.confirm_plan(
+            result_inputs_enabled=True,
+            proposal_schema_version=6,
+            profile_key="r6-result-planning",
+        )
+        self.ids.update(self._planning.ids)
+        self.request_id = self._planning.ids["planning_request"]
+        self.worker_item_ids = dict(self._planning.worker_item_ids)
+        self.request_ids = dict(self._planning.request_ids)
+        self._seeded = True
+
+    def confirm_with_missing_spec_module(self) -> None:
+        self._planning.confirm_plan(
+            result_inputs_enabled=True,
+            proposal_schema_version=6,
+            profile_key="r6-invalid-result-planning",
+            verification_module_refs=(
+                UUID("00000000-0000-0000-0000-000000000090"),
+                UUID("00000000-0000-0000-0000-000000000091"),
+            ),
+        )
+
+    def reconfirm(self) -> None:
+        if not self._seeded:
+            raise AssertionError("result integration plan has not been seeded")
+        self._planning.confirm_prepared_plan(result_inputs_enabled=True)
 
     def uow(self) -> SqlAlchemyUnitOfWork:
         return SqlAlchemyUnitOfWork(self.database)

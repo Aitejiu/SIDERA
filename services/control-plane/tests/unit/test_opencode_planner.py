@@ -317,7 +317,7 @@ def test_planner_probe_declares_json_text_not_json_schema(tmp_path: Path) -> Non
     assert profile.idempotency is IdempotencyCapability.NONE
     assert profile.cancellation is CancellationCapability.PROCESS
     assert profile.usage_reporting is UsageReportingCapability.TOKENS
-    assert profile.proposal_schema_versions == (2, 3, 4, 5)
+    assert profile.proposal_schema_versions == (2, 3, 4, 5, 6)
     assert profile.context_package_versions == (1,)
 
 

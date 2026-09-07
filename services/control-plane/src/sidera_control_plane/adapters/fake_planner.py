@@ -23,7 +23,9 @@ from sidera_control_plane.application.revision_planning_context import (
 )
 from sidera_control_plane.domain.collaboration import (
     CollaborationPolicyRequestV1,
+    CollaborationPolicyRequestV2,
     resolve_collaboration_policy,
+    resolve_collaboration_policy_v2,
 )
 from sidera_control_plane.domain.context_packages import (
     ContextAcknowledgement,
@@ -56,6 +58,7 @@ from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayload,
     PlanningProposalPayloadV4,
+    PlanningProposalPayloadV6,
     ProposalRevision,
     ProposedRootTask,
     ProposedSubtask,
@@ -64,6 +67,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
@@ -74,6 +78,7 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
     WorkItemKind,
 )
+from sidera_control_plane.domain.result_integration import IntegrationSpecV1
 from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
 
 FakeScenario = Literal[
@@ -125,7 +130,7 @@ class FakePlannerAdapter:
         max_context_bytes=128_000,
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2, 3, 4),
+        proposal_schema_versions=(2, 3, 4, 6),
         context_package_versions=(1,),
     )
 
@@ -267,8 +272,18 @@ class FakePlannerAdapter:
                     payload = _revision_proposal_payload_v4(
                         payload, self.config.collaboration_mode
                     )
+                elif planner_input.proposal_schema_version == 6:
+                    payload = _revision_proposal_payload_v6(
+                        payload, self.config.collaboration_mode
+                    )
                 collaboration_policy = (
-                    resolve_collaboration_policy(
+                    resolve_collaboration_policy_v2(
+                        payload.collaboration_policy_request,
+                        planner_input.profile_snapshot.collaboration_runtime_binding,
+                        subtask_keys=frozenset(item.key for item in payload.subtasks),
+                    )
+                    if isinstance(payload, PlanningRevisionProposalPayloadV6)
+                    else resolve_collaboration_policy(
                         payload.collaboration_policy_request,
                         planner_input.profile_snapshot.collaboration_runtime_binding,
                         subtask_keys=frozenset(item.key for item in payload.subtasks),
@@ -321,6 +336,8 @@ class FakePlannerAdapter:
         payload = (
             _proposal_payload_v4(legacy_payload, self.config.collaboration_mode)
             if planner_input.proposal_schema_version == 4
+            else _proposal_payload_v6(legacy_payload, self.config.collaboration_mode)
+            if planner_input.proposal_schema_version == 6
             else legacy_payload
         )
         proposal = ProposalRevision.create(
@@ -470,6 +487,122 @@ def _proposal_payload_v4(
         decision_summary=legacy.decision_summary,
         impact_policy=legacy.impact_policy,
         collaboration_policy_request=_collaboration_policy_request(mode),
+    )
+
+
+def _collaboration_policy_request_v2(
+    mode: FakeCollaborationMode,
+) -> CollaborationPolicyRequestV2:
+    return CollaborationPolicyRequestV2.from_mapping(
+        {
+            "schema_version": 2,
+            "mode": mode,
+            "default_policy": {"strategy_id": "all_required"},
+            "subtask_overrides": [],
+            "input_groups": [],
+        }
+    )
+
+
+def _integration_spec(worker_keys: tuple[str, ...], integration_worker: str) -> IntegrationSpecV1:
+    return IntegrationSpecV1.from_mapping(
+        {
+            "schema_version": 1,
+            "repository_ref": "repo://fake-planner",
+            "base_commit": "a" * 40,
+            "integration_worker_item_key": integration_worker,
+            "input_group_keys": [],
+            "criteria": [
+                {
+                    "key": "implementation",
+                    "text": "The implementation is ready",
+                    "mode": "automatic",
+                    "check_keys": ["unit"],
+                }
+            ],
+            "checks": [
+                {
+                    "key": "unit",
+                    "version": 1,
+                    "argv": ["python3", "-m", "unittest"],
+                    "cwd": ".",
+                    "environment_ref": "env://fake-planner",
+                    "prepare_argvs": [],
+                    "timeout_seconds": 60,
+                    "success_exit_codes": [0],
+                    "report_paths": [],
+                    "required": True,
+                }
+            ],
+            "verification_binding": {
+                "adapter_module_ref": "00000000-0000-0000-0000-000000000010",
+                "adapter_config_version": 1,
+                "workspace_module_ref": "00000000-0000-0000-0000-000000000011",
+                "workspace_config_version": 1,
+            },
+            "rework_policy": {
+                "max_auto_rework_rounds": 2,
+                "max_auto_rework_seconds": 1800,
+                "allowed_worker_item_keys": list(worker_keys),
+            },
+            "apply_policy": {
+                "apply_on_accept": False,
+                "mode": "fast_forward_only",
+                "target_ref": None,
+            },
+            "finalization_policy": "stop_unused",
+        }
+    )
+
+
+def _proposal_payload_v6(
+    legacy: PlanningProposalPayload,
+    mode: FakeCollaborationMode,
+) -> PlanningProposalPayloadV6:
+    worker_keys = tuple(item.key for item in legacy.worker_items)
+    integration_worker = worker_keys[-1]
+    return PlanningProposalPayloadV6(
+        schema_version=6,
+        kind=legacy.kind,
+        root_task=legacy.root_task,
+        subtasks=legacy.subtasks,
+        worker_items=legacy.worker_items,
+        subtask_milestones=legacy.subtask_milestones,
+        subtask_dependencies=legacy.subtask_dependencies,
+        worker_item_dependencies=legacy.worker_item_dependencies,
+        execution_intents=legacy.execution_intents,
+        decision_summary=legacy.decision_summary,
+        impact_policy=legacy.impact_policy,
+        collaboration_policy_request=_collaboration_policy_request_v2(mode),
+        integration_spec=_integration_spec(worker_keys, integration_worker),
+    )
+
+
+def _revision_proposal_payload_v6(
+    legacy: PlanningRevisionProposalPayloadV3,
+    mode: FakeCollaborationMode,
+) -> PlanningRevisionProposalPayloadV6:
+    worker_keys = tuple(item.key for item in legacy.worker_items)
+    integration_worker = worker_keys[-1]
+    return PlanningRevisionProposalPayloadV6(
+        schema_version=6,
+        kind=legacy.kind,
+        base_descriptor=legacy.base_descriptor,
+        root_task=legacy.root_task,
+        subtasks=legacy.subtasks,
+        worker_items=legacy.worker_items,
+        subtask_milestones=legacy.subtask_milestones,
+        subtask_dependencies=legacy.subtask_dependencies,
+        worker_item_dependencies=legacy.worker_item_dependencies,
+        execution_intents=legacy.execution_intents,
+        subtask_identity_decisions=legacy.subtask_identity_decisions,
+        worker_item_identity_decisions=legacy.worker_item_identity_decisions,
+        retired_subtask_ids=legacy.retired_subtask_ids,
+        retired_worker_item_ids=legacy.retired_worker_item_ids,
+        decision_summary=legacy.decision_summary,
+        impact_policy=legacy.impact_policy,
+        collaboration_policy_request=_collaboration_policy_request_v2(mode),
+        integration_spec=_integration_spec(worker_keys, integration_worker),
     )
 
 

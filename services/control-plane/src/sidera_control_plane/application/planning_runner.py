@@ -106,6 +106,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
     PlanningRevisionProposalPayloadV5,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.proposal_validation import validate_proposal
 from sidera_control_plane.domain.revision_diff import RevisionDiffNormalizer
@@ -1230,10 +1231,11 @@ class PlanningRunner:
                         PlanningRevisionProposalPayloadV3,
                         PlanningRevisionProposalPayloadV4,
                         PlanningRevisionProposalPayloadV5,
+                        PlanningRevisionProposalPayloadV6,
                     ),
                 ):
                     raise ValueError(
-                        "revision proposal schema v3, v4, or v5 is required"
+                        "revision proposal schema v3, v4, v5, or v6 is required"
                     )
                 collaboration_policy = (
                     resolve_collaboration_policy_v2(
@@ -1243,7 +1245,13 @@ class PlanningRunner:
                             item.key for item in validated_payload.subtasks
                         ),
                     )
-                    if isinstance(validated_payload, PlanningRevisionProposalPayloadV5)
+                    if isinstance(
+                        validated_payload,
+                        (
+                            PlanningRevisionProposalPayloadV5,
+                            PlanningRevisionProposalPayloadV6,
+                        ),
+                    )
                     else resolve_collaboration_policy(
                         validated_payload.collaboration_policy_request,
                         request.profile_snapshot.collaboration_runtime_binding,

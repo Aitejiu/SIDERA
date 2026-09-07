@@ -38,6 +38,7 @@ from sidera_control_plane.domain.planning_proposals import (
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import (
     SubtaskMilestone,
@@ -46,11 +47,16 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
     WorkItemKind,
 )
+from sidera_control_plane.domain.result_integration import IntegrationSpecV1
 from sidera_control_plane.domain.revision_diff import (
     NormalizedRevisionDiff,
     RevisionDiffNormalizer,
 )
 from tests.unit.result_input_fixtures import revision_v5_mapping
+from tests.unit.result_integration_fixtures import (
+    integration_mapping,
+    revision_v6_mapping,
+)
 from tests.unit.test_collaboration_policy_v2 import runtime_binding
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
@@ -562,3 +568,72 @@ def test_v5_group_consumer_change_uses_patch_transition_when_declared() -> None:
         WorkerTransitionAction.CONTINUE,
     )
     assert "input_group_changed" in transition.reason_codes
+
+
+def test_v6_revision_diff_exposes_integration_spec_changes() -> None:
+    base = _v4_snapshot_with_two_workers()
+    base_spec = integration_mapping()
+    base_spec["integration_worker_item_key"] = "backend"
+    base_spec["input_group_keys"] = ["source"]
+    base_spec["rework_policy"] = {
+        "max_auto_rework_rounds": 1,
+        "max_auto_rework_seconds": 900,
+        "allowed_worker_item_keys": ["backend", "source"],
+    }
+    base = replace(
+        base,
+        schema_version=5,
+        integration_spec=IntegrationSpecV1.from_mapping(base_spec),
+    )
+
+    raw = revision_v6_mapping()
+    descriptor = raw["base_descriptor"]
+    assert isinstance(descriptor, dict)
+    descriptor.update(
+        {
+            "workspace_id": str(base.workspace_id),
+            "root_task_id": str(base.root_task_id),
+            "plan_snapshot_id": str(base.id),
+            "plan_generation": base.generation,
+            "plan_content_hash": plan_snapshot_content_hash(base),
+        }
+    )
+    retired = raw["retired_worker_item_ids"]
+    assert isinstance(retired, list)
+    source_id = base.worker_item_plans[-1].worker_item_id
+    assert source_id is not None
+    retired.append(str(source_id))
+    target_spec = raw["integration_spec"]
+    assert isinstance(target_spec, dict)
+    checks = target_spec["checks"]
+    assert isinstance(checks, list)
+    assert isinstance(checks[0], dict)
+    checks[0]["timeout_seconds"] = 120
+    target_spec["apply_policy"] = {
+        "apply_on_accept": True,
+        "mode": "fast_forward_only",
+        "target_ref": "refs/heads/main",
+    }
+
+    payload = PlanningRevisionProposalPayloadV6.from_mapping(raw)
+    resolved = CollaborationPolicySnapshotV2.from_request(
+        payload.collaboration_policy_request, runtime_binding()
+    )
+    diff = RevisionDiffNormalizer().normalize(
+        base,
+        payload,
+        collaboration_policy=resolved,
+    )
+
+    paths = {item.field_path for item in diff.integration_spec_changes}
+    assert {
+        "integration_spec.integration_worker_item_key",
+        "integration_spec.input_group_keys",
+        "integration_spec.checks",
+        "integration_spec.rework_policy",
+        "integration_spec.apply_policy",
+    } <= paths
+    assert "integration_spec_changed" in diff.risk_flags
+    assert (
+        NormalizedRevisionDiff.from_mapping(diff.to_mapping()) == diff
+    )

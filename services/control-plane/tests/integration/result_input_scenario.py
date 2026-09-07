@@ -113,6 +113,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterialization,
     ContextMaterializationV1,
     ContextMaterializationV2,
+    ContextPackageManifestV1,
     ContextPackageManifestV2,
     ContextPurpose,
 )
@@ -149,6 +150,7 @@ from sidera_control_plane.domain.planning import PlanningRequest, PlanningReques
 from sidera_control_plane.domain.planning_proposals import (
     PlanningProfileDescriptor,
     PlanningProposalPayloadV5,
+    PlanningProposalPayloadV6,
     ProposalRevision,
 )
 from sidera_control_plane.domain.planning_revision_proposals import (
@@ -189,6 +191,7 @@ from sidera_control_plane.persistence.models import (
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from tests.integration.test_proposal_confirmation import planner_capabilities, profile
 from tests.unit.result_input_fixtures import proposal_v5_mapping
+from tests.unit.result_integration_fixtures import integration_mapping
 
 FROZEN_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
 _RESULT_INPUT_GATEWAY_CODES = frozenset(
@@ -417,7 +420,7 @@ class _CaptureWorkspaceProvider:
         del operation_id
         return manifest
 
-    def inspect(self, location_ref: str) -> object:
+    def inspect(self, location_ref: str) -> ExecutionWorkspaceManifest:
         manifest = self._manifests_by_location.get(location_ref)
         if manifest is None:
             raise RuntimeError(f"unknown capture workspace {location_ref}")
@@ -557,6 +560,7 @@ class ResultInputScenario:
         self.worker_item_ids: dict[str, UUID] = {}
         self.request_ids: dict[str, UUID] = {}
         self._pending_confirmation: PendingResultInputSeed | None = None
+        self._confirmation_command_id: UUID | None = None
         self._capture_adapter: _CaptureWorkerAdapter | None = None
         self._capture_adapters_by_key: dict[str, list[_CaptureWorkerAdapter]] = {}
         self._gateway: WorkerGateway | None = None
@@ -593,9 +597,12 @@ class ResultInputScenario:
         result_inputs_enabled: bool = True,
         prepare_only: bool = False,
         browser_state: bool = False,
+        proposal_schema_version: int = 5,
+        profile_key: str = "result-input-planner",
+        verification_module_refs: tuple[UUID, UUID] | None = None,
     ) -> PendingResultInputSeed | None:
         planner_capability = replace(
-            planner_capabilities(), proposal_schema_versions=(5,)
+            planner_capabilities(), proposal_schema_versions=(proposal_schema_version,)
         )
         runtime_capability = CollaborationRuntimeCapabilityProfile(
             interface_version="collaboration-runtime-v2",
@@ -651,6 +658,62 @@ class ResultInputScenario:
             secret_refs=(),
             lifecycle=ModuleLifecycle.ACTIVE,
         )
+        verification_adapter_definition: ModuleDefinition | None = None
+        verification_workspace_definition: ModuleDefinition | None = None
+        verification_adapter_instance: ModuleInstance | None = None
+        verification_workspace_instance: ModuleInstance | None = None
+        if proposal_schema_version == 6:
+            verification_adapter_definition = ModuleDefinition(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                module_type="worker_adapter",
+                provider="local_verification",
+                interface_version="sidera.worker-adapter.v2",
+                config_schema_version=1,
+                capabilities=replace(
+                    _CAPTURE_ADAPTER_CAPABILITIES,
+                    verification_versions=(1,),
+                ),
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            verification_adapter_instance = ModuleInstance(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                definition_id=verification_adapter_definition.id,
+                instance_name="result-verification-adapter",
+                config_version=1,
+                config_namespace="verification",
+                config={},
+                secret_refs=(),
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            verification_workspace_definition = ModuleDefinition(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                module_type="workspace_provider",
+                provider="git",
+                interface_version="sidera.workspace-provider.v1",
+                config_schema_version=1,
+                capabilities=WorkspaceProviderCapabilityProfile(
+                    isolation=SandboxCapability.FILESYSTEM,
+                    writable=True,
+                    git_worktree=True,
+                    stability=StabilityLevel.STABLE,
+                    code_input_versions=(1,),
+                ),
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
+            verification_workspace_instance = ModuleInstance(
+                id=uuid4(),
+                workspace_id=self.workspace_id,
+                definition_id=verification_workspace_definition.id,
+                instance_name="result-verification-workspace",
+                config_version=1,
+                config_namespace="verification",
+                config={},
+                secret_refs=(),
+                lifecycle=ModuleLifecycle.ACTIVE,
+            )
         binding = CollaborationRuntimeBindingSnapshot(
             runtime_definition_id=runtime_definition.id,
             runtime_instance_id=runtime_instance.id,
@@ -660,7 +723,8 @@ class ResultInputScenario:
         )
         stored_profile = replace(
             profile(self.workspace_id, planner_instance.id),
-            proposal_schema_version=5,
+            profile_key=profile_key,
+            proposal_schema_version=proposal_schema_version,
             collaboration_runtime_binding=binding,
         )
         request = PlanningRequest.create(
@@ -684,6 +748,17 @@ class ResultInputScenario:
             uow.modules.add_instance(planner_instance)
             uow.modules.add_definition(runtime_definition)
             uow.modules.add_instance(runtime_instance)
+            if proposal_schema_version == 6:
+                assert (
+                    verification_adapter_definition is not None
+                    and verification_workspace_definition is not None
+                    and verification_adapter_instance is not None
+                    and verification_workspace_instance is not None
+                )
+                uow.modules.add_definition(verification_adapter_definition)
+                uow.modules.add_instance(verification_adapter_instance)
+                uow.modules.add_definition(verification_workspace_definition)
+                uow.modules.add_instance(verification_workspace_instance)
             uow.planning_profiles.add(stored_profile)
             uow.planning_requests.add(request)
             context_revision = WorkContextRevisionFactory().create(
@@ -706,14 +781,30 @@ class ResultInputScenario:
                 context_revision,
             )
 
-        payload = PlanningProposalPayloadV5.from_mapping(
-            _proposal_mapping(
-                groups=groups,
-                hard_edges=hard_edges,
-                source_worker_keys=source_worker_keys,
-                max_attempts=max_attempts,
-                browser_state=browser_state,
-            )
+        proposal_mapping = _proposal_mapping(
+            groups=groups,
+            hard_edges=hard_edges,
+            source_worker_keys=source_worker_keys,
+            max_attempts=max_attempts,
+            browser_state=browser_state,
+            proposal_schema_version=proposal_schema_version,
+            verification_module_refs=(
+                verification_module_refs
+                if verification_module_refs is not None
+                else (
+                    verification_adapter_instance.id,
+                    verification_workspace_instance.id,
+                )
+                if proposal_schema_version == 6
+                and verification_adapter_instance is not None
+                and verification_workspace_instance is not None
+                else None
+            ),
+        )
+        payload = (
+            PlanningProposalPayloadV6.from_mapping(proposal_mapping)
+            if proposal_schema_version == 6
+            else PlanningProposalPayloadV5.from_mapping(proposal_mapping)
         )
         with self.uow_factory() as uow:
             stored_request = uow.planning_requests.get(
@@ -735,7 +826,7 @@ class ResultInputScenario:
                 lease_id=lease_id,
                 fencing_token=1,
                 provider_ref="fake:result-input",
-                structured_result_type="planning.proposal.v5",
+                structured_result_type=f"planning.proposal.v{proposal_schema_version}",
                 usage=run.usage,
                 now=self.now,
             )
@@ -773,6 +864,7 @@ class ResultInputScenario:
             )
 
         self._pending_confirmation = pending
+        self._confirmation_command_id = uuid4()
         if prepare_only:
             return pending
         self.confirm_prepared_plan(result_inputs_enabled=result_inputs_enabled)
@@ -802,6 +894,8 @@ class ResultInputScenario:
         pending = self._pending_confirmation
         if pending is None:
             raise AssertionError("result-input proposal has not been prepared")
+        if self._confirmation_command_id is None:
+            self._confirmation_command_id = uuid4()
 
         result = CommandService(
             self.uow_factory,
@@ -815,7 +909,7 @@ class ResultInputScenario:
             ),
         ).handle(
             CommandEnvelope(
-                id=uuid4(),
+                id=self._confirmation_command_id,
                 workspace_id=self.workspace_id,
                 command_type="ConfirmPlanningProposal",
                 target_type="planning_request",
@@ -940,7 +1034,6 @@ class ResultInputScenario:
             head = uow.plans.get_head(
                 self.ids["root_task"], self.workspace_id, for_update=True
             )
-            base_snapshot = uow.plans.get(head.active_snapshot_id, self.workspace_id)
             original_request = uow.planning_requests.get(
                 self.ids["planning_request"], self.workspace_id
             )
@@ -949,6 +1042,7 @@ class ResultInputScenario:
             )
             assert root_task is not None
             assert head is not None
+            base_snapshot = uow.plans.get(head.active_snapshot_id, self.workspace_id)
             assert base_snapshot is not None
             assert original_request is not None
             assert original_proposal is not None
@@ -1391,7 +1485,9 @@ class ResultInputScenario:
         assert isinstance(package, ContextPackageManifestV2)
         return package
 
-    def context_package_for_execution(self, execution_id: UUID) -> object:
+    def context_package_for_execution(
+        self, execution_id: UUID
+    ) -> ContextPackageManifestV1 | ContextPackageManifestV2:
         with self.uow_factory() as uow:
             for schema_version in (2, 1):
                 package = uow.context_packages.get_for_consumer(
@@ -2747,6 +2843,8 @@ def _proposal_mapping(
     source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
     max_attempts: int = 1,
     browser_state: bool = False,
+    proposal_schema_version: int = 5,
+    verification_module_refs: tuple[UUID, UUID] | None = None,
 ) -> dict[str, object]:
     raw = proposal_v5_mapping()
     worker_items = raw["worker_items"]
@@ -2911,6 +3009,26 @@ def _proposal_mapping(
     else:
         selected_groups = groups
     policy["input_groups"] = [deepcopy(item) for item in selected_groups]
+    if proposal_schema_version == 6:
+        spec = integration_mapping()
+        spec["integration_worker_item_key"] = "summary"
+        spec["input_group_keys"] = [
+            str(item["group_key"]) for item in selected_groups
+        ]
+        spec["rework_policy"] = {
+            "max_auto_rework_rounds": 2,
+            "max_auto_rework_seconds": 1800,
+            "allowed_worker_item_keys": [item["key"] for item in worker_items],
+        }
+        if verification_module_refs is not None:
+            spec["verification_binding"] = {
+                "adapter_module_ref": str(verification_module_refs[0]),
+                "adapter_config_version": 1,
+                "workspace_module_ref": str(verification_module_refs[1]),
+                "workspace_config_version": 1,
+            }
+        raw["schema_version"] = 6
+        raw["integration_spec"] = spec
     return raw
 
 
