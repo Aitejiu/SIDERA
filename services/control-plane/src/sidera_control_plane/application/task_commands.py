@@ -17,7 +17,6 @@ class TaskCommandHandler:
             "PauseTask",
             "ResumeTask",
             "CancelTask",
-            "CompleteTask",
         }
     )
 

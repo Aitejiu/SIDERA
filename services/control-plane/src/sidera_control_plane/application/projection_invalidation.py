@@ -214,6 +214,19 @@ def projection_targets_for_event(
             )
             for target in targets
         )
+    if event.aggregate_type == "result_acceptance" or event.event_type == (
+        "TaskAcceptanceRecorded"
+    ):
+        return _targets(
+            (
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "collaboration_runtime",
+            ),
+            worker_item_id,
+            root_task_id or _payload_uuid(payload, "root_task_id") or event.aggregate_id,
+        )
     if event.aggregate_type in {"work_context", "work_context_binding"}:
         change_type = {
             "WorkContextCreated": "work_context_created",

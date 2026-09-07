@@ -32,6 +32,10 @@ from sidera_control_plane.application.event_ingestor import (
     SessionEventIngestor,
 )
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
+from sidera_control_plane.application.result_acceptance import (
+    ResultAcceptanceService,
+    build_acceptance_basis_hash,
+)
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
@@ -64,7 +68,13 @@ from sidera_control_plane.domain.result_operations import (
     ReworkRecordV1,
     TaskResultHead,
 )
-from sidera_control_plane.domain.result_verification import VerificationResultV1
+from sidera_control_plane.domain.result_verification import (
+    CriterionDecisionType,
+    CriterionDecisionV1,
+    CriterionObservedStatus,
+    VerificationResultV1,
+    evaluate_criteria,
+)
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
@@ -501,18 +511,27 @@ class ResultIntegrationScenario:
         idempotency_key: str | None = None,
         command_id: UUID | None = None,
         expected_version: int | None = None,
+        target_id: UUID | None = None,
     ):
         key = idempotency_key or f"scenario:{command_type}:{uuid4()}"
         command_id = command_id or uuid5(NAMESPACE_URL, f"result-scenario-command:{key}")
         if expected_version is None:
             version = self._command_expected_versions.setdefault(
-                key, self.head().result_version
+                key,
+                self.root().version
+                if command_type == "CompleteTask"
+                else self.head().result_version,
             )
         else:
             version = expected_version
         service = CommandService(
             lambda: self.uow(),
             (
+                ResultAcceptanceService(
+                    clock=lambda: self._planning.now,
+                    local_actor_type="local",
+                    local_actor_id="operator",
+                ),
                 ResultReworkService(
                     clock=lambda: self._planning.now,
                     local_actor_type="local",
@@ -532,7 +551,7 @@ class ResultIntegrationScenario:
                 target_type="task",
                 actor_type=actor_type,
                 actor_id=actor_id,
-                target_id=self.root_task_id,
+                target_id=target_id or self.root_task_id,
                 payload=payload,
                 expected_version=version,
                 idempotency_key=key,
@@ -548,6 +567,46 @@ class ResultIntegrationScenario:
                 str(result.data["integration_operation_id"])
             )
         return result
+
+    def accept_payload(self, candidate: IntegrationCandidateV1) -> dict[str, object]:
+        """Build the exact acceptance contract from persisted candidate evidence."""
+
+        if not isinstance(candidate, IntegrationCandidateV1):
+            raise TypeError("candidate must be a typed integration candidate")
+        with self.uow() as uow:
+            plan = uow.plans.get(candidate.plan_snapshot_id, self.workspace_id)
+        if plan is None or plan.integration_spec is None:
+            raise AssertionError("integration acceptance spec is unavailable")
+        results = self.verification_results(candidate.id)
+        evaluations = evaluate_criteria(plan.integration_spec.criteria, results)
+        decisions: list[CriterionDecisionV1] = []
+        for criterion, evaluation in zip(
+            plan.integration_spec.criteria, evaluations, strict=True
+        ):
+            if evaluation.observed_status is CriterionObservedStatus.PASSED:
+                decision = CriterionDecisionType.ACCEPT_PASSED
+                reason = None
+            elif evaluation.eligible_manual:
+                decision = CriterionDecisionType.MANUAL_PASSED
+                reason = "operator reviewed the manual criterion"
+            else:
+                decision = CriterionDecisionType.EXCEPTION_ACCEPTED
+                reason = "operator accepted the candidate exception"
+            decisions.append(CriterionDecisionV1(criterion.key, decision, reason))
+        result_version = self.head().result_version
+        return {
+            "candidate_id": str(candidate.id),
+            "candidate_hash": candidate.content_hash,
+            "acceptance_basis_hash": build_acceptance_basis_hash(
+                candidate,
+                results,
+                decisions,
+                result_version=result_version,
+                integration_spec=plan.integration_spec,
+            ),
+            "expected_result_version": result_version,
+            "criteria": [decision.to_mapping() for decision in decisions],
+        }
 
     def selection(self, selection_id: UUID):
         with self.uow() as uow:

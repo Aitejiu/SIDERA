@@ -71,6 +71,7 @@ from sidera_control_plane.application.planning_metrics import PlanningMetricsSer
 from sidera_control_plane.application.planning_queries import PlanningQueryService
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.resource_queries import ResourceQueryService
+from sidera_control_plane.application.result_acceptance import ResultAcceptanceService
 from sidera_control_plane.application.result_input_queries import (
     ResultInputQueryService,
 )
@@ -227,6 +228,11 @@ def get_command_service(
     return CommandService(
         factory,
         (
+            ResultAcceptanceService(
+                lambda: datetime.now(UTC),
+                local_actor_type=settings.local_actor_type,
+                local_actor_id=settings.local_actor_id,
+            ),
             TaskCommandHandler(),
             AcknowledgeAttentionItemHandler(lambda: datetime.now(UTC)),
             PublishPlanSnapshotHandler(),

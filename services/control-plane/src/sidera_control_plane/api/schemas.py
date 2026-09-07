@@ -175,6 +175,26 @@ class SetTaskPriorityPayload(BaseModel):
     priority: int = Field(ge=0, le=100)
 
 
+class AcceptanceCriterionDecisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    criterion_key: NonEmptyString
+    decision: Literal["accept_passed", "manual_passed", "exception_accepted"]
+    reason: str | None
+
+
+class CompleteTaskPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: UUID
+    candidate_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    acceptance_basis_hash: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+    expected_result_version: int = Field(ge=1)
+    criteria: tuple[AcceptanceCriterionDecisionPayload, ...] = Field(min_length=1)
+
+
 class EmptyPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2667,14 +2687,16 @@ class CommandRequest(BaseModel):
         elif self.command_type == "SetTaskPriority":
             self._require_mutation_target()
             parsed = SetTaskPriorityPayload.model_validate(self.payload)
-        elif self.command_type in {
-            "PauseTask",
-            "ResumeTask",
-            "CancelTask",
-            "CompleteTask",
-        }:
+        elif self.command_type in {"PauseTask", "ResumeTask", "CancelTask"}:
             self._require_mutation_target()
             parsed = EmptyPayload.model_validate(self.payload)
+        elif self.command_type == "CompleteTask":
+            self._require_mutation_target()
+            parsed = (
+                EmptyPayload.model_validate(self.payload)
+                if not self.payload
+                else CompleteTaskPayload.model_validate(self.payload)
+            )
         elif self.command_type == "RegisterWorker":
             self._require_create("worker")
             parsed = RegisterWorkerPayload.model_validate(self.payload)

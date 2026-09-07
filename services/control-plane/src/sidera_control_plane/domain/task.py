@@ -147,6 +147,15 @@ class Task:
         self.status = TaskStatus.WAITING
         self.version += 1
 
+    def await_acceptance(self) -> None:
+        self._assert_mutable()
+        if self.status is TaskStatus.WAITING:
+            return
+        if self.status not in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}:
+            raise InvalidTransition(f"task cannot await acceptance from {self.status}")
+        self.status = TaskStatus.WAITING
+        self.version += 1
+
     def complete(self) -> None:
         self._assert_mutable()
         if self.status is not TaskStatus.WAITING:
