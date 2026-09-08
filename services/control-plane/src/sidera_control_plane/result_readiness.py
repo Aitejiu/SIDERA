@@ -14,6 +14,7 @@ from uuid import UUID
 
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.result_operations import ResultError
+from sidera_control_plane.local_gate_record import validate_local_gate_record
 
 type ReadinessStatus = Literal["ok", "missing", "invalid", "unavailable"]
 type RepositoryResolver = (
@@ -132,6 +133,7 @@ def authorize_real_result_run(
         raise ResultError("real_local_gate_invalid", {})
 
     _validate_real_local_gate(local_gate_record)
+    _validate_optional_local_gate_evidence(local_gate_record, values)
     approved = _mapping_value(local_gate_record, "approved")
     database = _mapping_value(local_gate_record, "database")
     repository_record = _mapping_value(local_gate_record, "repository")
@@ -242,6 +244,32 @@ def _validate_real_local_gate(record: Mapping[str, object]) -> None:
     _approved_endpoint(approved)
     _approved_text(approved, "credential_source")
     _approved_fallbacks(approved)
+
+
+def validate_local_gate_evidence(
+    record: Mapping[str, object], repository: Path
+) -> None:
+    """Require current provider-free local evidence before a real run is bound."""
+
+    validation = validate_local_gate_record(record, repository)
+    if not validation.ok:
+        raise ResultError(validation.code, {})
+
+
+def _validate_optional_local_gate_evidence(
+    record: Mapping[str, object], values: Mapping[str, str]
+) -> None:
+    """Validate an explicit local evidence envelope without changing old gate files."""
+
+    evidence = record.get("local_gate_evidence")
+    if evidence is None:
+        return
+    if not isinstance(evidence, Mapping):
+        raise ResultError("real_local_gate_invalid", {})
+    repository_value = values.get("SIDERA_LOCAL_GATE_REPOSITORY")
+    if repository_value is None or not repository_value.strip():
+        raise ResultError("real_local_gate_invalid", {})
+    validate_local_gate_evidence(evidence, Path(repository_value).expanduser())
 
 
 def _mapping_value(value: object, key: str) -> Mapping[str, object] | None:

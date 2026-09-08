@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.result_operations import ResultError
-from sidera_control_plane.result_readiness import authorize_real_result_run
+from sidera_control_plane.local_gate_record import build_local_gate_record
+from sidera_control_plane.result_readiness import (
+    authorize_real_result_run,
+    validate_local_gate_evidence,
+)
 from tests.e2e.test_real_opencode_result_integration import (
     REAL_RESULT_EXECUTION_STEPS,
 )
@@ -62,6 +67,30 @@ def _local_gate(repository: Path) -> dict[str, object]:
 def _repository(tmp_path: Path) -> Path:
     repository = tmp_path / "isolated-repository"
     (repository / ".git").mkdir(parents=True)
+    return repository
+
+
+def _source_repository(tmp_path: Path) -> Path:
+    repository = tmp_path / "source-repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Sidera Test"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "source.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "initial"],
+        cwd=repository,
+        check=True,
+    )
     return repository
 
 
@@ -162,6 +191,23 @@ def test_real_gate_requires_a_valid_durable_run_id(tmp_path: Path) -> None:
             _local_gate(repository),
             environ=_environment(repository, SIDERA_REAL_RESULT_RUN_ID="not-a-uuid"),
         )
+
+
+def test_real_gate_can_validate_current_provider_free_local_evidence(
+    tmp_path: Path,
+) -> None:
+    repository = _source_repository(tmp_path)
+    evidence = build_local_gate_record(
+        repository,
+        database_url="postgresql+psycopg://tester@127.0.0.1:55432/sidera_test",
+        checks={"unit": 0},
+    )
+
+    validate_local_gate_evidence(evidence.model_dump(), repository)
+    (repository / "source.py").write_text("value = 2\n", encoding="utf-8")
+
+    with pytest.raises(ResultError, match="local_gate_code_changed"):
+        validate_local_gate_evidence(evidence.model_dump(), repository)
 
 
 def test_real_result_flow_budget_names_the_full_acceptance_path() -> None:

@@ -7,12 +7,37 @@ CONTROL_PLANE_ROOT="$REPO_ROOT/services/control-plane"
 AKASHIC_ROOT="$REPO_ROOT/integrations/akashic"
 WEB_ROOT="$REPO_ROOT/apps/web"
 TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sidera-r6-result-integration-gate.XXXXXX")
+RECORD_PATH=""
+
+while (($# > 0)); do
+  case "$1" in
+    --record)
+      shift
+      if (($# == 0)); then
+        printf 'r6 result integration: --record requires a path\n' >&2
+        exit 2
+      fi
+      RECORD_PATH=$1
+      ;;
+    *)
+      printf 'r6 result integration: unknown argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ -n "$RECORD_PATH" && "$RECORD_PATH" != /* ]]; then
+  RECORD_PATH="$PWD/$RECORD_PATH"
+fi
 
 LOCAL_FAILED=0
 REAL_INTEGRATION_ACCEPTANCE=NOT_RUN
 RESULT_INTEGRATION_DATABASE_CHECK=FAIL
 STEP_COUNT=0
 PRESERVE_TEMP=0
+CHECKS_FILE="$TEMP_DIR/checks.tsv"
+: >"$CHECKS_FILE"
 
 cleanup() {
   if ((PRESERVE_TEMP != 0)); then
@@ -37,9 +62,11 @@ run_step() {
   printf 'r6 result integration: %s\n' "$label"
   if "$@" >"$output_file" 2>&1; then
     printf 'r6 result integration: %s: PASS\n' "$label"
+    printf '%s\t%s\t%s\n' "$label" "0" "PASS" >>"$CHECKS_FILE"
   else
     local step_rc=$?
     printf 'r6 result integration: %s: FAIL (exit %s)\n' "$label" "$step_rc" >&2
+    printf '%s\t%s\t%s\n' "$label" "$step_rc" "FAIL" >>"$CHECKS_FILE"
     mark_local_failure
   fi
 }
@@ -125,24 +152,9 @@ PY
 }
 
 classify_dirty_scope() {
-  local status_output
-  status_output=$(git -C "$REPO_ROOT" status --porcelain=v1 -z --untracked-files=all 2>/dev/null) || return 1
-  if [[ -z "$status_output" ]]; then
-    printf '%s\n' 'clean'
-    return 0
-  fi
-  while IFS= read -r -d '' line; do
-    local path="${line:3}"
-    case "$path" in
-      .superpowers/*|references/*|docs/superpowers/specs/2026-09-05-sidera-r6-3-4-scope-proposal.md)
-        ;;
-      *)
-        printf '%s\n' 'dirty'
-        return 0
-        ;;
-    esac
-  done <<<"$status_output"
-  printf '%s\n' 'protected-only'
+  safe_local_env uv run --project "$CONTROL_PLANE_ROOT" \
+    python -m sidera_control_plane.local_gate_record classify \
+    --repository "$REPO_ROOT"
 }
 
 check_protected_state() {
@@ -161,12 +173,16 @@ compare_files() {
 }
 
 COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null) || COMMIT=unknown
+COMMIT_FULL=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || COMMIT_FULL=unknown
 DIRTY_SCOPE=$(classify_dirty_scope) || DIRTY_SCOPE=unknown
 PROTECTED_STATE_BEFORE="$TEMP_DIR/protected-before.txt"
 PROTECTED_STATE_AFTER="$TEMP_DIR/protected-after.txt"
 if ! git -C "$REPO_ROOT" status --short -- .superpowers references \
   docs/superpowers/specs/2026-09-05-sidera-r6-3-4-scope-proposal.md \
   >"$PROTECTED_STATE_BEFORE" 2>/dev/null; then
+  mark_local_failure
+fi
+if [[ "$DIRTY_SCOPE" == "dirty" || "$DIRTY_SCOPE" == "unknown" ]]; then
   mark_local_failure
 fi
 
@@ -265,6 +281,25 @@ if (( LOCAL_FAILED == 0 )); then
   run_step 'git diff check' safe_local_env git -C "$REPO_ROOT" diff --check
 else
   printf 'r6 result integration: local checks not started because database/authorization guard failed\n' >&2
+fi
+
+if [[ -n "$RECORD_PATH" ]]; then
+  RECORD_STATUS=FAIL
+  if (( LOCAL_FAILED == 0 )) && [[ "$DIRTY_SCOPE" != "dirty" && "$DIRTY_SCOPE" != "unknown" ]]; then
+    RECORD_STATUS=PASS
+  fi
+  if ! safe_local_env uv run --project "$CONTROL_PLANE_ROOT" \
+    python -m sidera_control_plane.local_gate_record write \
+    --output "$RECORD_PATH" \
+    --repository "$REPO_ROOT" \
+    --database-url "${SIDERA_TEST_DATABASE_URL:-}" \
+    --checks-file "$CHECKS_FILE" \
+    --status "$RECORD_STATUS" \
+    --dirty-scope "$DIRTY_SCOPE" \
+    --commit "$COMMIT_FULL"; then
+    printf 'r6 result integration: local gate record: FAIL\n' >&2
+    mark_local_failure
+  fi
 fi
 
 printf 'RESULT_INTEGRATION_COMMIT=%s\n' "$COMMIT"

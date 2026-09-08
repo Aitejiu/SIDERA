@@ -26,6 +26,21 @@ printf 'uv real=%s/%s deepseek=%s opencode=%s args=%s\n' \
   "${OPENCODE_API_KEY:-unset}" \
   "$*" >>"$FAKE_LOG"
 
+if [[ "$*" == *"sidera_control_plane.local_gate_record classify"* ]]; then
+  printf '%s\n' 'protected-only'
+  exit 0
+fi
+
+if [[ "$*" == *"sidera_control_plane.local_gate_record write"* ]]; then
+  for ((index = 1; index <= $#; index += 1)); do
+    if [[ "${!index}" == "--output" ]]; then
+      next=$((index + 1))
+      printf '%s\n' '{"status":"PASS"}' >"${!next}"
+    fi
+  done
+  exit 0
+fi
+
 if [[ "$*" == *"result_readiness"* ]]; then
   if [[ "${SIDERA_RESULT_REAL_GATE_PREFLIGHT:-0}" == "1" ]]; then
     printf '%s\n' '{"enabled":false,"ready":false,"real_result_gate":{"error_code":"real_run_not_authorized","status":"blocked"}}'
@@ -73,6 +88,8 @@ set -euo pipefail
 printf 'git args=%s\n' "$*" >>"$FAKE_LOG"
 if [[ "$*" == *"rev-parse --short HEAD"* ]]; then
   printf '%s\n' 'r6gate0'
+elif [[ "$*" == *"rev-parse HEAD"* ]]; then
+  printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 elif [[ "$*" == *"status --porcelain=v1 -z"* ]]; then
   printf '%s\0' '?? .superpowers/' '?? references/'
 fi
@@ -111,6 +128,14 @@ fake_output=$(<"$FAKE_LOG")
 assert_contains "$fake_output" 'real=unset/unset'
 assert_contains "$fake_output" 'deepseek=unset'
 assert_contains "$fake_output" 'opencode=unset'
+
+record_path="$TEMP_DIR/local-gate.json"
+recorded_output=$(DEEPSEEK_API_KEY=sk-test-deepseek OPENCODE_API_KEY=sk-test-opencode \
+  run_gate --record "$record_path")
+assert_contains "$recorded_output" 'RESULT_INTEGRATION_LOCAL_GATE=PASS'
+[[ -s "$record_path" ]] || fail "--record did not create a machine-readable record"
+fake_output=$(<"$FAKE_LOG")
+assert_contains "$fake_output" 'local_gate_record write'
 
 set +e
 unsafe_output=$(SIDERA_TEST_DATABASE_URL='postgresql+psycopg://tester@example.com:5432/sidera_development' run_gate 2>&1)
