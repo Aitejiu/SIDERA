@@ -17,6 +17,7 @@ from .contracts import (
 )
 from .evidence import EvidenceBuilder
 from .intervention import run_intervention
+from .revision import run_revision
 from .user_flow import run_user_flow
 
 ResultBudgetState = Literal["completed", "reserved", "exhausted", "unknown"]
@@ -246,6 +247,16 @@ def run_scenario(
             raw,
             snapshot=snapshot,
             evidence_kind=intervention_evidence_kind,
+        )
+    if name == "revision":
+        snapshot = _optional_revision_snapshot(raw)
+        revision_evidence_kind: Literal["contract", "real_user_flow"] = (
+            "real_user_flow" if mode == "real" else "contract"
+        )
+        return run_revision(
+            raw,
+            snapshot=snapshot,
+            evidence_kind=revision_evidence_kind,
         )
     return builder.finish(
         real_tests=0,
