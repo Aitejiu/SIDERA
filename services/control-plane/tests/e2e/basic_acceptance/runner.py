@@ -9,8 +9,14 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from .contracts import ScenarioEvidence, UserFlowSnapshot
+from .contracts import (
+    InterventionSnapshot,
+    RevisionSnapshot,
+    ScenarioEvidence,
+    UserFlowSnapshot,
+)
 from .evidence import EvidenceBuilder
+from .intervention import run_intervention
 from .user_flow import run_user_flow
 
 ResultBudgetState = Literal["completed", "reserved", "exhausted", "unknown"]
@@ -231,6 +237,16 @@ def run_scenario(
             snapshot=snapshot,
             evidence_kind=user_flow_evidence_kind,
         )
+    if name == "intervention":
+        snapshot = _optional_intervention_snapshot(raw)
+        intervention_evidence_kind: Literal["contract", "real_user_flow"] = (
+            "real_user_flow" if mode == "real" else "contract"
+        )
+        return run_intervention(
+            raw,
+            snapshot=snapshot,
+            evidence_kind=intervention_evidence_kind,
+        )
     return builder.finish(
         real_tests=0,
         incomplete=True,
@@ -252,3 +268,21 @@ def _optional_user_flow_snapshot(
     if not isinstance(value, dict):
         return None
     return UserFlowSnapshot.model_validate(value)
+
+
+def _optional_intervention_snapshot(
+    manifest: dict[str, object],
+) -> InterventionSnapshot | None:
+    value = manifest.get("intervention_snapshot")
+    if not isinstance(value, dict):
+        return None
+    return InterventionSnapshot.model_validate(value)
+
+
+def _optional_revision_snapshot(
+    manifest: dict[str, object],
+) -> RevisionSnapshot | None:
+    value = manifest.get("revision_snapshot")
+    if not isinstance(value, dict):
+        return None
+    return RevisionSnapshot.model_validate(value)

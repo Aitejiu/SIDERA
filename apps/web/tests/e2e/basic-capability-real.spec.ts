@@ -53,6 +53,7 @@ test.describe("R6 basic real planning journey", () => {
     await expect(worker).toBeVisible();
     await worker.click();
     await expect(page.locator("#worker-item-title")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
 
     expect(violations).toEqual([]);
     const storage = await page.evaluate(() => {

@@ -123,3 +123,75 @@ class UserFlowSnapshot(BaseModel):
     restore_check_passed: bool
     dependency_satisfied: bool
     source_windows: tuple[ExecutionWindow, ...]
+
+
+class InterventionSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    root_task_id: UUID
+    worker_item_id: UUID
+    sibling_worker_item_ids: tuple[UUID, ...]
+    plan_generation_before: int = Field(ge=1)
+    plan_generation_after: int = Field(ge=1)
+    input_command_id: UUID
+    input_id: UUID
+    input_target_worker_item_id: UUID
+    input_status: Literal["queued", "accepted", "delivered", "applied", "failed", "unknown"]
+    adapter_acknowledged: bool
+    observed_output_id: UUID | None
+    observed_output_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    sibling_input_ids_before: tuple[UUID, ...]
+    sibling_input_ids_after: tuple[UUID, ...]
+    source_candidate_id: UUID
+    source_candidate_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    failed_check_id: UUID | None
+    failed_check_candidate_id: UUID | None
+    failed_check_candidate_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    rework_record_id: UUID | None
+    rework_execution_id: UUID | None
+    rework_session_id: UUID | None
+    rework_worker_item_id: UUID | None
+    rework_generation: int | None = Field(default=None, ge=1)
+    replacement_candidate_id: UUID | None
+    replacement_candidate_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    rework_round: int = Field(ge=0)
+    rework_round_limit: int = Field(ge=1)
+    rework_elapsed_seconds: int = Field(ge=0)
+    rework_time_limit_seconds: int = Field(ge=1)
+    unaffected_result_ids_before: tuple[UUID, ...]
+    unaffected_result_ids_after: tuple[UUID, ...]
+
+
+class RevisionSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    root_task_id: UUID
+    main_agent_thread_id_before: str = Field(min_length=1, max_length=256)
+    main_agent_thread_id_after: str = Field(min_length=1, max_length=256)
+    main_agent_tool_call_observed: bool
+    tool_call_id: str | None = Field(default=None, max_length=256)
+    old_plan_id: UUID
+    old_plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    old_generation: int = Field(ge=1)
+    new_plan_id: UUID | None
+    new_plan_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    new_generation: int | None = Field(default=None, ge=1)
+    revision_id: UUID | None
+    revision_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    confirmation_command_id: UUID | None
+    transition_id: UUID | None
+    old_plan_still_queryable: bool
+    reused_worker_item_ids: tuple[UUID, ...]
+    changed_worker_item_ids: tuple[UUID, ...]
+    added_worker_item_ids: tuple[UUID, ...]
+    old_worker_item_ids: tuple[UUID, ...]
+    source_result_ids_before: tuple[UUID, ...]
+    source_result_ids_after: tuple[UUID, ...]
+    unimpacted_result_ids: tuple[UUID, ...]
+    transition_worker_item_ids: tuple[UUID, ...]
+    old_inputs_rejected_for_new_plan: bool
+    transition_status: Literal["confirmed", "converged", "unknown", "failed"]
