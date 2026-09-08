@@ -483,6 +483,7 @@ def test_real_opencode_result_input_path(tmp_path: Path) -> None:
                         "executions": 3,
                         "selected_sources": 2,
                         "artifacts": 3,
+                        "effective_wall_seconds": config.max_seconds,
                         "usage": "not_reported_by_adapter",
                     }
                 },

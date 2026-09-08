@@ -6,13 +6,13 @@ import hashlib
 import json
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
@@ -23,11 +23,18 @@ from sidera_control_plane.domain.modules import (
     WorkspaceProviderCapabilityProfile,
 )
 from sidera_control_plane.persistence.database import Database
-from sidera_control_plane.persistence.models import ExecutionModel
+from sidera_control_plane.persistence.models import (
+    ExecutionModel,
+    ExecutionSessionModel,
+    RealResultExecutionReservationModel,
+)
 from sidera_control_plane.persistence.real_result_budget import (
     RealResultExecutionBudgetStore,
 )
-from sidera_control_plane.result_readiness import authorize_real_result_run
+from sidera_control_plane.result_readiness import (
+    authorize_real_result_run,
+    effective_real_result_wall_seconds,
+)
 from tests.e2e.test_r6_3_4_real_opencode_inputs import (
     REAL_RESULT_MAX_REPORT_BYTES,
     REAL_RESULT_MAX_SECONDS,
@@ -86,9 +93,12 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
     scenario: ResultIntegrationScenario | None = None
     reservations = []
     started_at = datetime.now(UTC)
-    deadline = time.monotonic() + min(
-        REAL_RESULT_MAX_SECONDS, authorization.wall_clock_seconds
+    effective_wall_seconds = min(
+        REAL_RESULT_MAX_SECONDS,
+        effective_real_result_wall_seconds(authorization),
     )
+    expires_at = started_at + timedelta(seconds=effective_wall_seconds)
+    deadline = time.monotonic() + effective_wall_seconds
     try:
         workspace_id = uuid4()
         ids = seed_execution_request_facts(database, workspace_id)
@@ -143,6 +153,15 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         scenario.configure_worker_runtime(runtime, repository_ref=repository_ref)
         scenario.seed_plan(apply=False)
         budget_store = RealResultExecutionBudgetStore(database)
+        profile_fingerprint = _real_profile_fingerprint(authorization)
+        identity = budget_store.begin_run(
+            run_id=authorization.run_id,
+            profile_fingerprint=profile_fingerprint,
+            max_executions=authorization.max_executions,
+            expires_at=expires_at,
+        )
+        if identity.expires_at != expires_at:
+            raise AssertionError("real run deadline changed during begin")
 
         def reserve(step: str) -> None:
             _ensure_real_time(deadline)
@@ -162,6 +181,23 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
                 raise AssertionError("real result reservation sequence is not contiguous")
             reservations.append(reservation)
 
+        def bind(reservation_index: int, execution_id: UUID) -> None:
+            with database.session() as session:
+                session_id = session.scalar(
+                    select(ExecutionSessionModel.id)
+                    .where(ExecutionSessionModel.execution_id == execution_id)
+                    .order_by(ExecutionSessionModel.created_at.desc())
+                )
+            if session_id is None:
+                raise AssertionError(
+                    f"real execution {execution_id} has no persisted session"
+                )
+            budget_store.bind_execution(
+                reservations[reservation_index].id,
+                execution_id,
+                session_id,
+            )
+
         # Reserve all three first-pass sessions before entering the helper that
         # creates the two source workers and the first integration worker.
         reserve("source-a")
@@ -169,6 +205,11 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         reserve("integration")
         first = scenario.seed_repairable_candidate()
         _ensure_real_time(deadline)
+        bind(0, scenario._source_execution_ids["a"])
+        bind(1, scenario._source_execution_ids["b"])
+        if scenario._integration_execution_id is None:
+            raise AssertionError("real integration execution was not created")
+        bind(2, scenario._integration_execution_id)
         budget_store.complete(reservations[0].id, status="succeeded")
         budget_store.complete(reservations[1].id, status="succeeded")
         budget_store.complete(reservations[2].id, status="succeeded")
@@ -190,6 +231,10 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
                 b"# SIDERA_REAL_RESULT_REPAIR\n",
             },
         )
+        rework_request = scenario.request(rework_request_id)
+        if rework_request.first_execution_id is None:
+            raise AssertionError("real rework execution was not created")
+        bind(3, rework_request.first_execution_id)
         budget_store.complete(reservations[3].id, status="succeeded")
 
         scenario.command(
@@ -199,6 +244,9 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         reserve("reintegration")
         second = scenario.drive()
         _ensure_real_time(deadline)
+        if scenario._integration_execution_id is None:
+            raise AssertionError("real reintegration execution was not created")
+        bind(4, scenario._integration_execution_id)
         budget_store.complete(reservations[4].id, status="succeeded")
         if len(adapters) != 5:
             raise AssertionError(f"real flow started {len(adapters)} adapters")
@@ -220,23 +268,41 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         _ensure_real_time(deadline)
 
         with database.session() as session:
-            execution_count = int(
-                session.scalar(
-                    select(ExecutionModel.id).where(
-                        ExecutionModel.workspace_id == workspace_id,
-                        ExecutionModel.id.in_(
-                            [
-                                scenario.latest_execution_id("a"),
-                                scenario.latest_execution_id("b"),
-                                scenario.latest_execution_id("summary"),
-                            ]
-                        ),
+            bound_reservations = tuple(
+                session.scalars(
+                    select(RealResultExecutionReservationModel).where(
+                        RealResultExecutionReservationModel.run_id
+                        == authorization.run_id
                     )
                 )
-                is not None
             )
-        if execution_count != 1:
-            raise AssertionError("real execution evidence query was not deterministic")
+            bound_execution_ids = tuple(
+                item.execution_id for item in bound_reservations if item.execution_id
+            )
+            bound_session_ids = tuple(
+                item.session_id for item in bound_reservations if item.session_id
+            )
+            execution_count = session.scalar(
+                select(func.count(func.distinct(ExecutionModel.id))).where(
+                    ExecutionModel.workspace_id == workspace_id,
+                    ExecutionModel.id.in_(bound_execution_ids),
+                )
+            )
+            session_count = session.scalar(
+                select(func.count(func.distinct(ExecutionSessionModel.id))).where(
+                    ExecutionSessionModel.id.in_(bound_session_ids),
+                )
+            )
+        if len(bound_reservations) != len(REAL_RESULT_EXECUTION_STEPS):
+            raise AssertionError("real reservation evidence count is incomplete")
+        if len(bound_execution_ids) != len(REAL_RESULT_EXECUTION_STEPS):
+            raise AssertionError("real reservations are not bound to distinct executions")
+        if len(bound_session_ids) != len(REAL_RESULT_EXECUTION_STEPS):
+            raise AssertionError("real reservations are not bound to distinct sessions")
+        if execution_count != len(REAL_RESULT_EXECUTION_STEPS):
+            raise AssertionError("real execution evidence count was not deterministic")
+        if session_count != len(REAL_RESULT_EXECUTION_STEPS):
+            raise AssertionError("real session evidence count was not deterministic")
 
         print(
             json.dumps(
@@ -250,6 +316,8 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
                         "provider_call_window_seconds": int(
                             (datetime.now(UTC) - started_at).total_seconds()
                         ),
+                        "effective_wall_seconds": effective_wall_seconds,
+                        "profile_fingerprint": profile_fingerprint,
                         "usage": "not_reported_by_adapter",
                     }
                 },
@@ -348,6 +416,22 @@ def _real_database_url() -> str:
 def _opaque_repository_ref(repository: Path) -> str:
     digest = hashlib.sha256(str(repository.resolve()).encode("utf-8")).hexdigest()
     return f"git-repository://{digest}"
+
+
+def _real_profile_fingerprint(authorization: Any) -> str:
+    payload = json.dumps(
+        {
+            "provider": authorization.provider,
+            "model": authorization.model,
+            "endpoint_host": authorization.endpoint_host,
+            "fallbacks": list(authorization.fallbacks),
+            "max_executions": authorization.max_executions,
+            "wall_clock_seconds": authorization.wall_clock_seconds,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _real_run_requested() -> bool:

@@ -6354,6 +6354,8 @@ class RealResultRunBudgetModel(TimestampMixin, Base):
     reserved_executions: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    profile_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -6394,6 +6396,23 @@ class RealResultExecutionReservationModel(TimestampMixin, Base):
             "run_id",
             "sequence_no",
         ),
+        Index(
+            "uq_real_result_execution_reservations_execution",
+            "execution_id",
+            unique=True,
+            postgresql_where=text("execution_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_real_result_execution_reservations_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("session_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "(execution_id IS NULL AND session_id IS NULL) OR "
+            "(execution_id IS NOT NULL AND session_id IS NOT NULL)",
+            name="ck_real_result_execution_reservations_binding_pair",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -6401,6 +6420,14 @@ class RealResultExecutionReservationModel(TimestampMixin, Base):
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
     step_key: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("executions.id", ondelete="RESTRICT"),
+    )
+    session_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("execution_sessions.id", ondelete="RESTRICT"),
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

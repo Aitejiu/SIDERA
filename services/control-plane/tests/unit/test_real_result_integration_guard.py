@@ -10,6 +10,7 @@ from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.local_gate_record import build_local_gate_record
 from sidera_control_plane.result_readiness import (
     authorize_real_result_run,
+    effective_real_result_wall_seconds,
     validate_local_gate_evidence,
 )
 from tests.e2e.test_real_opencode_result_integration import (
@@ -175,6 +176,7 @@ def test_valid_real_gate_is_bounded_and_has_no_secret_summary(tmp_path: Path) ->
     assert authorization.model == "opencode-go/MiMo-V2.5"
     assert authorization.max_executions == 5
     assert authorization.wall_clock_seconds == 1800
+    assert effective_real_result_wall_seconds(authorization) == 600
     assert authorization.reserve_execution(0) == 1
     assert authorization.reserve_execution(4) == 5
     with pytest.raises(ResultError, match="real_run_budget_exhausted"):

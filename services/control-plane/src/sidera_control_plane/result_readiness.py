@@ -28,6 +28,7 @@ _REAL_MODEL_PREFIX = "opencode-go/"
 _REAL_CREDENTIAL_SOURCES = frozenset({"opencode-credential-store"})
 _REAL_MAX_EXECUTIONS = 5
 _REAL_MAX_WALL_SECONDS = 1_800
+_REAL_EFFECTIVE_MAX_WALL_SECONDS = 600
 _DATABASE_NAME = re.compile(r"^sidera_test(?:_[A-Za-z0-9]+)*$")
 
 
@@ -109,6 +110,14 @@ class RealRunAuthorization:
             "max_executions": self.max_executions,
             "wall_clock_seconds": self.wall_clock_seconds,
         }
+
+
+def effective_real_result_wall_seconds(authorization: RealRunAuthorization) -> int:
+    """Return the stricter result scenario limit below the authorization ceiling."""
+
+    if not isinstance(authorization, RealRunAuthorization):
+        raise TypeError("real result authorization is required")
+    return min(_REAL_EFFECTIVE_MAX_WALL_SECONDS, authorization.wall_clock_seconds)
 
 
 def authorize_real_result_run(
