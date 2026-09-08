@@ -20,6 +20,9 @@ from sidera_control_plane.adapters.reference_collaboration_runtime import (
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.application.artifact_content import ArtifactContentService
+from sidera_control_plane.application.code_result_capture import (
+    CodeResultCaptureService,
+)
 from sidera_control_plane.application.collaboration_decisions import (
     CollaborationDecisionApplicationResult,
     CollaborationDecisionService,
@@ -558,11 +561,13 @@ class ResultInputScenario:
         tmp_path: Path,
         *,
         worker_runtime: ResultInputWorkerRuntime | None = None,
+        code_result_capture_service: CodeResultCaptureService | None = None,
     ) -> None:
         self.database = database
         self.workspace_id = workspace_id
         self.tmp_path = tmp_path
         self._worker_runtime = worker_runtime
+        self._code_result_capture_service = code_result_capture_service
         self.now = FROZEN_NOW
         self.clock: Callable[[], datetime] = lambda: self.now
         self.uow_factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: (
@@ -627,6 +632,28 @@ class ResultInputScenario:
             decision_service=self._decision_service,
             evaluation_lease_ttl=timedelta(seconds=10),
         )
+
+    def configure_worker_runtime(
+        self,
+        worker_runtime: ResultInputWorkerRuntime | None,
+        *,
+        code_result_capture_service: CodeResultCaptureService | None = None,
+    ) -> None:
+        """Change the adapter boundary before a plan is confirmed."""
+
+        if self.worker_item_ids:
+            raise AssertionError(
+                "worker runtime must be configured before plan materialization"
+            )
+        self._worker_runtime = worker_runtime
+        self._code_result_capture_service = code_result_capture_service
+
+    def set_code_result_capture_service(
+        self, service: CodeResultCaptureService | None
+    ) -> None:
+        """Replace the capture boundary after a durable scenario restart."""
+
+        self._code_result_capture_service = service
 
     def confirm_plan(
         self,
@@ -1601,10 +1628,11 @@ class ResultInputScenario:
         self,
         key: str,
         *,
+        execution_id: UUID | None = None,
         start_outcome_unknown: bool = False,
         crash_after_context_ack: bool = False,
     ) -> object:
-        execution_id = self._execution_id(key)
+        execution_id = execution_id or self._execution_id(key)
         assert execution_id is not None
         with self.uow_factory() as uow:
             execution = uow.executions.get(execution_id, self.workspace_id)
@@ -1716,11 +1744,53 @@ class ResultInputScenario:
         self._ensure_source_executions()
         self.activate()
         self.assemble_context(key)
-        started = self.start_worker(key)
+        return self._complete_started_worker(
+            key,
+            prompt=prompt,
+            marker=marker,
+            max_report_bytes=max_report_bytes,
+        )
+
+    def complete_prepared_worker(
+        self,
+        key: str,
+        *,
+        prompt: str,
+        marker: bytes,
+        max_report_bytes: int = 4_096,
+        execution_id: UUID | None = None,
+    ) -> tuple[UUID, ...]:
+        """Complete a worker whose exact context package is already prepared."""
+
+        if self._worker_runtime is None:
+            raise AssertionError("an injected WorkerAdapter runtime is required")
+        if not prompt.strip() or not marker:
+            raise ValueError("prompt and marker are required")
+        if max_report_bytes < 1:
+            raise ValueError("max_report_bytes must be positive")
+        return self._complete_started_worker(
+            key,
+            prompt=prompt,
+            marker=marker,
+            max_report_bytes=max_report_bytes,
+            execution_id=execution_id,
+        )
+
+    def _complete_started_worker(
+        self,
+        key: str,
+        *,
+        prompt: str,
+        marker: bytes,
+        max_report_bytes: int,
+        execution_id: UUID | None = None,
+    ) -> tuple[UUID, ...]:
+        started = self.start_worker(key, execution_id=execution_id)
         if not isinstance(started, GatewayExecutionResult):
             raise TypeError("injected WorkerAdapter did not start the Session")
 
-        self.send_worker_input(key, text=prompt)
+        active_execution_id = execution_id or self.latest_execution_id(key)
+        self.send_worker_input(key, text=prompt, execution_id=active_execution_id)
         dispatch = InputDispatcher(
             self.uow_factory,
             self._capture_gateway(),
@@ -1729,7 +1799,7 @@ class ResultInputScenario:
         if dispatch.delivered != 1 or dispatch.failed or dispatch.blocked:
             raise AssertionError(f"injected worker input was not delivered: {dispatch}")
 
-        execution_id = self.latest_execution_id(key)
+        execution_id = active_execution_id
         with self.uow_factory() as uow:
             execution = uow.executions.get(execution_id, self.workspace_id)
             assert execution is not None
@@ -1963,6 +2033,7 @@ class ResultInputScenario:
             adapter_factories=adapter_factories,
             workspace_factories=workspace_factories,
             artifact_content_store=self.artifact_store,
+            code_result_capture_service=self._code_result_capture_service,
             context_materializer=ContextMaterializer(
                 _EmptyCatalog(),
                 result_input_content=ArtifactContentService(
@@ -2010,8 +2081,9 @@ class ResultInputScenario:
         *,
         text: str,
         attachment_refs: tuple[str, ...] = (),
+        execution_id: UUID | None = None,
     ) -> object:
-        execution_id = self.latest_execution_id(key)
+        execution_id = execution_id or self.latest_execution_id(key)
         if self._worker_runtime is None:
             context_version = self.captured_context(key).metadata.context_version
         else:

@@ -98,7 +98,7 @@ from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from sidera_control_plane.result_worker import ResultWorker
 from tests.unit.result_integration_fixtures import snapshot_mapping
 
-from .result_input_scenario import ResultInputScenario
+from .result_input_scenario import ResultInputScenario, ResultInputWorkerRuntime
 from .test_r5_1_execution_request_schema import (
     request_row,
     seed_execution_request_facts,
@@ -119,6 +119,9 @@ class ResultIntegrationScenario:
         request_id: UUID,
         *,
         base_commit: str | None = None,
+        worker_runtime: ResultInputWorkerRuntime | None = None,
+        repository_ref: str | None = None,
+        repository_path: Path | None = None,
     ) -> None:
         self.database = database
         self.workspace_id = workspace_id
@@ -126,7 +129,14 @@ class ResultIntegrationScenario:
         self.ids = ids
         self.request_id = request_id
         self.operation_id = UUID("80000000-0000-0000-0000-000000000002")
-        self._planning = ResultInputScenario(database, workspace_id, tmp_path)
+        self._worker_runtime = worker_runtime
+        self._repository_ref = repository_ref or "repo://integration-test"
+        self._planning = ResultInputScenario(
+            database,
+            workspace_id,
+            tmp_path,
+            worker_runtime=worker_runtime,
+        )
         self._seeded = False
         self.worker_item_ids: dict[str, UUID] = {}
         self.request_ids: dict[str, UUID] = {}
@@ -136,7 +146,11 @@ class ResultIntegrationScenario:
         self._integration_request_id: UUID | None = None
         self._integration_operation_id: UUID | None = None
         self._pending_reintegration_request_id: UUID | None = None
-        self._repository = tmp_path / "result-integration-repository"
+        self._repository = (
+            repository_path
+            if repository_path is not None
+            else tmp_path / "result-integration-repository"
+        ).expanduser().resolve()
         self._worktree_root = tmp_path / "result-integration-worktrees"
         self._artifact_store = LocalArtifactContentStore(
             tmp_path / "result-integration-artifacts"
@@ -155,6 +169,41 @@ class ResultIntegrationScenario:
         self._command_expected_versions: dict[str, int] = {}
         initial_commit = self._init_repository()
         self._base_commit = base_commit or initial_commit
+        if worker_runtime is not None:
+            self.configure_worker_runtime(
+                worker_runtime,
+                repository_ref=self._repository_ref,
+            )
+
+    @property
+    def repository_path(self) -> Path:
+        return self._repository
+
+    @property
+    def repository_ref(self) -> str:
+        return self._repository_ref
+
+    def configure_worker_runtime(
+        self,
+        worker_runtime: ResultInputWorkerRuntime,
+        *,
+        repository_ref: str,
+    ) -> None:
+        """Attach a real adapter boundary before confirming the plan."""
+
+        if self._seeded:
+            raise AssertionError(
+                "worker runtime must be configured before plan materialization"
+            )
+        if not repository_ref.strip():
+            raise ValueError("repository_ref is required")
+        self._worker_runtime = worker_runtime
+        self._repository_ref = repository_ref
+        self._capture_service = self._new_capture_service()
+        self._planning.configure_worker_runtime(
+            worker_runtime,
+            code_result_capture_service=self._capture_service,
+        )
 
     @property
     def root_task_id(self) -> UUID:
@@ -230,6 +279,8 @@ class ResultIntegrationScenario:
         self.worker_item_ids = dict(self._planning.worker_item_ids)
         self.request_ids = dict(self._planning.request_ids)
         self._capture_service = self._new_capture_service()
+        if self._worker_runtime is not None:
+            self._planning.set_code_result_capture_service(self._capture_service)
         self._apply_enabled = apply
         self._seeded = True
 
@@ -292,6 +343,8 @@ class ResultIntegrationScenario:
         files: dict[str, bytes],
         commit: bool,
         capture: bool = True,
+        agent_prompt: str | None = None,
+        agent_marker: bytes | None = None,
     ) -> CodeResultSnapshotV1 | None:
         """Run one source WorkerItem through a real Git worktree."""
         if not isinstance(key, str) or not key.strip():
@@ -304,6 +357,22 @@ class ResultIntegrationScenario:
             raise KeyError(source_key)
         if source_key in self._source_execution_ids:
             raise AssertionError(f"source {source_key!r} has already been started")
+        if self._worker_runtime is not None:
+            if not commit or not capture:
+                raise ValueError(
+                    "real WorkerAdapter sources require commit and capture enabled"
+                )
+            marker = agent_marker or _real_file_marker(files)
+            self._planning.complete_injected_worker(
+                source_key,
+                prompt=agent_prompt or _real_file_prompt(files),
+                marker=marker,
+            )
+            execution_id = self._planning._execution_id(source_key)
+            if execution_id is None:
+                raise AssertionError(f"source execution {source_key!r} was not created")
+            self._source_execution_ids[source_key] = execution_id
+            return self.latest_source(source_key)
         self._planning._ensure_source_executions()
         execution_id = self._planning._execution_id(source_key)
         if execution_id is None:
@@ -478,7 +547,7 @@ class ResultIntegrationScenario:
             snapshots=selected_snapshots,
             request_id=execution_request.id,
             execution_id=execution.id,
-            repository_ref="repo://integration-test",
+            repository_ref=self._repository_ref,
             base_commit=self._base_commit if base_commit is not None else "a" * 40,
         )
 
@@ -770,6 +839,15 @@ class ResultIntegrationScenario:
             raise TypeError(f"source result {source_key!r} was not captured")
         return snapshot
 
+    def _code_result_for_execution(
+        self, execution_id: UUID
+    ) -> CodeResultSnapshotV1 | None:
+        with self.uow() as uow:
+            snapshot = uow.results.get_code_result_by_capture_operation(
+                code_capture_operation_id(execution_id), self.workspace_id
+            )
+        return snapshot if isinstance(snapshot, CodeResultSnapshotV1) else None
+
     def reintegration_payload(
         self,
         candidate: IntegrationCandidateV1,
@@ -810,6 +888,27 @@ class ResultIntegrationScenario:
         execution_id = request.first_execution_id
         if execution_id is None:
             raise AssertionError("rework execution was not materialized")
+        if self._worker_runtime is not None:
+            context_result = self._planning.run_context_worker(request.worker_item_key)
+            if context_result.ready < 1 or context_result.failed != 0:
+                raise AssertionError(
+                    f"real rework ContextPackage was not materialized: {context_result}"
+                )
+            marker = _real_file_marker(files)
+            self._planning.complete_prepared_worker(
+                request.worker_item_key,
+                execution_id=execution_id,
+                prompt=(
+                    "Repair only the requested WorkerItem result in the current Git "
+                    "worktree. "
+                    + _real_file_prompt(files)
+                ),
+                marker=marker,
+            )
+            snapshot = self._code_result_for_execution(execution_id)
+            if snapshot is None:
+                raise AssertionError("real rework result was not captured")
+            return snapshot
         worker_id, lease_id, session_id, execution_version = (
             self._planning._start_source(execution_id, key=request.worker_item_key)
         )
@@ -1052,7 +1151,74 @@ class ResultIntegrationScenario:
             )
             uow.context_assemblies.add(assembly)
 
+    def _run_real_integration_execution(self, *, request_id: UUID | None = None) -> None:
+        request_id = (
+            request_id or self._integration_request_id or self.request_ids["summary"]
+        )
+        self._planning.reconcile()
+        self._planning.activate()
+        execution_id = self._planning._execution_id("summary")
+        if execution_id is None:
+            raise AssertionError("integration execution was not activated")
+        with self.uow() as uow:
+            execution_request = uow.execution_requests.get(
+                request_id, self.workspace_id
+            )
+            execution = uow.executions.get(execution_id, self.workspace_id)
+        if execution_request is None or execution is None:
+            raise AssertionError("integration execution facts are unavailable")
+        if execution_request.first_execution_id != execution_id:
+            raise AssertionError("latest integration execution does not match request")
+
+        self._integration_execution_id = execution_id
+        self._integration_request_id = request_id
+        if self._integration_operation_id is None:
+            self._integration_operation_id = uuid5(
+                NAMESPACE_URL,
+                f"sidera.integration-candidate-operation:{execution_id}",
+            )
+
+        code_inputs = self.code_input_manifest(
+            base_commit=self._base_commit,
+            request_id=request_id,
+            execution_id=execution_id,
+        )
+        self._install_code_context(code_inputs)
+        context_result = self._planning.run_context_worker("summary")
+        if context_result.ready < 1 or context_result.failed != 0:
+            raise AssertionError(
+                f"real integration ContextPackage was not materialized: {context_result}"
+            )
+
+        marker = f"SIDERA_REAL_RESULT_INTEGRATION_{uuid4().hex}".encode()
+        check = (
+            "Create `integration.txt` with exactly one line containing the marker "
+            f"{marker.decode()} . Then create `test_sidera_result_check.py` with a "
+            "unittest that imports login and asserts `login.ALLOW_EXPIRED` is False. "
+            "Do not modify login.py or profile.py and do not change any other file."
+            if self._repairable_candidate
+            else (
+                "Create `integration.txt` with exactly one line containing the marker "
+                f"{marker.decode()} . Do not change any other file."
+            )
+        )
+        self._planning.complete_prepared_worker(
+            "summary",
+            prompt=(
+                "The selected source results are already materialized in this Git "
+                "worktree. "
+                + check
+            ),
+            marker=marker,
+        )
+        snapshot = self._code_result_for_execution(execution_id)
+        if snapshot is None:
+            raise AssertionError("real integration result was not captured")
+
     def _run_integration_execution(self, *, request_id: UUID | None = None) -> None:
+        if self._worker_runtime is not None:
+            self._run_real_integration_execution(request_id=request_id)
+            return
         request_id = (
             request_id or self._integration_request_id or self.request_ids["summary"]
         )
@@ -1642,9 +1808,13 @@ class ResultIntegrationScenario:
         return assembly
 
     def _new_capture_service(self) -> CodeResultCaptureService:
+        repositories = {
+            "repo://integration-test": self._repository,
+            self._repository_ref: self._repository,
+        }
         return CodeResultCaptureService(
             lambda: self.uow(),
-            GitResultStore({"repo://integration-test": self._repository}),
+            GitResultStore(repositories),
             artifact_content_store=self._artifact_store,
             clock=lambda: self._planning.now,
         )
@@ -1819,6 +1989,29 @@ class ResultIntegrationScenario:
                     statement.order_by(EventModel.created_at.asc(), EventModel.id.asc())
                 ).all()
             )
+
+
+def _real_file_marker(files: dict[str, bytes]) -> bytes:
+    for relative, body in sorted(files.items()):
+        del relative
+        if body:
+            return body[: min(len(body), 64)]
+    raise ValueError("real worker files must contain a non-empty body")
+
+
+def _real_file_prompt(files: dict[str, bytes]) -> str:
+    rendered: list[str] = []
+    for relative, body in sorted(files.items()):
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("real worker file prompts require UTF-8 files") from exc
+        rendered.append(f"FILE {relative}\n{text}\nEND FILE")
+    return (
+        "In the current Git worktree, create or replace exactly the files listed "
+        "below with the exact UTF-8 contents. Do not change any other file and "
+        "finish after saving them.\n\n" + "\n\n".join(rendered)
+    )
 
 
 @pytest.fixture

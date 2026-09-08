@@ -52,6 +52,7 @@ class RealResultInputGateConfig:
     concurrency: int = REAL_RESULT_CONCURRENCY
     max_seconds: int = REAL_RESULT_MAX_SECONDS
     max_report_bytes: int = REAL_RESULT_MAX_REPORT_BYTES
+    context_package_versions: tuple[int, ...] = (1, 2)
 
 
 def real_result_gate_requested(
@@ -169,6 +170,7 @@ def run_real_result_preflight(config: RealResultInputGateConfig) -> Any:
         executable=config.executable,
         expected_version=config.expected_version,
         timeout_seconds=min(30.0, float(config.max_seconds)),
+        context_package_versions=config.context_package_versions,
     )
     if report.status != "ok" or report.capability_profile is None:
         raise RealResultInputGateError(

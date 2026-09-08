@@ -84,6 +84,7 @@ def run_preflight(
     git_executable: str = "git",
     expected_version: str | None = None,
     timeout_seconds: float = 30.0,
+    context_package_versions: tuple[int, ...] = (1, 2),
 ) -> OpenCodePreflightReport:
     configured = executable.strip()
     errors: list[str] = []
@@ -128,6 +129,7 @@ def run_preflight(
             profile = OpenCodeACPAdapter(
                 executable=resolved,
                 request_timeout_seconds=timeout_seconds,
+                context_package_versions=context_package_versions,
             ).probe({"cwd": workspace})
     except Exception as exc:  # noqa: BLE001
         errors.append(f"ACP initialize/session-new probe failed: {_error_text(exc)}")

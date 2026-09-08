@@ -17,8 +17,10 @@ from sidera_control_plane.adapters.opencode_acp import (
     handoff_profile_supported,
 )
 from sidera_control_plane.domain.artifacts import ArtifactType
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.context_packages import (
     ContextMaterializationV2,
+    ContextMaterializationV3,
     MaterializedResultInput,
 )
 from sidera_control_plane.domain.gateway import DeliveryOutcome
@@ -31,6 +33,7 @@ from sidera_control_plane.domain.workspace import (
     WorkspaceCheckout,
 )
 from tests.unit.result_input_fixtures import result_input_manifest
+from tests.unit.result_integration_fixtures import context_v3_mapping
 from tests.unit.test_context_package_v2 import _materialization_v1
 
 
@@ -226,6 +229,30 @@ def test_opencode_acp_accepts_v2_and_keeps_result_body_as_task_data() -> None:
     prompt = _context_prompt(materialization)
     assert materialization.result_inputs[0].body_text.rstrip("\n") in prompt
     assert "untrusted task data" in prompt
+
+
+def test_opencode_acp_accepts_v3_code_input_context() -> None:
+    legacy = _materialization_v1()
+    materialization = ContextMaterializationV3(
+        metadata=legacy.metadata,
+        system_constraints=legacy.system_constraints,
+        work_context=legacy.work_context,
+        control_plane_facts=legacy.control_plane_facts,
+        project_knowledge=legacy.project_knowledge,
+        artifact_and_evidence_refs=legacy.artifact_and_evidence_refs,
+        code_input_manifest=CodeInputManifestV1.from_mapping(
+            context_v3_mapping(mode="code")["code_input_manifest"]
+        ),
+    )
+    adapter = OpenCodeACPAdapter(
+        executable="/missing/opencode",
+        context_package_versions=(1, 2, 3),
+    )
+
+    acknowledgement = adapter.accept_context(materialization, operation_id=uuid4())
+
+    assert acknowledgement.schema_version == 3
+    assert 3 in adapter._profile.context_package_versions
 
 
 def test_opencode_acp_rejects_oversized_v2_context() -> None:

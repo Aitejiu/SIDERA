@@ -7,6 +7,9 @@ import pytest
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.result_readiness import authorize_real_result_run
+from tests.e2e.test_real_opencode_result_integration import (
+    REAL_RESULT_EXECUTION_STEPS,
+)
 
 
 def _settings() -> Settings:
@@ -147,6 +150,16 @@ def test_valid_real_gate_is_bounded_and_has_no_secret_summary(tmp_path: Path) ->
         authorization.reserve_execution(5)
     assert "credential" not in repr(authorization.safe_summary()).casefold()
     assert "secret" not in repr(authorization.safe_summary()).casefold()
+
+
+def test_real_result_flow_budget_names_the_full_acceptance_path() -> None:
+    assert REAL_RESULT_EXECUTION_STEPS == (
+        "source-a",
+        "source-b",
+        "integration",
+        "repair-source-a",
+        "reintegration",
+    )
 
 
 @pytest.mark.parametrize(

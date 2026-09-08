@@ -8,7 +8,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import Popen
@@ -37,6 +37,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextMaterialization,
     ContextMaterializationV1,
     ContextMaterializationV2,
+    ContextMaterializationV3,
     ContextPurpose,
 )
 from sidera_control_plane.domain.context_patches import (
@@ -138,6 +139,7 @@ class OpenCodeACPAdapter:
         stderr_limit_bytes: int = 64 * 1024,
         client_name: str = "sidera-control-plane",
         client_version: str = "0.1.0",
+        context_package_versions: tuple[int, ...] = (1, 2),
     ) -> None:
         executable = executable.strip()
         if not executable:
@@ -153,6 +155,9 @@ class OpenCodeACPAdapter:
             raise ValueError("stderr limit must be positive")
         if not git_executable.strip():
             raise ValueError("Git executable is required")
+        declared_context_versions = _declared_context_package_versions(
+            context_package_versions
+        )
         self._executable = executable
         self._model = model.strip() if model is not None and model.strip() else None
         self._workspace_root = (
@@ -170,7 +175,14 @@ class OpenCodeACPAdapter:
         self._client_name = client_name
         self._client_version = client_version
         self._sessions: dict[str, _OpenCodeSession] = {}
-        self._profile = self._PROFILE
+        self._profile = replace(
+            self._PROFILE,
+            context_package_versions=declared_context_versions,
+        )
+        self._handoff_profile = replace(
+            self._HANDOFF_PROFILE,
+            context_package_versions=declared_context_versions,
+        )
         self._lock = threading.RLock()
 
     def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
@@ -194,7 +206,7 @@ class OpenCodeACPAdapter:
                 transport, _session_id, session, keep_plan=False
             )
             self._profile = (
-                self._HANDOFF_PROFILE if handoff_supported else self._PROFILE
+                self._handoff_profile if handoff_supported else self._profile
             )
             return self._profile
         except ACPTimeoutError:
@@ -212,6 +224,13 @@ class OpenCodeACPAdapter:
         operation_id: UUID,
     ) -> ContextAcknowledgement:
         _validate_context(materialization, operation_id)
+        if not self._profile.supports_context_package_version(
+            materialization.schema_version
+        ):
+            raise ValueError(
+                f"materialization schema v{materialization.schema_version} is not "
+                "declared by the OpenCode adapter capability profile"
+            )
         metadata = materialization.metadata
         return ContextAcknowledgement(
             package_id=metadata.package_id,
@@ -280,7 +299,9 @@ class OpenCodeACPAdapter:
                     context_version=metadata.context_version or 0,
                     acknowledged_at=datetime.now(UTC),
                 )
-            profile = self._HANDOFF_PROFILE if handoff_supported else self._PROFILE
+            profile = (
+                self._handoff_profile if handoff_supported else self._profile
+            )
             handle = AdapterSessionHandle(
                 execution_session_id=execution_session_id,
                 adapter_session_id=adapter_session_id,
@@ -1157,12 +1178,13 @@ def _validate_context(
     expected_type = {
         1: ContextMaterializationV1,
         2: ContextMaterializationV2,
+        3: ContextMaterializationV3,
     }.get(materialization.schema_version)
     if expected_type is None or not isinstance(materialization, expected_type):
         raise TypeError("materialization schema does not match its typed payload")
     if not isinstance(operation_id, UUID):
         raise TypeError("operation_id must be a UUID")
-    if materialization.schema_version not in (1, 2):
+    if materialization.schema_version not in (1, 2, 3):
         raise ValueError("unsupported context materialization schema")
     if (
         materialization.metadata.purpose is not ContextPurpose.EXECUTION
@@ -1171,6 +1193,28 @@ def _validate_context(
         raise ValueError("worker adapter requires an execution worker context")
     if materialization.total_byte_count > 256 * 1024:
         raise ValueError("context materialization exceeds adapter size limit")
+
+
+def _declared_context_package_versions(
+    versions: tuple[int, ...],
+) -> tuple[int, ...]:
+    if not isinstance(versions, tuple):
+        raise TypeError("context_package_versions must be a tuple")
+    normalized = tuple(sorted(set(versions)))
+    if not normalized:
+        raise ValueError("context_package_versions cannot be empty")
+    if any(
+        not isinstance(version, int) or isinstance(version, bool) or version < 1
+        for version in normalized
+    ):
+        raise ValueError("context_package_versions must contain positive integers")
+    unsupported = set(normalized).difference({1, 2, 3})
+    if unsupported:
+        raise ValueError(
+            "unsupported OpenCode context package versions: "
+            + ", ".join(str(version) for version in sorted(unsupported))
+        )
+    return normalized
 
 
 def _require_handoff_profile(profile: WorkerAdapterCapabilityProfile) -> None:

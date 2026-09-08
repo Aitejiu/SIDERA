@@ -136,6 +136,9 @@ def build_worker_adapter_factories(
                 settings.opencode_stop_grace_seconds,
             ),
             git_executable=settings.git_executable,
+            context_package_versions=_module_config_context_package_versions(
+                instance
+            ),
         )
 
     def local_verification_factory(instance: ModuleInstance) -> WorkerAdapter:
@@ -360,6 +363,23 @@ def _module_config_float(
         ):
             return float(value)
     return default
+
+
+def _module_config_context_package_versions(
+    instance: ModuleInstance,
+) -> tuple[int, ...]:
+    raw = _module_config_value(instance, "context_package_versions")
+    if raw is None:
+        return (1, 2)
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        raise TypeError("opencode context_package_versions must be an array")
+    versions = tuple(raw)
+    if any(
+        not isinstance(version, int) or isinstance(version, bool)
+        for version in versions
+    ):
+        raise TypeError("opencode context_package_versions must contain integers")
+    return versions
 
 
 def _service(runtime: object, name: str) -> Any:
