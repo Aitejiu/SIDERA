@@ -204,3 +204,27 @@ def test_check_scenario_does_not_create_a_session(tmp_path: Path) -> None:
     assert evidence.status == "NOT_RUN"
     assert evidence.failure_code == "check_mode_no_business_session"
     assert not (tmp_path / "run" / "acceptance-state.json").exists()
+
+
+def test_real_scenarios_without_observation_are_explicitly_incomplete(
+    tmp_path: Path,
+) -> None:
+    manifest = {
+        "run_id": "10000000-0000-0000-0000-000000000106",
+        "runtime_fingerprint": "c" * 64,
+        "run_root": str(tmp_path / "run"),
+        "scenarios": {
+            "profile": {"max_seconds": 60},
+            "result-inputs": {"max_seconds": 60},
+        },
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    profile = run_scenario("profile", path, mode="real")
+    result_inputs = run_scenario("result-inputs", path, mode="real")
+
+    assert profile.status == "INCOMPLETE"
+    assert profile.failure_code == "profile_real_evidence_not_supplied"
+    assert result_inputs.status == "INCOMPLETE"
+    assert result_inputs.failure_code == "result_inputs_real_evidence_not_supplied"

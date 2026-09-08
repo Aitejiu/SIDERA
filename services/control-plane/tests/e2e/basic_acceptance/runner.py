@@ -304,6 +304,20 @@ def run_scenario(
             snapshot=snapshot,
             evidence_kind=notification_evidence_kind,
         )
+    if name == "profile":
+        return builder.finish(
+            real_tests=0,
+            incomplete=True,
+            check_codes=("profile_real_evidence_not_supplied",),
+            failure_code_override="profile_real_evidence_not_supplied",
+        )
+    if name in {"result-inputs", "result-integration"}:
+        return builder.finish(
+            real_tests=0,
+            incomplete=True,
+            check_codes=(f"{name.replace('-', '_')}_real_evidence_not_supplied",),
+            failure_code_override=f"{name.replace('-', '_')}_real_evidence_not_supplied",
+        )
     return builder.finish(
         real_tests=0,
         incomplete=True,
