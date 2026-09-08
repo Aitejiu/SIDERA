@@ -35,6 +35,10 @@ from sidera_control_plane.result_readiness import (
     authorize_real_result_run,
     effective_real_result_wall_seconds,
 )
+from tests.e2e.basic_acceptance.runner import (
+    ResultWorkerObservation,
+    assert_result_worker_observation,
+)
 from tests.e2e.test_r6_3_4_real_opencode_inputs import (
     REAL_RESULT_MAX_REPORT_BYTES,
     REAL_RESULT_MAX_SECONDS,
@@ -304,12 +308,66 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         if session_count != len(REAL_RESULT_EXECUTION_STEPS):
             raise AssertionError("real session evidence count was not deterministic")
 
+        integration_execution_id = scenario.integration_execution_id
+        code_inputs = scenario.code_input_manifest(
+            execution_id=integration_execution_id,
+        )
+        context_package = scenario._planning.context_package_for_execution(
+            integration_execution_id
+        )
+        selection = scenario.selection(code_inputs.input_selection_id)
+        with database.session() as session:
+            from sidera_control_plane.persistence.models import ArtifactModel
+
+            source_artifacts = tuple(
+                session.scalars(
+                    select(ArtifactModel).where(
+                        ArtifactModel.id.in_(
+                            [item.artifact_id for item in code_inputs.artifacts]
+                        )
+                    )
+                ).all()
+            )
+        artifact_bodies = tuple(
+            (
+                str(artifact.id),
+                scenario._planning.artifact_store.read(artifact.storage_ref),
+            )
+            for artifact in source_artifacts
+        )
+        evidence_checks = assert_result_worker_observation(
+            ResultWorkerObservation(
+                selection_id=selection.id,
+                selection_hash=selection.selection_hash,
+                expected_selection_hash=code_inputs.input_selection_hash,
+                bundle_id=context_package.package_id,
+                context_package_id=context_package.package_id,
+                context_package_hash=context_package.package_hash,
+                expected_context_package_hash=context_package.package_hash,
+                selected_artifact_hashes=tuple(
+                    (str(item.artifact_id), item.content_hash)
+                    for item in code_inputs.artifacts
+                ),
+                artifact_bodies=artifact_bodies,
+                source_execution_ids=tuple(scenario._source_execution_ids.values()),
+                downstream_execution_id=integration_execution_id,
+                expected_downstream_execution_id=integration_execution_id,
+                downstream_body=scenario.read_candidate_file(second, "integration.txt"),
+                downstream_marker=scenario.real_integration_marker,
+                real_session_ids=bound_session_ids,
+                budget_state="completed",
+                session_state="succeeded",
+            )
+        )
+
         print(
             json.dumps(
                 {
                     "real_result_integration": {
                         **authorization.safe_summary(),
                         "status": "passed",
+                        "evidence_kind": "real_worker",
+                        "evidence_checks": list(evidence_checks),
                         "executions": len(reservations),
                         "steps": list(REAL_RESULT_EXECUTION_STEPS),
                         "adapters": len(adapters),

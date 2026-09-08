@@ -20,6 +20,10 @@ from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
+from tests.e2e.basic_acceptance.runner import (
+    ResultWorkerObservation,
+    assert_result_worker_observation,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -307,6 +311,8 @@ def test_real_opencode_result_input_path(tmp_path: Path) -> None:
             "b": f"SIDERA_REAL_R6_3_4_B_{uuid4().hex}".encode(),
         }
         source_artifact_ids: dict[str, UUID] = {}
+        source_artifact_bodies: dict[str, bytes] = {}
+        source_artifact_hashes: dict[str, str] = {}
         for key in ("a", "b"):
             _ensure_real_time(deadline)
             artifacts = scenario.complete_injected_worker(
@@ -360,6 +366,8 @@ def test_real_opencode_result_input_path(tmp_path: Path) -> None:
                 raise AssertionError(f"real source {key} marker is missing from its Artifact")
             if hashlib.sha256(body).hexdigest() != content_hash:
                 raise AssertionError(f"real source {key} Artifact hash does not match bytes")
+            source_artifact_bodies[str(artifact_id)] = body
+            source_artifact_hashes[str(artifact_id)] = content_hash
 
         summary_body, summary_hash = _artifact_body(scenario, summary_artifacts[0])
         if summary_markers_missing(summary_body, source_markers, summary_marker):
@@ -396,6 +404,7 @@ def test_real_opencode_result_input_path(tmp_path: Path) -> None:
                 ContextPackageModel,
                 EvidenceClaimModel,
                 ExecutionModel,
+                ExecutionSessionModel,
                 GatewayOperationModel,
             )
             selection_row = session.get(CollaborationInputSelectionModel, selection.id)
@@ -472,6 +481,37 @@ def test_real_opencode_result_input_path(tmp_path: Path) -> None:
             ).all()
             if len(actual_artifacts) != 3:
                 raise AssertionError("real gate did not persist exactly three result Artifacts")
+            real_session_ids = tuple(
+                session.scalars(
+                    select(ExecutionSessionModel.id)
+                    .where(ExecutionSessionModel.execution_id.in_(execution_ids))
+                    .order_by(ExecutionSessionModel.id.asc())
+                ).all()
+            )
+
+        evidence_checks = assert_result_worker_observation(
+            ResultWorkerObservation(
+                selection_id=selection.id,
+                selection_hash=selection.selection_hash,
+                expected_selection_hash=selection.selection_hash,
+                bundle_id=package.package_id,
+                context_package_id=package.package_id,
+                context_package_hash=package.package_hash,
+                expected_context_package_hash=package.package_hash,
+                selected_artifact_hashes=tuple(source_artifact_hashes.items()),
+                artifact_bodies=tuple(source_artifact_bodies.items()),
+                source_execution_ids=tuple(
+                    scenario.latest_execution_id(key) for key in ("a", "b")
+                ),
+                downstream_execution_id=summary_execution_id,
+                expected_downstream_execution_id=summary_execution_id,
+                downstream_body=summary_body,
+                downstream_marker=summary_marker,
+                real_session_ids=real_session_ids,
+                budget_state="completed",
+                session_state="succeeded",
+            )
+        )
 
         _ensure_real_time(deadline)
         print(
@@ -480,6 +520,8 @@ def test_real_opencode_result_input_path(tmp_path: Path) -> None:
                     "real_result_input_acceptance": {
                         **safe_real_result_gate_summary(config),
                         "status": "passed",
+                        "evidence_kind": "real_worker",
+                        "evidence_checks": list(evidence_checks),
                         "executions": 3,
                         "selected_sources": 2,
                         "artifacts": 3,

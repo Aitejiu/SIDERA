@@ -145,6 +145,7 @@ class ResultIntegrationScenario:
         self._integration_execution_id: UUID | None = None
         self._integration_request_id: UUID | None = None
         self._integration_operation_id: UUID | None = None
+        self._real_integration_marker: bytes | None = None
         self._pending_reintegration_request_id: UUID | None = None
         self._repository = (
             repository_path
@@ -1191,6 +1192,7 @@ class ResultIntegrationScenario:
             )
 
         marker = f"SIDERA_REAL_RESULT_INTEGRATION_{uuid4().hex}".encode()
+        self._real_integration_marker = marker
         check = (
             "Create `integration.txt` with exactly one line containing the marker "
             f"{marker.decode()} . Then create `test_sidera_result_check.py` with a "
@@ -1493,6 +1495,29 @@ class ResultIntegrationScenario:
         if not isinstance(snapshot, CodeResultSnapshotV1):
             raise TypeError(f"candidate {candidate_id} has no code snapshot")
         return snapshot.result_commit
+
+    def read_candidate_file(self, candidate: object, relative_path: str) -> bytes:
+        """Read one immutable file from a captured candidate tree."""
+
+        if not relative_path or Path(relative_path).is_absolute():
+            raise ValueError("candidate file path must be relative")
+        if any(part in {"", ".", ".."} for part in Path(relative_path).parts):
+            raise ValueError("candidate file path must stay within the repository")
+        commit = self.candidate_commit(candidate)
+        result = subprocess.run(
+            ["git", "show", f"{commit}:{relative_path}"],
+            cwd=self._repository,
+            check=True,
+            capture_output=True,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        return result.stdout
+
+    @property
+    def real_integration_marker(self) -> bytes:
+        if self._real_integration_marker is None:
+            raise AssertionError("real integration marker was not recorded")
+        return self._real_integration_marker
 
     def _fault(self, point: str) -> None:
         if point in self._fault_points:

@@ -1824,6 +1824,8 @@ class ResultInputScenario:
             body = self.artifact_store.read(artifact.storage_ref)
             if len(body) > max_report_bytes:
                 raise AssertionError("real result Artifact exceeds the byte limit")
+            if not result_artifact_matches(body, artifact.content_hash):
+                raise AssertionError("real result Artifact hash does not match bytes")
             if marker in body:
                 artifact_ids.append(artifact.id)
         if not artifact_ids:
@@ -3185,6 +3187,19 @@ def _proposal_mapping(
         raw["schema_version"] = 6
         raw["integration_spec"] = spec
     return raw
+
+
+def result_artifact_matches(
+    body: bytes,
+    expected_hash: str,
+    *,
+    marker: bytes | None = None,
+) -> bool:
+    """Check persisted bytes and, when supplied, the worker's marker together."""
+
+    if sha256(body).hexdigest() != expected_hash:
+        return False
+    return marker is None or marker in body
 
 
 @pytest.fixture
