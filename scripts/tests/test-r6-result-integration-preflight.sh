@@ -29,4 +29,15 @@ fi
 [[ "$output" == *'"enabled":true'* ]] || fail "enabled state was not reported"
 [[ "$output" != *'sk-'* ]] || fail "preflight output leaked a credential marker"
 
+set +e
+real_output=$(env -u SIDERA_RUN_REAL_RESULT_INTEGRATION \
+  -u SIDERA_REAL_RESULT_INTEGRATION_AUTHORIZED \
+  SIDERA_DATABASE_URL="$DB_URL" \
+  SIDERA_RESULT_REAL_GATE_PREFLIGHT=1 "$PREFLIGHT" 2>&1)
+real_status=$?
+set -e
+[[ "$real_status" -eq 2 ]] || fail "real gate preflight should remain blocked"
+[[ "$real_output" == *'real_run_not_authorized'* ]] \
+  || fail "real gate block reason was not reported"
+
 printf '%s\n' 'r6 result integration preflight tests passed'

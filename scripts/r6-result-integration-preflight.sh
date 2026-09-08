@@ -13,11 +13,22 @@ else
   PYTHON_COMMAND=(uv run --project "$CONTROL_PLANE_ROOT" python)
 fi
 
+READINESS_ARGUMENTS=()
+if [[ "${SIDERA_RESULT_REAL_GATE_PREFLIGHT:-0}" == "1" ]]; then
+  READINESS_ARGUMENTS+=(--real-gate)
+fi
+
 set +e
 (
   cd "$REPO_ROOT"
-  PYTHONPATH="$CONTROL_PLANE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-    "${PYTHON_COMMAND[@]}" -m sidera_control_plane.result_readiness
+  if ((${#READINESS_ARGUMENTS[@]} == 0)); then
+    PYTHONPATH="$CONTROL_PLANE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+      "${PYTHON_COMMAND[@]}" -m sidera_control_plane.result_readiness
+  else
+    PYTHONPATH="$CONTROL_PLANE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+      "${PYTHON_COMMAND[@]}" -m sidera_control_plane.result_readiness \
+      "${READINESS_ARGUMENTS[@]}"
+  fi
 ) >"$OUTPUT_DIR/stdout" 2>"$OUTPUT_DIR/stderr"
 STATUS=$?
 set -e

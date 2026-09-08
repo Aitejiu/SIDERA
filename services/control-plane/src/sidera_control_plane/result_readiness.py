@@ -9,8 +9,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.result_operations import ResultError
 
 type ReadinessStatus = Literal["ok", "missing", "invalid", "unavailable"]
 type RepositoryResolver = (
@@ -19,6 +21,12 @@ type RepositoryResolver = (
 
 _SHA1 = re.compile(r"^[0-9a-fA-F]{40}$")
 _SHELL_TOKENS = frozenset({";", "&&", "||", "|", "&", ">", ">>", "<"})
+_REAL_PROVIDER = "opencode-go"
+_REAL_MODEL_PREFIX = "opencode-go/"
+_REAL_CREDENTIAL_SOURCES = frozenset({"opencode-credential-store"})
+_REAL_MAX_EXECUTIONS = 5
+_REAL_MAX_WALL_SECONDS = 1_800
+_DATABASE_NAME = re.compile(r"^sidera_test(?:_[A-Za-z0-9]+)*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +70,274 @@ class ResultReadinessReport:
             "checks": [check.as_dict() for check in self.checks],
             "missing_capabilities": list(self.missing_capabilities),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RealRunAuthorization:
+    """Non-secret, bounded authorization for a real result-integration run."""
+
+    provider: str
+    model: str
+    endpoint_host: str
+    credential_source: str
+    fallbacks: tuple[str, ...]
+    repository: Path
+    max_executions: int
+    wall_clock_seconds: int
+
+    def reserve_execution(self, executions_started: int) -> int:
+        """Validate a durable counter before creating an external session."""
+
+        if type(executions_started) is not int or executions_started < 0:
+            raise ResultError("real_budget_invalid", {})
+        if executions_started >= self.max_executions:
+            raise ResultError("real_run_budget_exhausted", {})
+        return executions_started + 1
+
+    def safe_summary(self) -> dict[str, object]:
+        """Return fields safe for a run log; never include credentials or paths."""
+
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "endpoint_host": self.endpoint_host,
+            "fallbacks": list(self.fallbacks),
+            "max_executions": self.max_executions,
+            "wall_clock_seconds": self.wall_clock_seconds,
+        }
+
+
+def authorize_real_result_run(
+    settings: Settings,
+    local_gate_record: Mapping[str, object],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> RealRunAuthorization:
+    """Authorize one bounded real OpenCode result run without starting a session."""
+
+    if not isinstance(settings, Settings):
+        raise TypeError("real result authorization requires Settings")
+    values = os.environ if environ is None else environ
+    if (
+        values.get("SIDERA_RUN_REAL_RESULT_INTEGRATION") != "1"
+        or values.get("SIDERA_REAL_RESULT_INTEGRATION_AUTHORIZED") != "1"
+    ):
+        raise ResultError("real_run_not_authorized", {})
+    if not settings.result_integration_enabled:
+        raise ResultError("real_result_integration_disabled", {})
+    if not isinstance(local_gate_record, Mapping):
+        raise ResultError("real_local_gate_invalid", {})
+
+    _validate_real_local_gate(local_gate_record)
+    approved = _mapping_value(local_gate_record, "approved")
+    database = _mapping_value(local_gate_record, "database")
+    repository_record = _mapping_value(local_gate_record, "repository")
+    if approved is None or database is None or repository_record is None:
+        raise ResultError("real_local_gate_invalid", {})
+
+    provider = _real_required(values, "SIDERA_REAL_RESULT_PROVIDER")
+    model = _real_required(values, "SIDERA_REAL_RESULT_MODEL")
+    endpoint_host = _real_endpoint(values, "SIDERA_REAL_RESULT_ENDPOINT_HOST")
+    credential_source = _real_required(values, "SIDERA_REAL_RESULT_CREDENTIAL_SOURCE")
+    repository = _real_repository(values, repository_record)
+
+    approved_provider = _approved_text(approved, "provider")
+    approved_model = _approved_text(approved, "model")
+    approved_endpoint = _approved_endpoint(approved)
+    approved_credential_source = _approved_text(approved, "credential_source")
+    if approved_provider != _REAL_PROVIDER or "deepseek" in approved_provider.casefold():
+        raise ResultError("real_provider_not_approved", {})
+    if (
+        not approved_model.startswith(_REAL_MODEL_PREFIX)
+        or "deepseek" in approved_model.casefold()
+    ):
+        raise ResultError("real_model_not_approved", {})
+    if approved_credential_source not in _REAL_CREDENTIAL_SOURCES:
+        raise ResultError("real_credential_source_invalid", {})
+    if provider != approved_provider:
+        raise ResultError("real_provider_not_approved", {})
+    if model != approved_model:
+        raise ResultError("real_model_not_approved", {})
+    if endpoint_host != approved_endpoint:
+        raise ResultError("real_endpoint_not_approved", {})
+    if credential_source != approved_credential_source:
+        raise ResultError("real_credential_source_invalid", {})
+    if any(
+        token in credential_source.casefold()
+        for token in ("key=", "token=", "secret=", "password=")
+    ):
+        raise ResultError("real_credential_source_invalid", {})
+
+    gate_fallbacks = _approved_fallbacks(approved)
+    configured_fallbacks = _csv(values.get("SIDERA_REAL_RESULT_FALLBACKS"))
+    declared_fallbacks = _csv(values.get("SIDERA_REAL_RESULT_APPROVED_FALLBACKS"))
+    if not set(declared_fallbacks).issubset(gate_fallbacks):
+        raise ResultError("real_fallback_not_approved", {})
+    if not set(configured_fallbacks).issubset(gate_fallbacks):
+        raise ResultError("real_fallback_not_approved", {})
+    if any("deepseek" in item.casefold() for item in (*gate_fallbacks, *configured_fallbacks)):
+        raise ResultError("real_fallback_not_approved", {})
+
+    max_executions = _bounded_real_int(
+        values.get("SIDERA_REAL_RESULT_MAX_EXECUTIONS"),
+        default=_REAL_MAX_EXECUTIONS,
+        upper=_REAL_MAX_EXECUTIONS,
+    )
+    wall_clock_seconds = _bounded_real_int(
+        values.get("SIDERA_REAL_RESULT_WALL_SECONDS"),
+        default=_REAL_MAX_WALL_SECONDS,
+        upper=_REAL_MAX_WALL_SECONDS,
+    )
+    return RealRunAuthorization(
+        provider=provider,
+        model=model,
+        endpoint_host=endpoint_host,
+        credential_source=credential_source,
+        fallbacks=configured_fallbacks,
+        repository=repository,
+        max_executions=max_executions,
+        wall_clock_seconds=wall_clock_seconds,
+    )
+
+
+def _validate_real_local_gate(record: Mapping[str, object]) -> None:
+    if record.get("status") != "PASS" or record.get("provider_free") is not True:
+        raise ResultError("real_local_gate_invalid", {})
+    commit = record.get("commit")
+    if not isinstance(commit, str) or _SHA1.fullmatch(commit) is None:
+        raise ResultError("real_local_gate_invalid", {})
+
+    database = _mapping_value(record, "database")
+    if (
+        database is None
+        or database.get("scheme") != "postgresql+psycopg"
+        or database.get("host") not in {"127.0.0.1", "localhost", "::1"}
+        or not isinstance(database.get("name"), str)
+        or _DATABASE_NAME.fullmatch(str(database["name"])) is None
+    ):
+        raise ResultError("real_local_gate_invalid", {})
+
+    repository = _mapping_value(record, "repository")
+    repository_path = None if repository is None else repository.get("path")
+    if (
+        repository is None
+        or repository.get("isolated") is not True
+        or not isinstance(repository_path, str)
+        or not Path(repository_path).is_absolute()
+        or not Path(repository_path).is_dir()
+        or not (Path(repository_path) / ".git").exists()
+    ):
+        raise ResultError("real_local_gate_invalid", {})
+
+    approved = _mapping_value(record, "approved")
+    if approved is None:
+        raise ResultError("real_local_gate_invalid", {})
+    _approved_text(approved, "provider")
+    _approved_text(approved, "model")
+    _approved_endpoint(approved)
+    _approved_text(approved, "credential_source")
+    _approved_fallbacks(approved)
+
+
+def _mapping_value(value: object, key: str) -> Mapping[str, object] | None:
+    candidate = value.get(key) if isinstance(value, Mapping) else None
+    return candidate if isinstance(candidate, Mapping) else None
+
+
+def _approved_text(approved: Mapping[str, object], key: str) -> str:
+    value = approved.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ResultError("real_local_gate_invalid", {})
+    return value.strip()
+
+
+def _approved_endpoint(approved: Mapping[str, object]) -> str:
+    value = _approved_text(approved, "endpoint_host")
+    return _parse_endpoint(value, code="real_local_gate_invalid")
+
+
+def _approved_fallbacks(approved: Mapping[str, object]) -> tuple[str, ...]:
+    value = approved.get("fallbacks")
+    if not isinstance(value, (list, tuple)) or isinstance(value, (str, bytes)):
+        raise ResultError("real_local_gate_invalid", {})
+    fallbacks = tuple(
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    )
+    if len(fallbacks) != len(value) or len(set(fallbacks)) != len(fallbacks):
+        raise ResultError("real_local_gate_invalid", {})
+    return fallbacks
+
+
+def _real_required(values: Mapping[str, str], name: str) -> str:
+    value = values.get(name)
+    if value is None or not value.strip():
+        raise ResultError("real_configuration_missing", {})
+    return value.strip()
+
+
+def _real_endpoint(values: Mapping[str, str], name: str) -> str:
+    return _parse_endpoint(_real_required(values, name), code="real_endpoint_invalid")
+
+
+def _parse_endpoint(value: str, *, code: str) -> str:
+    if any(character.isspace() for character in value) or "://" in value:
+        raise ResultError(code, {})
+    try:
+        parsed = urlsplit(f"//{value}")
+        _ = parsed.port
+    except ValueError as exc:
+        raise ResultError(code, {}) from exc
+    if (
+        parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or any(character in value for character in "/?#@")
+    ):
+        raise ResultError(code, {})
+    return value.lower()
+
+
+def _real_repository(
+    values: Mapping[str, str], record: Mapping[str, object]
+) -> Path:
+    gate_value = record.get("path")
+    requested_value = values.get("SIDERA_REAL_RESULT_REPOSITORY")
+    if not isinstance(gate_value, str) or requested_value is None:
+        raise ResultError("real_repository_not_approved", {})
+    requested = Path(requested_value).expanduser()
+    gate_path = Path(gate_value).expanduser()
+    if (
+        not requested.is_absolute()
+        or requested.resolve() != gate_path.resolve()
+        or not requested.is_dir()
+        or not (requested / ".git").exists()
+    ):
+        raise ResultError("real_repository_not_approved", {})
+    return requested.resolve()
+
+
+def _csv(value: str | None) -> tuple[str, ...]:
+    if value is None or not value.strip():
+        return ()
+    items = tuple(item.strip() for item in value.split(",") if item.strip())
+    return items if len(set(items)) == len(items) else tuple(dict.fromkeys(items))
+
+
+def _bounded_real_int(value: str | None, *, default: int, upper: int) -> int:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ResultError("real_budget_invalid", {}) from exc
+    if parsed < 1 or parsed > upper:
+        raise ResultError("real_budget_invalid", {})
+    return parsed
 
 
 def inspect_result_readiness(
@@ -479,9 +755,15 @@ def _apply_policy_check(settings: Settings) -> ResultReadinessCheck:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="Validate the local SIDERA result integration boundary"
-    ).parse_args(argv)
+    )
+    parser.add_argument(
+        "--real-gate",
+        action="store_true",
+        help="also evaluate the explicitly authorized real-run boundary",
+    )
+    args = parser.parse_args(argv)
     try:
         settings = Settings()  # pyright: ignore[reportCallIssue]
         catalog = _json_env("SIDERA_RESULT_MODULE_CATALOG", [])
@@ -501,6 +783,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "checks": checks,
         }
         report = inspect_result_readiness(settings, catalog, resolver)
+        payload = report.as_dict()
+        real_gate_ready = True
+        if args.real_gate:
+            real_gate = _inspect_real_gate(settings)
+            payload["real_result_gate"] = real_gate
+            real_gate_ready = real_gate.get("status") == "authorized"
     except Exception as exc:  # noqa: BLE001
         print(
             json.dumps(
@@ -510,10 +798,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 1
-    print(json.dumps(report.as_dict(), sort_keys=True, separators=(",", ":")))
-    if not report.enabled:
-        return 0
-    return 0 if report.ready else 2
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    readiness_ready = True if not report.enabled else report.ready
+    return 0 if readiness_ready and real_gate_ready else 2
+
+
+def _inspect_real_gate(settings: Settings) -> dict[str, object]:
+    if (
+        os.environ.get("SIDERA_RUN_REAL_RESULT_INTEGRATION") != "1"
+        or os.environ.get("SIDERA_REAL_RESULT_INTEGRATION_AUTHORIZED") != "1"
+    ):
+        return {"status": "blocked", "error_code": "real_run_not_authorized"}
+    path_value = os.environ.get("SIDERA_REAL_RESULT_LOCAL_GATE_FILE")
+    if path_value is None or not path_value.strip():
+        return {"status": "blocked", "error_code": "real_local_gate_missing"}
+    try:
+        value = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "blocked", "error_code": "real_local_gate_invalid"}
+    try:
+        authorization = authorize_real_result_run(settings, value)
+    except ResultError as exc:
+        return {"status": "blocked", "error_code": exc.code}
+    return {"status": "authorized", "summary": authorization.safe_summary()}
 
 
 def _json_env(name: str, default: object) -> object:
