@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "run_id": "10000000-0000-0000-0000-000000000001",
+  "workspace_id": "10000000-0000-0000-0000-000000000002",
+  "local_gate_record": "/tmp/sidera-r6-basic/local-gate.json",
+  "runtime_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "run_root": "/tmp/sidera-r6-basic/run",
+  "repository": "/tmp/sidera-r6-basic/repository",
+  "base_commit": "0000000000000000000000000000000000000000",
+  "database_ref": "env:SIDERA_DATABASE_URL",
+  "knowledge_database_ref": "env:SIDERA_KNOWLEDGE_DATABASE_URL",
+  "control_plane_url": "http://127.0.0.1:8010",
+  "knowledge_url": "http://127.0.0.1:8020",
+  "main_agent_gateway_url": "http://127.0.0.1:8030",
+  "web_url": "http://127.0.0.1:5173",
+  "profiles": [
+    {
+      "role": "main_agent",
+      "runtime": "akashic",
+      "provider": "opencode-go",
+      "model_id": "opencode-go/MiMo-V2.5",
+      "endpoint_host": "127.0.0.1:4096",
+      "credential_ref": "none",
+      "config_ref": "module:r6/main-agent",
+      "config_version": 1,
+      "fallbacks": []
+    },
+    {
+      "role": "planner",
+      "runtime": "opencode-acp-planner",
+      "provider": "opencode-acp-planner",
+      "model_id": "opencode-go/MiMo-V2.5",
+      "endpoint_host": "127.0.0.1:4096",
+      "credential_ref": "none",
+      "config_ref": "module:r6/planner",
+      "config_version": 1,
+      "fallbacks": []
+    },
+    {
+      "role": "worker",
+      "runtime": "opencode-acp",
+      "provider": "opencode-acp",
+      "model_id": "opencode-go/MiMo-V2.5",
+      "endpoint_host": "127.0.0.1:4096",
+      "credential_ref": "none",
+      "config_ref": "module:r6/worker",
+      "config_version": 1,
+      "fallbacks": []
+    },
+    {
+      "role": "second_worker",
+      "runtime": "opencode-acp",
+      "provider": "opencode-acp",
+      "model_id": "opencode-go/MiMo-V2.5",
+      "endpoint_host": "127.0.0.1:4096",
+      "credential_ref": "none",
+      "config_ref": "module:r6/second_worker",
+      "config_version": 1,
+      "fallbacks": []
+    }
+  ],
+  "scenarios": {
+    "profile": {
+      "main_agent_turns": 0,
+      "planner_runs": 0,
+      "worker_sessions": 0,
+      "adapter_prompts": 0,
+      "max_seconds": 120
+    },
+    "user-flow": {
+      "main_agent_turns": 3,
+      "planner_runs": 1,
+      "worker_sessions": 3,
+      "adapter_prompts": 6,
+      "max_seconds": 600
+    }
+  }
+}
