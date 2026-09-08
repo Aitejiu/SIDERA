@@ -133,9 +133,12 @@ if "$ROOT/scripts/r6-basic-stack.sh" start --manifest "$MANIFEST" >/dev/null 2>&
 fi
 
 before_pid=$(cat "$RUNTIME/pids/notification-worker.pid")
+control_plane_pid_before_restart=$(cat "$RUNTIME/pids/control-plane.pid")
 "$ROOT/scripts/r6-basic-stack.sh" restart --manifest "$MANIFEST" --component notification-worker >/dev/null
 after_pid=$(cat "$RUNTIME/pids/notification-worker.pid")
 [ "$before_pid" != "$after_pid" ] || fail 'single-component restart must replace its pid'
+[ "$(cat "$RUNTIME/pids/control-plane.pid")" = "$control_plane_pid_before_restart" ] \
+  || fail 'single-component restart must not touch unrelated components'
 
 "$ROOT/scripts/r6-basic-stack.sh" stop --manifest "$MANIFEST" >/dev/null
 

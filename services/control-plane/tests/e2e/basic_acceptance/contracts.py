@@ -195,3 +195,48 @@ class RevisionSnapshot(BaseModel):
     transition_worker_item_ids: tuple[UUID, ...]
     old_inputs_rejected_for_new_plan: bool
     transition_status: Literal["confirmed", "converged", "unknown", "failed"]
+
+
+class RecoverySnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    root_task_id: UUID
+    command_id: UUID
+    operation_id: UUID
+    operation_id_after_restart: UUID
+    restarted_components: tuple[str, ...] = Field(min_length=1)
+    same_run_identity: bool
+    plan_status_before: str = Field(min_length=1, max_length=64)
+    plan_status_after: str = Field(min_length=1, max_length=64)
+    candidate_hash_before: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    candidate_hash_after: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    pending_acceptance_before: bool
+    pending_acceptance_after: bool
+    unknown_outcome_observed: bool
+    unknown_reconciled: bool
+    duplicate_execution_count: int = Field(ge=0)
+    provider_identity_proven: bool
+    replacement_started: bool
+    execution_count: int = Field(ge=0)
+    execution_limit: int = Field(ge=1)
+    elapsed_seconds: int = Field(ge=0)
+    deadline_seconds: int = Field(ge=1)
+    state_after: Literal["reconciled", "pending", "unknown", "failed"]
+
+
+class RuntimeLimitEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    configured_worker_capacity: int = Field(ge=1)
+    observed_peak_worker_capacity: int = Field(ge=0)
+    configured_retry_limit: int = Field(ge=0)
+    observed_retry_count: int = Field(ge=0)
+    session_deadline_seconds: int = Field(ge=1)
+    observed_elapsed_seconds: int = Field(ge=0)
+    deadline_preserved_across_restart: bool
+    unknown_relaunch_blocked: bool
+    usage_status: Literal["available", "unavailable", "unknown"]

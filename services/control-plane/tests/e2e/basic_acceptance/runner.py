@@ -11,12 +11,14 @@ from uuid import UUID
 
 from .contracts import (
     InterventionSnapshot,
+    RecoverySnapshot,
     RevisionSnapshot,
     ScenarioEvidence,
     UserFlowSnapshot,
 )
 from .evidence import EvidenceBuilder
 from .intervention import run_intervention
+from .recovery import run_recovery
 from .revision import run_revision
 from .user_flow import run_user_flow
 
@@ -258,6 +260,16 @@ def run_scenario(
             snapshot=snapshot,
             evidence_kind=revision_evidence_kind,
         )
+    if name == "recovery":
+        snapshot = _optional_recovery_snapshot(raw)
+        recovery_evidence_kind: Literal["contract", "real_user_flow"] = (
+            "real_user_flow" if mode == "real" else "contract"
+        )
+        return run_recovery(
+            raw,
+            snapshot=snapshot,
+            evidence_kind=recovery_evidence_kind,
+        )
     return builder.finish(
         real_tests=0,
         incomplete=True,
@@ -297,3 +309,12 @@ def _optional_revision_snapshot(
     if not isinstance(value, dict):
         return None
     return RevisionSnapshot.model_validate(value)
+
+
+def _optional_recovery_snapshot(
+    manifest: dict[str, object],
+) -> RecoverySnapshot | None:
+    value = manifest.get("recovery_snapshot")
+    if not isinstance(value, dict):
+        return None
+    return RecoverySnapshot.model_validate(value)
