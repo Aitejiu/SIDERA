@@ -330,4 +330,4 @@ def test_r5_3_schema_uses_one_head(database: Database) -> None:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0030_r6_verification_request_uniqueness"
+    assert version == "0031_r6_real_result_budget"

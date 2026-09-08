@@ -86,6 +86,7 @@ def test_r6_1_upgrade_downgrade_upgrade_backfills_only_real_heads(
         "0028_r6_result_integration",
         "0029_r6_result_context",
         "0030_r6_verification_request_uniqueness",
+        "0031_r6_real_result_budget",
     }:
         pytest.skip(
             "R6.3.3 and later are forward-only; historical downgrade rehearsal "
