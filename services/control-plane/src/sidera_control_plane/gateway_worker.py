@@ -64,6 +64,76 @@ class GatewayRuntime:
     catalog: KnowledgeHttpAdapter
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerAdapterRegistration:
+    """Production registration facts shared by the factory map and gates."""
+
+    adapter_type: str
+    factory_key: str
+    implementation: str
+    capability_versions: tuple[str, ...]
+    is_fake: bool
+    delegates_to_opencode: bool
+    is_local_verification: bool
+    eligibility_note: str
+
+
+_WORKER_ADAPTER_REGISTRATIONS = (
+    WorkerAdapterRegistration(
+        adapter_type="fake",
+        factory_key="fake",
+        implementation="FakeWorkerAdapter",
+        capability_versions=("context-package:v1", "handoff:v1"),
+        is_fake=True,
+        delegates_to_opencode=False,
+        is_local_verification=False,
+        eligibility_note="deterministic test boundary; excluded from the real gate",
+    ),
+    WorkerAdapterRegistration(
+        adapter_type="opencode",
+        factory_key="opencode",
+        implementation="OpenCodeACPAdapter",
+        capability_versions=("context-package:v1/v2/v3", "handoff:v1"),
+        is_fake=False,
+        delegates_to_opencode=True,
+        is_local_verification=False,
+        eligibility_note="same provider as source; excluded from the distinct gate",
+    ),
+    WorkerAdapterRegistration(
+        adapter_type="opencode-acp",
+        factory_key="opencode",
+        implementation="OpenCodeACPAdapter",
+        capability_versions=("context-package:v1/v2/v3", "handoff:v1"),
+        is_fake=False,
+        delegates_to_opencode=True,
+        is_local_verification=False,
+        eligibility_note="alias of opencode; excluded from the distinct gate",
+    ),
+    WorkerAdapterRegistration(
+        adapter_type=LOCAL_VERIFICATION_PROVIDER,
+        factory_key="local_verification",
+        implementation="LocalVerificationAdapter",
+        capability_versions=("context-package:v3", "verification:v1"),
+        is_fake=False,
+        delegates_to_opencode=False,
+        is_local_verification=True,
+        eligibility_note="local deterministic verification; not an execution Agent",
+    ),
+)
+
+
+def worker_adapter_inventory() -> tuple[WorkerAdapterRegistration, ...]:
+    """Return immutable production registration facts without constructing adapters."""
+
+    return _WORKER_ADAPTER_REGISTRATIONS
+
+
+def registered_worker_adapter_types() -> tuple[str, ...]:
+    """Return adapter type keys from the same source used by the factory map."""
+
+    return tuple(item.adapter_type for item in _WORKER_ADAPTER_REGISTRATIONS)
+
+
 def build_worker_adapter_factories(
     settings: Settings,
     *,
@@ -160,13 +230,18 @@ def build_worker_adapter_factories(
             adapter_config_version=instance.config_version,
         )
 
+    builders = {
+        "fake": fake_factory,
+        "opencode": opencode_factory,
+        "local_verification": local_verification_factory,
+    }
     return {
-        "fake": lambda instance: get_adapter(instance, fake_factory),
-        "opencode": lambda instance: get_adapter(instance, opencode_factory),
-        "opencode-acp": lambda instance: get_adapter(instance, opencode_factory),
-        LOCAL_VERIFICATION_PROVIDER: lambda instance: get_adapter(
-            instance, local_verification_factory
-        ),
+        registration.adapter_type: (
+            lambda instance, builder=builders[registration.factory_key]: get_adapter(
+                instance, builder
+            )
+        )
+        for registration in worker_adapter_inventory()
     }
 
 
