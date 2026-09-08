@@ -81,7 +81,11 @@ def test_r6_1_upgrade_downgrade_upgrade_backfills_only_real_heads(
         ).scalar_one()
     if version in {
         "0025_r6_3_3_notification_gateway",
+        "0026_r6_3_4_result_inputs",
         "0027_r6_3_4_result_input_context",
+        "0028_r6_result_integration",
+        "0029_r6_result_context",
+        "0030_r6_verification_request_uniqueness",
     }:
         pytest.skip(
             "R6.3.3 and later are forward-only; historical downgrade rehearsal "

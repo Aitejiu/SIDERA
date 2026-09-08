@@ -179,7 +179,12 @@ class SqlAlchemyCollaborationQueryStore:
                 ExecutionRequestModel.plan_snapshot_id == plan.snapshot_id,
                 ExecutionRequestModel.plan_generation == plan.generation,
             )
-            .order_by(ExecutionRequestModel.worker_item_key.asc())
+            .order_by(
+                ExecutionRequestModel.worker_item_key.asc(),
+                ExecutionRequestModel.created_at.desc(),
+                ExecutionRequestModel.updated_at.desc(),
+                ExecutionRequestModel.id.desc(),
+            )
         ).all()
         requests = tuple(_request(row, plan) for row in request_rows)
         request_ids = {request.id for request in requests}

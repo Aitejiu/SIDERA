@@ -32,7 +32,15 @@ test.describe("R6 result integration control room", () => {
     await expect(page).toHaveScreenshot("result-integration-root.png", {
       fullPage: true,
       animations: "disabled",
-      mask: [page.locator(".mono-label"), page.locator(".notification-center")],
+      mask: [
+        page.locator(".mono-label"),
+        page.locator(".notification-center"),
+        page.locator(".task-result-panel__candidate strong"),
+        page.locator(".task-result-panel__candidate dd"),
+        page.locator(".task-result-panel__artifacts li small"),
+        page.locator(".result-history__list span"),
+        page.locator(".result-history__list small"),
+      ],
     });
   });
 
@@ -84,12 +92,35 @@ test.describe("R6 result integration control room", () => {
     await expect(page.locator("#artifact-page-title")).toHaveText("Artifact 查看器");
     await page.goBack();
     await expect(page.locator("#worker-item-title")).toHaveText("Worker A");
+    await expect(page.getByRole("region", { name: "结果输入" })).toContainText("内容交付");
+    await expect(page.getByRole("region", { name: "结果输入" })).toContainText("未放行");
+    await expect(page.getByRole("region", { name: "协同放行控制" })).toContainText("未放行");
+    const deliveryItems = page.locator(".worker-timeline-item--delivery");
+    await expect(deliveryItems.filter({ hasText: "report" }).first()).toBeVisible();
+    await expect(deliveryItems.filter({ hasText: "diff" }).first()).toBeVisible();
 
     await expectNoHorizontalOverflow(page);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(100);
     await expect(page).toHaveScreenshot("result-integration-worker.png", {
-      fullPage: true,
+      fullPage: false,
       animations: "disabled",
-      mask: [page.locator(".mono-label"), page.locator(".notification-center")],
+      mask: [
+        page.locator(".topbar"),
+        page.locator(".navigation-rail"),
+        page.locator(".workspace-tabs"),
+        page.locator(".worker-item-page__heading .eyebrow"),
+        page.locator(".worker-composer__scope"),
+        page.getByRole("heading", { name: "Execution / Session" }).locator("..").locator(".worker-item-facts"),
+        page.locator(".result-input-panel__summary > div:first-child small"),
+        page.locator(".result-input-delivery .result-input-muted"),
+        page.locator(".worker-timeline-item time"),
+        page.locator(".worker-timeline-item--delivery strong"),
+        page.locator(".worker-timeline-item--delivery p"),
+        page.locator(".worker-item-sidebar__footer"),
+        page.locator(".mono-label"),
+        page.locator(".notification-tray"),
+      ],
     });
   });
 

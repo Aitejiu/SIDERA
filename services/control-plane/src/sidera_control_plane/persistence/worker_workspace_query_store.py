@@ -205,7 +205,11 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                     ArtifactModel.workspace_id == workspace_id,
                     ArtifactModel.execution_id.in_(execution_ids or {UUID(int=0)}),
                 )
-                .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
+                .order_by(
+                    ArtifactModel.created_at.asc(),
+                    ArtifactModel.artifact_type.asc(),
+                    ArtifactModel.id.asc(),
+                )
             ).all()
             artifacts = tuple(_artifact(row) for row in artifact_rows)
 

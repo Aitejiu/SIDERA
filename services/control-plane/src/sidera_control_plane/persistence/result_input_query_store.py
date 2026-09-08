@@ -373,6 +373,7 @@ def _current_request_for_worker(
             ),
         )
         .order_by(
+            ExecutionRequestModel.created_at.desc(),
             ExecutionRequestModel.updated_at.desc(),
             ExecutionRequestModel.id.desc(),
         )

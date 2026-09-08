@@ -36,7 +36,7 @@ def test_r6_3_2_schema_adds_governance_ledger_and_deferred_status(
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        assert version == "0027_r6_3_4_result_input_context"
+        assert version == "0030_r6_verification_request_uniqueness"
 
 
 def test_r6_3_2_schema_has_named_governance_constraints(database: Database) -> None:

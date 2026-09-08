@@ -8,8 +8,14 @@ from fastapi.testclient import TestClient
 
 from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.result_input_queries import (
+    ResultInputQueryService,
+)
 from sidera_control_plane.application.result_queries import ResultQueryService
 from sidera_control_plane.config import Settings
+from sidera_control_plane.persistence.result_input_query_store import (
+    SqlAlchemyResultInputQueryStore,
+)
 from sidera_control_plane.persistence.result_query_store import (
     SqlAlchemyResultQueryStore,
 )
@@ -109,6 +115,39 @@ def test_acceptance_basis_is_derived_from_the_current_candidate(
     assert body["expected_result_version"] == result_scenario.head().result_version
     assert body["acceptance_basis_hash"] == payload["acceptance_basis_hash"]
     assert result_scenario.events("TaskAcceptanceRecorded") == ()
+
+
+def test_worker_result_query_prefers_the_latest_rework_request(
+    result_scenario,
+) -> None:
+    result_scenario.seed_repairable_candidate()
+    candidate = result_scenario.current_candidate()
+    rework = result_scenario.command(
+        "RequestTaskRework",
+        result_scenario.rework_payload(candidate),
+    )
+    rework_request_id = UUID(str(rework.data["request_ids"][0]))
+    replacement = result_scenario.rework_source(
+        rework_request_id,
+        files={"login.py": b"ALLOW_EXPIRED = False\n"},
+    )
+    result_scenario.command(
+        "ReintegrateTaskResult",
+        result_scenario.reintegration_payload(candidate, replacement),
+    )
+    result_scenario.drive()
+
+    view = ResultInputQueryService(
+        SqlAlchemyResultInputQueryStore(result_scenario.database),
+        governance_enabled=True,
+    ).get_worker_result_inputs(
+        result_scenario.workspace_id,
+        result_scenario.worker_item_ids["a"],
+    )
+
+    assert view.request is not None
+    assert view.request.execution_request_id == rework_request_id
+    assert view.governance.release_state == "unreleased"
 
 
 def test_result_queries_enforce_workspace_candidate_and_cursor_scope(

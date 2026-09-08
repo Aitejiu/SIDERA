@@ -483,8 +483,14 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                     return
                 issue = _capture_failure(run.captures)
                 if issue is not None:
+                    if run.process.poll() is not None:
+                        self._finalize_locked(run, forced_failure=issue)
+                        return
                     if not _identity_matches(run.identity):
-                        self._mark_unknown_locked(run, "process_state_unknown")
+                        if run.process.poll() is not None:
+                            self._finalize_locked(run, forced_failure=issue)
+                        else:
+                            self._mark_unknown_locked(run, "process_state_unknown")
                     elif _terminate_process_group(
                         run.process,
                         run.identity,
@@ -515,7 +521,11 @@ class LocalCheckRunner(LocalCheckRunnerPort):
             return self._finalize_locked(run, forced_failure=None)
         issue = _capture_failure(run.captures)
         if issue is not None:
+            if run.process.poll() is not None:
+                return self._finalize_locked(run, forced_failure=issue)
             if not _identity_matches(run.identity):
+                if run.process.poll() is not None:
+                    return self._finalize_locked(run, forced_failure=issue)
                 return self._mark_unknown_locked(run, "process_state_unknown")
             if not _terminate_process_group(
                 run.process,

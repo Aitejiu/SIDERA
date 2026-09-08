@@ -18,6 +18,9 @@ from sidera_control_plane.application.notification_observations import (
     observation_subject_key,
     projection_change_is_observable,
 )
+from sidera_control_plane.application.notification_policy import (
+    NotificationObservation,
+)
 from sidera_control_plane.application.result_notifications import (
     result_notification_facts,
 )
@@ -90,6 +93,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         authoritative_read = self._read_current_state(change)
         if authoritative_read is None:
             return None
+        if isinstance(authoritative_read, NotificationObservation):
+            return authoritative_read
         return self._composer.compose(change, authoritative_read)
 
     def list_baseline_candidates(
@@ -413,7 +418,7 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
 
     def _read_current_state(
         self, change: ProjectionChange
-    ) -> NotificationAuthoritativeRead | None:
+    ) -> NotificationAuthoritativeRead | NotificationObservation | None:
         subject = observation_subject_key(change)
         if subject is None or change.resource_id is None:
             return None
@@ -569,8 +574,12 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                 source_type=source_type,
                 origin_route_active=origin_route_active,
             )
+            event = overview.get("event")
+            view = overview.get("view")
+            if not isinstance(view, Mapping):
+                return None
             observations = result_notification_facts(
-                overview["event"], overview["view"]
+                event, view
             )
             if not observations:
                 return None

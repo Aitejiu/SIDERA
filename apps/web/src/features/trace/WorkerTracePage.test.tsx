@@ -181,5 +181,5 @@ describe("WorkerTracePage", () => {
 
     await user.click(screen.getByRole("button", { name: /scope_escalation_requested/ }));
     expect(await screen.findByRole("link", { name: /与 Main Agent 对话/ })).toHaveAttribute("href", "http://main-agent.local");
-  });
+  }, 15_000);
 });

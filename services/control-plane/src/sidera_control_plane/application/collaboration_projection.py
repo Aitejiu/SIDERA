@@ -98,7 +98,7 @@ class CollaborationRequestFact:
     handoff_transition_id: UUID | None = None
     result_derivation_kind: str | None = None
     source_candidate_id: UUID | None = None
-    purpose: str = ""
+    purpose: str = "execution"
 
 
 @dataclass(frozen=True, slots=True)
