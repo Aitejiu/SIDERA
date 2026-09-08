@@ -8,6 +8,8 @@ from sidera_control_plane.persistence.database import Database
 
 pytestmark = pytest.mark.integration
 
+CURRENT_SCHEMA_REVISION = "0032_r6_real_run_identity"
+
 
 def _column(columns: Sequence[Mapping[str, Any]], name: str) -> Mapping[str, Any]:
     return next(column for column in columns if column["name"] == name)
@@ -186,4 +188,4 @@ def test_r5_1_1_schema_remains_present_after_r5_3_upgrade(
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        assert version == "0031_r6_real_result_budget"
+        assert version == CURRENT_SCHEMA_REVISION

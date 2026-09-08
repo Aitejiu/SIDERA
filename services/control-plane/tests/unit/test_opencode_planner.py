@@ -5,7 +5,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -61,6 +61,15 @@ from sidera_control_plane.domain.planning_revision_proposals import (
 from tests.unit.test_planning_commands import module_facts, profile
 
 NOW = datetime.now(UTC)
+
+
+def _run_control(operation_id: UUID, *, timeout_seconds: int = 30) -> PlannerRunControl:
+    started_at = datetime.now(UTC)
+    return PlannerRunControl(
+        operation_id=operation_id,
+        started_at=started_at,
+        deadline_at=started_at + timedelta(seconds=timeout_seconds),
+    )
 
 
 def _fake_opencode(tmp_path: Path, *, hang_prompt: bool = False) -> Path:
@@ -278,11 +287,7 @@ def test_opencode_parser_dispatches_initial_and_revision_v4() -> None:
     )
     fake_result = FakePlannerAdapter(FakePlannerConfig(scenario="revision")).plan(
         revision_input,
-        PlannerRunControl(
-            operation_id=revision_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(revision_input.operation_id),
     )
     assert isinstance(fake_result, PlannerProposalResult)
     revision_payload = fake_result.proposal.payload.to_mapping()
@@ -512,11 +517,7 @@ def test_planner_parses_proposal_and_usage_and_cleans_temp_directory(
 
     result = adapter.plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
 
     assert isinstance(result, PlannerProposalResult)
@@ -533,11 +534,7 @@ def test_planner_parses_revision_proposal_against_exact_context_base(
     planner_input, _ = _revision_planner_input()
     fake_result = FakePlannerAdapter(FakePlannerConfig(scenario="revision")).plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
     assert isinstance(fake_result, PlannerProposalResult)
     assert isinstance(fake_result.proposal.payload, PlanningRevisionProposalPayloadV3)
@@ -548,11 +545,7 @@ def test_planner_parses_revision_proposal_against_exact_context_base(
 
     result = _adapter(tmp_path).plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
 
     assert isinstance(result, PlannerProposalResult)
@@ -573,11 +566,7 @@ def test_planner_rejects_create_schema_for_revision_input(
     with pytest.raises(OpenCodePlannerError, match="strict JSON"):
         _adapter(tmp_path).plan(
             planner_input,
-            PlannerRunControl(
-                operation_id=planner_input.operation_id,
-                started_at=NOW,
-                deadline_at=NOW + timedelta(seconds=30),
-            ),
+            _run_control(planner_input.operation_id),
         )
 
 
@@ -603,11 +592,7 @@ def test_planner_parses_blocking_clarifications(
 
     result = _adapter(tmp_path).plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
 
     assert isinstance(result, PlannerClarificationResult)
@@ -642,11 +627,7 @@ def test_planner_normalizes_single_flat_clarification(
 
     result = _adapter(tmp_path).plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
 
     assert isinstance(result, PlannerClarificationResult)
@@ -667,11 +648,7 @@ def test_planner_rejects_explanations_and_markdown_around_json(
         with pytest.raises(OpenCodePlannerError, match="strict JSON"):
             adapter.plan(
                 planner_input,
-                PlannerRunControl(
-                    operation_id=planner_input.operation_id,
-                    started_at=NOW,
-                    deadline_at=NOW + timedelta(seconds=30),
-                ),
+                _run_control(planner_input.operation_id),
             )
 
 
@@ -687,11 +664,7 @@ def test_planner_repairs_one_invalid_structured_response(
 
     result = _adapter(tmp_path).plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
 
     assert isinstance(result, PlannerProposalResult)
@@ -714,11 +687,7 @@ def test_planner_retries_schema_repair_when_first_repair_is_invalid(
 
     result = _adapter(tmp_path).plan(
         planner_input,
-        PlannerRunControl(
-            operation_id=planner_input.operation_id,
-            started_at=NOW,
-            deadline_at=NOW + timedelta(seconds=30),
-        ),
+        _run_control(planner_input.operation_id),
     )
 
     assert isinstance(result, PlannerProposalResult)
@@ -739,11 +708,7 @@ def test_planner_cancel_terminates_owned_process(
         try:
             adapter.plan(
                 planner_input,
-                PlannerRunControl(
-                    operation_id=planner_input.operation_id,
-                    started_at=NOW,
-                    deadline_at=NOW + timedelta(seconds=30),
-                ),
+                _run_control(planner_input.operation_id),
             )
         except BaseException as exc:  # noqa: BLE001
             result.append(exc)

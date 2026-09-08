@@ -278,7 +278,7 @@ if [[ "${SIDERA_RUN_WEB_E2E:-1}" == "1" ]]; then
     SIDERA_E2E_CONTROL_PLANE_PORT="${SIDERA_E2E_CONTROL_PLANE_PORT:-18100}" \
     SIDERA_E2E_KNOWLEDGE_SERVICE_PORT="${SIDERA_E2E_KNOWLEDGE_SERVICE_PORT:-18120}" \
     SIDERA_E2E_MAIN_AGENT_PORT="${SIDERA_E2E_MAIN_AGENT_PORT:-18110}" \
-    SIDERA_E2E_WEB_PORT="${SIDERA_E2E_WEB_PORT:-18417}" \
+    SIDERA_E2E_WEB_PORT="${SIDERA_E2E_WEB_PORT:-18427}" \
     npm --prefix "$WEB_ROOT" run test:e2e -- \
     tests/e2e/basic-capability-readonly.spec.ts \
     --project=desktop-chromium --project=tablet-chromium --project=mobile-chromium

@@ -8,6 +8,8 @@ from sidera_control_plane.persistence.database import Database
 
 pytestmark = pytest.mark.integration
 
+CURRENT_SCHEMA_REVISION = "0032_r6_real_run_identity"
+
 
 EXPECTED_TABLES = {
     "work_contexts",
@@ -330,4 +332,4 @@ def test_r5_3_schema_uses_one_head(database: Database) -> None:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0031_r6_real_result_budget"
+    assert version == CURRENT_SCHEMA_REVISION

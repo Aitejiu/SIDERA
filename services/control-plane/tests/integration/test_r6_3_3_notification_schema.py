@@ -22,6 +22,8 @@ from sidera_control_plane.persistence.models import (
 
 pytestmark = pytest.mark.integration
 
+CURRENT_SCHEMA_REVISION = "0032_r6_real_run_identity"
+
 
 EXPECTED_TABLES = {
     "notification_policy_states",
@@ -352,7 +354,7 @@ def test_r6_3_3_schema_survives_current_revision(database: Database) -> None:
         version = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-    assert version == "0031_r6_real_result_budget"
+        assert version == CURRENT_SCHEMA_REVISION
 
 
 def test_r6_3_3_migration_downgrade_is_forward_only() -> None:

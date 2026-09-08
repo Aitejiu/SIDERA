@@ -5,7 +5,6 @@ from typing import Any
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.config import Settings
 
-
 QUERY_CONTRACTS = {
     "/api/v1/workspaces/{workspace_id}/task-overviews": "TaskConsoleOverviewProjectionResponse",
     "/api/v1/tasks/{root_task_id}/overview": "TaskConsoleOverviewProjectionResponse",

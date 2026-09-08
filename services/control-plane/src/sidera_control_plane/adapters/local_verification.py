@@ -495,7 +495,7 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                         run.process,
                         run.identity,
                         self._termination_grace_seconds,
-                    ):
+                    ) or run.process.poll() is not None:
                         self._finalize_locked(run, forced_failure=issue)
                     else:
                         self._mark_unknown_locked(run, "process_state_unknown")
@@ -507,7 +507,7 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                         run.process,
                         run.identity,
                         self._termination_grace_seconds,
-                    ):
+                    ) or run.process.poll() is not None:
                         self._finalize_locked(run, forced_failure="deadline_exceeded")
                     else:
                         self._mark_unknown_locked(run, "process_state_unknown")
@@ -532,6 +532,8 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                 run.identity,
                 self._termination_grace_seconds,
             ):
+                if run.process.poll() is not None:
+                    return self._finalize_locked(run, forced_failure=issue)
                 return self._mark_unknown_locked(run, "process_state_unknown")
             return self._finalize_locked(run, forced_failure=issue)
         if self._now() >= run.request.deadline:
@@ -542,6 +544,11 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                 run.identity,
                 self._termination_grace_seconds,
             ):
+                if run.process.poll() is not None:
+                    return self._finalize_locked(
+                        run,
+                        forced_failure="deadline_exceeded",
+                    )
                 return self._mark_unknown_locked(run, "process_state_unknown")
             return self._finalize_locked(run, forced_failure="deadline_exceeded")
         return run.observation
