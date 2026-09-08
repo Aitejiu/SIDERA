@@ -45,6 +45,14 @@ test.describe("R6 basic real planning journey", () => {
     await page.getByRole("button", { name: "确认并创建任务" }).click();
     await expect(page).toHaveURL(new RegExp(`/workspaces/${escapeRegExp(workspaceId)}/tasks/[0-9a-f-]{36}$`));
     await expect(page.locator("#task-detail-title")).toBeVisible();
+    const subtask = page.getByRole("button", { name: /打开子任务：/ }).first();
+    await expect(subtask).toBeVisible();
+    await subtask.click();
+    await expect(page.locator("#subtask-title")).toBeVisible();
+    const worker = page.getByRole("button", { name: /打开 Worker：/ }).first();
+    await expect(worker).toBeVisible();
+    await worker.click();
+    await expect(page.locator("#worker-item-title")).toBeVisible();
 
     expect(violations).toEqual([]);
     const storage = await page.evaluate(() => {

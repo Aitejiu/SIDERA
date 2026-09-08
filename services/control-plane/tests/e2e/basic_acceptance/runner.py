@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from .contracts import ScenarioEvidence
+from .contracts import ScenarioEvidence, UserFlowSnapshot
 from .evidence import EvidenceBuilder
+from .user_flow import run_user_flow
 
 ResultBudgetState = Literal["completed", "reserved", "exhausted", "unknown"]
 ResultSessionState = Literal["succeeded", "failed", "timed_out", "unknown"]
@@ -220,6 +221,16 @@ def run_scenario(
             check_codes=("manifest_loaded", "check_mode_no_business_session"),
             failure_code_override="check_mode_no_business_session",
         )
+    if name == "user-flow":
+        snapshot = _optional_user_flow_snapshot(raw)
+        user_flow_evidence_kind: Literal["contract", "real_user_flow"] = (
+            "real_user_flow" if mode == "real" else "contract"
+        )
+        return run_user_flow(
+            raw,
+            snapshot=snapshot,
+            evidence_kind=user_flow_evidence_kind,
+        )
     return builder.finish(
         real_tests=0,
         incomplete=True,
@@ -232,3 +243,12 @@ def _code_commit(manifest: dict[str, object]) -> str:
     if isinstance(value, str) and len(value) == 40:
         return value
     return "0" * 40
+
+
+def _optional_user_flow_snapshot(
+    manifest: dict[str, object],
+) -> UserFlowSnapshot | None:
+    value = manifest.get("user_flow_snapshot")
+    if not isinstance(value, dict):
+        return None
+    return UserFlowSnapshot.model_validate(value)

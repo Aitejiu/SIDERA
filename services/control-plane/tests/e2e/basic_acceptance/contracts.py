@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -83,3 +84,42 @@ class ConfirmedPlanEvidence(BaseModel):
     pre_confirmation_status: str = Field(min_length=1, max_length=64)
     post_confirmation_status: str = Field(min_length=1, max_length=64)
     check_codes: tuple[str, ...] = ()
+
+
+class ExecutionWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    started_at: datetime
+    finished_at: datetime
+
+
+class UserFlowSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    workspace_id: UUID
+    root_task_id: UUID
+    source_execution_ids: tuple[UUID, ...]
+    source_session_ids: tuple[UUID, ...]
+    integration_execution_id: UUID
+    integration_session_id: UUID
+    input_selection_id: UUID
+    input_selection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_id: UUID
+    candidate_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_selection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verification_id: UUID | None
+    verification_candidate_id: UUID | None
+    verification_candidate_hash: str | None
+    verification_status: Literal["passed", "failed", "unknown"]
+    acceptance_id: UUID | None
+    accepted_candidate_id: UUID | None
+    accepted_candidate_hash: str | None
+    accepted: bool
+    accepted_tree_hash: str = Field(pattern=r"^[0-9a-f]{40}$")
+    restored_tree_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    restore_check_passed: bool
+    dependency_satisfied: bool
+    source_windows: tuple[ExecutionWindow, ...]
