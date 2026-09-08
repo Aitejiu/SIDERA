@@ -52,3 +52,34 @@ class ReservationResult(BaseModel):
     deadline: str
     diagnostic_code: str
     resource_ids: tuple[str, ...] = ()
+
+
+class PlanningBrief(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str = Field(min_length=1, max_length=4000)
+    constraints: tuple[str, ...] = ()
+    acceptance_criteria: tuple[str, ...] = Field(min_length=1)
+    context_refs: tuple[str, ...] = ()
+    requested_outputs: tuple[str, ...] = Field(min_length=1)
+    implementation_worker_keys: tuple[str, str] = ("validation", "formatting")
+    integration_worker_key: str = "integration"
+
+
+class ConfirmedPlanEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    workspace_id: UUID
+    main_agent_thread_id: str = Field(min_length=1, max_length=256)
+    main_agent_turn_id: str = Field(min_length=1, max_length=256)
+    planning_request_id: UUID
+    proposal_id: UUID
+    proposal_revision: int = Field(ge=1)
+    proposal_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_command_id: UUID
+    root_task_id: UUID
+    confirmed_by: str = Field(min_length=1, max_length=128)
+    pre_confirmation_status: str = Field(min_length=1, max_length=64)
+    post_confirmation_status: str = Field(min_length=1, max_length=64)
+    check_codes: tuple[str, ...] = ()
