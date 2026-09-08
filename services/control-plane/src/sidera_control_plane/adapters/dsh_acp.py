@@ -92,6 +92,20 @@ class DshACPAdapter:
         context_patch_versions=(),
         handoff_checkpoint_mode=HandoffCheckpointMode.UNSUPPORTED,
     )
+    _TARGET_PROFILE = WorkerAdapterCapabilityProfile(
+        input=CapabilityInput.QUEUED,
+        idempotency=IdempotencyCapability.NONE,
+        resume=ResumeCapability.SAME_PROCESS,
+        stop=StopCapability.EXACT_EXECUTION,
+        sandbox=SandboxCapability.FILESYSTEM,
+        stability=StabilityLevel.EXPERIMENTAL,
+        context_package_versions=(1, 2),
+        context_patch_versions=(),
+        handoff_checkpoint_mode=HandoffCheckpointMode.UNSUPPORTED,
+        handoff_session_context_versions=(1,),
+        handoff_writer_gate_versions=(1,),
+        handoff_inspection=True,
+    )
 
     def __init__(
         self,
@@ -106,6 +120,7 @@ class DshACPAdapter:
         git_executable: str = "git",
         client_name: str = "sidera-dsh-worker",
         client_version: str = "0.1.0",
+        handoff_target_enabled: bool = False,
     ) -> None:
         if not argv or any(not isinstance(item, str) or not item for item in argv):
             raise ValueError("DSH ACP argv must contain non-empty strings")
@@ -129,16 +144,21 @@ class DshACPAdapter:
         self._git_executable = git_executable.strip()
         self._client_name = client_name.strip() or "sidera-dsh-worker"
         self._client_version = client_version.strip() or "0.1.0"
+        self._handoff_target_enabled = handoff_target_enabled
+        profile_template = self._TARGET_PROFILE if handoff_target_enabled else self._BASE_PROFILE
         self._profile = WorkerAdapterCapabilityProfile(
-            input=self._BASE_PROFILE.input,
-            idempotency=self._BASE_PROFILE.idempotency,
-            resume=self._BASE_PROFILE.resume,
-            stop=self._BASE_PROFILE.stop,
-            sandbox=self._BASE_PROFILE.sandbox,
-            stability=self._BASE_PROFILE.stability,
+            input=profile_template.input,
+            idempotency=profile_template.idempotency,
+            resume=profile_template.resume,
+            stop=profile_template.stop,
+            sandbox=profile_template.sandbox,
+            stability=profile_template.stability,
             context_package_versions=versions,
             context_patch_versions=(),
-            handoff_checkpoint_mode=HandoffCheckpointMode.UNSUPPORTED,
+            handoff_checkpoint_mode=profile_template.handoff_checkpoint_mode,
+            handoff_session_context_versions=profile_template.handoff_session_context_versions,
+            handoff_writer_gate_versions=profile_template.handoff_writer_gate_versions,
+            handoff_inspection=profile_template.handoff_inspection,
         )
         self._contexts: dict[tuple[UUID, str], _AcceptedContext] = {}
         self._sessions: dict[UUID, _DshSession] = {}
@@ -206,6 +226,9 @@ class DshACPAdapter:
         if context is not None:
             _validate_context(context, operation_id, self._profile)
             self._require_accepted_context(context, spec.execution_id)
+        handoff_instruction = _handoff_instruction(context)
+        if handoff_instruction is not None and not self._handoff_target_enabled:
+            raise DshACPAdapterError("dsh_handoff_target_not_enabled")
         transport = self._spawn(cwd)
         try:
             self._handshake(transport, cwd, {}, create_session=False)
@@ -243,6 +266,9 @@ class DshACPAdapter:
                 acceptance_criteria=spec.acceptance_criteria,
                 workspace_digest=workspace_manifest_digest(workspace),
                 context=context,
+                fencing_token=spec.fencing_token,
+                handoff_instruction=handoff_instruction,
+                handoff_held=handoff_instruction is not None,
             )
             with self._lock:
                 self._sessions[execution_session_id] = session
@@ -305,6 +331,22 @@ class DshACPAdapter:
             if identity_error is not None:
                 session.operation_results[operation_id] = identity_error
                 return identity_error
+            if session.handoff_state_unknown:
+                return _delivery(
+                    operation_id,
+                    DeliveryOutcome.UNKNOWN,
+                    None,
+                    "handoff_writer_state_unknown",
+                    session,
+                )
+            if session.handoff_held and not session.writer_enabled:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.BLOCKED,
+                    accepted_sequence=None,
+                    failure_code="handoff_writer_disabled",
+                    execution_session_id=session.handle.execution_session_id,
+                )
             if session.prompt_busy:
                 return DeliveryResult(
                     operation_id=operation_id,
@@ -523,16 +565,43 @@ class DshACPAdapter:
         self, handle: AdapterSessionHandle, *, operation_id: UUID
     ) -> HandoffOperationInspection:
         session = self._session(handle)
+        if not self._handoff_target_enabled:
+            return HandoffOperationInspection(
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+                outcome=HandoffInspectionOutcome.UNKNOWN,
+                execution_id=session.execution_id,
+                session_id=session.handle.execution_session_id,
+                accepted_sequence=None,
+                context_binding=None,
+                observed_at=datetime.now(UTC),
+                evidence_refs=(f"dsh-inspection://{operation_id}/unsupported",),
+            )
+        result = session.operation_results.get(operation_id)
+        if result is None:
+            outcome = HandoffInspectionOutcome.ABSENT
+            operation_type = GatewayOperationType.HANDOFF_ENABLE_WRITER
+            accepted_sequence = None
+        else:
+            outcome = (
+                HandoffInspectionOutcome.SUCCEEDED
+                if result.outcome is DeliveryOutcome.DELIVERED
+                else HandoffInspectionOutcome.UNKNOWN
+                if result.outcome is DeliveryOutcome.UNKNOWN
+                else HandoffInspectionOutcome.FAILED
+            )
+            operation_type = GatewayOperationType.HANDOFF_ENABLE_WRITER
+            accepted_sequence = result.accepted_sequence
         return HandoffOperationInspection(
             operation_id=operation_id,
-            operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
-            outcome=HandoffInspectionOutcome.UNKNOWN,
+            operation_type=operation_type,
+            outcome=outcome,
             execution_id=session.execution_id,
             session_id=session.handle.execution_session_id,
-            accepted_sequence=None,
-            context_binding=None,
+            accepted_sequence=accepted_sequence,
+            context_binding=session.handle.context_binding,
             observed_at=datetime.now(UTC),
-            evidence_refs=(f"dsh-inspection://{operation_id}/unsupported",),
+            evidence_refs=(f"dsh-inspection://{operation_id}/{outcome.value}",),
         )
 
     def enable_handoff_writer(
@@ -542,8 +611,122 @@ class DshACPAdapter:
         fencing_token: int,
         operation_id: UUID,
     ) -> DeliveryResult:
-        del handle, fencing_token
-        raise DshACPAdapterError(f"dsh_writer_gate_unsupported:{operation_id}")
+        if not self._handoff_target_enabled:
+            raise DshACPAdapterError("dsh_writer_gate_unsupported")
+        session = self._session(handle)
+        with session.lock:
+            previous = session.operation_results.get(operation_id)
+            if previous is not None:
+                return previous
+            identity_error = self._identity_failure(session, handle, operation_id)
+            if identity_error is not None:
+                session.operation_results[operation_id] = identity_error
+                return identity_error
+            if session.handle.context_binding is None or not session.handoff_held:
+                raise DshACPAdapterError("handoff_context_binding_missing")
+            if session.handoff_state_unknown:
+                return _delivery(
+                    operation_id,
+                    DeliveryOutcome.UNKNOWN,
+                    None,
+                    "handoff_writer_state_unknown",
+                    session,
+                )
+            if fencing_token != session.fencing_token:
+                return _delivery(
+                    operation_id,
+                    DeliveryOutcome.FAILED,
+                    None,
+                    "handoff_fencing_mismatch",
+                    session,
+                )
+            if session.writer_enabled:
+                raise DshACPAdapterError("handoff_writer_already_enabled")
+            if session.handoff_instruction is None:
+                raise DshACPAdapterError("handoff_context_missing_instruction")
+            if session.prompt_busy:
+                return _delivery(
+                    operation_id,
+                    DeliveryOutcome.BLOCKED,
+                    None,
+                    "prompt_busy",
+                    session,
+                )
+            session.prompt_busy = True
+            try:
+                result = session.transport.request(
+                    "session/prompt",
+                    {
+                        "sessionId": handle.adapter_session_id,
+                        "prompt": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "SIDERA_HANDOFF_RESUME_V1\n"
+                                    "Continue only from the bound context package.\n"
+                                    f"operation_id={operation_id}\n"
+                                    f"instruction={session.handoff_instruction}"
+                                ),
+                            }
+                        ],
+                    },
+                    timeout=self._request_timeout_seconds,
+                )
+                if result.get("stopReason") != "end_turn":
+                    delivery = _delivery(
+                        operation_id,
+                        DeliveryOutcome.UNKNOWN,
+                        None,
+                        "handoff_writer_completion_unproven",
+                        session,
+                    )
+                else:
+                    self._append_notifications(session)
+                    session.initial_prompt_sent = True
+                    session.writer_enabled = True
+                    sequence = session.next_sequence
+                    session.next_sequence += 1
+                    session.last_accepted_sequence = sequence
+                    session.events.append(
+                        _event(
+                            session,
+                            "handoff.writer_enabled",
+                            sequence,
+                            {
+                                "context_version": session.handle.context_binding.context_version
+                            },
+                        )
+                    )
+                    session.handle = _with_last_sequence(session.handle, sequence)
+                    delivery = _delivery(
+                        operation_id,
+                        DeliveryOutcome.DELIVERED,
+                        sequence,
+                        None,
+                        session,
+                    )
+            except ACPProcessTimeoutError:
+                delivery = _delivery(
+                    operation_id,
+                    DeliveryOutcome.UNKNOWN,
+                    None,
+                    "acp_response_timeout",
+                    session,
+                )
+            except ACPProcessError as exc:
+                delivery = _delivery(
+                    operation_id,
+                    DeliveryOutcome.UNKNOWN,
+                    None,
+                    _safe_failure_code(exc),
+                    session,
+                )
+            finally:
+                session.prompt_busy = False
+            if delivery.outcome is DeliveryOutcome.UNKNOWN:
+                session.handoff_state_unknown = True
+            session.operation_results[operation_id] = delivery
+            return delivery
 
     def active_processes(self) -> tuple[Any, ...]:
         with self._lock:
@@ -714,6 +897,9 @@ class _DshSession:
         acceptance_criteria: tuple[str, ...],
         workspace_digest: str,
         context: ContextMaterialization | None,
+        fencing_token: int,
+        handoff_instruction: str | None,
+        handoff_held: bool,
     ) -> None:
         self.handle = handle
         self.transport = transport
@@ -722,6 +908,11 @@ class _DshSession:
         self.acceptance_criteria = acceptance_criteria
         self.workspace_digest = workspace_digest
         self.context = context
+        self.fencing_token = fencing_token
+        self.handoff_instruction = handoff_instruction
+        self.handoff_held = handoff_held
+        self.writer_enabled = not handoff_held
+        self.handoff_state_unknown = False
         self.events: deque[AdapterEvent] = deque()
         self.next_sequence = 1
         self.last_accepted_sequence = 0
@@ -769,6 +960,23 @@ def _declared_context_package_versions(versions: tuple[int, ...]) -> tuple[int, 
 
 def _context_body_digest(materialization: ContextMaterialization) -> str:
     return hashlib.sha256(materialization.canonical_bytes()).hexdigest()
+
+
+def _handoff_instruction(
+    materialization: ContextMaterialization | None,
+) -> str | None:
+    if materialization is None:
+        return None
+    value = materialization.control_plane_facts.facts.get("handoff")
+    if not isinstance(value, Mapping):
+        return None
+    instruction = value.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise DshACPAdapterError("handoff_context_missing_instruction")
+    instruction = instruction.strip()
+    if len(instruction) > 4096:
+        raise DshACPAdapterError("handoff_instruction_too_large")
+    return instruction
 
 
 def _context_binding(

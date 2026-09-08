@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
+from sidera_control_plane.adapters.dsh_acp import DshACPAdapter
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
@@ -118,6 +120,19 @@ _WORKER_ADAPTER_REGISTRATIONS = (
         delegates_to_opencode=False,
         is_local_verification=True,
         eligibility_note="local deterministic verification; not an execution Agent",
+    ),
+    WorkerAdapterRegistration(
+        adapter_type="dsh-acp",
+        factory_key="dsh_acp",
+        implementation="DshACPAdapter",
+        capability_versions=("context-package:v1/v2", "handoff-target:v1"),
+        is_fake=False,
+        delegates_to_opencode=False,
+        is_local_verification=False,
+        eligibility_note=(
+            "independent ACP target; target-only until a distinct source checkpoint "
+            "contract is proven"
+        ),
     ),
 )
 
@@ -230,10 +245,35 @@ def build_worker_adapter_factories(
             adapter_config_version=instance.config_version,
         )
 
+    def dsh_acp_factory(instance: ModuleInstance) -> WorkerAdapter:
+        return DshACPAdapter(
+            argv=_module_config_argv(
+                instance,
+                "argv",
+                ("node", "integrations/dsh-worker/src/acp-host.ts"),
+            ),
+            process_env=_module_config_process_env(instance),
+            workspace_root=settings.workspace_root,
+            request_timeout_seconds=_module_config_float(
+                instance,
+                "request_timeout_seconds",
+                settings.opencode_request_timeout_seconds,
+            ),
+            stop_grace_seconds=_module_config_float(
+                instance,
+                "stop_grace_seconds",
+                settings.opencode_stop_grace_seconds,
+            ),
+            git_executable=settings.git_executable,
+            context_package_versions=_module_config_context_package_versions(instance),
+            handoff_target_enabled=True,
+        )
+
     builders = {
         "fake": fake_factory,
         "opencode": opencode_factory,
         "local_verification": local_verification_factory,
+        "dsh_acp": dsh_acp_factory,
     }
     return {
         registration.adapter_type: (
@@ -455,6 +495,36 @@ def _module_config_context_package_versions(
     ):
         raise TypeError("opencode context_package_versions must contain integers")
     return versions
+
+
+def _module_config_argv(
+    instance: ModuleInstance,
+    name: str,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    raw = _module_config_value(instance, name)
+    if raw is None:
+        return default
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        raise TypeError("DSH argv must be an array of argument strings")
+    values = tuple(raw)
+    if not values or any(not isinstance(value, str) or not value for value in values):
+        raise TypeError("DSH argv must contain non-empty strings")
+    return values
+
+
+def _module_config_process_env(instance: ModuleInstance) -> dict[str, str]:
+    raw = _module_config_value(instance, "process_env")
+    if raw is None:
+        # PATH is an execution prerequisite, not a provider credential. All
+        # other environment entries must be explicit module configuration.
+        return {"PATH": os.environ.get("PATH", "")}
+    if not isinstance(raw, Mapping):
+        raise TypeError("DSH process_env must be an object")
+    values = {str(key): value for key, value in raw.items()}
+    if any(not isinstance(value, str) for value in values.values()):
+        raise TypeError("DSH process_env values must be strings")
+    return values
 
 
 def _service(runtime: object, name: str) -> Any:

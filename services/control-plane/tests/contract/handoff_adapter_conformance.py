@@ -136,7 +136,7 @@ def run_source_role(factory: HandoffAdapterFactory, root: Path) -> None:
     fixture = factory.create(root)
     adapter = fixture.adapter
     profile = adapter.probe(fixture.probe_config)
-    _assert_handoff_profile(profile)
+    _assert_source_handoff_profile(profile)
     source_handle = None
     stop_operation_id = gateway_operation_id(
         fixture.source_spec.execution_id, GatewayOperationType.STOP_SESSION
@@ -217,7 +217,7 @@ def run_target_role(factory: HandoffAdapterFactory, root: Path) -> None:
     fixture = factory.create(root)
     adapter = fixture.adapter
     profile = adapter.probe(fixture.probe_config)
-    _assert_handoff_profile(profile)
+    _assert_target_handoff_profile(profile)
     target_handle = None
     target_stop_operation_id = uuid4()
     try:
@@ -293,12 +293,21 @@ def run_target_role(factory: HandoffAdapterFactory, root: Path) -> None:
         _best_effort_stop(adapter, target_handle, target_stop_operation_id)
 
 
-def _assert_handoff_profile(profile: WorkerAdapterCapabilityProfile) -> None:
+def _assert_source_handoff_profile(profile: WorkerAdapterCapabilityProfile) -> None:
     assert profile.handoff_checkpoint_mode in {
         HandoffCheckpointMode.NATIVE,
         HandoffCheckpointMode.CONTROL_EVENT,
     }
     assert 1 in profile.handoff_checkpoint_versions
+    assert 1 in profile.handoff_session_context_versions
+    assert 1 in profile.handoff_writer_gate_versions
+    assert profile.handoff_inspection is True
+
+
+def _assert_target_handoff_profile(profile: WorkerAdapterCapabilityProfile) -> None:
+    """Target eligibility does not require source checkpoint capabilities."""
+
+    assert profile.stop.value == "exact-execution"
     assert 1 in profile.handoff_session_context_versions
     assert 1 in profile.handoff_writer_gate_versions
     assert profile.handoff_inspection is True

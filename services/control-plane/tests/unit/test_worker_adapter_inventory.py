@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from sys import executable
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
@@ -9,6 +10,7 @@ import pytest
 
 from sidera_control_plane import gateway_worker
 from sidera_control_plane.adapters import opencode_acp
+from sidera_control_plane.adapters.dsh_acp import DshACPAdapter
 from sidera_control_plane.adapters.local_verification import LocalVerificationAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 from sidera_control_plane.domain.modules import (
@@ -61,6 +63,7 @@ def test_inventory_and_factories_share_one_registration_source(
         "opencode",
         "opencode-acp",
         LOCAL_VERIFICATION_PROVIDER,
+        "dsh-acp",
     }
     assert all(item.factory_key for item in registrations)
 
@@ -184,6 +187,34 @@ def test_default_opencode_module_keeps_legacy_context_contract(
 
     assert isinstance(adapter, OpenCodeACPAdapter)
     assert adapter._profile.context_package_versions == (1, 2)
+
+
+def test_factory_constructs_dsh_target_from_explicit_argv_and_environment(
+    tmp_path: Path,
+) -> None:
+    instance = _instance(
+        config={
+            "worker.argv": [executable, "-c", "print('acp host')"],
+            "worker.process_env": {"PATH": "/usr/bin", "DSH_MODEL": "mock"},
+            "worker.context_package_versions": [1, 2],
+            "worker.request_timeout_seconds": 3.0,
+            "worker.stop_grace_seconds": 0.5,
+        }
+    )
+    factories = gateway_worker.build_worker_adapter_factories(
+        _settings(tmp_path),
+        workspace_manager=cast(Any, SimpleNamespace()),
+    )
+
+    adapter = factories["dsh-acp"](instance)
+
+    assert isinstance(adapter, DshACPAdapter)
+    assert adapter._argv == (executable, "-c", "print('acp host')")
+    assert adapter._process_env == {"PATH": "/usr/bin", "DSH_MODEL": "mock"}
+    assert adapter._handoff_target_enabled is True
+    assert adapter._profile.handoff_checkpoint_versions == ()
+    assert adapter._profile.handoff_session_context_versions == (1,)
+    assert adapter._profile.handoff_writer_gate_versions == (1,)
 
 
 def test_local_verification_is_explicitly_not_a_second_agent(
