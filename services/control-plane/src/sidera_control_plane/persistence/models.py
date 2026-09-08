@@ -6339,6 +6339,76 @@ class NotificationReconciliationCursorModel(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class RealResultRunBudgetModel(TimestampMixin, Base):
+    __tablename__ = "real_result_run_budgets"
+    __table_args__ = (
+        CheckConstraint(
+            "max_executions >= 1 AND reserved_executions >= 0 "
+            "AND reserved_executions <= max_executions",
+            name="ck_real_result_run_budgets_counts",
+        ),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    max_executions: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved_executions: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RealResultExecutionReservationModel(TimestampMixin, Base):
+    __tablename__ = "real_result_execution_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence_no >= 1",
+            name="ck_real_result_execution_reservations_sequence",
+        ),
+        CheckConstraint(
+            "status IN ('started', 'succeeded', 'unknown')",
+            name="ck_real_result_execution_reservations_status",
+        ),
+        ForeignKeyConstraint(
+            ["run_id"],
+            ["real_result_run_budgets.run_id"],
+            ondelete="RESTRICT",
+            name="fk_real_result_execution_reservations_run",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "sequence_no",
+            name="uq_real_result_execution_reservations_sequence",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "step_key",
+            name="uq_real_result_execution_reservations_step",
+        ),
+        Index(
+            "ix_real_result_execution_reservations_run",
+            "run_id",
+            "sequence_no",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class ResultOperationAttemptModel(TimestampMixin, Base):
     __tablename__ = "result_operation_attempts"
     __table_args__ = (

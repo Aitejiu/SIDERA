@@ -24,6 +24,9 @@ from sidera_control_plane.domain.modules import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import ExecutionModel
+from sidera_control_plane.persistence.real_result_budget import (
+    RealResultExecutionBudgetStore,
+)
 from sidera_control_plane.result_readiness import authorize_real_result_run
 from tests.e2e.test_r6_3_4_real_opencode_inputs import (
     REAL_RESULT_MAX_REPORT_BYTES,
@@ -81,7 +84,7 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
     database = Database(_real_database_url())
     adapters: list[OpenCodeACPAdapter] = []
     scenario: ResultIntegrationScenario | None = None
-    reserved = 0
+    reservations = []
     started_at = datetime.now(UTC)
     deadline = time.monotonic() + min(
         REAL_RESULT_MAX_SECONDS, authorization.wall_clock_seconds
@@ -139,18 +142,25 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         )
         scenario.configure_worker_runtime(runtime, repository_ref=repository_ref)
         scenario.seed_plan(apply=False)
+        budget_store = RealResultExecutionBudgetStore(database)
 
         def reserve(step: str) -> None:
-            nonlocal reserved
             _ensure_real_time(deadline)
-            if reserved >= len(REAL_RESULT_EXECUTION_STEPS):
+            if len(reservations) >= len(REAL_RESULT_EXECUTION_STEPS):
                 raise AssertionError("real result execution budget was overrun")
-            if REAL_RESULT_EXECUTION_STEPS[reserved] != step:
+            if REAL_RESULT_EXECUTION_STEPS[len(reservations)] != step:
                 raise AssertionError(
                     f"real result step order changed: expected "
-                    f"{REAL_RESULT_EXECUTION_STEPS[reserved]}, got {step}"
+                    f"{REAL_RESULT_EXECUTION_STEPS[len(reservations)]}, got {step}"
                 )
-            reserved = authorization.reserve_execution(reserved)
+            reservation = budget_store.reserve(
+                run_id=authorization.run_id,
+                max_executions=authorization.max_executions,
+                step_key=step,
+            )
+            if reservation.sequence_no != len(reservations) + 1:
+                raise AssertionError("real result reservation sequence is not contiguous")
+            reservations.append(reservation)
 
         # Reserve all three first-pass sessions before entering the helper that
         # creates the two source workers and the first integration worker.
@@ -159,6 +169,9 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         reserve("integration")
         first = scenario.seed_repairable_candidate()
         _ensure_real_time(deadline)
+        budget_store.complete(reservations[0].id, status="succeeded")
+        budget_store.complete(reservations[1].id, status="succeeded")
+        budget_store.complete(reservations[2].id, status="succeeded")
         if len(adapters) != 3:
             raise AssertionError(f"first pass started {len(adapters)} real adapters")
         if scenario.verification_results(first.id)[0].status != "failed":
@@ -177,6 +190,7 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
                 b"# SIDERA_REAL_RESULT_REPAIR\n",
             },
         )
+        budget_store.complete(reservations[3].id, status="succeeded")
 
         scenario.command(
             "ReintegrateTaskResult",
@@ -185,6 +199,7 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
         reserve("reintegration")
         second = scenario.drive()
         _ensure_real_time(deadline)
+        budget_store.complete(reservations[4].id, status="succeeded")
         if len(adapters) != 5:
             raise AssertionError(f"real flow started {len(adapters)} adapters")
         if scenario.verification_results(second.id)[0].status != "passed":
@@ -196,8 +211,12 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
             raise AssertionError(f"real result acceptance did not complete: {outcome}")
         if scenario.candidate_tree(second) != scenario.restore_candidate(second):
             raise AssertionError("real accepted candidate did not restore independently")
-        if reserved != len(REAL_RESULT_EXECUTION_STEPS):
+        if len(reservations) != len(REAL_RESULT_EXECUTION_STEPS):
             raise AssertionError("real result flow did not consume its declared budget")
+        if budget_store.reserved_count(authorization.run_id) != len(
+            REAL_RESULT_EXECUTION_STEPS
+        ):
+            raise AssertionError("durable real result budget count is incomplete")
         _ensure_real_time(deadline)
 
         with database.session() as session:
@@ -225,7 +244,7 @@ def test_real_opencode_result_integration_entry(tmp_path: Path) -> None:
                     "real_result_integration": {
                         **authorization.safe_summary(),
                         "status": "passed",
-                        "executions": reserved,
+                        "executions": len(reservations),
                         "steps": list(REAL_RESULT_EXECUTION_STEPS),
                         "adapters": len(adapters),
                         "provider_call_window_seconds": int(

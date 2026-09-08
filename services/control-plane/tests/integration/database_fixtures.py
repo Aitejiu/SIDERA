@@ -65,6 +65,8 @@ from sidera_control_plane.persistence.models import (
     ProcessDescriptorModel,
     ProjectionChangeModel,
     ProposalMaterializationModel,
+    RealResultExecutionReservationModel,
+    RealResultRunBudgetModel,
     ResultApplyOperationModel,
     ResultOperationAttemptModel,
     ResultReworkRecordModel,
@@ -243,6 +245,8 @@ def _clear_database(database: Database) -> None:
         session.execute(delete(HandoffTransitionModel))
         session.execute(delete(HandoffProposalModel))
         for model in (
+            RealResultExecutionReservationModel,
+            RealResultRunBudgetModel,
             ProjectionChangeModel,
             AttentionAcknowledgementModel,
             WorkspaceProjectionCursorModel,

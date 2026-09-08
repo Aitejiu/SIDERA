@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.result_operations import ResultError
@@ -76,6 +77,7 @@ class ResultReadinessReport:
 class RealRunAuthorization:
     """Non-secret, bounded authorization for a real result-integration run."""
 
+    run_id: UUID
     provider: str
     model: str
     endpoint_host: str
@@ -98,6 +100,7 @@ class RealRunAuthorization:
         """Return fields safe for a run log; never include credentials or paths."""
 
         return {
+            "run_id": str(self.run_id),
             "provider": self.provider,
             "model": self.model,
             "endpoint_host": self.endpoint_host,
@@ -188,7 +191,9 @@ def authorize_real_result_run(
         default=_REAL_MAX_WALL_SECONDS,
         upper=_REAL_MAX_WALL_SECONDS,
     )
+    run_id = _real_run_id(values)
     return RealRunAuthorization(
+        run_id=run_id,
         provider=provider,
         model=model,
         endpoint_host=endpoint_host,
@@ -275,6 +280,14 @@ def _real_required(values: Mapping[str, str], name: str) -> str:
     if value is None or not value.strip():
         raise ResultError("real_configuration_missing", {})
     return value.strip()
+
+
+def _real_run_id(values: Mapping[str, str]) -> UUID:
+    value = _real_required(values, "SIDERA_REAL_RESULT_RUN_ID")
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ResultError("real_run_id_invalid", {}) from exc
 
 
 def _real_endpoint(values: Mapping[str, str], name: str) -> str:

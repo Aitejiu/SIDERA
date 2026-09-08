@@ -25,6 +25,7 @@ def _environment(repository: Path, **overrides: str) -> dict[str, str]:
     values = {
         "SIDERA_RUN_REAL_RESULT_INTEGRATION": "1",
         "SIDERA_REAL_RESULT_INTEGRATION_AUTHORIZED": "1",
+        "SIDERA_REAL_RESULT_RUN_ID": "11111111-1111-4111-8111-111111111111",
         "SIDERA_REAL_RESULT_PROVIDER": "opencode-go",
         "SIDERA_REAL_RESULT_MODEL": "opencode-go/MiMo-V2.5",
         "SIDERA_REAL_RESULT_ENDPOINT_HOST": "api.opencode.example",
@@ -141,6 +142,7 @@ def test_valid_real_gate_is_bounded_and_has_no_secret_summary(tmp_path: Path) ->
     )
 
     assert authorization.provider == "opencode-go"
+    assert str(authorization.run_id) == "11111111-1111-4111-8111-111111111111"
     assert authorization.model == "opencode-go/MiMo-V2.5"
     assert authorization.max_executions == 5
     assert authorization.wall_clock_seconds == 1800
@@ -150,6 +152,16 @@ def test_valid_real_gate_is_bounded_and_has_no_secret_summary(tmp_path: Path) ->
         authorization.reserve_execution(5)
     assert "credential" not in repr(authorization.safe_summary()).casefold()
     assert "secret" not in repr(authorization.safe_summary()).casefold()
+
+
+def test_real_gate_requires_a_valid_durable_run_id(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    with pytest.raises(ResultError, match="real_run_id_invalid"):
+        authorize_real_result_run(
+            _settings(),
+            _local_gate(repository),
+            environ=_environment(repository, SIDERA_REAL_RESULT_RUN_ID="not-a-uuid"),
+        )
 
 
 def test_real_result_flow_budget_names_the_full_acceptance_path() -> None:
