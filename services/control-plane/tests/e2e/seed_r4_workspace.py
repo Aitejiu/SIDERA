@@ -23,6 +23,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextSelectionReason,
     ContextTrustLevel,
 )
+from sidera_control_plane.domain.plan_revisions import plan_snapshot_content_hash
 from sidera_control_plane.domain.plans import (
     DependencyEnforcement,
     DependencyKind,
@@ -81,6 +82,7 @@ from sidera_control_plane.persistence.models import (
     ProcessDescriptorModel,
     ProjectionChangeModel,
     ProposalMaterializationModel,
+    RootTaskPlanHeadModel,
     SchedulingBlockModel,
     TaskModel,
     WorkContextModel,
@@ -289,6 +291,7 @@ def _clean_workspace(session, workspace_id: UUID) -> None:
         PlanningClarificationModel,
         PlanningRunLeaseModel,
         PlanningRunModel,
+        RootTaskPlanHeadModel,
         PlanningBriefRevisionModel,
         PlanningRequestModel,
         PlanningProfileModel,
@@ -563,6 +566,29 @@ def _seed_task_first(session, workspace_id: UUID) -> None:
             _plan_model(second),
             _plan_model(second_root_first),
             _plan_model(second_root_second),
+        ]
+    )
+    session.flush()
+    session.add_all(
+        [
+            RootTaskPlanHeadModel(
+                workspace_id=workspace_id,
+                root_task_id=ROOT_TASK_ID,
+                active_snapshot_id=GENERATION_TWO_ID,
+                active_generation=2,
+                active_snapshot_hash=plan_snapshot_content_hash(second),
+                version=1,
+                updated_at=NOW,
+            ),
+            RootTaskPlanHeadModel(
+                workspace_id=workspace_id,
+                root_task_id=SECOND_ROOT_TASK_ID,
+                active_snapshot_id=SECOND_GENERATION_TWO_ID,
+                active_generation=2,
+                active_snapshot_hash=plan_snapshot_content_hash(second_root_second),
+                version=1,
+                updated_at=NOW,
+            ),
         ]
     )
     session.flush()
