@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ from sidera_control_plane.gateway_worker import (
     WorkerAdapterRegistration,
     worker_adapter_inventory,
 )
+from tests.e2e.basic_acceptance.runner import run_scenario
 
 
 def _qualifying_second_adapters() -> tuple[WorkerAdapterRegistration, ...]:
@@ -29,29 +31,18 @@ def test_second_adapter_handoff_gate() -> None:
             "set SIDERA_R6_2_SECOND_ADAPTER=1 to run the distinct Adapter gate"
         )
 
-    selected_type = os.environ.get("SIDERA_R6_2_SECOND_ADAPTER_TYPE", "").strip()
-    candidate = next(
-        (
-            item
-            for item in _qualifying_second_adapters()
-            if item.adapter_type == selected_type
-        ),
-        None,
-    )
-    if candidate is None:
-        inventory = ", ".join(item.adapter_type for item in _qualifying_second_adapters())
-        pytest.skip(
-            "no qualifying registered non-OpenCode real Adapter is available; "
-            f"selected={selected_type or '<unset>'}, eligible={inventory or '<none>'}"
+    manifest_ref = os.environ.get("SIDERA_BASIC_ACCEPTANCE_MANIFEST", "").strip()
+    if not manifest_ref:
+        pytest.fail(
+            "real second Adapter gate requires SIDERA_BASIC_ACCEPTANCE_MANIFEST; "
+            "inventory alone is not an acceptance result"
         )
-
-    # A qualifying entry must be wired to a real factory before this test can
-    # be enabled. Keeping this explicit prevents a future inventory-only edit
-    # from silently turning the release gate into a false pass.
-    pytest.fail(
-        "registered second Adapter has no approved real factory integration yet: "
-        f"{candidate.adapter_type} ({candidate.implementation})"
+    evidence = run_scenario(
+        "second-adapter",
+        Path(manifest_ref).expanduser(),
+        mode="real",
     )
+    assert evidence.status == "PASS", evidence.model_dump(mode="json")
 
 
 def registered_adapter_inventory() -> tuple[dict[str, Any], ...]:

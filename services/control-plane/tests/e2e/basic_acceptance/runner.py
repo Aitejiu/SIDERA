@@ -14,12 +14,14 @@ from .contracts import (
     RecoverySnapshot,
     RevisionSnapshot,
     ScenarioEvidence,
+    SecondAdapterSnapshot,
     UserFlowSnapshot,
 )
 from .evidence import EvidenceBuilder
 from .intervention import run_intervention
 from .recovery import run_recovery
 from .revision import run_revision
+from .second_adapter import run_second_adapter
 from .user_flow import run_user_flow
 
 ResultBudgetState = Literal["completed", "reserved", "exhausted", "unknown"]
@@ -269,6 +271,21 @@ def run_scenario(
             raw,
             snapshot=snapshot,
             evidence_kind=recovery_evidence_kind,
+        )
+    if name == "second-adapter":
+        snapshot_value = raw.get("second_adapter_snapshot")
+        snapshot = (
+            SecondAdapterSnapshot.model_validate(snapshot_value)
+            if isinstance(snapshot_value, dict)
+            else None
+        )
+        second_adapter_evidence_kind: Literal["contract", "real_user_flow"] = (
+            "real_user_flow" if mode == "real" else "contract"
+        )
+        return run_second_adapter(
+            raw,
+            snapshot=snapshot,
+            evidence_kind=second_adapter_evidence_kind,
         )
     return builder.finish(
         real_tests=0,

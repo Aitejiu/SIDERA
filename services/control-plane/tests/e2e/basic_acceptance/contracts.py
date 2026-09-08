@@ -226,6 +226,41 @@ class RecoverySnapshot(BaseModel):
     state_after: Literal["reconciled", "pending", "unknown", "failed"]
 
 
+class SecondAdapterSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    root_task_id: UUID
+    workspace_id: UUID
+    source_worker_item_id: UUID
+    target_worker_item_id: UUID
+    source_adapter_type: str = Field(min_length=1, max_length=128)
+    target_adapter_type: str = Field(min_length=1, max_length=128)
+    source_implementation: str = Field(min_length=1, max_length=256)
+    target_implementation: str = Field(min_length=1, max_length=256)
+    source_execution_id: UUID
+    target_execution_id: UUID
+    source_session_id: UUID
+    target_session_id: UUID
+    source_real_session: bool
+    target_real_session: bool
+    source_checkpoint_observed: bool
+    source_stop_observed: bool
+    source_unknown_reconciled: bool
+    target_started_held: bool
+    target_prompt_count_before_enable: int = Field(ge=0)
+    target_enable_observed: bool
+    target_prompt_count_after_enable: int = Field(ge=0)
+    target_single_writer_observed: bool
+    workspace_reused_exact: bool
+    context_binding_observed: bool
+    source_context_marker_observed: bool
+    target_context_marker_observed: bool
+    target_result_observed: bool
+    trace_usage_gap_explicit: bool
+
+
 class RuntimeLimitEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
