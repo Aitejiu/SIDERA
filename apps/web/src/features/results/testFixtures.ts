@@ -47,6 +47,7 @@ export function resultView(
     previous_candidate_id: null,
     created_at: "2026-09-08T01:00:00Z",
     is_current: true,
+    storage_status: "unknown",
     artifacts: [{
       artifact_id: "71000000-0000-0000-0000-000000000008",
       artifact_type: "patch",

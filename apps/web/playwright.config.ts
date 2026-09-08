@@ -72,6 +72,8 @@ export default defineConfig({
         SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN: controlPlaneToken,
         SIDERA_CONTEXT_PACKAGE_CUTOVER_AT: contextPackageCutoverAt,
         SIDERA_COLLABORATION_GOVERNANCE_ENABLED: "true",
+        SIDERA_RESULT_INTEGRATION_ENABLED: "true",
+        SIDERA_RESULT_INPUTS_ENABLED: "true",
         SIDERA_LOCAL_ACTOR_TYPE: "local",
         SIDERA_LOCAL_ACTOR_ID: "aitejiu",
       },

@@ -75,6 +75,14 @@ export type R6ResultInputAction =
   | "finish-late-source"
   | "recover-body"
   | "inspect";
+export type R6ResultIntegrationAction = "repair" | "accept";
+export type R6ResultIntegrationSeed = {
+  workspace_id: string;
+  root_task_id: string;
+  worker_item_ids: Record<string, string>;
+  current_candidate_id: string | null;
+  phase: string;
+};
 
 const webRoot = resolve(import.meta.dirname, "../..");
 const repositoryRoot = resolve(webRoot, "../..");
@@ -95,6 +103,8 @@ const knowledgeSeedScript = resolve(knowledgeServiceRoot, "tests/e2e/seed_r5_3_k
 const knowledgeDefaultPython = resolve(knowledgeServiceRoot, ".venv/bin/python");
 const defaultContextPackageCutoverAt = "2026-08-27T00:00:00+08:00";
 const resultInputRoots = new Map<string, string>();
+const resultIntegrationRuntimeModule = "tests.e2e.result_integration_seed";
+const resultIntegrationRoots = new Map<string, string>();
 
 export function seedR4Workspace(scenario: SeedScenario = "task-first"): void {
   execFileSync(
@@ -283,6 +293,34 @@ export function runR6ResultInputActionForWorkspace(
   return runR6ResultInputAction(workspaceId, root, action);
 }
 
+export function seedResultIntegration(
+  workspaceId: string,
+  root: string,
+): R6ResultIntegrationSeed {
+  runResultIntegrationAction(workspaceId, root, "seed");
+  const state = runResultIntegrationAction(workspaceId, root, "prepare");
+  return parseResultIntegrationSeed(state);
+}
+
+export function prepareResultIntegrationBrowser(workspaceId: string): R6ResultIntegrationSeed {
+  const root = resultIntegrationRoots.get(workspaceId);
+  if (root === undefined) {
+    throw new Error(`R6 result-integration workspace is not registered: ${workspaceId}`);
+  }
+  return parseResultIntegrationSeed(runResultIntegrationAction(workspaceId, root, "prepare"));
+}
+
+export function advanceResultIntegration(
+  workspaceId: string,
+  action: R6ResultIntegrationAction,
+): R6ResultIntegrationSeed {
+  const root = resultIntegrationRoots.get(workspaceId);
+  if (root === undefined) {
+    throw new Error(`R6 result-integration workspace is not registered: ${workspaceId}`);
+  }
+  return parseResultIntegrationSeed(runResultIntegrationAction(workspaceId, root, "advance", action));
+}
+
 export function seedKnowledge(workspaceId: string = WORKSPACE_ID): void {
   execFileSync(
     process.env.SIDERA_E2E_KNOWLEDGE_PYTHON ?? knowledgeDefaultPython,
@@ -457,6 +495,65 @@ function runR6ResultInputAction(
     throw new Error(`R6.3.4 result-input action ${action} returned a non-object summary`);
   }
   return parsed as Record<string, unknown>;
+}
+
+function runResultIntegrationAction(
+  workspaceId: string,
+  root: string,
+  mode: "seed" | "prepare" | "advance",
+  action?: R6ResultIntegrationAction,
+): Record<string, unknown> {
+  const output = execFileSync(
+    process.env.SIDERA_E2E_PYTHON ?? defaultPython,
+    [
+      "-m",
+      resultIntegrationRuntimeModule,
+      "--workspace-id",
+      workspaceId,
+      "--mode",
+      mode,
+      ...(action === undefined ? [] : ["--action", action]),
+    ],
+    {
+      cwd: controlPlaneRoot,
+      stdio: "pipe",
+      env: {
+        ...e2eEnvironment(),
+        SIDERA_R6_RESULT_INTEGRATION_TEST_MODE: "1",
+        SIDERA_R6_RESULT_INTEGRATION_SCOPE: "provider-free-result-integration",
+        SIDERA_R6_RESULT_INTEGRATION_TEST_ROOT: root,
+        SIDERA_RESULT_INTEGRATION_ENABLED: "1",
+        SIDERA_RESULT_INPUTS_ENABLED: "1",
+        SIDERA_RUN_REAL_RESULT_INTEGRATION: "0",
+        SIDERA_RUN_REAL_RESULT_INPUTS: "0",
+      },
+      encoding: "utf8",
+    },
+  );
+  const lastLine = output.trim().split(/\r?\n/).at(-1);
+  if (lastLine === undefined || lastLine.length === 0) {
+    throw new Error(`R6 result-integration action ${mode} did not return a JSON summary`);
+  }
+  const parsed: unknown = JSON.parse(lastLine);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`R6 result-integration action ${mode} returned a non-object summary`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseResultIntegrationSeed(state: Record<string, unknown>): R6ResultIntegrationSeed {
+  const workerItemIds = requiredStateRecord(state, "worker_item_ids");
+  return {
+    workspace_id: requiredStateString(state, "workspace_id"),
+    root_task_id: requiredStateString(state, "root_task_id"),
+    worker_item_ids: Object.fromEntries(
+      Object.entries(workerItemIds).map(([key]) => [key, requiredRecordString(workerItemIds, key)]),
+    ),
+    current_candidate_id: state.current_candidate_id === null
+      ? null
+      : requiredStateString(state, "current_candidate_id"),
+    phase: requiredStateString(state, "phase"),
+  };
 }
 
 function requiredStateString(state: Record<string, unknown>, key: string): string {
@@ -639,6 +736,12 @@ type Fixtures = {
     workspaceId: string,
     action: R6ResultInputAction,
   ) => Record<string, unknown>;
+  seedResultIntegration: () => R6ResultIntegrationSeed;
+  prepareResultIntegrationBrowser: (workspaceId: string) => R6ResultIntegrationSeed;
+  advanceResultIntegration: (
+    workspaceId: string,
+    action: R6ResultIntegrationAction,
+  ) => R6ResultIntegrationSeed;
   seedKnowledge: (workspaceId?: string) => void;
 };
 
@@ -734,6 +837,32 @@ export const test = base.extend<Fixtures>({
     // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(runR6ResultInputActionForWorkspace);
+  },
+  seedResultIntegration: async ({ browserName }, use) => {
+    void browserName;
+    const workspaceId = randomUUID();
+    const root = mkdtempSync(join(tmpdir(), "sidera-r6-result-integration-"));
+    resultIntegrationRoots.set(workspaceId, root);
+    try {
+      // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+      // eslint-disable-next-line react-hooks/rules-of-hooks
+      await use(() => seedResultIntegration(workspaceId, root));
+    } finally {
+      resultIntegrationRoots.delete(workspaceId);
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  prepareResultIntegrationBrowser: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(prepareResultIntegrationBrowser);
+  },
+  advanceResultIntegration: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(advanceResultIntegration);
   },
   seedKnowledge: async ({ browserName }, use) => {
     void browserName;
