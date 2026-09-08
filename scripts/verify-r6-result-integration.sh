@@ -125,12 +125,12 @@ PY
 
 classify_dirty_scope() {
   local status_output
-  status_output=$(git -C "$REPO_ROOT" status --short --untracked-files=all 2>/dev/null) || return 1
+  status_output=$(git -C "$REPO_ROOT" status --porcelain=v1 -z --untracked-files=all 2>/dev/null) || return 1
   if [[ -z "$status_output" ]]; then
     printf '%s\n' 'clean'
     return 0
   fi
-  while IFS= read -r line; do
+  while IFS= read -r -d '' line; do
     local path="${line:3}"
     case "$path" in
       .superpowers/*|references/*|docs/superpowers/specs/2026-09-05-sidera-r6-3-4-scope-proposal.md)

@@ -73,8 +73,8 @@ set -euo pipefail
 printf 'git args=%s\n' "$*" >>"$FAKE_LOG"
 if [[ "$*" == *"rev-parse --short HEAD"* ]]; then
   printf '%s\n' 'r6gate0'
-elif [[ "$*" == *"status --short"* ]]; then
-  printf '%s\n' '?? .superpowers/' '?? references/'
+elif [[ "$*" == *"status --porcelain=v1 -z"* ]]; then
+  printf '%s\0' '?? .superpowers/' '?? references/'
 fi
 EOF
 
