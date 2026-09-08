@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
@@ -20,7 +21,7 @@ from .client import (
     TransportUnavailable,
 )
 from .config import TaskBridgeConfig
-from .state import BridgeStateStore
+from .state import BridgeStateStore, PrivateRoute
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,66 @@ _TERMINAL_ERROR_CODES = frozenset(
 
 class GatewayNotReady(RuntimeError):
     """The local Adapter cannot safely start external notification delivery."""
+
+
+class NotificationRouteGuardError(ValueError):
+    """A private notification route cannot be proven safe for this run."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizedPrivateRoute:
+    """The exact route selected by an explicit, non-secret run reference."""
+
+    source_ref: str
+    route: PrivateRoute
+
+
+def resolve_authorized_private_route(
+    route_reference: str | None,
+    *,
+    environ: Mapping[str, str],
+    routes: Mapping[str, PrivateRoute],
+    module_routes: Mapping[str, str] | None = None,
+) -> AuthorizedPrivateRoute:
+    """Resolve one manifest route without enumerating or guessing recipients.
+
+    A manifest carries only an ``env:NAME`` or ``module:NAME`` reference.  The
+    resolved value is an opaque source reference that must match one exact
+    locally persisted route.  This function deliberately performs a direct
+    lookup, so a missing or unknown route cannot turn into a contact search or
+    a test message to another recipient.
+    """
+
+    if not isinstance(route_reference, str) or not route_reference.strip():
+        raise NotificationRouteGuardError("notification_route_reference_missing")
+    reference = route_reference.strip()
+    if reference.startswith("env:"):
+        name = reference.removeprefix("env:")
+        if not name or name not in environ or not environ[name].strip():
+            raise NotificationRouteGuardError(
+                "notification_route_reference_unavailable"
+            )
+        source_ref = environ[name].strip()
+    elif reference.startswith("module:"):
+        module_name = reference.removeprefix("module:")
+        source_ref = (module_routes or {}).get(module_name, "").strip()
+        if not source_ref:
+            raise NotificationRouteGuardError(
+                "notification_route_reference_unavailable"
+            )
+    else:
+        raise NotificationRouteGuardError("notification_route_reference_invalid")
+
+    route = routes.get(source_ref)
+    if route is None:
+        raise NotificationRouteGuardError("notification_route_not_found")
+    if route.channel != "telegram":
+        raise NotificationRouteGuardError("notification_route_channel_unsupported")
+    return AuthorizedPrivateRoute(source_ref=source_ref, route=route)
 
 
 class GatewayNotificationRunner:
@@ -503,9 +564,12 @@ def _result_uuid(result: DispatchResult, key: str) -> UUID | None:
 
 
 __all__ = [
+    "AuthorizedPrivateRoute",
     "GatewayNotReady",
     "GatewayNotificationRunner",
     "MalformedNotificationDelivery",
+    "NotificationRouteGuardError",
     "normalize_provider_error",
     "render_notification_message",
+    "resolve_authorized_private_route",
 ]

@@ -26,6 +26,12 @@ class ScenarioEvidence(BaseModel):
     command_ids: tuple[UUID, ...] = ()
     execution_ids: tuple[UUID, ...] = ()
     session_ids: tuple[UUID, ...] = ()
+    notification_fact_ids: tuple[UUID, ...] = ()
+    notification_thread_ids: tuple[UUID, ...] = ()
+    notification_intent_ids: tuple[UUID, ...] = ()
+    notification_delivery_ids: tuple[UUID, ...] = ()
+    notification_attempt_ids: tuple[UUID, ...] = ()
+    provider_receipt_refs: tuple[str, ...] = ()
     check_codes: tuple[str, ...] = ()
     failure_code: str | None = None
 
@@ -259,6 +265,44 @@ class SecondAdapterSnapshot(BaseModel):
     target_context_marker_observed: bool
     target_result_observed: bool
     trace_usage_gap_explicit: bool
+
+
+class NotificationSnapshot(BaseModel):
+    """Secret-free facts collected from the normal notification path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    root_task_id: UUID
+    fact_id: UUID
+    thread_id: UUID
+    intent_id: UUID
+    delivery_id: UUID
+    attempt_id: UUID
+    provider_receipt_ref: str = Field(min_length=1, max_length=512)
+    source_ref_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    private_source_ref_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    web_root_task_id: UUID
+    private_root_task_id: UUID
+    web_subtask_id: UUID | None = None
+    private_subtask_id: UUID | None = None
+    web_worker_item_id: UUID | None = None
+    private_worker_item_id: UUID | None = None
+    route_status: Literal["authorized", "missing", "unknown", "revoked"]
+    route_scope_valid: bool
+    normal_business_path_observed: bool
+    gateway_claim_observed: bool
+    gateway_settle_observed: bool
+    message_has_task_context: bool
+    deep_link_targets_exact_resource: bool
+    web_mail_matches_private: bool
+    provider_status: Literal["accepted", "rejected", "unknown"]
+    user_acknowledged: bool
+    main_agent_re_read_latest_fact: bool
+    ack_loss_recovered: bool
+    business_state_preserved_after_recovery: bool
+    only_same_source_route_delivered: bool
 
 
 class RuntimeLimitEvidence(BaseModel):

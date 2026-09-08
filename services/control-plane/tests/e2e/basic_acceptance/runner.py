@@ -11,6 +11,7 @@ from uuid import UUID
 
 from .contracts import (
     InterventionSnapshot,
+    NotificationSnapshot,
     RecoverySnapshot,
     RevisionSnapshot,
     ScenarioEvidence,
@@ -19,6 +20,7 @@ from .contracts import (
 )
 from .evidence import EvidenceBuilder
 from .intervention import run_intervention
+from .notification import run_notification
 from .recovery import run_recovery
 from .revision import run_revision
 from .second_adapter import run_second_adapter
@@ -286,6 +288,21 @@ def run_scenario(
             raw,
             snapshot=snapshot,
             evidence_kind=second_adapter_evidence_kind,
+        )
+    if name == "notification":
+        snapshot_value = raw.get("notification_snapshot")
+        snapshot = (
+            NotificationSnapshot.model_validate(snapshot_value)
+            if isinstance(snapshot_value, dict)
+            else None
+        )
+        notification_evidence_kind: Literal["contract", "real_user_flow"] = (
+            "real_user_flow" if mode == "real" else "contract"
+        )
+        return run_notification(
+            raw,
+            snapshot=snapshot,
+            evidence_kind=notification_evidence_kind,
         )
     return builder.finish(
         real_tests=0,

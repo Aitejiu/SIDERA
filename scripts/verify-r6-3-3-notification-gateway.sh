@@ -110,11 +110,18 @@ else
 fi
 
 if [ "${SIDERA_RUN_REAL_NOTIFICATION_GATE:-0}" = "1" ]; then
-  [ -n "${SIDERA_REAL_NOTIFICATION_GATE_COMMAND:-}" ] \
-    || fail "SIDERA_REAL_NOTIFICATION_GATE_COMMAND is required when the real notification gate is enabled"
-  run_step 'real Akashic/Telegram gate' safe_env bash -c "$SIDERA_REAL_NOTIFICATION_GATE_COMMAND"
+  [ -n "${SIDERA_BASIC_NOTIFICATION_MANIFEST:-}" ] \
+    || fail "SIDERA_BASIC_NOTIFICATION_MANIFEST is required when the real notification gate is enabled"
+  [ -f "$SIDERA_BASIC_NOTIFICATION_MANIFEST" ] \
+    || fail "SIDERA_BASIC_NOTIFICATION_MANIFEST does not point to a file"
+  run_step 'fixed real Akashic/Telegram gate' safe_env env \
+    PYTHONPATH="$AKASHIC_ROOT:$REPO_ROOT/akashic-agent" \
+    SIDERA_RUN_REAL_NOTIFICATION_GATE=1 \
+    SIDERA_BASIC_NOTIFICATION_MANIFEST="$SIDERA_BASIC_NOTIFICATION_MANIFEST" \
+    uv run --project "$AKASHIC_ROOT" pytest -q \
+    "$AKASHIC_ROOT/tests/test_basic_real_notification.py"
 else
-  printf 'SKIPPED: real Akashic/Telegram gate not enabled\n'
+  printf 'SKIPPED: fixed real Akashic/Telegram gate not enabled\n'
 fi
 
 git -C "$REPO_ROOT" status --short -- .superpowers references >"$LOCAL_STATE_AFTER"
