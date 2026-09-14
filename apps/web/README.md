@@ -6,10 +6,9 @@ PostgreSQL directly.
 
 For the current local developer preview, start with the
 [initial demo guide](../../docs/deployment/initial-demo.md). It includes a
-provider-free fixture workspace, all three local server commands, the current
-browser checks, and the limits of the demo. The versioned R4/R5 sections below
-are component and historical gate references, not a complete current product
-release checklist.
+provider-free fixture workspace, all three local server commands, and the
+limits of the demo. Product usage is covered in the [user guide](../../docs/guide/workspace.md);
+the sections below are for frontend development and testing.
 
 ## macOS Prerequisites
 
@@ -179,10 +178,6 @@ uv run --project services/control-plane pytest \
   the timeout settings and the PostgreSQL DSN. A skipped provider test is not
   real-operation evidence.
 
-The standalone PostgreSQL mode remains the development mainline. Main Agent
-integration, planning proposals, DSH Worker ACP hosting, WorkerItem handoff,
-and collaboration now have implementations; their acceptance scope is
-recorded separately in the [root README](../../README.md#当前状态).
-A future DSH Plugin may embed the same Public API projections and deep links,
-but it must not access the database or create a second state source. Remote
-identity and remote Artifact storage remain outside this local demo.
+For supported query endpoints, command handling, and local identity limits,
+see the [integration and API documentation](../../docs/api/README.md).
+Remote identity and remote Artifact storage remain outside this local demo.

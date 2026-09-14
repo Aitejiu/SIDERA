@@ -8,6 +8,12 @@ OpenCode ACP child process per Execution through a replaceable Adapter; it does
 not own the Main Agent, collaboration topology, user memory, or knowledge
 content.
 
+For a provider-free local preview, follow the [quick start](../../docs/deployment/initial-demo.md).
+Public HTTP contracts are documented in the [API guide](../../docs/api/README.md).
+This component README covers Control Plane-specific preflight, migrations,
+planning profile payloads, WorkContext backfill, ContextPackage assembly, and
+operator commands.
+
 ## Prerequisites
 
 - Python 3.12 or newer and `uv`.
@@ -35,7 +41,7 @@ opencode --version
 
 export SIDERA_OPENCODE_EXECUTABLE="$(command -v opencode)"
 export SIDERA_OPENCODE_EXPECTED_VERSION="1.18.19"
-export SIDERA_OPENCODE_MODEL="deepseek/deepseek-v4-flash"
+export SIDERA_OPENCODE_MODEL="<authorized-provider>/<model-id>"
 export SIDERA_WORKSPACE_ROOT="$PWD/.sidera/workspaces"
 mkdir -p "$SIDERA_WORKSPACE_ROOT"
 ```
@@ -72,9 +78,10 @@ probe does not make a Planner profile available.
 Set local development paths:
 
 ```bash
-export SIDERA_PG_BIN="$HOME/.local/share/sidera/postgresql-16.14/bin"
+export SIDERA_PG_BIN="$(brew --prefix postgresql@16)/bin"
 export SIDERA_PG_DATA_DIR="$HOME/.local/share/sidera/postgres-data"
 export SIDERA_PG_LOG="$HOME/.local/share/sidera/postgres.log"
+mkdir -p "$HOME/.local/share/sidera"
 ```
 
 Initialize the cluster and database once. The `trust` authentication below is
@@ -132,6 +139,71 @@ uv run --project services/control-plane python \
 
 `StdoutEventSink` is a development diagnostic, not a production transport or a
 delivery contract. External delivery is at least once.
+
+## R5.3.3 Context Package Runtime
+
+R5.3.3 makes WorkContext and exact Knowledge references a durable
+`ContextPackage`. The Control Plane stores the immutable manifest, hashes,
+consumer identity, budget, expiry, acknowledgement, and audit metadata. It
+does not store Knowledge section bodies in the package projection, Events,
+Outbox payloads, or logs.
+
+### Context Worker
+
+Run the Context Package Worker as a separate process after both databases have
+been migrated. It claims short-lived assembly leases, closes the database unit
+of work, calls the Knowledge Service, and opens a new unit of work only to
+persist the result:
+
+```bash
+export SIDERA_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_test"
+export SIDERA_KNOWLEDGE_BASE_URL="http://127.0.0.1:8020"
+export SIDERA_KNOWLEDGE_CONTROL_PLANE_TOKEN="<local-secret>"
+export SIDERA_CONTEXT_ASSEMBLY_BATCH_SIZE=10
+export SIDERA_CONTEXT_ASSEMBLY_LEASE_SECONDS=60
+export SIDERA_CONTEXT_ASSEMBLY_MAX_ATTEMPTS=5
+
+uv run --project services/control-plane python \
+  -m sidera_control_plane.context_package_worker \
+  --owner-id context-worker-local \
+  --poll-seconds 1 \
+  --batch-size 10
+```
+
+Use `--once` for a smoke run. The worker prints counts and safe error codes
+only. Never put the Knowledge token, Markdown body, or resolved secret value in
+module configuration, command payloads, Events, or logs. The Knowledge Service
+uses its own `SIDERA_KNOWLEDGE_DATABASE_URL` and must be migrated independently.
+
+The HTTP call is deliberately outside a Control Plane database transaction.
+This prevents a slow or unavailable Knowledge Service from holding row locks.
+The lease expiry allows another worker to reclaim work after a process restart;
+unique `(purpose, consumer_id)` and package hashes prevent duplicate packages.
+Temporary failures enter bounded retry and eventually block the assembly;
+permanent reference, permission, workspace, or hash failures block it without
+falling back to an empty context.
+
+### Cutover And Recovery
+
+Set `SIDERA_CONTEXT_PACKAGE_CUTOVER_AT` to an explicit timezone-aware instant
+when enabling the R5.3.3 path. Consumers created before the cutover retain the
+frozen legacy execution shape. New planning and execution consumers require a
+ready assembly, an active non-expired package, and an adapter capability that
+declares ContextPackage schema version `1`; missing or unsupported context is a
+stable scheduling/planning block, never an implicit legacy or empty-context
+fallback.
+
+Retry keeps the original request, fingerprint, consumer, and absolute expiry.
+Once the package has expired, create a new consumer instead of extending the
+old authorization. Revoke is owner-only and records an attention/event; it does
+not claim to erase information from a running Worker or automatically kill its
+process. `new_starts` blocks new consumer starts while an owner audit remains
+permitted; `all_materialization` also blocks owner body materialization.
+
+The read API exposes the manifest and audit metadata without body content. The
+owner materialization endpoint returns the typed body only in memory and sends
+`Cache-Control: no-store`. Use the package and submission query routes for
+operator diagnosis rather than reading PostgreSQL directly.
 
 ## R5.1 Planning Control Loop
 
@@ -248,7 +320,7 @@ from an adapter type, instance name, or latest active module:
    ```bash
    uv run --project services/control-plane python \
      -m sidera_control_plane.runtime_readiness \
-     --workspace-id <workspace-uuid> --json
+     --workspace-id "<workspace-uuid>" --json
    ```
 
    Continue only when the report has no missing/invalid runtime, active
@@ -283,7 +355,7 @@ three-level model:
    ```bash
    uv run --project services/control-plane python \
      -m sidera_control_plane.worker_item_backfill \
-     --workspace-id <workspace-uuid>
+     --workspace-id "<workspace-uuid>"
    ```
 
    The command emits one JSON report per Root Task. Confirm that every report
@@ -396,6 +468,43 @@ User acknowledgements, exact WorkerItem intervention, and exact Execution stop
 are submitted through `POST /api/v1/commands`. The command envelope remains
 the concurrency boundary; the Web does not write control-plane tables.
 
+## R5.3.2 Legacy WorkContext Backfill
+
+Requests created before durable `WorkContext` creation can be rebuilt from the
+immutable planning and task records already in PostgreSQL. The backfill never
+calls a Planner, reads chat/network state, or invents missing user content. It
+creates one `legacy_backfill` revision per request, skips requests that already
+have a WorkContext, and orders batches by planning-request UUID so a reported
+cursor can be used to resume a run.
+
+Run a read-only preview first:
+
+```bash
+uv run --project services/control-plane python \
+  -m sidera_control_plane.work_context_backfill \
+  --workspace-id "$SIDERA_WORKSPACE_ID" \
+  --batch-size 100 \
+  --dry-run
+```
+
+Writing requires an explicit confirmation flag:
+
+```bash
+uv run --project services/control-plane python \
+  -m sidera_control_plane.work_context_backfill \
+  --workspace-id "$SIDERA_WORKSPACE_ID" \
+  --batch-size 100 \
+  --confirm-write
+```
+
+The JSON summary contains only counts and the last planning-request UUID. A
+request with a Brief but missing Proposal, Materialization, Plan, or root Task
+is stored as `legacy_incomplete` with deterministic `missing_fact_codes`; a
+request with no Brief row is reported as incomplete and is not written because
+the revision schema requires an exact Brief reference. Each batch is its own
+transaction, so a corrupt batch is rolled back and reported while later UUID
+batches can continue.
+
 ## R4 Web And E2E
 
 The standalone Web is in `apps/web`. It reads Task First projections, durable
@@ -489,6 +598,8 @@ uv run --project services/control-plane pytest \
   services/control-plane/tests/integration/test_opencode_end_to_end.py -q
 ```
 
-Akashic, Web intervention UI, Main Agent, DSH integration, memory, and
-knowledge remain outside this service. Container packaging is deferred until
-the deployment topology is selected.
+Knowledge remains an independent service and database; this process only stores
+exact Knowledge references and ContextPackage manifests, and calls Knowledge
+through the bounded HTTP adapter. Main Agent conversation and Personal Memory
+remain outside this service. See the [API guide](../../docs/api/README.md) for
+integration boundaries and the local-only security profile.

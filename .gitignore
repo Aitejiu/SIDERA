@@ -50,4 +50,15 @@ logs/
 /.superpowers/
 /skills-lock.json
 /.local-backup/
-/references/deepseek-harness/
+/references/
+
+# Private product context and engineering notes stay local.
+# Publish only the selected user guides and integration/API documentation.
+/PRODUCT.md
+/docs/*
+!/docs/README.md
+!/docs/guide/
+!/docs/api/
+!/docs/deployment/
+/docs/deployment/*
+!/docs/deployment/initial-demo.md

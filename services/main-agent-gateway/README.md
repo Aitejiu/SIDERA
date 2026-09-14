@@ -50,10 +50,15 @@ uv run --project services/main-agent-gateway pytest \
   services/main-agent-gateway/tests/integration/test_real_vertical_loop.py -q
 ```
 
-The helper used by the stale-confirm/offline test must accept only the fixed
-actions `pause-control-plane` and `resume-control-plane`. It must operate on a
-PID whose runtime identity belongs to the current SIDERA checkout, never use
-`pkill`/`killall`, and leave PostgreSQL, Akashic, plugin-data, and task data
-untouched. The test captures helper output and does not print credentials or
+The helper used by the stale-confirm/offline and Web restart tests must accept
+only the fixed actions `pause-control-plane`, `resume-control-plane`, and
+`restart-gateway`. It must operate on a PID whose runtime identity belongs to
+the current SIDERA checkout, use only exact identity-checked process control,
+and leave PostgreSQL, Akashic, plugin-data, and task data untouched. The test
+captures helper output and does not print credentials or
 transcripts. Real resources are marked with a unique test marker and remain in
 the configured workspace for post-run inspection.
+
+See the [integration and API guide](../../docs/api/README.md) for the separate
+Control Plane and Knowledge endpoints. The provider-free demo does not start
+this Gateway or configure a real main-agent provider.

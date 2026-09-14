@@ -5,6 +5,11 @@ sources, candidate review state, and its command/event persistence. It is a sepa
 Python package and PostgreSQL database from the Control Plane; it must not import
 `sidera_control_plane`, share SQLAlchemy models, or use cross-database joins.
 
+For a provider-free local preview, use the [quick start](../../docs/deployment/initial-demo.md).
+The [API guide](../../docs/api/README.md) covers endpoints and capability tokens.
+This service owns knowledge content, revisions, and candidate review; the
+Control Plane stores exact references and hashes.
+
 ## Development
 
 From the repository root:
@@ -58,5 +63,6 @@ postgresql+psycopg://sidera@127.0.0.1:55432/sidera_knowledge_test
 The database URL is supplied through `SIDERA_KNOWLEDGE_DATABASE_URL`. No production
 credentials belong in this repository.
 
-R5.3.1 adds Knowledge commands, queries, review, FTS search, and exact materialization.
-ContextPackage integration remains a later controlled integration stage.
+Knowledge commands, queries, review, FTS search, and exact materialization are
+available through this service. Candidate review remains explicit and asynchronous;
+Task completion does not wait for it.
