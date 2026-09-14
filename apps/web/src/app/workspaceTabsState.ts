@@ -16,6 +16,7 @@ export type WorkspaceTabId =
 
 export type WorkspaceTab = {
   returnTabId?: WorkspaceTabId;
+  description?: string;
 } & (
   | {
       id: "task-index";
@@ -313,6 +314,9 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
     return false;
   }
   if (typeof value.title !== "string" || typeof value.href !== "string") {
+    return false;
+  }
+  if (value.description !== undefined && typeof value.description !== "string") {
     return false;
   }
   if (value.id === "task-index") {

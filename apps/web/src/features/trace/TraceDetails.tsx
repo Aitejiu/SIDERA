@@ -1,107 +1,75 @@
-import { FileArchive, Info, Timer, Wrench } from "lucide-react";
-import { useState } from "react";
+import { FileArchive } from "lucide-react";
 
+import { SafeMarkdown } from "../knowledge/SafeMarkdown";
 import { ProviderExtensions } from "./providerExtensions";
+import { formatTraceDuration, traceCategory, traceIsError, traceStatus } from "./tracePresentation";
 import type { WorkerTraceEvent } from "./types";
 
-type TraceDetailTab = "overview" | "input" | "output" | "timing" | "usage" | "artifacts";
-
-export function TraceDetails({
-  event,
-  onArtifactSelect,
-}: {
+export function TraceDetails({ event, onArtifactSelect }: {
   event: WorkerTraceEvent | null;
   onArtifactSelect: (artifactId: string) => void;
 }) {
-  const [tab, setTab] = useState<TraceDetailTab>("overview");
   if (event === null) {
-    return <section className="trace-details trace-details--empty" aria-label="轨迹详情"><span>选择一条轨迹查看详情</span></section>;
+    return <section className="trace-details trace-details--empty" aria-label="轨迹详情">选择一条记录查看详情</section>;
   }
-  const tabs: { key: TraceDetailTab; label: string }[] = [
-    { key: "overview", label: "Overview" },
-    { key: "input", label: "Input" },
-    { key: "output", label: "Output" },
-    { key: "timing", label: "Timing" },
-    { key: "usage", label: "Usage" },
-    { key: "artifacts", label: "Artifacts" },
-  ];
+  const category = traceCategory(event.category);
+  const Icon = category.icon;
+  const isTool = event.category === "tool" || event.category === "subtool";
+  const extensions = event.provider_extensions;
   return (
-    <section className="trace-details" aria-labelledby="trace-details-title">
-      <div className="section-heading">
-        <div>
-          <span className="eyebrow">EVENT #{event.sequence}</span>
-          <h2 id="trace-details-title">{event.title}</h2>
+    <section className="trace-details" aria-label="轨迹详情">
+      <header className="trace-details__heading">
+        <div className="trace-details__identity">
+          <span className={`trace-kind trace-kind--${category.tone}`}><Icon size={14} aria-hidden="true" />{category.label}</span>
+          <span className="trace-details__sequence">#{event.sequence}</span>
         </div>
-        <span className="trace-details__category">{event.category}</span>
-      </div>
-      <div className="trace-tabs" role="tablist" aria-label="轨迹事件详情">
-        {tabs.map((item) => (
-          <button
-            key={item.key}
-            className={tab === item.key ? "is-active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.key}
-            onClick={() => setTab(item.key)}
-          >
-            {tabIcon(item.key)}{item.label}
-          </button>
-        ))}
-      </div>
-      <div className="trace-details__body">
-        {tab === "overview" ? <Overview event={event} /> : null}
-        {tab === "input" ? <SafeValue label="Input" value={event.summary} /> : null}
-        {tab === "output" ? <SafeValue label="Output" value={event.summary} /> : null}
-        {tab === "timing" ? <Timing event={event} /> : null}
-        {tab === "usage" ? <Usage event={event} /> : null}
-        {tab === "artifacts" ? (
-          <div className="artifact-ref-list">
-            {event.artifact_refs.length === 0 ? <span className="muted-copy">没有关联 Artifact</span> : null}
-            {event.artifact_refs.map((artifactId) => (
-              <button className="artifact-ref" key={artifactId} type="button" onClick={() => onArtifactSelect(artifactId)}>
-                <FileArchive size={14} aria-hidden="true" />{artifactId}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-      <ProviderExtensions extensions={event.provider_extensions} />
+        <h2 id="trace-details-title">{event.title}</h2>
+        <div className="trace-details__meta">
+          <span className={traceIsError(event.status, event.category) ? "trace-event-error" : ""}>{traceStatus(event.status)}</span>
+          <time dateTime={event.occurred_at}>{formatTimestamp(event.occurred_at)}</time>
+          {event.duration_ms !== null ? <span>{formatTraceDuration(event.duration_ms)}</span> : null}
+        </div>
+      </header>
+      <section className="trace-content" aria-label="摘要">
+        <h3>摘要</h3>
+        {event.summary ? <SafeMarkdown source={event.summary} allowImages={false} /> : <span className="muted-copy">未提供</span>}
+      </section>
+      {isTool ? <>
+        <TraceValue label="输入" value={extensions.rawInput} />
+        <TraceValue label="输出" value={extensions.rawOutput} />
+      </> : null}
+      {event.artifact_refs.length > 0 ? (
+        <section className="trace-content" aria-label="关联产物">
+          <h3>关联产物</h3>
+          <div className="artifact-ref-list">{event.artifact_refs.map((artifactId) => (
+            <button className="artifact-ref" key={artifactId} type="button" onClick={() => onArtifactSelect(artifactId)}>
+              <FileArchive size={14} aria-hidden="true" />{artifactId}
+            </button>
+          ))}</div>
+        </section>
+      ) : null}
+      <details className="trace-technical" aria-label="技术详情">
+        <summary>技术详情</summary>
+        <dl className="trace-facts">
+          <div><dt>事件类型</dt><dd>{event.category}</dd></div>
+          <div><dt>原始状态</dt><dd>{event.status}</dd></div>
+          <div><dt>耗时</dt><dd>{formatTraceDuration(event.duration_ms)}</dd></div>
+          <div><dt>WorkItem</dt><dd>{event.work_item_key ?? "未提供"}</dd></div>
+          <div><dt>Payload ref</dt><dd>{event.provider_payload_ref ?? "未提供"}</dd></div>
+        </dl>
+        <TraceValue label="用量" value={event.usage} />
+        {Object.keys(extensions).length > 0 ? <ProviderExtensions extensions={extensions} /> : null}
+      </details>
     </section>
   );
 }
 
-function Overview({ event }: { event: WorkerTraceEvent }) {
-  return (
-    <div className="trace-overview">
-      <p>{event.summary}</p>
-      <dl className="trace-facts">
-        <div><dt>Status</dt><dd>{event.status}</dd></div>
-        <div><dt>Occurred</dt><dd>{formatTimestamp(event.occurred_at)}</dd></div>
-        <div><dt>WorkItem</dt><dd>{event.work_item_key ?? "未提供"}</dd></div>
-        <div><dt>Payload ref</dt><dd>{event.provider_payload_ref ?? "未提供"}</dd></div>
-      </dl>
-    </div>
-  );
-}
-
-function Timing({ event }: { event: WorkerTraceEvent }) {
-  return <SafeValue label="Duration" value={event.duration_ms === null ? "未提供" : `${event.duration_ms} ms`} />;
-}
-
-function Usage({ event }: { event: WorkerTraceEvent }) {
-  return <SafeValue label="Usage" value={event.usage ?? "未提供"} />;
-}
-
-function SafeValue({ label, value }: { label: string; value: unknown }) {
-  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return <div className="trace-value"><span className="eyebrow">{label}</span><pre>{text}</pre></div>;
-}
-
-function tabIcon(tab: TraceDetailTab) {
-  if (tab === "timing") return <Timer size={13} aria-hidden="true" />;
-  if (tab === "artifacts") return <FileArchive size={13} aria-hidden="true" />;
-  if (tab === "output" || tab === "input") return <Wrench size={13} aria-hidden="true" />;
-  return <Info size={13} aria-hidden="true" />;
+function TraceValue({ label, value }: { label: string; value: unknown }) {
+  return <section className="trace-content trace-value" aria-label={label}>
+    <h3>{label}</h3>
+    {value === null || value === undefined ? <span className="muted-copy">未提供</span>
+      : <pre tabIndex={0}><code>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</code></pre>}
+  </section>;
 }
 
 function formatTimestamp(value: string): string {

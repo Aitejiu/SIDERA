@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowRight, ArrowUp, CircleAlert, Clock3, FileCheck2, GitBranch, List, MessageSquareText, PackageCheck } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, ChevronDown, CircleAlert, Clock3, FileCheck2, GitBranch, Info, List, MessageSquareText, PackageCheck } from "lucide-react";
+import { useRef } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
+import { useSubtaskDetailsState } from "@/app/WorkspaceViewState";
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
@@ -74,6 +76,7 @@ export function SubtaskPage() {
       >
         {workspaceQuery.data ? (
           <SubtaskContent
+            key={`${resolvedRootTaskId}:${resolvedSubtaskKey}`}
             workspace={workspaceQuery.data}
             viewMode={viewMode}
             onViewModeChange={setViewMode}
@@ -105,10 +108,34 @@ function SubtaskContent({
   workspaceId: string;
   rootTaskId: string;
 }) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const [detailsOpen, setDetailsOpen] = useSubtaskDetailsState(rootTaskId, workspace.subtask.key);
   const status = subtaskStatus(workspace.subtask.state);
   const decisionRequiredWorkerCount = workspace.worker_items.filter(
     (worker) => worker.attention_state === "decision_required",
   ).length;
+  const completedWorkerCount = workspace.worker_items.filter(
+    (worker) => worker.status === "succeeded" || worker.status === "completed",
+  ).length;
+  const collaborationNeedsAttention = Boolean(workspace.collaboration
+    && (workspace.collaboration.waiting_worker_item_count
+      || workspace.collaboration.waiting_upstream_subtasks.length
+      || workspace.collaboration.missing_artifact_refs.length
+      || workspace.collaboration.missing_evidence_refs.length
+      || workspace.collaboration.satisfied_input_count < workspace.collaboration.required_input_count));
+  const convergenceNeedsAttention = Boolean(workspace.convergence
+    && (workspace.convergence.blocked_count || workspace.convergence.unknown_count
+      || workspace.convergence.blocked_predecessor_paths.length
+      || ["blocked_unknown", "degraded", "waiting_dependency"].includes(workspace.convergence.status)));
+  const collaboration = <SubtaskCollaborationStrip collaboration={workspace.collaboration} onOpenSubtask={onOpenSubtask} />;
+  const convergence = <PlanConvergenceStrip label="分支收敛" convergence={workspace.convergence} />;
+  const showAttention = workspace.attention_items.length > 0 || collaborationNeedsAttention || convergenceNeedsAttention;
+  const toggleDetails = () => {
+    const details = detailsRef.current;
+    if (!details) return;
+    details.open = !details.open;
+    if (details.open) details.querySelector("summary")?.focus();
+  };
   return (
     <>
       <div className="breadcrumb">
@@ -119,110 +146,94 @@ function SubtaskContent({
       </div>
       <header className="subtask-page__heading">
         <div>
-          <span className="eyebrow">SUBTASK WORKSPACE · GEN {workspace.plan_generation}</span>
           <h1 id="subtask-title">{workspace.subtask.title}</h1>
-          <p>{workspace.subtask.goal_summary}</p>
           <p className="subtask-page__current-action">
-            <span className="eyebrow">当前动作</span>
+            <span>当前进展</span>
             {workspace.subtask.current_action ?? "尚未开始"}
           </p>
         </div>
         <div className="subtask-page__meta">
           <StatusMark kind={status.kind} label={status.label} />
+          <span>已完成 {completedWorkerCount} / {workspace.worker_items.length}</span>
           {decisionRequiredWorkerCount > 0 ? (
             <span className="subtask-page__decision-count">
               <CircleAlert size={13} aria-hidden="true" />待你决定 {decisionRequiredWorkerCount} 个 WorkerItem
             </span>
           ) : null}
           <span className="mono-label">验收 {workspace.subtask.evidence_satisfied} / {workspace.subtask.evidence_required}</span>
-          <span className="mono-label">CURSOR {workspace.last_change_cursor}</span>
         </div>
       </header>
 
-      <SubtaskRelations
-        upstream={workspace.upstream_subtasks}
-        downstream={workspace.downstream_subtasks}
-        onOpen={onOpenSubtask}
-      />
-
-      <SubtaskCollaborationStrip
-        collaboration={workspace.collaboration}
-        onOpenSubtask={onOpenSubtask}
-      />
-
-      <PlanConvergenceStrip
-        label="分支收敛"
-        convergence={workspace.convergence}
-      />
-
-      <TaskKnowledgeSummary
-        workspaceId={workspaceId}
-        rootTaskId={rootTaskId}
-        submissionTaskId={workspace.subtask.task_id ?? rootTaskId}
-        sourceSubtaskId={workspace.subtask.task_id}
-      />
-
-      {workspace.attention_items.length > 0 ? (
-        <section className="subtask-attention" aria-labelledby="subtask-attention-title">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">ATTENTION</span>
-              <h2 id="subtask-attention-title">需要处理</h2>
+      {showAttention ? <div className="subtask-page__attention" role="region" aria-label="当前卡点与待处理" tabIndex={0}>
+        {workspace.attention_items.length > 0 ? (
+          <section className="subtask-attention" aria-labelledby="subtask-attention-title">
+            <div className="section-heading">
+              <div>
+                <h2 id="subtask-attention-title">需要处理</h2>
+              </div>
+              <span className="mono-label">{workspace.attention_items.length} 项</span>
             </div>
-            <span className="mono-label">{workspace.attention_items.length} ITEMS</span>
-          </div>
-          <div className="subtask-attention__list">
-            {workspace.attention_items.map((item) => (
-              <article className="subtask-attention__item" key={item.key}>
-                <div className="subtask-attention__heading">
-                  <strong>{isSchedulingWait(item) ? "调度等待" : item.worker_item_title ?? workspace.subtask.title}</strong>
-                  {isSchedulingWait(item) ? <span className="subtask-attention__tag">需要处理</span> : null}
-                </div>
-                <span>{item.waiting_details_summary || item.reason}</span>
-                {isSchedulingWait(item) ? (
-                  <div className="subtask-attention__meta">
-                    <span>
-                      <Clock3 size={13} aria-hidden="true" />
-                      阻塞于 {formatBlockedSince(item.blocked_since)}
-                    </span>
-                    {item.requires_operator ? <strong>需要我处理</strong> : <span>等待执行节点恢复</span>}
-                    {item.worker_item_id ? (
-                      <button
-                        className="quiet-button"
-                        type="button"
-                        onClick={() => onOpenWorker(item.worker_item_id!)}
-                      >
-                        打开 WorkerItem 工作区
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
+            <div className="subtask-attention__list">
+              {workspace.attention_items.map((item) => (
+                <article className="subtask-attention__item" key={item.key}>
+                  {item.worker_item_id ? (
+                    <button className="subtask-attention__open" type="button" onClick={() => onOpenWorker(item.worker_item_id!)}>
+                      <span className="subtask-attention__heading">
+                        <strong>{isSchedulingWait(item) ? "调度等待" : item.worker_item_title ?? workspace.subtask.title}</strong>
+                        <ArrowRight size={14} aria-hidden="true" />
+                      </span>
+                      <span>{item.waiting_details_summary || item.reason}</span>
+                    </button>
+                  ) : (
+                    <div className="subtask-attention__body">
+                      <strong>{isSchedulingWait(item) ? "调度等待" : workspace.subtask.title}</strong>
+                      <span>{item.waiting_details_summary || item.reason}</span>
+                    </div>
+                  )}
+                  {isSchedulingWait(item) ? (
+                    <div className="subtask-attention__meta">
+                      <span>
+                        <Clock3 size={13} aria-hidden="true" />
+                        阻塞于 {formatBlockedSince(item.blocked_since)}
+                      </span>
+                      {item.requires_operator ? <strong>需要我处理</strong> : <span>等待执行节点恢复</span>}
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+        {collaborationNeedsAttention ? collaboration : null}
+        {convergenceNeedsAttention ? convergence : null}
+      </div> : null}
 
       <div className="subtask-page__layout">
         <div className="subtask-page__main">
-          <div className="subtask-view-switch" role="tablist" aria-label="Worker 工作区视图">
-            <button
-              className={viewMode === "board" ? "is-active" : ""}
-              type="button"
-              role="tab"
-              aria-selected={viewMode === "board"}
-              onClick={() => onViewModeChange("board")}
-            >
-              <List size={14} aria-hidden="true" />列表
-            </button>
-            <button
-              className={viewMode === "graph" ? "is-active" : ""}
-              type="button"
-              role="tab"
-              aria-selected={viewMode === "graph"}
-              onClick={() => onViewModeChange("graph")}
-            >
-              <GitBranch size={14} aria-hidden="true" />Graph
+          <div className="subtask-page__toolbar">
+            <div className="subtask-view-switch" role="tablist" aria-label="Worker 工作区视图">
+              <button
+                className={viewMode === "board" ? "is-active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "board"}
+                onClick={() => onViewModeChange("board")}
+              >
+                <List size={14} aria-hidden="true" />列表
+              </button>
+              <button
+                className={viewMode === "graph" ? "is-active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "graph"}
+                onClick={() => onViewModeChange("graph")}
+              >
+                <GitBranch size={14} aria-hidden="true" />Graph
+              </button>
+            </div>
+            <button className="quiet-button" type="button" aria-label="查看子任务详情"
+              aria-controls="subtask-detail-information" aria-expanded={detailsOpen} onClick={toggleDetails}>
+              <Info size={14} aria-hidden="true" />子任务详情
             </button>
           </div>
           {viewMode === "board" ? (
@@ -230,10 +241,24 @@ function SubtaskContent({
           ) : (
             <WorkerGraph workspace={workspace} onOpen={onOpenWorker} />
           )}
-          <SubtaskActivity workspace={workspace} />
         </div>
-        <WorkerSummary workspace={workspace} />
       </div>
+      <details id="subtask-detail-information" className="task-details subtask-details" ref={detailsRef}
+        open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+        <summary><ChevronDown size={14} aria-hidden="true" />子任务详情</summary>
+        <div className="subtask-details__content">
+          <div className="subtask-details__main">
+            <span className="mono-label">GEN {workspace.plan_generation} · CURSOR {workspace.last_change_cursor}</span>
+            <SubtaskRelations upstream={workspace.upstream_subtasks} downstream={workspace.downstream_subtasks} onOpen={onOpenSubtask} />
+            {!collaborationNeedsAttention ? collaboration : null}
+            {!convergenceNeedsAttention ? convergence : null}
+            <TaskKnowledgeSummary workspaceId={workspaceId} rootTaskId={rootTaskId}
+              submissionTaskId={workspace.subtask.task_id ?? rootTaskId} sourceSubtaskId={workspace.subtask.task_id} />
+            <SubtaskActivity workspace={workspace} />
+          </div>
+          <WorkerSummary workspace={workspace} />
+        </div>
+      </details>
     </>
   );
 }
@@ -253,7 +278,6 @@ function SubtaskCollaborationStrip({
     <section className="subtask-collaboration" aria-labelledby="subtask-collaboration-title">
       <div className="subtask-collaboration__heading">
         <div>
-          <span className="eyebrow">COLLABORATION FAN-IN</span>
           <h2 id="subtask-collaboration-title">输入汇聚</h2>
         </div>
         <span className="mono-label">策略 · {collaborationStrategyLabel(collaboration.effective_strategy)}</span>
@@ -363,7 +387,6 @@ function SubtaskActivity({ workspace }: { workspace: SubtaskWorkspace }) {
     <section className="subtask-activity" aria-labelledby="subtask-activity-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">SUBTASK ACTIVITY</span>
           <h2 id="subtask-activity-title">最近活动</h2>
         </div>
         <span className="mono-label">{workspace.recent_activity.length} ITEMS</span>

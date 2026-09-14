@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
+import { useWorkerTimelineState } from "@/app/WorkspaceViewState";
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
@@ -162,6 +163,7 @@ export function WorkerItemPage() {
       >
         {workspaceQuery.data ? (
           <WorkerItemContent
+            key={workspaceQuery.data.worker_item.id}
             workspace={workspaceQuery.data}
             activity={activity.items}
             hasMore={activity.nextCursor !== null}
@@ -267,6 +269,7 @@ function WorkerItemContent({
 }) {
   const [traceDescriptor, setTraceDescriptor] = useState<NonNullable<WorkerActivity["trace_descriptor"]> | null>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const timelineState = useWorkerTimelineState(workspace.worker_item.id);
   const [resultInputActionState, setResultInputActionState] = useState<{
     status: "idle" | "submitting" | "success" | "error";
     message: string | null;
@@ -301,16 +304,11 @@ function WorkerItemContent({
         <span>{taskTitle} / {subtaskTitle}</span>
       </div>
       <header className="worker-item-page__heading">
-        <div>
-          <span className="eyebrow">WORKERITEM WORKSPACE · {workspace.worker_item.stable_key}</span>
+        <div className="worker-item-page__title-row">
           <h1 id="worker-item-title">{workspace.worker_item.title}</h1>
-          <p>{workspace.worker_item.responsibility}</p>
-        </div>
-        <div className="worker-item-page__meta">
           <StatusMark kind={workerStatus.kind} label={workerStatus.label} />
-          <span className="mono-label">CONTEXT V{workspace.worker_item.context_version}</span>
-          <span className="mono-label">CURSOR {workspace.last_change_cursor}</span>
         </div>
+        <p>{workspace.worker_item.responsibility}</p>
       </header>
 
       <PlanSyncBanner
@@ -322,11 +320,16 @@ function WorkerItemContent({
 
       <div className="worker-item-page__layout">
         <div className="worker-item-page__main">
-          <div className="worker-item-page__scope">
-            <span className="eyebrow">LONG-LIVED WORKSPACE</span>
-            <strong>{workspace.worker_item.responsibility}</strong>
-            <span>Execution / Session 会在这里连续呈现，历史上下文不会因换代丢失。</span>
-          </div>
+          <section className="worker-item-progress" aria-label="当前进展">
+            <span className="worker-item-progress__label">当前进展</span>
+            <strong>{workspace.current_step ?? "尚未开始"}</strong>
+            {workspace.next_action ? <span>下一步：{workspace.next_action}</span> : null}
+            {workspace.execution_history[0]?.waiting_details_summary ? (
+              <p className="worker-item-progress__waiting"><CircleAlert size={14} aria-hidden="true" />{workspace.execution_history[0].waiting_details_summary}</p>
+            ) : workspace.collaboration?.waiting_summary ? (
+              <p className="worker-item-progress__waiting"><CircleAlert size={14} aria-hidden="true" />{workspace.collaboration.waiting_summary}</p>
+            ) : null}
+          </section>
           {workspace.active_handoff && !handoffOpen ? (
             <HandoffProgress
               workspaceId={workspace.workspace_id}
@@ -346,11 +349,13 @@ function WorkerItemContent({
             <div className="worker-item-page__activity-loading" role="status">读取 WorkerItem 活动</div>
           ) : (
             <WorkerTimeline
+              {...timelineState}
               activities={timelineActivity}
               hasMore={hasMore}
               isLoadingMore={isLoadingMore}
               onLoadMore={onLoadMore}
               onOpenTrace={(activityItem) => setTraceDescriptor(activityItem.trace_descriptor)}
+              onOpenCurrentTrace={workspace.trace_descriptor ? () => setTraceDescriptor(workspace.trace_descriptor) : undefined}
             />
           )}
           <WorkerComposer

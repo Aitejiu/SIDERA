@@ -3,8 +3,6 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { StatusMark } from "@/shared/ui/StatusMark";
-
 import {
   executionQueryKey,
   executionSessionQueryKey,
@@ -14,10 +12,8 @@ import {
   getWorkerTrace,
   workerTraceQueryKey,
 } from "./api";
-import { ArtifactViewer } from "./ArtifactViewer";
-import { TraceDetails } from "./TraceDetails";
-import { TraceLedger } from "./TraceLedger";
-import { TraceTiming } from "./TraceTiming";
+import { TraceReader } from "./TraceReader";
+import { TraceSummary } from "./TraceSummary";
 import type { WorkerTraceEvent } from "./types";
 
 export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {}) {
@@ -28,7 +24,6 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
     sessionId = "",
   } = useParams<{ workspaceId: string; rootTaskId: string; executionId: string; sessionId: string }>();
   const [selectedSequence, setSelectedSequence] = useState<number | null>(null);
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [followTail, setFollowTail] = useState(true);
 
   const traceQuery = useInfiniteQuery({
@@ -54,14 +49,14 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
   });
   const trace = useMemo(() => {
     const pages = traceQuery.data?.pages ?? [];
-    const [firstPage] = pages;
-    if (firstPage === undefined) return undefined;
-    return { ...firstPage, events: pages.flatMap((page) => page.events) };
+    const latestPage = pages.at(-1);
+    if (latestPage === undefined) return undefined;
+    return { ...latestPage, events: pages.flatMap((page) => page.events) };
   }, [traceQuery.data?.pages]);
   const selectedEvent = useMemo(() => {
     if (trace === undefined || trace.events.length === 0) return null;
-    return trace.events.find((event) => event.sequence === selectedSequence) ?? trace.events.at(-1) ?? null;
-  }, [selectedSequence, trace]);
+    return (followTail ? trace.events.at(-1) : trace.events.find((event) => event.sequence === selectedSequence)) ?? trace.events.at(-1) ?? null;
+  }, [followTail, selectedSequence, trace]);
   const escalationRequested = selectedEvent !== null && `${selectedEvent.title} ${selectedEvent.summary}`.includes("scope_escalation_requested");
   const capabilitiesQuery = useQuery({
     queryKey: ["workspace-capabilities", workspaceId],
@@ -93,25 +88,10 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
 
       <header className="trace-page-heading">
         <div>
-          <span className="eyebrow">WORKER TRACE · EXACT SESSION</span>
           <h1 id="worker-trace-title">Worker 轨迹</h1>
-          <p className="trace-address-line"><code>{rootTaskId}</code> / <code>{executionId}</code> / <code>{sessionId}</code></p>
         </div>
-        <div className="trace-page-heading__state">
-          <StatusMark kind={statusKind(executionQuery.data?.status ?? trace?.status ?? "connecting")} />
-          <span className="mono-label">{trace?.freshness_at ? `新鲜度 ${formatTime(trace.freshness_at)}` : "等待 trace"}</span>
-        </div>
+        <Link className="quiet-button" to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${executionId}/sessions/${sessionId}`}>返回执行步骤</Link>
       </header>
-
-      {executionQuery.data ? (
-        <div className="trace-execution-strip">
-          <span><small>Worker</small><strong>{trace?.worker_id?.slice(0, 8) ?? "未分配"}</strong></span>
-          <span><small>当前动作</small><strong>{trace?.current_action ?? "暂无"}</strong></span>
-          <span><small>Plan generation</small><strong>{trace?.plan_generation ?? "--"}</strong></span>
-          <span><small>Checkpoint</small><strong>{trace?.checkpoint_sequence ?? "--"}</strong></span>
-          <span><small>Session version</small><strong>{sessionQuery.data?.version ?? "--"}</strong></span>
-        </div>
-      ) : null}
 
       {traceQuery.isError ? (
         <div className="trace-provider-warning" role="alert">
@@ -123,59 +103,32 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
 
       {trace ? (
         <>
-          <div className="trace-primary-grid">
-            <div className="trace-main-column">
-              <TraceTiming timing={trace.timing} />
-              {escalationRequested ? (
-                <div className="scope-escalation" role="status">
-                  <CircleDot size={16} aria-hidden="true" />
-                  <span>这个 scope 需要整体调整，请回到 Main Agent 处理。</span>
-                  {mainAgentEntry ? <a href={mainAgentEntry} target="_blank" rel="noreferrer">与 Main Agent 对话<ExternalLink size={13} aria-hidden="true" /></a> : <span className="muted-copy">Main Agent 未配置入口</span>}
-                </div>
-              ) : null}
-              <TraceLedger
-                events={trace.events}
-                selectedSequence={selectedEvent?.sequence ?? null}
-                onSelect={selectEvent}
-                onLoadOlder={() => void traceQuery.fetchPreviousPage()}
-                hasOlder={traceQuery.hasPreviousPage === true}
-                isLoadingOlder={traceQuery.isFetchingPreviousPage}
-                followTail={followTail}
-                onFollowTail={followLatest}
-                onPauseFollow={() => setFollowTail(false)}
-              />
-              <TraceDetails event={selectedEvent} onArtifactSelect={setSelectedArtifactId} />
-              <ArtifactViewer workspaceId={workspaceId} artifactId={selectedArtifactId} />
+          <TraceSummary trace={trace} executionStatus={executionQuery.data?.status} sessionVersion={sessionQuery.data?.version} rootTaskId={rootTaskId} />
+          {escalationRequested ? (
+            <div className="scope-escalation" role="status">
+              <CircleDot size={16} aria-hidden="true" />
+              <span>这个 scope 需要整体调整，请回到 Main Agent 处理。</span>
+              {mainAgentEntry ? <a href={mainAgentEntry} target="_blank" rel="noreferrer">与 Main Agent 对话<ExternalLink size={13} aria-hidden="true" /></a> : <span className="muted-copy">Main Agent 未配置入口</span>}
             </div>
-            <aside className="trace-side-column" aria-label="Trace 诊断信息">
-              <div className="trace-side-card">
-                <span className="eyebrow">WORKER STATUS</span>
-                <strong>{trace.status}</strong>
-                <span>{trace.current_action ?? "暂无当前动作"}</span>
-                <Link className="quiet-button" to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${executionId}/sessions/${sessionId}`}>返回执行步骤</Link>
-              </div>
-            </aside>
-          </div>
+          ) : null}
+          <TraceReader
+            workspaceId={workspaceId}
+            events={trace.events}
+            selectedSequence={selectedEvent?.sequence ?? null}
+            onSelect={selectEvent}
+            onLoadOlder={() => void traceQuery.fetchPreviousPage()}
+            hasOlder={traceQuery.hasPreviousPage === true}
+            isLoadingOlder={traceQuery.isFetchingPreviousPage}
+            followTail={followTail}
+            onFollowTail={followLatest}
+            onPauseFollow={() => { setSelectedSequence(selectedEvent?.sequence ?? null); setFollowTail(false); }}
+          />
         </>
       ) : traceQuery.isPending ? (
         <div className="trace-loading" role="status"><RefreshCcw size={16} />读取 Worker trace</div>
       ) : null}
     </section>
   );
-}
-
-function statusKind(status: string): "connecting" | "live" | "stale" | "resyncing" | "offline" | "planned" | "running" | "completed" | "failed" {
-  if (status === "succeeded" || status === "completed") return "completed";
-  if (status === "failed" || status === "canceled") return "failed";
-  if (status === "offline") return "offline";
-  if (status === "stale") return "stale";
-  if (status === "connecting") return "connecting";
-  return "running";
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

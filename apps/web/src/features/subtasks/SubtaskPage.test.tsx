@@ -242,6 +242,54 @@ describe("SubtaskPage", () => {
     );
   });
 
+  it("keeps secondary facts behind details without hiding current work or blockers", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    expect(await screen.findByRole("region", { name: "Worker 看板" })).toBeVisible();
+    expect(screen.getByText("等待确认重试规则")).toBeVisible();
+    expect(screen.getByText("2 个候选执行节点暂不可用")).toBeVisible();
+    expect(screen.getByText("缺少 Artifact · artifact:payment-contract")).toBeVisible();
+    expect(screen.getByText("设计回调")).not.toBeVisible();
+    expect(screen.getByText("重复通知测试通过。")).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "查看子任务详情" }));
+    expect(screen.getByText("设计回调")).toBeVisible();
+    expect(screen.getByText("重复通知测试通过。")).toBeVisible();
+  });
+
+  it("opens a normal attention item in its own WorkerItem workspace", async () => {
+    server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/subtasks/${SUBTASK_KEY}`, () => HttpResponse.json({
+      ...workspace,
+      attention_items: [{ key: "worker:reviewer:blocked", kind: "blocked", worker_item_id: REVIEWER_ID,
+        worker_item_title: "审查者", reason: "请确认重试规则", requires_operator: true,
+        occurred_at: "2026-08-23T08:00:00Z" }],
+    })));
+    const user = userEvent.setup();
+    renderPage();
+    const attention = (await screen.findByRole("heading", { name: "需要处理", level: 2 })).closest("section")!;
+    await user.click(within(attention).getByRole("button", { name: /审查者.*请确认重试规则/ }));
+    expect(screen.getByTestId("route-location")).toHaveTextContent(`/workspaces/${WORKSPACE_ID}/worker-items/${REVIEWER_ID}`);
+  });
+
+  it("keeps unknown convergence results visible even when counters are zero", async () => {
+    server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/subtasks/${SUBTASK_KEY}`, () => HttpResponse.json({
+      ...workspace,
+      convergence: { status: "blocked_unknown", source_generation: 1, target_generation: 2,
+        total_count: 1, converged_count: 0, blocked_count: 0, unknown_count: 0,
+        blocked_predecessor_paths: [], plan_transition_id: "transition-1", subtask_key: SUBTASK_KEY },
+    })));
+    renderPage();
+    expect(await screen.findByRole("region", { name: "分支收敛" })).toBeVisible();
+    expect(screen.getByText("未知结果")).toBeVisible();
+  });
+
+  it("shows an identical step and blocker once without dropping the blocking fact", async () => {
+    renderPage();
+    const card = await screen.findByRole("button", { name: "打开 Worker：审查者" });
+    expect(within(card).getAllByText("等待实现者完成")).toHaveLength(1);
+    expect(within(card).getByText("等待协同放行")).toBeVisible();
+    expect(within(card).getByText("等待你决定")).toBeVisible();
+  });
+
   it("shows local goal and WorkerItems before the graph", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -255,7 +303,7 @@ describe("SubtaskPage", () => {
     expect(screen.getByText("需要我处理")).toBeVisible();
     expect(screen.getByText("协同门槛")).toBeVisible();
     expect(screen.getByText(/阻塞于/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "打开 WorkerItem 工作区" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /调度等待.*2 个候选执行节点暂不可用/ })).toBeVisible();
     expect(screen.getByText("实现幂等写入和重试策略")).toBeVisible();
     expect(screen.queryByTestId("worker-graph-canvas")).not.toBeInTheDocument();
 
@@ -348,8 +396,9 @@ describe("SubtaskPage", () => {
         sources: [],
       })),
     );
+    const user = userEvent.setup();
     renderPage();
-
+    await user.click(await screen.findByRole("button", { name: "查看子任务详情" }));
     const summary = await screen.findByRole("region", { name: "知识上下文" });
     expect(await within(summary).findByText("回调规则")).toBeVisible();
     expect(within(summary).getByText("待审核 1")).toBeVisible();
@@ -373,8 +422,9 @@ describe("SubtaskPage", () => {
   });
 
   it("keeps Subtask relations and delivery evidence in the summary", async () => {
+    const user = userEvent.setup();
     renderPage();
-
+    await user.click(await screen.findByRole("button", { name: "查看子任务详情" }));
     expect(await screen.findByText("设计回调")).toBeVisible();
     expect(screen.getByText("支付集成")).toBeVisible();
     expect(screen.getByText("test-report")).toBeVisible();

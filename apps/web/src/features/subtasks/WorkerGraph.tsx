@@ -2,6 +2,7 @@ import {
   Background,
   Controls,
   Handle,
+  MarkerType,
   Position,
   ReactFlow,
   type Edge,
@@ -12,7 +13,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useEffect, useState } from "react";
 
-import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
+import { executionStatusLabel, StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
 import { layoutWorkerGraph, type WorkerGraphLayout } from "./workerGraphLayout";
 import type { SubtaskWorkspace, WorkerItemSummary } from "./types";
@@ -96,6 +97,7 @@ export function WorkerGraph({
     type: "smoothstep" as const,
     label: edge.kind,
     animated: edge.kind === "dependency",
+    markerEnd: { type: MarkerType.ArrowClosed, color: "var(--graph-line)" },
     style: edgeStyle(edge.kind),
     data: edge as unknown as Record<string, unknown>,
   }));
@@ -154,7 +156,7 @@ function WorkerGraphNode({ data }: NodeProps<WorkerFlowNode>) {
       >
         <span className="worker-flow-node__topline">
           <span className="eyebrow">{data.role}</span>
-          <StatusMark kind={data.statusKind} />
+          <StatusMark kind={data.statusKind} label={executionStatusLabel(data.status)} />
         </span>
         <strong>{data.title}</strong>
         <span className="worker-flow-node__step">{data.current_step ?? "尚未开始"}</span>
@@ -207,12 +209,12 @@ function workerTitle(workspace: SubtaskWorkspace, workerItemId: string): string 
 
 function edgeStyle(kind: string) {
   if (kind === "review") {
-    return { stroke: "#b36b00", strokeDasharray: "7 4", strokeWidth: 2 };
+    return { stroke: "var(--attention)", strokeDasharray: "7 4", strokeWidth: 1.7 };
   }
   if (kind === "context") {
-    return { stroke: "#929aa4", strokeDasharray: "3 4", strokeWidth: 1.5 };
+    return { stroke: "var(--graph-line)", strokeDasharray: "3 4", strokeWidth: 1.3 };
   }
-  return { stroke: "#2166d1", strokeWidth: 2.5 };
+  return { stroke: "var(--graph-line)", strokeWidth: 1.7 };
 }
 
 function workerStatusKind(status: string): StatusMarkKind {

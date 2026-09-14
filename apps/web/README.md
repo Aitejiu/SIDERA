@@ -4,6 +4,13 @@ SIDERA Web is the standalone Task First control room. It consumes the
 versioned SIDERA Public API; it does not import a Worker adapter or read
 PostgreSQL directly.
 
+For the current local developer preview, start with the
+[initial demo guide](../../docs/deployment/initial-demo.md). It includes a
+provider-free fixture workspace, all three local server commands, the current
+browser checks, and the limits of the demo. The versioned R4/R5 sections below
+are component and historical gate references, not a complete current product
+release checklist.
+
 ## macOS Prerequisites
 
 - macOS with Homebrew
@@ -19,7 +26,7 @@ Install dependencies and prepare the database from the repository root:
 
 ```bash
 uv sync --project services/control-plane --all-groups --frozen
-npm --prefix apps/web install
+npm --prefix apps/web ci
 export SIDERA_DATABASE_URL="postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_test"
 uv run --project services/control-plane alembic \
   -c services/control-plane/alembic.ini upgrade head
@@ -122,7 +129,7 @@ Run the real provider only after the pinned executable passes preflight:
 ```bash
 export SIDERA_OPENCODE_EXECUTABLE="$(command -v opencode)"
 export SIDERA_OPENCODE_EXPECTED_VERSION="1.18.19"
-export SIDERA_OPENCODE_MODEL="deepseek/deepseek-v4-flash"
+export SIDERA_OPENCODE_MODEL="<authorized-provider>/<model-id>"
 uv run --project services/control-plane python \
   -m sidera_control_plane.opencode_preflight
 
@@ -172,8 +179,10 @@ uv run --project services/control-plane pytest \
   the timeout settings and the PostgreSQL DSN. A skipped provider test is not
   real-operation evidence.
 
-R4 delivers the standalone complete mode. A future DSH Plugin may embed the
-same Public API projections and deep links, but it must not access this
-database or create a second state source. DSH Worker support, Main Agent and
-Planner proposals, strong TaskRelation gates, remote identity and remote
-Artifact storage remain later extension points.
+The standalone PostgreSQL mode remains the development mainline. Main Agent
+integration, planning proposals, DSH Worker ACP hosting, WorkerItem handoff,
+and collaboration now have implementations; their acceptance scope is
+recorded separately in the [root README](../../README.md#当前状态).
+A future DSH Plugin may embed the same Public API projections and deep links,
+but it must not access the database or create a second state source. Remote
+identity and remote Artifact storage remain outside this local demo.

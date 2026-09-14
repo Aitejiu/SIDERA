@@ -1,10 +1,11 @@
-import { BookOpen, Boxes, Clock3, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
+import { BookOpen, Boxes, Clock3, Layers, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 
 import { WorkspaceStreamProvider, useWorkspaceStream } from "./WorkspaceStreamProvider";
-import { WorkspaceTabs, WorkspaceTabsProvider } from "./WorkspaceTabs";
+import { semanticTabForLocation, WorkspaceTabs, WorkspaceTabsProvider } from "./WorkspaceTabs";
+import { useWorkspaceReadingPosition } from "./WorkspaceViewState";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { NotificationCenter } from "@/features/attention/NotificationCenter";
@@ -27,13 +28,16 @@ export function App() {
 
 function AppFrame({ workspaceId }: { workspaceId: string }) {
   const { streamState } = useWorkspaceStream();
+  const location = useLocation();
+  const frameRef = useRef<HTMLDivElement>(null);
+  useWorkspaceReadingPosition(frameRef, semanticTabForLocation(workspaceId, location)?.id ?? null);
 
   return (
     <div className="control-room">
       <header className="topbar">
         <NavLink className="product-mark" to={`/workspaces/${workspaceId}/tasks`}>
           <span className="product-mark__glyph" aria-hidden="true">
-            S
+            <Layers size={22} />
           </span>
           <span>SIDERA</span>
         </NavLink>
@@ -80,7 +84,7 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
 
         <main className="main-surface">
           <WorkspaceTabs workspaceId={workspaceId} />
-          <div className="route-frame">
+          <div className="route-frame" ref={frameRef}>
             <Outlet />
           </div>
         </main>

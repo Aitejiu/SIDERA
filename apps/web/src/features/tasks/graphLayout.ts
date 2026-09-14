@@ -1,7 +1,7 @@
 import ELK, { type ElkExtendedEdge, type ElkNode } from "elkjs/lib/elk.bundled";
 
 export const TASK_NODE_WIDTH = 280;
-export const TASK_NODE_HEIGHT = 88;
+export const TASK_NODE_HEIGHT = 140;
 
 export interface LayoutNodeInput {
   subtask_key: string;

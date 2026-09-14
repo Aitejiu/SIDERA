@@ -21,7 +21,7 @@ export function AsyncState({
 }: AsyncStateProps) {
   if (isLoading) {
     return (
-      <div className="task-list" aria-label="正在加载">
+      <div className="task-list" role="status" aria-label="正在加载">
         <div className="task-row task-row--skeleton" data-testid="task-row-skeleton" aria-hidden="true">
           <span />
           <span />

@@ -1,8 +1,10 @@
-import { ChevronDown, ChevronUp, Radio } from "lucide-react";
+import { ChevronRight, ChevronUp, Radio } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { memo, useLayoutEffect, useMemo, useRef } from "react";
+import Markdown from "react-markdown";
 
 import type { WorkerTraceEvent } from "./types";
+import { formatTraceDuration, traceCategory, traceIsError, traceStatus } from "./tracePresentation";
 
 export function TraceLedger({
   title = "Worker 轨迹",
@@ -15,6 +17,8 @@ export function TraceLedger({
   followTail,
   onFollowTail,
   onPauseFollow,
+  compact = false,
+  emptyMessage = "暂无轨迹记录",
 }: {
   title?: string;
   events: WorkerTraceEvent[];
@@ -26,7 +30,10 @@ export function TraceLedger({
   followTail: boolean;
   onFollowTail: () => void;
   onPauseFollow: () => void;
+  compact?: boolean;
+  emptyMessage?: string;
 }) {
+  const rowHeight = compact ? 56 : 76;
   const parentRef = useRef<HTMLDivElement>(null);
   const pendingPrependRef = useRef<{ scrollTop: number; scrollHeight: number; count: number } | null>(null);
   // TanStack Virtual exposes an intentionally stateful virtualizer instance.
@@ -34,15 +41,16 @@ export function TraceLedger({
   const virtualizer = useVirtualizer({
     count: events.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 76,
+    estimateSize: () => rowHeight,
+    getItemKey: (index) => events[index]?.sequence ?? index,
     overscan: 12,
   });
   const virtualItems = virtualizer.getVirtualItems();
   const visibleItems = useMemo(
     () => virtualItems.length > 0
       ? virtualItems
-      : events.slice(0, 120).map((_, index) => ({ index, start: index * 76, size: 76 })),
-    [events, virtualItems],
+      : events.slice(0, 120).map((_, index) => ({ index, start: index * rowHeight, size: rowHeight })),
+    [events, virtualItems, rowHeight],
   );
 
   useLayoutEffect(() => {
@@ -55,6 +63,14 @@ export function TraceLedger({
     scrollElement.scrollTop = pending.scrollTop + heightDelta;
     pendingPrependRef.current = null;
   }, [events.length]);
+
+  const latestSequence = events.at(-1)?.sequence;
+  useLayoutEffect(() => {
+    const element = parentRef.current;
+    if (compact && followTail && element !== null && pendingPrependRef.current === null) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [compact, followTail, latestSequence]);
 
   const loadOlder = () => {
     const scrollElement = parentRef.current;
@@ -70,10 +86,9 @@ export function TraceLedger({
   };
 
   return (
-    <section className="trace-ledger" aria-labelledby="trace-ledger-title">
+    <section className={`trace-ledger${compact ? " trace-ledger--compact" : ""}`} aria-label={title}>
       <div className="section-heading trace-ledger__heading">
         <div>
-          <span className="eyebrow">TURN / STEP LEDGER</span>
           <h2 id="trace-ledger-title">{title}</h2>
         </div>
         <div className="trace-ledger__actions">
@@ -99,29 +114,34 @@ export function TraceLedger({
           }
         }}
       >
-        <div className="trace-ledger__spacer" style={{ height: virtualizer.getTotalSize() || events.length * 76 }}>
+        {events.length === 0 ? <div className="trace-ledger__empty" role="status">{emptyMessage}</div> : null}
+        <div className="trace-ledger__spacer" style={{ height: virtualizer.getTotalSize() || events.length * rowHeight }}>
           {visibleItems.map((item) => {
             const event = events[item.index];
             if (event === undefined) return null;
+            const category = traceCategory(event.category);
+            const Icon = category.icon;
+            const isError = traceIsError(event.status, event.category);
             return (
               <button
-                className={`trace-row${selectedSequence === event.sequence ? " is-selected" : ""}`}
+                className={`trace-row${selectedSequence === event.sequence ? " is-selected" : ""}${isError ? " trace-row--error" : ""}`}
                 key={`${event.sequence}-${event.occurred_at}`}
                 type="button"
                 onClick={() => onSelect(event)}
-                style={{ transform: `translateY(${item.start}px)` }}
+                style={{ transform: `translateY(${item.start}px)`, height: rowHeight }}
                 aria-current={selectedSequence === event.sequence ? "true" : undefined}
               >
-                <span className="trace-row__sequence">#{event.sequence}</span>
+                {compact ? <span className={`trace-row__kind trace-kind--${category.tone}`} title={category.label} aria-label={category.label}><Icon size={16} aria-hidden="true" /></span>
+                  : <span className="trace-row__sequence">#{event.sequence}</span>}
                 <span className="trace-row__main">
-                  <strong>{event.title}</strong>
-                  <span>{event.summary}</span>
+                  <strong title={event.title}>{event.title}</strong>
+                  <span title={event.summary}>{compact ? <TracePreview text={event.summary} /> : event.summary}</span>
                 </span>
                 <span className="trace-row__meta">
-                  <span className={`trace-category trace-category--${event.category}`}>{event.category}</span>
-                  <span>{event.duration_ms === null ? "--" : `${event.duration_ms} ms`}</span>
+                  <span className={isError ? "trace-event-error" : ""}>{traceStatus(event.status)}</span>
+                  <span>{event.duration_ms === null ? `#${event.sequence}` : formatTraceDuration(event.duration_ms)}</span>
                 </span>
-                <ChevronDown className="trace-row__arrow" size={15} aria-hidden="true" />
+                <ChevronRight className="trace-row__arrow" size={15} aria-hidden="true" />
               </button>
             );
           })}
@@ -130,3 +150,7 @@ export function TraceLedger({
     </section>
   );
 }
+
+const TracePreview = memo(function TracePreview({ text }: { text: string }) {
+  return <Markdown allowedElements={[]} unwrapDisallowed skipHtml>{text}</Markdown>;
+});

@@ -1,6 +1,6 @@
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 
-import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
+import { executionStatusLabel, StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
 import type { SubtaskNode } from "./types";
 
@@ -18,7 +18,7 @@ export function TaskNode({ data }: NodeProps<TaskFlowNode>) {
       >
         <span className="task-flow-node__topline">
           <span className="eyebrow">{data.subtask_key}</span>
-          <StatusMark kind={statusKind(data.state)} />
+          <StatusMark kind={statusKind(data.state)} label={executionStatusLabel(data.state)} />
         </span>
         <strong>{data.title}</strong>
         <span className="task-flow-node__action">

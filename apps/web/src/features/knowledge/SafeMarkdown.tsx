@@ -2,12 +2,13 @@ import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ReactNode } from "react";
 
-export function SafeMarkdown({ source }: { source: string }) {
+export function SafeMarkdown({ source, allowImages = true }: { source: string; allowImages?: boolean }) {
   return (
     <div className="safe-markdown">
       <Markdown
         remarkPlugins={[remarkGfm]}
         skipHtml
+        disallowedElements={allowImages ? undefined : ["img"]}
         components={safeComponents}
       >
         {source}

@@ -1,6 +1,6 @@
 import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, LoaderCircle, MoveRight } from "lucide-react";
 
-import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
+import { executionStatusLabel, StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
 import { workerCollaborationLabel } from "../collaboration/types";
 import type { WorkerItemSummary } from "./types";
@@ -10,16 +10,15 @@ type WorkerColumnKey = "attention" | "running" | "waiting" | "next" | "completed
 type WorkerColumn = {
   key: WorkerColumnKey;
   title: string;
-  eyebrow: string;
   empty: string;
 };
 
 const columns: WorkerColumn[] = [
-  { key: "attention", title: "需要处理", eyebrow: "ATTENTION", empty: "没有 WorkerItem 卡住" },
-  { key: "running", title: "执行中", eyebrow: "RUNNING", empty: "没有正在执行的 WorkerItem" },
-  { key: "waiting", title: "等待", eyebrow: "WAITING", empty: "没有等待中的 WorkerItem" },
-  { key: "next", title: "下一步", eyebrow: "NEXT", empty: "没有待启动的 WorkerItem" },
-  { key: "completed", title: "已完成", eyebrow: "COMPLETED", empty: "还没有完成的 WorkerItem" },
+  { key: "attention", title: "需要处理", empty: "没有 WorkerItem 卡住" },
+  { key: "running", title: "执行中", empty: "没有正在执行的 WorkerItem" },
+  { key: "waiting", title: "等待", empty: "没有等待中的 WorkerItem" },
+  { key: "next", title: "下一步", empty: "没有待启动的 WorkerItem" },
+  { key: "completed", title: "已完成", empty: "还没有完成的 WorkerItem" },
 ];
 
 export function WorkerBoard({
@@ -41,7 +40,6 @@ export function WorkerBoard({
     <section className="worker-board" aria-labelledby="worker-board-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">WORKERITEM STATUS BOARD</span>
           <h2 id="worker-board-title">Worker 看板</h2>
         </div>
         <span className="mono-label">{workers.length} 个 WorkerItem</span>
@@ -52,7 +50,7 @@ export function WorkerBoard({
           <span>等待 WorkerItem 配置</span>
         </div>
       ) : (
-        <div className="worker-board__columns">
+        <div className="worker-board__columns" data-workspace-scroll="worker-board">
           {columns.map((column) => {
             const items = grouped.get(column.key) ?? [];
             return (
@@ -62,10 +60,7 @@ export function WorkerBoard({
                 aria-labelledby={`worker-board-${column.key}`}
               >
                 <header className="worker-board__column-heading">
-                  <div>
-                    <span className="eyebrow">{column.eyebrow}</span>
-                    <h3 id={`worker-board-${column.key}`}>{column.title}</h3>
-                  </div>
+                  <h3 id={`worker-board-${column.key}`}>{workerColumnIcon(column.key)}{column.title}</h3>
                   <span className="worker-board__count">{items.length}</span>
                 </header>
                 <div className="worker-board__list">
@@ -106,14 +101,14 @@ function WorkerCard({
     >
       <span className="worker-board-card__topline">
         <span className="eyebrow">{worker.role}</span>
-        <StatusMark kind={workerStatusKind(worker.status)} />
+        <StatusMark kind={workerStatusKind(worker.status)} label={executionStatusLabel(worker.status)} />
       </span>
       <strong>{worker.title}</strong>
       <span className="worker-board-card__responsibility">{worker.responsibility}</span>
-      <span className="worker-board-card__step">
+      {!worker.blocker || worker.current_step !== worker.blocker ? <span className="worker-board-card__step">
         <span className="eyebrow">当前步骤</span>
         {worker.current_step ?? "尚未开始"}
-      </span>
+      </span> : null}
       {worker.attention_state === "decision_required" ? (
         <span className="worker-board-card__decision"><CircleAlert size={13} aria-hidden="true" />等待你决定</span>
       ) : null}
@@ -123,7 +118,8 @@ function WorkerCard({
           {collaborationLabel}
         </span>
       ) : null}
-      {worker.collaboration_waiting_summary && worker.collaboration_waiting_summary !== collaborationLabel ? (
+      {worker.collaboration_waiting_summary && worker.collaboration_waiting_summary !== collaborationLabel
+        && worker.collaboration_waiting_summary !== worker.current_step && worker.collaboration_waiting_summary !== worker.blocker ? (
         <span className="worker-board-card__waiting-summary">
           {worker.collaboration_waiting_summary}
         </span>

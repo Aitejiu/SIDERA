@@ -407,6 +407,31 @@ describe("TaskDetailPage", () => {
     );
   });
 
+  it("keeps auxiliary facts behind task details without hiding decisions or changing the selected view", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(screen.getByRole("status", { name: "正在加载" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "支付重构" })).toBeVisible();
+    expect(screen.getByRole("group", { name: "任务进度" })).toHaveTextContent("已完成 1 / 2");
+    expect(screen.getByText("需要确认重试规则")).toBeVisible();
+    expect(screen.getByText("等待必要证据")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "里程碑" })).not.toBeVisible();
+    expect(screen.getByRole("region", { name: "知识上下文" })).not.toBeVisible();
+    expect(screen.getByRole("heading", { name: "最近动态" })).not.toBeVisible();
+
+    await user.click(screen.getByRole("tab", { name: "DAG" }));
+    await user.click(screen.getByRole("button", { name: "查看任务详情" }));
+    expect(screen.getByRole("heading", { name: "里程碑" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "知识上下文" })).toBeVisible();
+    expect(screen.getByText("活动 8")).toBeVisible();
+    await user.click(screen.getByText("任务详情", { exact: true }));
+    expect(screen.getByRole("heading", { name: "里程碑" })).not.toBeVisible();
+    expect(screen.getByRole("tab", { name: "DAG" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("region", { name: "任务 DAG" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认已处理" })).toBeVisible();
+  });
+
   it("shows overall delivery and opens a Subtask workspace", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -432,6 +457,31 @@ describe("TaskDetailPage", () => {
     expect(screen.getByTestId("route-location")).toHaveTextContent(
       `/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/subtasks/callback-idempotency`,
     );
+  });
+
+  it("places routine convergence and collaboration in details while keeping the blocker visible", async () => {
+    server.use(
+      http.get(`/api/v1/tasks/${ROOT_TASK_ID}/graph`, () => HttpResponse.json({
+        ...graph,
+        overview: {
+          ...graph.overview,
+          convergence: { ...graph.overview.convergence, status: "converged", blocked_count: 0, confirmation_blocked: false },
+          collaboration: { ...graph.overview.collaboration, status: "running", attention_required: false, blocked_subtask_count: 0, blocked_subtasks: [] },
+        },
+      })),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "支付重构" })).toBeVisible();
+    const attention = screen.getByRole("region", { name: "任务待处理事项" });
+    expect(within(attention).getByText("需要确认重试规则")).toBeVisible();
+    expect(screen.getByRole("region", { name: "计划收敛" })).not.toBeVisible();
+    expect(screen.getByRole("region", { name: "协同调度" })).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "查看任务详情" }));
+    expect(screen.getByRole("region", { name: "计划收敛" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "协同调度" })).toBeVisible();
+    expect(within(attention).getByText("需要确认重试规则")).toBeVisible();
   });
 
   it("shows the collaboration checkpoint on the root task before the board", async () => {
@@ -482,6 +532,7 @@ describe("TaskDetailPage", () => {
   });
 
   it("shows exact knowledge refs, delivery retry state, and review counts without loading body", async () => {
+    const user = userEvent.setup();
     server.use(
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/work-context`, () => HttpResponse.json(workContext)),
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/knowledge-submissions`, () => HttpResponse.json({
@@ -512,6 +563,7 @@ describe("TaskDetailPage", () => {
     );
     renderPage();
 
+    await user.click(await screen.findByRole("button", { name: "查看任务详情" }));
     const summary = await screen.findByRole("region", { name: "知识上下文" });
     expect(await within(summary).findByText("支付回调规则")).toBeVisible();
     expect(within(summary).getByText("1 个固定引用")).toBeVisible();
@@ -587,6 +639,7 @@ describe("TaskDetailPage", () => {
     const user = userEvent.setup();
     renderPage();
 
+    await user.click(await screen.findByRole("button", { name: "查看任务详情" }));
     expect(await screen.findByText("活动 8")).toBeVisible();
     expect(screen.queryByText("活动 9")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "加载更多活动" })).toBeVisible();

@@ -37,6 +37,9 @@ test.describe("Task First control room", () => {
     await page.getByRole("button", { name: "打开 Worker：实现者" }).click();
     await expect(page).toHaveURL(new RegExp(`/worker-items/${IMPLEMENTER_WORKER_ITEM_ID}$`));
     await expect(page.locator("#worker-item-title")).toHaveText("实现者");
+    const timeline = page.getByRole("region", { name: "WorkerItem 活动时间线", exact: true });
+    await timeline.focus();
+    await timeline.press("End");
     await expect(page.getByText("只修改这个回调重试规则", { exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "介入这个 Worker", exact: true })).toBeVisible();
 
@@ -44,7 +47,9 @@ test.describe("Task First control room", () => {
     await expect(traceButton).toBeVisible();
     await traceButton.click();
     await expect(page.getByRole("dialog", { name: "Agent Trace" })).toBeVisible();
-    await expect(page.getByRole("dialog", { name: "Agent Trace" }).getByText("Plan generation 2", { exact: true })).toBeVisible();
+    const traceDialog = page.getByRole("dialog", { name: "Agent Trace" });
+    await traceDialog.getByText("会话信息", { exact: true }).click();
+    await expect(traceDialog.locator(".trace-session-details .trace-facts div").filter({ has: page.getByText("Plan generation", { exact: true }) }).locator("dd")).toHaveText("2");
     await page.getByRole("button", { name: "关闭 Agent Trace" }).click();
     await expect(page.getByRole("dialog", { name: "Agent Trace" })).toHaveCount(0);
 

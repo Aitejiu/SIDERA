@@ -289,7 +289,7 @@ test.describe("notification inbox", () => {
 
     await page.getByRole("button", { name: "打开 WorkerItem" }).click();
     await expect(page).toHaveURL(new RegExp(`/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}\\?view=governance$`));
-    await page.getByRole("button", { name: new RegExp(`关闭WorkerItem`) }).click();
+    await page.locator(".workspace-tab.is-active").getByRole("button", { name: /^关闭/ }).click();
     await expect(page).toHaveURL(new RegExp(`/workspaces/${WORKSPACE_ID}/inbox$`));
   });
 

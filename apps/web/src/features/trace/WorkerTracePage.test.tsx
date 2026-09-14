@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -120,7 +120,7 @@ function traceResponse(events: ReturnType<typeof makeEvent>[], previous: number 
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`]}>
         <Routes>
@@ -129,6 +129,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
 }
 
 describe("WorkerTracePage", () => {
@@ -160,19 +161,78 @@ describe("WorkerTracePage", () => {
     );
   });
 
+  it("filters loaded records by text and category without showing unrelated details", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("event-141");
+    const search = screen.getByRole("searchbox", { name: "搜索已加载记录" });
+    await user.type(search, "event-180");
+    expect(screen.getByRole("button", { name: /event-180/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /event-181/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /event-180/ }));
+    expect(screen.getByRole("region", { name: "轨迹详情" })).toHaveTextContent("Normalized trace event 180");
+    await user.selectOptions(screen.getByRole("combobox", { name: "记录类型" }), "assistant_summary");
+    expect(screen.getByText("已加载记录中没有匹配项")).toBeVisible();
+    expect(screen.getByRole("region", { name: "轨迹详情" })).not.toHaveTextContent("Normalized trace event 180");
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.getByRole("button", { name: /event-181/ })).toBeVisible();
+  });
+
+  it("follows new records until reading is paused and resumes only on request", async () => {
+    const user = userEvent.setup();
+    let latest = 240;
+    server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`, () =>
+      HttpResponse.json(traceResponse(Array.from({ length: latest - 140 }, (_, index) => makeEvent(index + 141)), null))));
+    const { queryClient } = renderPage();
+    const refresh = async () => { await act(async () => { await queryClient.invalidateQueries({ queryKey: ["worker-trace"] }); }); };
+    expect(await screen.findByRole("heading", { name: "event-240" })).toBeVisible();
+    latest = 241;
+    await refresh();
+    expect(await screen.findByRole("heading", { name: "event-241" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /event-180/ }));
+    latest = 242;
+    await refresh();
+    await screen.findByRole("button", { name: /event-242/ });
+    expect(screen.getByRole("heading", { name: "event-180" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "跟随尾部" }));
+    expect(screen.getByRole("heading", { name: "event-242" })).toBeVisible();
+    await user.type(screen.getByRole("searchbox"), "event");
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    latest = 243;
+    await refresh();
+    await screen.findByRole("button", { name: /event-243/ });
+    expect(screen.getByRole("heading", { name: "event-242" })).toBeVisible();
+  });
+
+  it("does not turn missing measurements into zero duration or zero usage", async () => {
+    server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`, () =>
+      HttpResponse.json(traceResponse([makeEvent(141)], null))));
+    renderPage();
+    expect(await screen.findByText("已记录耗时 未提供")).toBeVisible();
+    expect(screen.getByText("用量未提供")).toBeVisible();
+  });
+
+  it("does not retain an artifact preview after selecting another event", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /event-180/ }));
+    await user.click(screen.getByRole("button", { name: ARTIFACT_ID }));
+    expect(await screen.findByText("artifact content")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /event-181/ }));
+    expect(screen.queryByText("artifact content")).not.toBeInTheDocument();
+  });
+
   it("shows a bounded trace ledger, loads older events, and opens artifact content by id", async () => {
     const user = userEvent.setup();
     renderPage();
 
-    expect(await screen.findByText("Worker 轨迹")).toBeVisible();
-    expect(await screen.findByRole("tab", { name: "Input" })).toBeVisible();
-    expect(await screen.findByText("Model", { selector: ".timing-metric span" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Worker 轨迹" })).toBeVisible();
     expect(await screen.findByText("event-141")).toBeVisible();
     expect(screen.queryByText("vendor:unknown")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /event-180/ }));
+    await user.click(within(screen.getByRole("region", { name: "轨迹详情" })).getByText("技术详情"));
     expect(await screen.findByText("vendor:unknown")).toBeVisible();
-    await user.click(screen.getByRole("tab", { name: /Artifacts/ }));
     await user.click(screen.getByRole("button", { name: ARTIFACT_ID }));
     expect(await screen.findByText("artifact content")).toBeVisible();
 

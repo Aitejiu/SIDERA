@@ -15,6 +15,7 @@ test.describe("runtime-aware worker routing", () => {
   test("pins a queued attempt, surfaces the wait, then refreshes after runtime binding", async ({ page }) => {
     await page.goto(`/workspaces/${WORKSPACE_ID}/worker-items/${IMPLEMENTER_WORKER_ITEM_ID}`);
     await expect(page.locator("#worker-item-title")).toHaveText("实现者");
+    await page.getByText("更多任务信息", { exact: true }).click();
 
     const routing = page.locator(".worker-item-routing");
     await expect(routing.getByText("自动选择", { exact: true })).toBeVisible();
@@ -50,6 +51,7 @@ test.describe("runtime-aware worker routing", () => {
     await workerPage.close();
 
     await page.reload();
+    await page.getByText("更多任务信息", { exact: true }).click();
     await expect(page.locator(".worker-item-routing")).toContainText("已租约");
     await expect(page.locator(".worker-item-routing")).toContainText("固定到 Runtime Routing Worker");
     await expect(page.locator(".worker-item-routing")).not.toContainText("等待调度");

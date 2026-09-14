@@ -38,5 +38,5 @@ function SafeJson({ value }: { value: unknown }) {
   } catch {
     output = "unserializable";
   }
-  return <pre className="safe-json">{output.slice(0, 8_192)}</pre>;
+  return <pre className="safe-json" tabIndex={0}>{output.slice(0, 8_192)}</pre>;
 }

@@ -1,6 +1,6 @@
 import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, LoaderCircle, MoveRight } from "lucide-react";
 
-import { StatusMark } from "@/shared/ui/StatusMark";
+import { executionStatusLabel, StatusMark } from "@/shared/ui/StatusMark";
 
 import { statusKind } from "./TaskNode";
 import type { SubtaskNode } from "./types";
@@ -10,16 +10,15 @@ type BoardColumnKey = "attention" | "running" | "waiting" | "next" | "completed"
 type BoardColumn = {
   key: BoardColumnKey;
   title: string;
-  eyebrow: string;
   empty: string;
 };
 
 const columns: BoardColumn[] = [
-  { key: "attention", title: "需要处理", eyebrow: "ATTENTION", empty: "没有卡点" },
-  { key: "running", title: "执行中", eyebrow: "RUNNING", empty: "没有正在执行的节点" },
-  { key: "waiting", title: "等待依赖", eyebrow: "WAITING", empty: "没有等待中的节点" },
-  { key: "next", title: "下一步", eyebrow: "NEXT", empty: "没有待启动节点" },
-  { key: "completed", title: "最近完成", eyebrow: "COMPLETED", empty: "还没有完成节点" },
+  { key: "attention", title: "需要处理", empty: "没有卡点" },
+  { key: "running", title: "执行中", empty: "没有正在执行的节点" },
+  { key: "waiting", title: "等待依赖", empty: "没有等待中的节点" },
+  { key: "next", title: "下一步", empty: "没有待启动节点" },
+  { key: "completed", title: "最近完成", empty: "还没有完成节点" },
 ];
 
 export function TaskBoard({
@@ -37,18 +36,17 @@ export function TaskBoard({
     <section className="task-board" aria-labelledby="task-board-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">SUBTASK STATUS BOARD</span>
           <h2 id="task-board-title">子任务状态看板</h2>
         </div>
         <span className="mono-label">{nodes.length} 个子任务</span>
       </div>
-      <div className="task-board__columns">
+      <div className="task-board__columns" data-workspace-scroll="task-board">
         {columns.map((column) => {
           const items = grouped.get(column.key) ?? [];
           return (
             <section className={`task-board__column task-board__column--${column.key}`} key={column.key} aria-labelledby={`task-board-${column.key}`}>
               <header className="task-board__column-heading">
-                <div><span className="eyebrow">{column.eyebrow}</span><h3 id={`task-board-${column.key}`}>{column.title}</h3></div>
+                <h3 id={`task-board-${column.key}`}>{boardColumnIcon(column.key)}{column.title}</h3>
                 <span className="task-board__count">{items.length}</span>
               </header>
               <div className="task-board__list">
@@ -68,7 +66,7 @@ function TaskBoardCard({ node, onOpen }: { node: SubtaskNode; onOpen: (subtaskKe
   const hasWorkerItems = node.worker_item_count > 0;
   return (
     <button className="task-board-card" type="button" onClick={() => onOpen(node.subtask_key)} aria-label={`打开子任务：${node.title}`}>
-      <span className="task-board-card__topline"><span className="eyebrow">{node.subtask_key}</span><StatusMark kind={statusKind(node.state)} /></span>
+      <span className="task-board-card__topline"><span className="eyebrow">{node.subtask_key}</span><StatusMark kind={statusKind(node.state)} label={executionStatusLabel(node.state)} /></span>
       <strong>{node.title}</strong>
       <span className="task-board-card__action">{action}</span>
       <span className="task-board-card__worker">

@@ -1,4 +1,4 @@
-import { CheckCircle2, RefreshCcw, Send, Square } from "lucide-react";
+import { CheckCircle2, Info, MessageSquareText, RefreshCcw, Send, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -150,30 +150,7 @@ export function WorkerComposer({
 
   return (
     <section className="worker-composer" aria-labelledby="worker-composer-title">
-      <div className="section-heading worker-composer__heading">
-        <div>
-          <span className="eyebrow">EXACT WORKER INTERVENTION</span>
-          <h2 id="worker-composer-title">介入这个 Worker</h2>
-        </div>
-        <span className={`composer-state composer-state--${status}`}>{statusLabel(status)}</span>
-      </div>
-      <div className="worker-composer__scope">
-        <span>{workspace.current_runtime?.worker_display_name ?? "当前 Agent 未接入"}</span>
-        <span>Session {context?.session_id.slice(0, 8) ?? "--"} · V{context?.session_version ?? "--"}</span>
-        <details>
-          <summary>查看精确 context</summary>
-          {context ? (
-            <dl>
-              <div><dt>WorkerItem</dt><dd>{context.worker_item_id}</dd></div>
-              <div><dt>Plan generation</dt><dd>{context.plan_generation}</dd></div>
-              <div><dt>Context version</dt><dd>{context.context_version}</dd></div>
-              <div><dt>Execution</dt><dd>{context.execution_id}</dd></div>
-              <div><dt>Session</dt><dd>{context.session_id}</dd></div>
-              <div><dt>Worker</dt><dd>{context.worker_id}</dd></div>
-            </dl>
-          ) : <span>当前没有可验证的 Session context</span>}
-        </details>
-      </div>
+      <h2 className="sr-only" id="worker-composer-title">介入这个 Worker</h2>
       {supersededInputs.length > 0 ? (
         <section className="worker-composer__superseded" aria-labelledby="worker-composer-superseded-title">
           <div className="worker-composer__superseded-heading">
@@ -233,29 +210,47 @@ export function WorkerComposer({
       ) : null}
       {errorMessage ? <div className="worker-composer__error" role="alert">{errorMessage}</div> : null}
       <div className="worker-composer__actions">
-        <button
-          className="primary-button"
-          type="button"
-          onClick={() => void handleSend()}
-          disabled={!writable || draft.text.trim() === "" || status === "sending"}
+        <span className="worker-composer__target">{workspace.current_runtime?.worker_display_name ?? "当前 Agent 未接入"}</span>
+        <span className={`composer-state composer-state--${status}`} role="status">{statusLabel(status)}</span>
+        <Link
+          className="worker-composer__main-agent-link"
+          aria-label="与主 Agent 讨论调整" title="与主 Agent 讨论调整"
+          to={`/workspaces/${workspaceId}/chat?rootTaskId=${encodeURIComponent(workspace.worker_item.root_task_id)}${subtaskKey ? `&subtaskKey=${encodeURIComponent(subtaskKey)}` : ""}&workerItemId=${encodeURIComponent(workerItemId)}`}
         >
-          <Send size={15} aria-hidden="true" />发送到当前 Session
-        </button>
+          <MessageSquareText size={16} aria-hidden="true" />
+        </Link>
         <button
           className="stop-button"
           type="button"
+          aria-label="停止 Execution" title="停止当前执行"
           onClick={() => void handleStop()}
           disabled={!writable || execution === undefined || execution.stop_requested === true || status === "stopping"}
         >
-          <Square size={14} aria-hidden="true" />停止 Execution
+          <Square size={14} aria-hidden="true" />
         </button>
-        <Link
-          className="worker-composer__main-agent-link"
-          to={`/workspaces/${workspaceId}/chat?rootTaskId=${encodeURIComponent(workspace.worker_item.root_task_id)}${subtaskKey ? `&subtaskKey=${encodeURIComponent(subtaskKey)}` : ""}&workerItemId=${encodeURIComponent(workerItemId)}`}
+        <button
+          className="primary-button"
+          type="button"
+          aria-label="发送到当前 Session" title="发送到当前 Session"
+          onClick={() => void handleSend()}
+          disabled={!writable || draft.text.trim() === "" || status === "sending"}
         >
-          与主 Agent 讨论调整
-        </Link>
+          <Send size={15} aria-hidden="true" />
+        </button>
       </div>
+      <details className="worker-composer__scope">
+        <summary title="查看精确 context"><Info size={15} aria-hidden="true" /><span>查看精确 context</span></summary>
+        {context ? (
+          <dl>
+            <div><dt>WorkerItem</dt><dd>{context.worker_item_id}</dd></div>
+            <div><dt>Plan generation</dt><dd>{context.plan_generation}</dd></div>
+            <div><dt>Context version</dt><dd>{context.context_version}</dd></div>
+            <div><dt>Execution</dt><dd>{context.execution_id}</dd></div>
+            <div><dt>Session</dt><dd>{context.session_id} · V{context.session_version}</dd></div>
+            <div><dt>Worker</dt><dd>{context.worker_id}</dd></div>
+          </dl>
+        ) : <span>当前没有可验证的 Session context</span>}
+      </details>
     </section>
   );
 }

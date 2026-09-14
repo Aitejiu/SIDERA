@@ -1,4 +1,4 @@
-import { Plus, X } from "lucide-react";
+import { BookOpen, Bot, FileText, Folder, GitBranch, Inbox, ListTodo, MessageCircle, Package, Plus, X, type LucideIcon } from "lucide-react";
 import {
   createContext,
   useCallback,
@@ -6,13 +6,16 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   type ReactNode,
 } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { getTaskGraph, taskGraphQueryKey } from "@/features/tasks/api";
-import type { TaskGraph } from "@/features/tasks/types";
+import { getWorkerItemWorkspace, workerWorkspaceQueryKey } from "@/features/worker-items/api";
+
+import { WorkspaceViewStateProvider } from "./WorkspaceViewState";
 
 import {
   activateTab,
@@ -93,7 +96,9 @@ export function WorkspaceTabsProvider({
 
   return (
     <WorkspaceTabsContext.Provider value={value}>
-      {children}
+      <WorkspaceViewStateProvider openTabIds={state.tabs.map(tab => tab.id)}>
+        {children}
+      </WorkspaceViewStateProvider>
     </WorkspaceTabsContext.Provider>
   );
 }
@@ -107,15 +112,23 @@ export function useWorkspaceTabs(): WorkspaceTabsContextValue {
 }
 
 export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
+  const stripRef = useRef<HTMLElement>(null);
   const location = useLocation();
   const { pathname, search } = location;
   const { state, activate, close, registerDirectRoute } = useWorkspaceTabs();
-  const queryClient = useQueryClient();
   const currentRoute = useMemo(
     () => semanticTabForLocation(workspaceId, { pathname, search }),
     [pathname, search, workspaceId],
   );
-  const rootTaskId = rootTaskIdFromPath(pathname, workspaceId);
+  const workerItemId = currentRoute?.kind === "worker-item" ? currentRoute.id.slice("worker-item:".length) : "";
+  const workerQuery = useQuery({
+    queryKey: workerWorkspaceQueryKey(workspaceId, workerItemId),
+    queryFn: ({ signal }) => getWorkerItemWorkspace(workspaceId, workerItemId, signal),
+    enabled: workerItemId.length > 0,
+  });
+  const rootTaskId = workerItemId
+    ? workerQuery.data?.worker_item.root_task_id ?? null
+    : rootTaskIdFromPath(pathname, workspaceId);
   const graphQuery = useQuery({
     queryKey: rootTaskId === null
       ? ["task-graph", workspaceId, "none"]
@@ -123,46 +136,87 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
     queryFn: ({ signal }) => getTaskGraph(workspaceId, rootTaskId ?? "", signal),
     enabled: rootTaskId !== null,
   });
-  const graph = rootTaskId === null
-    ? undefined
-    : graphQuery.data ?? queryClient.getQueryData<TaskGraph>(taskGraphQueryKey(workspaceId, rootTaskId));
+  const graph = graphQuery.data;
+  const subtaskKey = currentRoute?.kind === "subtask"
+    ? currentRoute.id.slice(`subtask:${rootTaskId}:`.length)
+    : workerQuery.data?.current_placement.subtask_key;
+  const subtaskTitle = graph?.nodes.find(node => node.subtask_key === subtaskKey)?.title;
+  const rootTitle = graph?.overview.title;
+  const workerTitle = workerQuery.data?.worker_item.title;
+  const resolvedTitle = currentRoute?.kind === "root-task" ? rootTitle
+    : currentRoute?.kind === "subtask" ? subtaskTitle
+      : currentRoute?.kind === "worker-item" ? workerTitle : undefined;
+  const resolvedPath = currentRoute?.kind === "worker-item" && workerTitle && rootTitle && subtaskTitle
+    ? `${rootTitle} / ${subtaskTitle} / ${workerTitle}`
+    : currentRoute?.kind === "subtask" && rootTitle && subtaskTitle
+      ? `${rootTitle} / ${subtaskTitle}`
+      : currentRoute?.kind === "root-task" ? rootTitle : undefined;
+  const existingRoute = state.tabs.find(tab => tab.id === currentRoute?.id);
+  const existingTitle = existingRoute?.title;
+  const existingDescription = existingRoute?.description;
 
   useEffect(() => {
     if (currentRoute === null || state.navigationHref !== null) {
       return;
     }
-    const title = graph?.overview.title;
-    const route = currentRoute.kind === "task-index"
-      || currentRoute.kind === "inbox"
-      || currentRoute.kind === "chat"
-      || currentRoute.kind === "collaboration"
-      || title === undefined
-      ? currentRoute
-      : { ...currentRoute, title };
+    const route = currentRoute.kind === "root-task" || currentRoute.kind === "subtask" || currentRoute.kind === "worker-item"
+      ? {
+        ...currentRoute,
+        title: resolvedTitle ?? existingTitle ?? currentRoute.title,
+        description: resolvedPath
+          ? `${tabDetail(currentRoute)} · ${resolvedPath}`
+          : existingDescription ?? `${tabDetail(currentRoute)} · ${resolvedTitle ?? existingTitle ?? currentRoute.title}`,
+      }
+      : currentRoute;
     registerDirectRoute(route);
-  }, [currentRoute, graph?.overview.title, registerDirectRoute, state.navigationHref]);
+  }, [currentRoute, resolvedTitle, resolvedPath, existingTitle, existingDescription, registerDirectRoute, state.navigationHref]);
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    const active = strip?.querySelector<HTMLElement>(".workspace-tab.is-active");
+    if (!strip || !active) return;
+    const revealActive = () => {
+      const bounds = active.getBoundingClientRect();
+      const viewport = strip.getBoundingClientRect();
+      if (bounds.left < viewport.left) strip.scrollLeft -= viewport.left - bounds.left + 8;
+      else if (bounds.right > viewport.right) strip.scrollLeft += bounds.right - viewport.right + 8;
+    };
+    revealActive();
+    if (typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(revealActive);
+    observer.observe(strip);
+    observer.observe(active);
+    return () => observer.disconnect();
+  }, [state.activeTabId]);
 
   return (
-    <nav className="workspace-tabs" aria-label="已打开的任务">
+    <nav className="workspace-tabs" aria-label="已打开的任务" ref={stripRef}>
       {state.tabs.map((tab) => {
         const isActive = tab.id === state.activeTabId;
         const accessibleLabel = tab.id === "task-index"
           ? "任务总览"
           : tab.title;
+        const Icon = tabIcon(tab);
+        const description = tab.description ?? `${tabDetail(tab)} · ${tab.title}`;
+        const descriptionId = `workspace-tab-description-${encodeURIComponent(tab.id)}`;
         return (
-          <div className={`workspace-tab${isActive ? " is-active" : ""}`} key={tab.id}>
+          <div className={`workspace-tab${isActive ? " is-active" : ""}${!tab.closeable ? " workspace-tab--pinned" : ""}`} key={tab.id}>
             <Link
               className="workspace-tab__link"
               to={tab.href}
               aria-current={isActive ? "page" : undefined}
               aria-label={accessibleLabel}
+              aria-describedby={descriptionId}
+              title={description}
               onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 event.preventDefault();
                 activate(tab.id);
               }}
             >
+              <Icon className="workspace-tab__icon" size={15} aria-hidden="true" />
               <span className="workspace-tab__label">{tab.title}</span>
-              <span className="workspace-tab__detail">{tabDetail(tab)}</span>
+              <span className="workspace-tab__detail sr-only" id={descriptionId}>{description}</span>
             </Link>
             {tab.closeable ? (
               <button
@@ -407,6 +461,21 @@ function tabDetail(tab: WorkspaceTab): string {
       return "候选";
     case "context-package":
       return "上下文包";
+  }
+}
+
+function tabIcon(tab: WorkspaceTab): LucideIcon {
+  switch (tab.kind) {
+    case "task-index": return ListTodo;
+    case "root-task": return Folder;
+    case "subtask": return GitBranch;
+    case "worker-item": return Bot;
+    case "inbox": return Inbox;
+    case "chat": return MessageCircle;
+    case "knowledge-page":
+    case "knowledge-candidate": return BookOpen;
+    case "context-package": return Package;
+    default: return FileText;
   }
 }
 

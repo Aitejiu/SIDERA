@@ -13,6 +13,21 @@ import {
 } from "./workspaceTabsState";
 import { semanticTabForLocation } from "./WorkspaceTabs";
 
+describe("workspace tab descriptions", () => {
+  it("persists the resolved ownership path with the tab", () => {
+    const tab = { ...subtaskTab("task-1", "callback"), description: "子任务 · 支付重构 / 回调幂等" };
+    const state = reduceTabs(initialTabs("ws-1"), openTab(tab));
+    expect(hydrateTabs("ws-1", serializeTabs(state))).toEqual(state);
+  });
+
+  it("rejects a non-text description from storage", () => {
+    const state = reduceTabs(initialTabs("ws-1"), openTab(rootTaskTab("task-1")));
+    const serialized = JSON.parse(serializeTabs(state));
+    serialized.tabs[1].description = { title: "wrong shape" };
+    expect(hydrateTabs("ws-1", JSON.stringify(serialized))).toEqual(initialTabs("ws-1"));
+  });
+});
+
 const taskIndex = (workspaceId = "ws-1") => initialTabs(workspaceId);
 
 function rootTaskTab(

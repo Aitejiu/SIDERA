@@ -3,7 +3,7 @@ import ELK, { type ElkExtendedEdge, type ElkNode } from "elkjs/lib/elk.bundled";
 import type { WorkerItemGraph, WorkerItemGraphEdge, WorkerItemSummary } from "./types";
 
 export const WORKER_NODE_WIDTH = 300;
-export const WORKER_NODE_HEIGHT = 132;
+export const WORKER_NODE_HEIGHT = 156;
 
 export interface WorkerLayoutNode {
   id: string;

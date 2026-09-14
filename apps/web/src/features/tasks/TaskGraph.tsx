@@ -1,6 +1,7 @@
 import {
   Background,
   Controls,
+  MarkerType,
   ReactFlow,
   type Edge,
   type NodeMouseHandler,
@@ -82,11 +83,12 @@ export function TaskGraph({
     target: edge.target,
     type: "smoothstep" as const,
     animated: false,
+    markerEnd: { type: MarkerType.ArrowClosed, color: "var(--graph-line)" },
     data: edge as unknown as Record<string, unknown>,
     style: {
-      stroke: isHardEdge(edge.kind) ? "#2166d1" : "#929aa4",
+      stroke: "var(--graph-line)",
       strokeDasharray: isHardEdge(edge.kind) ? undefined : "6 4",
-      strokeWidth: isHardEdge(edge.kind) ? 2.5 : 1.5,
+      strokeWidth: isHardEdge(edge.kind) ? 1.7 : 1.3,
     },
   }));
   const onNodeClick: NodeMouseHandler<TaskFlowNode> = (_event, node) => {

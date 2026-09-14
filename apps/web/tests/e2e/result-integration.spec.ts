@@ -82,7 +82,8 @@ test.describe("R6 result integration control room", () => {
     await traceButton.click();
     const traceDialog = page.getByRole("dialog", { name: "Agent Trace" });
     await expect(traceDialog).toBeVisible();
-    await expect(traceDialog.getByRole("complementary", { name: "Trace 诊断信息" })).toBeVisible();
+    await traceDialog.getByText("会话信息", { exact: true }).click();
+    await expect(traceDialog.locator(".trace-session-details .trace-facts")).toBeVisible();
     await traceDialog.getByRole("button", { name: "关闭 Agent Trace" }).click();
     await expect(traceDialog).toHaveCount(0);
 
@@ -177,7 +178,7 @@ test.describe("R6 result integration control room", () => {
     await expect(page.locator("#worker-item-title")).toHaveText("Worker A");
 
     const tabs = page.getByRole("navigation", { name: "已打开的任务" });
-    await tabs.getByRole("button", { name: /关闭WorkerItem/ }).click();
+    await tabs.getByRole("button", { name: "关闭Worker A", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/workspaces/${seed.workspace_id}/tasks/${seed.root_task_id}$`));
     await expect(page.locator("#task-detail-title")).toHaveText("Runtime-enabled plan");
 

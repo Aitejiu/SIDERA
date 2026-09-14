@@ -47,6 +47,7 @@ logs/
 
 # Workspace-local tooling, external references, and reversible cleanup backups
 /.agents/
+/.superpowers/
 /skills-lock.json
 /.local-backup/
 /references/deepseek-harness/

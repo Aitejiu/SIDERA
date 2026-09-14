@@ -2,8 +2,6 @@ import { AlertTriangle, RefreshCcw, X } from "lucide-react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { StatusMark } from "@/shared/ui/StatusMark";
-
 import {
   executionQueryKey,
   executionSessionQueryKey,
@@ -12,10 +10,8 @@ import {
   getWorkerTrace,
   workerTraceQueryKey,
 } from "../trace/api";
-import { ArtifactViewer } from "../trace/ArtifactViewer";
-import { TraceDetails } from "../trace/TraceDetails";
-import { TraceLedger } from "../trace/TraceLedger";
-import { TraceTiming } from "../trace/TraceTiming";
+import { TraceReader } from "../trace/TraceReader";
+import { TraceSummary } from "../trace/TraceSummary";
 import type { WorkerTraceEvent } from "../trace/types";
 import type { WorkerActivity } from "./types";
 
@@ -30,9 +26,9 @@ export function WorkerTraceDialog({
   descriptor: TraceDescriptor;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [selectedSequence, setSelectedSequence] = useState<number | null>(null);
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [followTail, setFollowTail] = useState(true);
 
   const traceQuery = useInfiniteQuery({
@@ -75,27 +71,27 @@ export function WorkerTraceDialog({
   });
   const trace = useMemo(() => {
     const pages = traceQuery.data?.pages ?? [];
-    const [firstPage] = pages;
-    if (firstPage === undefined) return undefined;
-    return { ...firstPage, events: pages.flatMap((page) => page.events) };
+    const latestPage = pages.at(-1);
+    if (latestPage === undefined) return undefined;
+    return { ...latestPage, events: pages.flatMap((page) => page.events) };
   }, [traceQuery.data?.pages]);
   const selectedEvent = useMemo(() => {
     if (trace === undefined || trace.events.length === 0) return null;
-    return trace.events.find((event) => event.sequence === selectedSequence) ?? trace.events.at(-1) ?? null;
-  }, [selectedSequence, trace]);
+    return (followTail ? trace.events.at(-1) : trace.events.find((event) => event.sequence === selectedSequence)) ?? trace.events.at(-1) ?? null;
+  }, [followTail, selectedSequence, trace]);
 
   useEffect(() => {
     const previousActiveElement = document.activeElement;
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
     closeButtonRef.current?.focus();
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.removeEventListener("keydown", handleKeyDown);
+      dialog.close?.();
       if (previousActiveElement instanceof HTMLElement) previousActiveElement.focus();
     };
-  }, [onClose]);
+  }, []);
 
   const selectEvent = (event: WorkerTraceEvent) => {
     setSelectedSequence(event.sequence);
@@ -109,14 +105,10 @@ export function WorkerTraceDialog({
   };
 
   return (
-    <div className="trace-dialog-backdrop">
-      <div className="trace-dialog worker-trace-dialog" role="dialog" aria-modal="true" aria-labelledby="worker-trace-dialog-title">
+    <dialog ref={dialogRef} className="trace-dialog worker-trace-dialog" aria-modal="true" aria-labelledby="worker-trace-dialog-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
         <div className="trace-dialog__bar">
           <div>
             <strong id="worker-trace-dialog-title">Agent Trace</strong>
-            <span className="worker-trace-dialog__address">
-              <code>{descriptor.execution_id}</code> / <code>{descriptor.session_id}</code>
-            </span>
           </div>
           <button
             ref={closeButtonRef}
@@ -140,49 +132,25 @@ export function WorkerTraceDialog({
             </div>
           ) : null}
           {trace ? (
-            <div className="trace-primary-grid">
-              <div className="trace-main-column">
-                <TraceTiming timing={trace.timing} />
-                <TraceLedger
-                  title="Agent Trace"
-                  events={trace.events}
-                  selectedSequence={selectedEvent?.sequence ?? null}
-                  onSelect={selectEvent}
-                  onLoadOlder={() => void traceQuery.fetchPreviousPage()}
-                  hasOlder={traceQuery.hasPreviousPage === true}
-                  isLoadingOlder={traceQuery.isFetchingPreviousPage}
-                  followTail={followTail}
-                  onFollowTail={followLatest}
-                  onPauseFollow={() => setFollowTail(false)}
-                />
-                <TraceDetails event={selectedEvent} onArtifactSelect={setSelectedArtifactId} />
-                <ArtifactViewer workspaceId={workspaceId} artifactId={selectedArtifactId} />
-              </div>
-              <aside className="trace-side-column" aria-label="Trace 诊断信息">
-                <div className="trace-side-card">
-                  <span className="eyebrow">EXACT SESSION</span>
-                  <StatusMark kind={statusKind(executionQuery.data?.status ?? trace.status)} />
-                  <strong>{trace.current_action ?? "暂无当前动作"}</strong>
-                  <span>Worker {trace.worker_id?.slice(0, 8) ?? "未分配"}</span>
-                  <span>Session V{sessionQuery.data?.version ?? "--"}</span>
-                  <span>Plan generation {trace.plan_generation ?? "--"}</span>
-                </div>
-              </aside>
-            </div>
+            <>
+              <TraceSummary trace={trace} executionStatus={executionQuery.data?.status} sessionVersion={sessionQuery.data?.version} rootTaskId={descriptor.root_task_id} />
+              <TraceReader
+                workspaceId={workspaceId}
+                events={trace.events}
+                selectedSequence={selectedEvent?.sequence ?? null}
+                onSelect={selectEvent}
+                onLoadOlder={() => void traceQuery.fetchPreviousPage()}
+                hasOlder={traceQuery.hasPreviousPage === true}
+                isLoadingOlder={traceQuery.isFetchingPreviousPage}
+                followTail={followTail}
+                onFollowTail={followLatest}
+                onPauseFollow={() => { setSelectedSequence(selectedEvent?.sequence ?? null); setFollowTail(false); }}
+              />
+            </>
           ) : traceQuery.isPending ? (
             <div className="trace-loading" role="status"><RefreshCcw size={16} />读取 Agent Trace</div>
           ) : null}
         </div>
-      </div>
-    </div>
+    </dialog>
   );
-}
-
-function statusKind(status: string): "connecting" | "live" | "stale" | "resyncing" | "offline" | "planned" | "running" | "completed" | "failed" {
-  if (status === "succeeded" || status === "completed") return "completed";
-  if (status === "failed" || status === "canceled") return "failed";
-  if (status === "offline") return "offline";
-  if (status === "stale") return "stale";
-  if (status === "connecting") return "connecting";
-  return "running";
 }

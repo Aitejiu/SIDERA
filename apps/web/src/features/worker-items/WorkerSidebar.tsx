@@ -6,16 +6,15 @@ import {
   ChevronDown,
   CircleAlert,
   GitBranch,
-  Gauge,
   History,
   PackageCheck,
   Puzzle,
   RefreshCcw,
   Route,
   ServerCog,
-  ShieldCheck,
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import { useState } from "react";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
@@ -74,16 +73,99 @@ export function WorkerSidebar({
   onOpenResults: (candidateId: string | undefined) => void;
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const currentExecution = workspace.execution_history[0] ?? null;
   const contextSynchronized = workerItem.context_version === workerItem.acknowledged_context_version;
+  const showExecutionConfiguration = currentExecution !== null && (
+    currentExecution.status !== "running"
+    || currentExecution.requires_operator
+    || Boolean(currentExecution.waiting_reason)
+  );
+  const needsAttention = resultInputsError || resultViewError
+    || resultInputActionState.status === "error"
+    || !contextSynchronized
+    || Boolean(workspace.plan_sync?.failure_code)
+    || Boolean(currentExecution?.requires_operator || currentExecution?.waiting_reason)
+    || currentExecution?.status === "failed"
+    || workspace.collaboration?.attention_state === "decision_required"
+    || workspace.collaboration?.governance_mode === "paused"
+    || Boolean(workspace.collaboration?.waiting_summary)
+    || resultInputs?.governance.attention_state === "requires_user"
+    || resultInputs?.governance.attention_state === "decision_required"
+    || resultInputs?.governance.governance_mode === "paused"
+    || resultInputs?.request?.status === "blocked"
+    || resultInputs?.delivery.assembly_status === "blocked"
+    || resultInputs?.delivery.assembly_status === "retry_wait"
+    || Boolean(resultInputs?.delivery.materialization_failure_code);
   return (
     <aside className="worker-item-sidebar" aria-label="WorkerItem 事实">
-      <div className="worker-item-sidebar__heading">
-        <div>
-          <span className="eyebrow">WORKERITEM FACTS</span>
-          <h2>任务信息</h2>
+      <section className="worker-item-sidebar__section worker-item-sidebar__agent">
+        <h3><ServerCog size={15} aria-hidden="true" />当前 Agent</h3>
+        <strong>{runtime?.worker_display_name ?? "尚未接入 Agent"}</strong>
+        <span>{runtime ? `${runtime.adapter_type} · ${statusLabel(runtime.execution_status)}` : "等待 runtime"}</span>
+        {workspace.active_handoff ? (
+          <div className="worker-item-handoff-summary" role="status">
+            <ArrowRightLeft size={14} aria-hidden="true" />
+            <span><strong>Agent 切换中</strong><small>{handoffPhaseLabel(workspace.active_handoff.phase)}</small></span>
+          </div>
+        ) : handoffAvailable ? (
+          <button className="quiet-button worker-item-handoff-button" type="button" onClick={onOpenHandoff}>
+            <ArrowRightLeft size={14} aria-hidden="true" />调整执行 Agent
+          </button>
+        ) : null}
+      </section>
+
+      <details className="worker-item-sidebar__collapsible">
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title"><PackageCheck size={15} aria-hidden="true" />交付物</span>
+          <span className="mono-label">{workspace.artifacts.length} 份 · {workspace.evidence.length} 条证据</span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+        <div className="worker-item-sidebar__section">
+          {workspace.artifacts.length === 0 ? <span className="muted-copy">还没有 Artifact</span> : null}
+          {workspace.artifacts.map((artifact) => (
+            <Link className="worker-item-sidebar__link" key={artifact.artifact_id}
+              to={`/workspaces/${workspace.workspace_id}/artifacts/${artifact.artifact_id}`}>
+              <span>{artifact.artifact_type}</span>
+              <small>{artifact.content_available ? "可查看" : "不可用"}</small>
+            </Link>
+          ))}
+          {workspace.evidence.map((evidence) => (
+            <div className="worker-item-sidebar__evidence" key={evidence.evidence_id}>
+              <strong>{evidence.acceptance_ref}</strong><span>{evidence.conclusion}</span>
+            </div>
+          ))}
         </div>
-        <StatusMark kind={workerStatusKind(workerItem.status)} />
+      </details>
+
+      <details className="worker-item-sidebar__collapsible">
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title"><Puzzle size={15} aria-hidden="true" />用量</span>
+          <span className="worker-item-sidebar__usage-total">{formatNumber(workspace.usage.input_tokens + workspace.usage.output_tokens)} tokens · {formatCost(workspace.usage.cost_microunits)}</span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+        <dl className="worker-item-usage">
+          <div><dt>输入 tokens</dt><dd>{formatNumber(workspace.usage.input_tokens)}</dd></div>
+          <div><dt>输出 tokens</dt><dd>{formatNumber(workspace.usage.output_tokens)}</dd></div>
+          <div><dt>缓存 tokens</dt><dd>{formatNumber(workspace.usage.cached_tokens)}</dd></div>
+          <div><dt>费用</dt><dd>{formatCost(workspace.usage.cost_microunits)}</dd></div>
+        </dl>
+      </details>
+
+      <details className="worker-item-sidebar__collapsible worker-item-sidebar__more" open={needsAttention || detailsOpen}
+        onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title">更多任务信息</span>
+          {needsAttention ? <CircleAlert size={14} aria-label="有待处理事项" /> : null}
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+
+      <div className="worker-item-sidebar__section">
+        <div className={`worker-item-context${contextSynchronized ? " is-synchronized" : " is-pending"}`}>
+          {contextSynchronized ? <CheckCircle2 size={15} aria-hidden="true" /> : <CircleAlert size={15} aria-hidden="true" />}
+          <strong>context V{workerItem.context_version} · {contextSynchronized ? "已同步" : "待同步"}</strong>
+        </div>
+        {!contextSynchronized ? <span className="muted-copy">Agent 尚未确认最新工作上下文</span> : null}
       </div>
 
       {workspace.collaboration ? <WorkerCollaborationSection collaboration={workspace.collaboration} /> : null}
@@ -153,68 +235,45 @@ export function WorkerSidebar({
         onRefresh={onRefresh}
       />
 
-      <ExecutionRoutingPanel
-        workspaceId={workspace.workspace_id}
-        execution={currentExecution}
-        workerItemId={workerItem.id}
-        rootTaskId={workerItem.root_task_id}
-        subtaskKey={workspace.current_placement.subtask_key}
-        onRefresh={onRefresh}
-      />
+      <details className="worker-item-sidebar__collapsible" open={showExecutionConfiguration}>
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title"><Route size={15} aria-hidden="true" />执行配置</span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+        <ExecutionRoutingPanel
+          workspaceId={workspace.workspace_id}
+          execution={currentExecution}
+          workerItemId={workerItem.id}
+          rootTaskId={workerItem.root_task_id}
+          subtaskKey={workspace.current_placement.subtask_key}
+          onRefresh={onRefresh}
+        />
+      </details>
 
-      <WorkerContextSummary
+      {needsAttention || detailsOpen ? <WorkerContextSummary
         workspaceId={workspace.workspace_id}
         executions={workspace.execution_history}
-      />
+      /> : null}
 
-      <section className="worker-item-sidebar__section">
-        <h3><ServerCog size={15} aria-hidden="true" />当前 Agent</h3>
-        <strong>{runtime?.worker_display_name ?? "尚未接入 Agent"}</strong>
-        <span>{runtime?.adapter_type ?? "等待 runtime"}</span>
-        <span className="mono-label">WorkerItem {shortId(workerItem.id)}</span>
-        {workspace.active_handoff ? (
-          <div className="worker-item-handoff-summary" role="status">
-            <ArrowRightLeft size={14} aria-hidden="true" />
-            <span><strong>Agent 切换中</strong><small>{handoffPhaseLabel(workspace.active_handoff.phase)}</small></span>
-          </div>
-        ) : handoffAvailable ? (
-          <button className="quiet-button worker-item-handoff-button" type="button" onClick={onOpenHandoff}>
-            <ArrowRightLeft size={14} aria-hidden="true" />调整执行 Agent
-          </button>
-        ) : null}
-      </section>
-
-      <section className="worker-item-sidebar__section">
-        <h3><Activity size={15} aria-hidden="true" />Execution / Session</h3>
-        {runtime ? (
-          <dl className="worker-item-facts">
-            <div><dt>Execution</dt><dd>{shortId(runtime.execution_id)} · {statusLabel(runtime.execution_status)}</dd></div>
-            <div><dt>Session</dt><dd>{runtime.session_id ? `${shortId(runtime.session_id)} · ${statusLabel(runtime.session_status ?? "unknown")}` : "无 Session"}</dd></div>
-            <div><dt>Session version</dt><dd>V{runtime.session_version ?? "--"}</dd></div>
-          </dl>
-        ) : (
-          <span className="muted-copy">当前没有运行中的 Execution / Session</span>
-        )}
-        <span className="mono-label">{taskTitle} / {subtaskTitle}</span>
-      </section>
-
-      <section className="worker-item-sidebar__section">
-        <h3><Gauge size={15} aria-hidden="true" />当前推进</h3>
-        <dl className="worker-item-facts">
-          <div><dt>当前步骤</dt><dd>{workspace.current_step ?? "尚未开始"}</dd></div>
-          <div><dt>下一动作</dt><dd>{workspace.next_action ?? "等待计划"}</dd></div>
-          <div><dt>Checkpoint</dt><dd>{workspace.latest_checkpoint ? `#${workspace.latest_checkpoint.sequence} · ${workspace.latest_checkpoint.title}` : "暂无"}</dd></div>
-        </dl>
-      </section>
-
-      <section className="worker-item-sidebar__section">
-        <h3><ShieldCheck size={15} aria-hidden="true" />Context</h3>
-        <div className={`worker-item-context${contextSynchronized ? " is-synchronized" : " is-pending"}`}>
-          {contextSynchronized ? <CheckCircle2 size={15} aria-hidden="true" /> : <CircleAlert size={15} aria-hidden="true" />}
-          <strong>context V{workerItem.context_version} · {contextSynchronized ? "已同步" : "待同步"}</strong>
+      <details className="worker-item-sidebar__collapsible">
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title"><Activity size={15} aria-hidden="true" />会话详情</span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+        <div className="worker-item-sidebar__section">
+          {runtime ? (
+            <dl className="worker-item-facts">
+              <div><dt>Execution</dt><dd>{shortId(runtime.execution_id)} · {statusLabel(runtime.execution_status)}</dd></div>
+              <div><dt>Session</dt><dd>{runtime.session_id ? `${shortId(runtime.session_id)} · ${statusLabel(runtime.session_status ?? "unknown")}` : "无 Session"}</dd></div>
+              <div><dt>Session version</dt><dd>V{runtime.session_version ?? "--"}</dd></div>
+            </dl>
+          ) : (
+            <span className="muted-copy">当前没有运行中的 Execution / Session</span>
+          )}
+          <span className="mono-label">{taskTitle} / {subtaskTitle}</span>
+          <span className="mono-label">WorkerItem {shortId(workerItem.id)}</span>
         </div>
-        {!contextSynchronized ? <span className="muted-copy">Agent 尚未确认最新工作上下文</span> : null}
-      </section>
+      </details>
 
       {workspace.plan_sync ? (
         <section className="worker-item-sidebar__section">
@@ -228,45 +287,23 @@ export function WorkerSidebar({
         </section>
       ) : null}
 
-      <section className="worker-item-sidebar__section">
-        <h3><Puzzle size={15} aria-hidden="true" />Usage</h3>
-        <dl className="worker-item-usage">
-          <div><dt>Input tokens</dt><dd>{formatNumber(workspace.usage.input_tokens)}</dd></div>
-          <div><dt>Output tokens</dt><dd>{formatNumber(workspace.usage.output_tokens)}</dd></div>
-          <div><dt>Cached tokens</dt><dd>{formatNumber(workspace.usage.cached_tokens)}</dd></div>
-          <div><dt>Cost</dt><dd>{formatCost(workspace.usage.cost_microunits)}</dd></div>
-        </dl>
-      </section>
-
-      <section className="worker-item-sidebar__section">
-        <h3><PackageCheck size={15} aria-hidden="true" />Artifacts / Evidence</h3>
-        {workspace.artifacts.length === 0 ? <span className="muted-copy">还没有 Artifact</span> : null}
-        {workspace.artifacts.map((artifact) => (
-          <Link
-            className="worker-item-sidebar__link"
-            key={artifact.artifact_id}
-            to={`/workspaces/${workspace.workspace_id}/artifacts/${artifact.artifact_id}`}
-          >
-            <span>{artifact.artifact_type}</span>
-            <small>{artifact.content_available ? "可查看" : "不可用"}</small>
-          </Link>
-        ))}
-        {workspace.evidence.map((evidence) => (
-          <div className="worker-item-sidebar__evidence" key={evidence.evidence_id}>
-            <strong>{evidence.acceptance_ref}</strong>
-            <span>{evidence.conclusion}</span>
-          </div>
-        ))}
-      </section>
-
-      <section className="worker-item-sidebar__section">
-        <h3><Route size={15} aria-hidden="true" />Placement history</h3>
-        <div className="worker-item-placement-list">
+      <details className="worker-item-sidebar__collapsible">
+        <summary className="worker-item-sidebar__collapsible-summary">
+          <span className="worker-item-sidebar__collapsible-title"><History size={15} aria-hidden="true" />分配历史</span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </summary>
+        <div className="worker-item-placement-list worker-item-sidebar__collapsible-body">
           {workspace.placement_history.map((placement) => (
             <PlacementRow key={`${placement.plan_generation}:${placement.subtask_key}`} placement={placement} />
           ))}
         </div>
-      </section>
+      </details>
+
+      <div className="worker-item-sidebar__footer">
+        <History size={13} aria-hidden="true" />
+        <span>CURSOR {workspace.last_change_cursor} · {formatTime(workspace.as_of)}</span>
+      </div>
+      </details>
 
       {!workspace.can_intervene ? (
         <section className="worker-item-readonly" role="status">
@@ -278,10 +315,6 @@ export function WorkerSidebar({
         </section>
       ) : null}
 
-      <div className="worker-item-sidebar__footer">
-        <History size={13} aria-hidden="true" />
-        <span>CURSOR {workspace.last_change_cursor} · {formatTime(workspace.as_of)}</span>
-      </div>
     </aside>
   );
 }
@@ -347,14 +380,6 @@ function PlacementRow({ placement }: { placement: WorkerPlacement }) {
       <span>{placement.role} · {placement.capability_requirements.join(" / ") || "无特殊能力要求"}</span>
     </div>
   );
-}
-
-function workerStatusKind(status: string): StatusMarkKind {
-  if (status === "running" || status === "assigned" || status === "queued" || status === "retrying") return "running";
-  if (status === "succeeded" || status === "completed") return "completed";
-  if (status === "failed") return "failed";
-  if (status === "blocked" || status === "waiting_user" || status === "waiting_dependency" || status === "retired") return "stale";
-  return "planned";
 }
 
 function statusLabel(status: string): string {

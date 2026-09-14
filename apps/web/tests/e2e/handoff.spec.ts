@@ -30,15 +30,15 @@ test.describe("R6.2 WorkerItem handoff vertical", () => {
 
     const tabs = page.getByRole("navigation", { name: "已打开的任务" });
     const workerTab = tabs.getByRole("link", {
-      name: `WorkerItem ${workerItemId.slice(0, 8)}`,
+      name: "Worker B", exact: true,
     });
     await expect(workerTab).toBeVisible();
     await tabs.getByRole("button", {
-      name: `关闭WorkerItem ${workerItemId.slice(0, 8)}`,
+      name: "关闭Worker B", exact: true,
     }).click();
     await expect(page).toHaveURL(new RegExp(`/workspaces/${seed.workspace_id}/tasks$`));
     await expect(tabs.getByRole("link", {
-      name: `WorkerItem ${workerItemId.slice(0, 8)}`,
+      name: "Worker B", exact: true,
     })).toHaveCount(0);
 
     await page.goto(workerPath);

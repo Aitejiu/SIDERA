@@ -560,15 +560,46 @@ describe("WorkerItemPage", () => {
     );
   });
 
+  it("keeps healthy workspace details out of the main reading path until requested", async () => {
+    const user = userEvent.setup();
+    server.use(http.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+      () => HttpResponse.json({ ...workspace, plan_sync: null }),
+    ));
+    const inputs = workerResultInputsFixture();
+    server.use(http.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/result-inputs`,
+      () => HttpResponse.json({
+        ...inputs,
+        request: { ...inputs.request, status: "materialized", gate_reason: null },
+        governance: { ...inputs.governance, attention_state: "none", waiting_summary: null, state: "materialized" },
+        delivery: { ...inputs.delivery, reason_code: null, acknowledgement_status: "acknowledged" },
+        execution: { ...inputs.execution, status: "running", gate_reason: null },
+        available_actions: [],
+      }),
+    ));
+    renderPage();
+    const sidebar = await screen.findByRole("complementary", { name: "WorkerItem 事实" });
+    expect(within(sidebar).getByText("Research reports")).not.toBeVisible();
+    expect(within(sidebar).queryByText("运行回调测试")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "当前进展" })).getByText("运行回调测试")).toBeVisible();
+    await user.click(within(sidebar).getByText("更多任务信息", { exact: true }));
+    expect(within(sidebar).getByText("Research reports")).toBeVisible();
+  });
+
   it("renders a stable WorkerItem workspace across sessions", async () => {
+    const user = userEvent.setup();
     renderPage();
 
     expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
     expect((await screen.findAllByText("支付重构 / 回调幂等")).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "系统记录" }));
     expect(screen.getByText("Session 1 已关闭")).toBeVisible();
     expect(screen.getByText("Session 2 · 当前")).toBeVisible();
     expect(screen.getByText("只修改这个回调重试规则")).toBeVisible();
     expect(screen.getAllByText("OpenCode Worker").length).toBeGreaterThan(0);
+    expect(screen.getByText("执行尝试 #2")).not.toBeVisible();
+    await user.click(screen.getByText("执行配置", { exact: true }));
     expect(screen.getByText("执行尝试 #2")).toBeVisible();
     expect(screen.getByText("当前执行已绑定；更换节点需要停止并创建新的执行尝试")).toBeVisible();
     expect(screen.getByText("运行回调测试")).toBeVisible();
@@ -577,6 +608,31 @@ describe("WorkerItemPage", () => {
     expect(screen.getByRole("button", { name: "局部返工" })).toBeVisible();
     expect(screen.getByText("Research reports")).toBeVisible();
     expect(screen.queryByText(/raw_payload/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { reason: "a pending decision", attention: "decision_required", mode: "automatic", failure: null },
+    { reason: "paused collaboration", attention: "none", mode: "paused", failure: null },
+    { reason: "a materialization failure", attention: "none", mode: "automatic", failure: "adapter_unavailable" },
+  ])("reveals $reason even without a waiting summary", async ({ attention, mode, failure }) => {
+    server.use(http.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+      () => HttpResponse.json({ ...workspace, plan_sync: null }),
+    ));
+    const inputs = workerResultInputsFixture();
+    server.use(http.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/result-inputs`,
+      () => HttpResponse.json({
+        ...inputs,
+        request: null,
+        governance: { ...inputs.governance, attention_state: attention, governance_mode: mode, waiting_summary: null, state: "materialized" },
+        delivery: { ...inputs.delivery, reason_code: null, materialization_failure_code: failure },
+        available_actions: [],
+      }),
+    ));
+    renderPage();
+    const sidebar = await screen.findByRole("complementary", { name: "WorkerItem 事实" });
+    await waitFor(() => expect(within(sidebar).getByText("Research reports")).toBeVisible());
   });
 
   it("keeps result input loading separate from the central workspace", async () => {
@@ -604,7 +660,7 @@ describe("WorkerItemPage", () => {
     renderPage();
 
     await screen.findByRole("region", { name: "结果输入" });
-    const details = document.querySelector("details.worker-item-sidebar__collapsible");
+    const details = screen.getByRole("region", { name: "结果输入" }).closest("details");
     if (!(details instanceof HTMLDetailsElement)) throw new Error("expected a collapsible result input section");
     expect(details.open).toBe(true);
     const summary = details.querySelector("summary");
@@ -626,6 +682,26 @@ describe("WorkerItemPage", () => {
     expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
     expect(await screen.findByRole("alert", { name: "结果输入" })).toHaveTextContent("结果输入暂不可用");
     expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
+  });
+
+  it("reveals execution configuration when a running attempt needs operator attention", async () => {
+    server.use(http.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/worker-items/${WORKER_ITEM_ID}/workspace`,
+      () => HttpResponse.json({
+        ...workspace,
+        execution_history: [{
+          ...workspace.execution_history[0],
+          scheduling_status: "waiting",
+          waiting_reason: "operator_required",
+          waiting_details_summary: "请检查执行节点连接",
+          requires_operator: true,
+        }],
+      }),
+    ));
+    renderPage();
+    const progress = await screen.findByRole("region", { name: "当前进展" });
+    expect(within(progress).getByText("请检查执行节点连接")).toBeVisible();
+    expect(screen.getByText("需要处理", { exact: true })).toBeVisible();
   });
 
   it("opens fixed source and artifact routes from the WorkerItem sidebar", async () => {
@@ -752,11 +828,11 @@ describe("WorkerItemPage", () => {
     expect(within(sync).getByText("GEN 1 → GEN 2")).toBeVisible();
     expect(within(sync).getByText("未知结果")).toBeVisible();
     expect(within(sync).getByRole("button", { name: "恢复计划同步" })).toBeVisible();
-    expect(screen.getByText("PLAN GENERATION")).toBeVisible();
-    expect(screen.getByText("CONTEXT PATCH")).toBeVisible();
-    expect(screen.getByText("CONTINUATION")).toBeVisible();
-    expect(screen.getByText("RECOVERY")).toBeVisible();
-    expect(screen.getByText("CHECKPOINT")).toBeVisible();
+    expect(screen.getByText("计划调整", { exact: true })).toBeVisible();
+    expect(screen.getByText("上下文更新", { exact: true })).toBeVisible();
+    expect(screen.getByText("工作续接", { exact: true })).toBeVisible();
+    expect(screen.getByText("异常恢复", { exact: true })).toBeVisible();
+    expect(screen.getByText("阶段结果", { exact: true })).toBeVisible();
     expect(screen.queryByRole("button", { name: /查看.*计划同步/ })).not.toBeInTheDocument();
   });
 
@@ -795,7 +871,8 @@ describe("WorkerItemPage", () => {
     const user = userEvent.setup();
     renderPage();
 
-    expect(await screen.findByText("用户介入")).toBeVisible();
+    expect(await screen.findByRole("article", { name: "只修改这个回调重试规则" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "系统记录" }));
     await user.click(screen.getByRole("button", { name: "加载更多活动" }));
 
     expect(await screen.findByText("更早的历史活动")).toBeVisible();
@@ -803,12 +880,17 @@ describe("WorkerItemPage", () => {
   });
 
   it("shows placement, usage, delivery facts, and a clear read-only state", async () => {
+    const user = userEvent.setup();
     renderPage();
 
     const sidebar = await screen.findByRole("complementary", { name: "WorkerItem 事实" });
+    expect(within(sidebar).getByText("第 2 代 · callback-idempotency")).not.toBeVisible();
+    await user.click(within(sidebar).getByText("分配历史", { exact: true }));
     expect(within(sidebar).getByText("第 2 代 · callback-idempotency")).toBeVisible();
     expect(within(sidebar).getByText("context V4 · 已同步")).toBeVisible();
+    await user.click(within(sidebar).getByText("用量", { exact: true }));
     expect(within(sidebar).getByText("1,200")).toBeVisible();
+    await user.click(within(sidebar).getByText("交付物", { exact: true }));
     expect(within(sidebar).getByText("test-report")).toBeVisible();
     expect(within(sidebar).getByText("重复通知测试通过")).toBeVisible();
   });
@@ -832,6 +914,7 @@ describe("WorkerItemPage", () => {
     const user = userEvent.setup();
     renderPage();
 
+    await user.click(await screen.findByRole("button", { name: "系统记录" }));
     const traceButton = await screen.findByRole("button", { name: "查看 Agent Trace" });
     await user.click(traceButton);
 
@@ -841,6 +924,18 @@ describe("WorkerItemPage", () => {
 
     expect(screen.queryByRole("dialog", { name: "Agent Trace" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(traceButton).toHaveFocus();
+  });
+
+  it("opens the current Agent Trace without exposing routine system records", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const traceButton = await screen.findByRole("button", { name: "查看当前 Agent Trace" });
+    expect(screen.queryByText("Session 1 已关闭")).not.toBeInTheDocument();
+    await user.click(traceButton);
+    const dialog = await screen.findByRole("dialog", { name: "Agent Trace" });
+    expect(within(dialog).getAllByText("运行回调测试").length).toBeGreaterThan(0);
+    await user.click(within(dialog).getByRole("button", { name: "关闭 Agent Trace" }));
     expect(traceButton).toHaveFocus();
   });
 
@@ -861,8 +956,8 @@ describe("WorkerItemPage", () => {
     );
     renderPage();
 
-    const readOnly = await screen.findByRole("status");
-    expect(within(readOnly).getByText("只读")).toBeVisible();
+    const readOnly = await screen.findByText("只读", { selector: '[role="status"] strong' });
+    expect(readOnly).toBeVisible();
     expect(screen.getAllByText("这个 WorkerItem 已退役，只能查看历史上下文").length).toBeGreaterThan(0);
     expect(screen.queryByRole("region", { name: "协同状态" })).not.toBeInTheDocument();
   });

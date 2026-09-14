@@ -18,6 +18,7 @@ export function AttentionPanel({
   rootTaskTitle,
   items,
   onAcknowledged,
+  compact = false,
 }: {
   workspaceId: string;
   rootTaskId: string;
@@ -25,6 +26,7 @@ export function AttentionPanel({
   rootTaskTitle?: string;
   items: AttentionItem[];
   onAcknowledged?: () => void;
+  compact?: boolean;
 }) {
   const [acknowledgedKeys, setAcknowledgedKeys] = useState<Set<string>>(() => new Set());
   const [pendingKey, setPendingKey] = useState<string | null>(null);
@@ -69,13 +71,13 @@ export function AttentionPanel({
   };
 
   return (
-    <section className="attention-panel" aria-labelledby="attention-panel-title">
+    <section className={`attention-panel${compact ? " attention-panel--compact" : ""}`} aria-labelledby="attention-panel-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">ATTENTION</span>
+          {!compact ? <span className="eyebrow">ATTENTION</span> : null}
           <h2 id="attention-panel-title">需要我</h2>
         </div>
-        <span className="mono-label">{visibleItems.length} ITEMS</span>
+        <span className="mono-label">{visibleItems.length} {compact ? "项待处理" : "ITEMS"}</span>
       </div>
       {error ? <div className="attention-panel__error" role="alert"><CircleAlert size={14} aria-hidden="true" />{error}</div> : null}
       {visibleItems.length === 0 ? (
@@ -86,14 +88,23 @@ export function AttentionPanel({
             <article className="attention-item" key={item.key}>
               <div className="attention-item__marker" aria-hidden="true"><CircleAlert size={15} /></div>
               <div className="attention-item__body">
-                <div className="attention-item__heading">
-                  <strong>{rootTaskTitle ? `${rootTaskTitle} / ${item.subtask_title}` : item.subtask_title}</strong>
-                  <span className="mono-label">{item.kind}</span>
-                </div>
-                <p>{item.reason}</p>
-                <span className="mono-label">
-                  持续 {formatElapsed(item.occurred_at)} · SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}
-                </span>
+                <Link className="attention-item__open" to={attentionHref(item, workspaceId, rootTaskId)}>
+                  <div className="attention-item__heading">
+                    <strong>{rootTaskTitle ? `${rootTaskTitle} / ${item.subtask_title}` : item.subtask_title}</strong>
+                    <ArrowRight size={14} aria-hidden="true" />
+                  </div>
+                  <p>{item.reason}</p>
+                </Link>
+                {compact ? (
+                  <details className="attention-item__details">
+                    <summary>事件详情</summary>
+                    <span className="mono-label">{item.kind} · 持续 {formatElapsed(item.occurred_at)} · SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}</span>
+                  </details>
+                ) : (
+                  <span className="mono-label">
+                    {item.kind} · 持续 {formatElapsed(item.occurred_at)} · SOURCE {item.resource_id.slice(0, 8)} · V{item.resource_version}
+                  </span>
+                )}
               </div>
               {item.kind === "collaboration_release_proposal" ? (
                 <Link
@@ -127,12 +138,14 @@ function attentionHref(
   workspaceId: string,
   rootTaskId: string,
 ): string {
-  if (item.deep_link) {
-    return item.deep_link;
+  const hasPageLink = item.deep_link?.startsWith(`/workspaces/${encodeURIComponent(workspaceId)}/`);
+  if (item.kind === "collaboration_release_proposal" && hasPageLink) {
+    return item.deep_link!;
   }
   if (item.worker_item_id) {
     return `/workspaces/${encodeURIComponent(workspaceId)}/worker-items/${encodeURIComponent(item.worker_item_id)}`;
   }
+  if (hasPageLink) return item.deep_link!;
   return `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(rootTaskId)}/subtasks/${encodeURIComponent(item.subtask_key)}`;
 }
 

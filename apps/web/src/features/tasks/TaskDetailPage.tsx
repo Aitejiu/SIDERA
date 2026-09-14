@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { Clock3, History, MessageCircle } from "lucide-react";
+import { ChevronDown, Clock3, History, MessageCircle, SlidersHorizontal } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
+import { useTaskDetailsState } from "@/app/WorkspaceViewState";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 import { AttentionPanel } from "@/features/attention/AttentionPanel";
 import { CollaborationSummary } from "@/features/collaboration/CollaborationSummary";
@@ -106,6 +107,7 @@ export function TaskDetailPage() {
       >
         {graphQuery.data ? (
           <TaskDeliveryContent
+            key={resolvedRootTaskId}
             graph={graphQuery.data}
             activity={activity}
             activityError={activityQuery.isError}
@@ -161,7 +163,20 @@ function TaskDeliveryContent({
   rootTaskId: string;
   onAcknowledged: () => void;
 }) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const [detailsOpen, setDetailsOpen] = useTaskDetailsState(rootTaskId);
   const status = taskStatus(graph);
+  const { overview } = graph;
+  const collaborationNeedsAttention = Boolean(overview.collaboration?.attention_required
+    || overview.collaboration?.attention_subtasks?.length
+    || overview.collaboration?.blocked_subtask_count
+    || overview.collaboration?.blocked_subtasks?.length);
+  const convergenceNeedsAttention = Boolean(overview.convergence?.confirmation_blocked
+    || overview.convergence?.has_active_fence
+    || overview.convergence?.has_unknown
+    || overview.convergence?.unknown_count
+    || overview.convergence?.blocked_count
+    || ["blocked_unknown", "degraded"].includes(overview.convergence?.status ?? ""));
   const schedulingWaits = graph.overview.attention_items.filter(isSchedulingWait);
   const blockedSubtasks = graph.nodes
     .filter((node) => node.requires_operator || node.attention_worker_item_count > 0 || ["blocked", "failed", "waiting_user"].includes(node.state))
@@ -170,22 +185,43 @@ function TaskDeliveryContent({
       title: node.title,
       detail: node.waiting_details_summary || node.current_action || node.waiting_reason || null,
     }));
+  const collaboration = (
+    <CollaborationSummary
+      summary={overview.collaboration}
+      rootTaskTitle={overview.title}
+      onOpenSubtask={onOpenSubtask}
+    />
+  );
+  const convergence = <PlanConvergenceStrip convergence={overview.convergence} blockedItems={blockedSubtasks} />;
+
+  const toggleDetails = () => {
+    const details = detailsRef.current;
+    if (!details) return;
+    details.open = !details.open;
+    if (details.open) details.querySelector("summary")?.focus();
+  };
 
   return (
     <>
       <header className="task-detail-heading">
-        <div>
-          <span className="eyebrow">TASK CONTROL ROOM · GEN {graph.overview.generation}</span>
+        <div className="task-detail-heading__identity">
           <h1 id="task-detail-title">{graph.overview.title}</h1>
           <p>{graph.overview.goal_summary}</p>
+          <div className="task-detail-progress" role="group" aria-label="任务进度">
+            <StatusMark kind={status.kind} label={status.label} />
+            <span>已完成 <strong>{overview.completed_subtask_count} / {overview.subtask_count}</strong> 子任务</span>
+            <span>执行中 <strong>{overview.running_subtask_count}</strong></span>
+            {overview.failed_subtask_count > 0 ? <span className="task-detail-progress__failed">失败 <strong>{overview.failed_subtask_count}</strong></span> : null}
+          </div>
         </div>
         <div className="task-detail-heading__meta">
-          <StatusMark kind={status.kind} label={status.label} />
           <Link
-            className="quiet-button"
+            className="quiet-button task-detail-heading__history"
             to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/plan/${graph.overview.generation}`}
+            aria-label="计划历史"
+            title="计划历史"
           >
-            <History size={14} aria-hidden="true" />计划历史
+            <History size={16} aria-hidden="true" />
           </Link>
           <Link
             className="quiet-button"
@@ -193,37 +229,31 @@ function TaskDeliveryContent({
           >
             <MessageCircle size={14} aria-hidden="true" />与 Main Agent 讨论
           </Link>
-          <span className="mono-label">CURSOR {graph.overview.last_change_cursor}</span>
+          <button className="quiet-button" type="button" aria-label="查看任务详情" aria-controls="task-detail-information" aria-expanded={detailsOpen} onClick={toggleDetails}>
+            <SlidersHorizontal size={14} aria-hidden="true" />详情
+          </button>
         </div>
       </header>
 
-      <CollaborationSummary
-        summary={graph.overview.collaboration}
-        rootTaskTitle={graph.overview.title}
-        onOpenSubtask={onOpenSubtask}
-      />
-
       <div className="task-detail-main">
-        <PlanConvergenceStrip
-          convergence={graph.overview.convergence}
-          blockedItems={blockedSubtasks}
-        />
-        <PlanRevisionAttention
-          attention={graph.overview.revision_attention}
-          rootTaskTitle={graph.overview.title}
-        />
-        <AttentionPanel
-          workspaceId={workspaceId}
-          rootTaskId={rootTaskId}
-          rootTaskVersion={rootTaskVersion}
-          rootTaskTitle={graph.overview.title}
-          items={graph.overview.attention_items}
-          onAcknowledged={onAcknowledged}
-        />
-        <SchedulingWaitSummary items={schedulingWaits} />
-        <MilestoneTrack milestones={graph.milestones} />
-        <ExecutionHorizon graph={graph} />
-        <TaskKnowledgeSummary workspaceId={workspaceId} rootTaskId={rootTaskId} />
+        <div className="task-detail-attention" data-workspace-scroll="task-attention" role="region" aria-label="任务待处理事项" tabIndex={0}>
+          <PlanRevisionAttention
+            attention={graph.overview.revision_attention}
+            rootTaskTitle={graph.overview.title}
+          />
+          <AttentionPanel
+            workspaceId={workspaceId}
+            rootTaskId={rootTaskId}
+            rootTaskVersion={rootTaskVersion}
+            rootTaskTitle={graph.overview.title}
+            items={graph.overview.attention_items}
+            onAcknowledged={onAcknowledged}
+            compact
+          />
+          {collaborationNeedsAttention ? collaboration : null}
+          {convergenceNeedsAttention ? convergence : null}
+          <SchedulingWaitSummary items={schedulingWaits} />
+        </div>
         <div className="task-view-switch" role="tablist" aria-label="子任务状态视图">
           <button
             className={viewMode === "board" ? "is-active" : ""}
@@ -256,16 +286,27 @@ function TaskDeliveryContent({
         {viewMode === "board" ? <TaskBoard nodes={graph.nodes} onOpen={onOpenSubtask} /> : null}
         {viewMode === "dag" ? <TaskGraph graph={graph} onOpen={onOpenSubtask} /> : null}
         {viewMode === "results" ? <TaskResultPanel workspaceId={workspaceId} rootTaskId={rootTaskId} /> : null}
-        <TaskActivity
-          activity={activity}
-          workspaceId={workspaceId}
-          rootTaskId={rootTaskId}
-          onLoadMore={onLoadMore}
-          isLoadingMore={activityLoadingMore}
-          isLoading={activityLoading}
-          isError={activityError}
-          onRetry={onRetryActivity}
-        />
+        <details id="task-detail-information" className="task-details" ref={detailsRef} open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+          <summary><ChevronDown size={16} aria-hidden="true" /><span>任务详情</span></summary>
+          <div className="task-details__content">
+            <div className="task-details__identity mono-label">GEN {overview.generation} · CURSOR {overview.last_change_cursor}</div>
+            <ExecutionHorizon graph={graph} />
+            <MilestoneTrack milestones={graph.milestones} />
+            {!convergenceNeedsAttention ? convergence : null}
+            {!collaborationNeedsAttention ? collaboration : null}
+            <TaskKnowledgeSummary workspaceId={workspaceId} rootTaskId={rootTaskId} />
+            <TaskActivity
+              activity={activity}
+              workspaceId={workspaceId}
+              rootTaskId={rootTaskId}
+              onLoadMore={onLoadMore}
+              isLoadingMore={activityLoadingMore}
+              isLoading={activityLoading}
+              isError={activityError}
+              onRetry={onRetryActivity}
+            />
+          </div>
+        </details>
       </div>
     </>
   );
