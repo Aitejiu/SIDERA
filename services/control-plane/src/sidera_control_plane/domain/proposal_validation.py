@@ -28,6 +28,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
 from sidera_control_plane.domain.plans import DependencyKind, TaskPlanSnapshot
 from sidera_control_plane.domain.result_inputs import (
     InputGroupInvalid,
+    InputGroupMode,
     InputGroupV1,
     InputWaitCycle,
     validate_input_wait_graph,
@@ -145,7 +146,10 @@ def validate_proposal(
         typed_payload.to_legacy() if is_v4 or is_v5 or is_v6 else typed_payload
     )
     _validate_unique_keys(validation_payload)
-    _validate_references(validation_payload)
+    _validate_references(
+        validation_payload,
+        enforce_worker_item_scope=is_v6,
+    )
     _validate_cycles(
         validation_payload,
         input_groups=(
@@ -161,6 +165,7 @@ def validate_proposal(
         _validate_collaboration_request(typed_payload, profile_snapshot)
     elif is_v5 or is_v6:
         _validate_collaboration_request_v2(typed_payload, profile_snapshot)
+        _validate_input_group_producers(typed_payload)
     if is_v6:
         validate_integration_spec(
             typed_payload.integration_spec,
@@ -171,6 +176,49 @@ def validate_proposal(
             ),
         )
     return typed_payload
+
+
+def _validate_input_group_producers(
+    payload: PlanningProposalPayloadV5 | PlanningProposalPayloadV6,
+) -> None:
+    request = payload.collaboration_policy_request
+    if request.mode is CollaborationMode.DISABLED:
+        return
+
+    intents_by_worker = {
+        intent.worker_item_key: intent for intent in payload.execution_intents
+    }
+    for group in request.input_groups:
+        required_artifacts = set(group.requirements.required_artifact_refs)
+        required_evidence = set(group.requirements.required_evidence_refs)
+        eligible_keys: set[str] = set()
+        for candidate in group.candidates:
+            intent = intents_by_worker[candidate.worker_item_key]
+            if (
+                required_artifacts <= set(intent.expected_artifact_refs)
+                and required_evidence <= set(intent.required_evidence_refs)
+            ):
+                eligible_keys.add(candidate.worker_item_key)
+
+        required_count = (
+            len(group.candidates)
+            if group.mode is InputGroupMode.ALL
+            else group.minimum_count
+        )
+        assert required_count is not None
+        if len(eligible_keys) >= required_count:
+            continue
+
+        ineligible_keys = tuple(
+            candidate.worker_item_key
+            for candidate in group.candidates
+            if candidate.worker_item_key not in eligible_keys
+        )
+        _fail(
+            "proposal_input_group_unproducible",
+            f"input group {group.group_key} has fewer eligible producers than its quorum",
+            (group.group_key, *ineligible_keys),
+        )
 
 
 def _typed_payload(
@@ -408,10 +456,15 @@ def _validate_unique_keys(payload: PlanningProposalPayload) -> None:
         )
 
 
-def _validate_references(payload: PlanningProposalPayload) -> None:
+def _validate_references(
+    payload: PlanningProposalPayload,
+    *,
+    enforce_worker_item_scope: bool = False,
+) -> None:
     subtask_keys = {item.key for item in payload.subtasks}
     worker_keys = {item.key for item in payload.worker_items}
     milestone_keys = {item.key for item in payload.subtask_milestones}
+    worker_item_subtasks = {item.key: item.subtask_key for item in payload.worker_items}
     for item in payload.subtasks:
         if item.milestone_key is not None and item.milestone_key not in milestone_keys:
             _fail("proposal_reference_invalid", "subtask milestone reference is unknown", (item.key, item.milestone_key))
@@ -441,6 +494,17 @@ def _validate_references(payload: PlanningProposalPayload) -> None:
             worker_keys,
             "worker item dependency",
         )
+        if enforce_worker_item_scope and worker_item_subtasks[
+            dependency.upstream_worker_item_key
+        ] != worker_item_subtasks[dependency.downstream_worker_item_key]:
+            _fail(
+                "cross_subtask_worker_dependency",
+                "WorkerItem dependency edges must stay within one Subtask",
+                (
+                    dependency.upstream_worker_item_key,
+                    dependency.downstream_worker_item_key,
+                ),
+            )
         if dependency.kind not in {"hard", "informational"}:
             _fail("proposal_schema_invalid", "worker dependency kind is unsupported", (dependency.kind,))
         for ref in dependency.required_artifact_refs:
@@ -459,6 +523,17 @@ def _validate_references(payload: PlanningProposalPayload) -> None:
                 worker_keys,
                 "activation dependency",
             )
+            if enforce_worker_item_scope and worker_item_subtasks[
+                dependency.upstream_worker_item_key
+            ] != worker_item_subtasks[dependency.downstream_worker_item_key]:
+                _fail(
+                    "cross_subtask_worker_dependency",
+                    "WorkerItem activation dependency edges must stay within one Subtask",
+                    (
+                        dependency.upstream_worker_item_key,
+                        dependency.downstream_worker_item_key,
+                    ),
+                )
             if dependency.kind not in {"hard", "informational"}:
                 _fail("proposal_schema_invalid", "activation dependency kind is unsupported", (dependency.kind,))
             for ref in dependency.required_artifact_refs:

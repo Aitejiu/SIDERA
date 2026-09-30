@@ -37,6 +37,8 @@ class OutboxStore(Protocol):
 
     def acknowledge(self, message_id: UUID, claim_token: UUID) -> bool: ...
 
+    def renew_claim(self, message_id: UUID, claim_token: UUID) -> bool: ...
+
     def reschedule(
         self,
         message_id: UUID,

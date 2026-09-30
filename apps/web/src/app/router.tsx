@@ -8,6 +8,7 @@ import {
 import {
   App,
 } from "./App";
+import { DEFAULT_WORKSPACE_ID } from "./runtimeConfig";
 import { KnowledgeInboxPage } from "@/features/knowledge/KnowledgeInboxPage";
 import { KnowledgeImportPage } from "@/features/knowledge/KnowledgeImportPage";
 import { KnowledgeLibraryPage } from "@/features/knowledge/KnowledgeLibraryPage";
@@ -32,8 +33,6 @@ import { PlanningPage } from "@/features/planning/PlanningPage";
 import { PlanRevisionPage } from "@/features/planning/PlanRevisionPage";
 import { ContextPackagePage } from "@/features/context/ContextPackagePage";
 import { CollaborationDetailPage } from "@/features/collaboration/CollaborationDetailPage";
-
-const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
 export const routes: RouteObject[] = [
   {

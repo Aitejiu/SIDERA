@@ -15,6 +15,7 @@ from sidera_control_plane.application.result_gate import (
 )
 from sidera_control_plane.application.result_input_sources import (
     build_rework_code_input_manifest,
+    load_code_result_dependency_closure,
 )
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
@@ -154,6 +155,17 @@ def build_rework_context(
             raise ResultError("rework_source_result_not_found", {"result_id": str(result_id)})
         snapshots.append(snapshot)
     try:
+        snapshots = list(
+            load_code_result_dependency_closure(
+                direct_snapshots=tuple(snapshots),
+                load_snapshot=lambda result_id: uow.results.get_record(
+                    "code_snapshot", result_id, request.workspace_id
+                ),
+                workspace_id=request.workspace_id,
+                root_task_id=request.root_task_id,
+                repository_ref=plan.integration_spec.repository_ref,
+            )
+        )
         code_manifest = build_rework_code_input_manifest(
             candidate=source_candidate,
             snapshots=snapshots,

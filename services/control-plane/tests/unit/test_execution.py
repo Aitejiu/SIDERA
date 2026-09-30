@@ -208,6 +208,41 @@ def test_execution_fail_requires_a_code_and_running_state() -> None:
         )
 
 
+def test_prestart_failure_requires_the_exact_leased_fence() -> None:
+    execution = make_execution()
+    lease_id = uuid4()
+    worker_id = uuid4()
+    execution.assign(lease_id=lease_id, worker_id=worker_id, fencing_token=2)
+
+    with pytest.raises(StaleFencingToken):
+        execution.fail_before_start(
+            lease_id=lease_id,
+            fencing_token=1,
+            failure_code="acceptance_budget_exhausted",
+            now=NOW,
+        )
+
+    execution.fail_before_start(
+        lease_id=lease_id,
+        fencing_token=2,
+        failure_code="acceptance_budget_exhausted",
+        now=NOW,
+    )
+    assert execution.status is ExecutionStatus.FAILED
+    assert execution.failure_code == "acceptance_budget_exhausted"
+    assert execution.started_at is None
+    assert execution.active_lease_id is None
+    assert execution.finished_at == NOW
+
+    with pytest.raises(InvalidTransition):
+        execution.fail_before_start(
+            lease_id=lease_id,
+            fencing_token=2,
+            failure_code="another_failure",
+            now=NOW,
+        )
+
+
 def test_session_activity_is_strictly_ordered_and_closes_once() -> None:
     session = ExecutionSession.start(
         session_id=uuid4(),

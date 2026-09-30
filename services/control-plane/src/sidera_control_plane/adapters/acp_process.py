@@ -26,9 +26,72 @@ class ACPProcessError(RuntimeError):
 class ACPProcessTimeoutError(ACPProcessError):
     """An ACP response did not arrive before its deadline."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str | None = None,
+        timeout_seconds: float | None = None,
+        elapsed_ms: int | None = None,
+        process_exited: bool | None = None,
+    ) -> None:
+        self.method = method
+        self.timeout_seconds = timeout_seconds
+        self.elapsed_ms = elapsed_ms
+        self.process_exited = process_exited
+        super().__init__(message)
+
 
 class ACPProcessProtocolError(ACPProcessError):
     """An ACP process emitted an invalid JSON-RPC message."""
+
+
+def _safe_error_classification(
+    error_data: object,
+) -> tuple[str | None, str | None]:
+    if not isinstance(error_data, Mapping):
+        return None, None
+    service = error_data.get("service")
+    error_name = error_data.get("errorName")
+    return (
+        "session" if isinstance(service, str) and service == "session" else None,
+        error_name
+        if isinstance(error_name, str)
+        and error_name in ("provider.invalid-request", "APIError")
+        else None,
+    )
+
+
+class ACPRemoteError(ACPProcessProtocolError):
+    """A matching ACP JSON-RPC request returned a remote error."""
+
+    def __init__(
+        self,
+        method: str,
+        code: int,
+        *,
+        error_data: object = None,
+    ) -> None:
+        self._method = method
+        self._code = code
+        self._service, self._error_name = _safe_error_classification(error_data)
+        super().__init__(f"ACP {method} returned JSON-RPC error code {code}")
+
+    @property
+    def method(self) -> str:
+        return self._method
+
+    @property
+    def code(self) -> int:
+        return self._code
+
+    @property
+    def service(self) -> str | None:
+        return self._service
+
+    @property
+    def error_name(self) -> str | None:
+        return self._error_name
 
 
 class ACPProcessTransport:
@@ -175,9 +238,23 @@ class ACPProcessTransport:
                 self._write(
                     {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
                 )
-            deadline = time.monotonic() + timeout
+            started_at = time.monotonic()
+            deadline = started_at + timeout
             while True:
-                message = self._read_message(max(0.0, deadline - time.monotonic()))
+                try:
+                    message = self._read_message(
+                        max(0.0, deadline - time.monotonic())
+                    )
+                except ACPProcessTimeoutError:
+                    raise ACPProcessTimeoutError(
+                        "ACP response timed out",
+                        method=method,
+                        timeout_seconds=timeout,
+                        elapsed_ms=max(
+                            0, int((time.monotonic() - started_at) * 1000)
+                        ),
+                        process_exited=self.process.poll() is not None,
+                    ) from None
                 # A server request can legally reuse a numeric id.  The
                 # presence of method makes it a request, never our response.
                 if isinstance(message.get("method"), str):
@@ -188,7 +265,17 @@ class ACPProcessTransport:
                         self._notifications.append(message)
                     continue
                 if "error" in message:
-                    raise ACPProcessProtocolError("ACP returned a JSON-RPC error")
+                    error = message["error"]
+                    code = error.get("code") if isinstance(error, Mapping) else None
+                    if type(code) is not int:
+                        raise ACPProcessProtocolError(
+                            "ACP returned an invalid JSON-RPC error"
+                        )
+                    raise ACPRemoteError(
+                        method,
+                        code,
+                        error_data=error.get("data"),
+                    )
                 result = message.get("result")
                 if not isinstance(result, Mapping):
                     raise ACPProcessProtocolError(
@@ -203,7 +290,12 @@ class ACPProcessTransport:
     def read_available(self, *, timeout: float) -> None:
         if timeout < 0:
             raise ValueError("ACP read timeout cannot be negative")
-        with self._request_lock:
+        # A request owns the single reader while it waits for its response.
+        # Observation is best-effort and must never queue behind that request;
+        # notifications already buffered by the request remain drainable.
+        if not self._request_lock.acquire(blocking=False):
+            return
+        try:
             while True:
                 if b"\n" not in self._read_buffer:
                     ready, _, _ = select.select([self._stdout], [], [], timeout)
@@ -219,6 +311,8 @@ class ACPProcessTransport:
                 else:
                     with self._lock:
                         self._notifications.append(message)
+        finally:
+            self._request_lock.release()
 
     def drain_notifications(self) -> tuple[Mapping[str, Any], ...]:
         with self._lock:

@@ -1,5 +1,12 @@
 import { CircleAlert, CircleCheck, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -32,6 +39,9 @@ const THREAD_BUSY_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000] as const;
 
 type ScopedTurnMap = Record<string, Record<string, MainAgentTurn>>;
 type ScopedInputMap = Record<string, Record<string, string>>;
+type PendingOperationState = "unknown" | "conflict";
+type PendingOperation = { operationId: string; state: PendingOperationState };
+type ScopedOperationMap = Record<string, PendingOperation>;
 
 export function ChatPage() {
   const workspaceId = useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
@@ -43,6 +53,7 @@ export function ChatPage() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [transientByScope, setTransientByScope] = useState<ScopedTurnMap>({});
   const [turnInputsByScope, setTurnInputsByScope] = useState<ScopedInputMap>({});
+  const [pendingOperationsByScope, setPendingOperationsByScope] = useState<ScopedOperationMap>({});
   const [pollingTurn, setPollingTurn] = useState<{ threadId: string; turnId: string } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [contextSendPending, setContextSendPending] = useState(false);
@@ -61,6 +72,7 @@ export function ChatPage() {
     () => turnInputsByScope[scope] ?? {},
     [scope, turnInputsByScope],
   );
+  const pendingOperation = pendingOperationsByScope[scope];
 
   const healthQuery = useQuery({
     queryKey: mainAgentHealthQueryKey(workspaceId),
@@ -206,10 +218,13 @@ export function ChatPage() {
     navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(nextThreadId)}`);
   };
 
-  const send = async (input: string) => {
+  const send = async (input: string, options: { freshOperation?: boolean } = {}) => {
     const normalizedInput = input.trim();
     if (activeTurn !== undefined || normalizedInput === "" || sendPending) return;
     setErrorMessage(null);
+    const operationId = options.freshOperation
+      ? createOperationId()
+      : pendingOperation?.operationId ?? createOperationId();
 
     if (threadId === undefined) {
       if (pendingContextRef === null || contextSendPending) return;
@@ -224,18 +239,29 @@ export function ChatPage() {
         setDrafts((current) => ({ ...current, [created.id]: normalizedInput }));
         navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(created.id)}`);
         try {
-          const turn = await startTurnWithBusyRetry(created.id, normalizedInput);
+          const turn = await startTurnWithBusyRetry(
+            created.id,
+            normalizedInput,
+            operationId,
+          );
           setTurnInputsByScope((current) => ({
             ...current,
             [created.id]: { ...current[created.id], [turn.id]: normalizedInput },
           }));
           applyTurn(turn);
+          clearPendingOperation(created.id, setPendingOperationsByScope);
           setDrafts((current) => ({ ...current, [created.id]: "" }));
           if (!turn.streamAvailable) {
             setPollingTurn({ threadId: created.id, turnId: turn.id });
           }
-        } catch {
-          setErrorMessage("消息未发送，输入内容已保留。请检查 Gateway 后重试。");
+        } catch (error) {
+          rememberPendingOperation(
+            created.id,
+            operationId,
+            error,
+            setPendingOperationsByScope,
+          );
+          setErrorMessage(startErrorMessage(error));
         }
       } catch {
         setErrorMessage("无法创建带上下文的对话，输入内容已保留。请稍后重试。");
@@ -247,18 +273,29 @@ export function ChatPage() {
 
     setSendPending(true);
     try {
-      const turn = await startTurnWithBusyRetry(threadId, normalizedInput);
+      const turn = await startTurnWithBusyRetry(
+        threadId,
+        normalizedInput,
+        operationId,
+      );
       setTurnInputsByScope((current) => ({
         ...current,
         [threadId]: { ...current[threadId], [turn.id]: normalizedInput },
       }));
       applyTurn(turn);
+      clearPendingOperation(threadId, setPendingOperationsByScope);
       setDrafts((current) => ({ ...current, [scope]: "" }));
       if (!turn.streamAvailable) {
         setPollingTurn({ threadId, turnId: turn.id });
       }
-    } catch {
-      setErrorMessage("消息未发送，输入内容已保留。请检查 Gateway 后重试。");
+    } catch (error) {
+      rememberPendingOperation(
+        threadId,
+        operationId,
+        error,
+        setPendingOperationsByScope,
+      );
+      setErrorMessage(startErrorMessage(error));
     } finally {
       setSendPending(false);
     }
@@ -272,7 +309,7 @@ export function ChatPage() {
       setErrorMessage("这轮对话没有可重试的原始输入。");
       return;
     }
-    await send(input);
+    await send(input, { freshOperation: true });
   };
 
   const interrupt = async () => {
@@ -316,6 +353,29 @@ export function ChatPage() {
         />
 
         <main className="chat-main" aria-label="Main Agent 对话工作面">
+          {pendingOperation !== undefined ? (
+            <div className="chat-recovery-notice" role="status" aria-label="发送结果恢复状态">
+              <RefreshCw size={16} aria-hidden="true" />
+              <div>
+                <strong>{pendingOperation.state === "conflict" ? "原发送仍待确认" : "结果待确认"}</strong>
+                <span>
+                  {pendingOperation.state === "conflict"
+                    ? "修改后的内容没有自动创建新回合；先结束这次恢复，再发起新的发送。"
+                    : "未自动重发；再次发送会复用原 operationId，避免重复执行。"}
+                </span>
+              </div>
+              <button
+                className="quiet-button"
+                type="button"
+                onClick={() => {
+                  clearPendingOperation(scope, setPendingOperationsByScope);
+                  setErrorMessage(null);
+                }}
+              >
+                开始新的发送
+              </button>
+            </div>
+          ) : null}
           {threadId !== undefined && activeTurn !== undefined && (!activeTurn.streamAvailable || pollingTurn !== null) ? (
             <div className="chat-recovery-notice" role="status" aria-label="对话恢复状态">
               <RefreshCw size={16} aria-hidden="true" />
@@ -325,7 +385,16 @@ export function ChatPage() {
               </div>
             </div>
           ) : null}
-          {unavailable ? (
+          {unavailable && threadId !== undefined ? (
+            <div className="chat-recovery-notice" role="status" aria-label="历史只读提示">
+              <CircleAlert size={16} aria-hidden="true" />
+              <div>
+                <strong>当前显示已恢复历史</strong>
+                <span>Gateway 暂不可用；维护模式下不能发送或中断新的回合。</span>
+              </div>
+            </div>
+          ) : null}
+          {unavailable && threadId === undefined ? (
             <div className="chat-main__offline" role="alert">
               <CircleAlert size={19} aria-hidden="true" />
               <strong>Main Agent 暂不可用</strong>
@@ -378,7 +447,7 @@ export function ChatPage() {
               <ChatComposer
                 value={draft}
                 active={activeTurn !== undefined}
-                disabled={threadQuery.isError || createMutation.isPending || contextSendPending || sendPending}
+                disabled={unavailable || threadQuery.isError || createMutation.isPending || contextSendPending || sendPending}
                 errorMessage={errorMessage}
                 onChange={(value) => {
                   setDrafts((current) => ({ ...current, [scope]: value }));
@@ -401,10 +470,14 @@ export function ChatPage() {
   );
 }
 
-async function startTurnWithBusyRetry(threadId: string, input: string): Promise<MainAgentTurn> {
+async function startTurnWithBusyRetry(
+  threadId: string,
+  input: string,
+  operationId: string,
+): Promise<MainAgentTurn> {
   for (let retryIndex = 0; ; retryIndex += 1) {
     try {
-      return await startTurn(threadId, input);
+      return await startTurn(threadId, input, operationId);
     } catch (error) {
       const retryDelay = THREAD_BUSY_RETRY_DELAYS_MS[retryIndex];
       if (!isRetryableThreadBusy(error) || retryDelay === undefined) {
@@ -413,6 +486,54 @@ async function startTurnWithBusyRetry(threadId: string, input: string): Promise<
       await wait(retryDelay);
     }
   }
+}
+
+function createOperationId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return "sidera-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+}
+
+function clearPendingOperation(
+  scope: string,
+  setPendingOperations: Dispatch<SetStateAction<ScopedOperationMap>>,
+): void {
+  setPendingOperations((current) => {
+    if (!(scope in current)) return current;
+    const next = { ...current };
+    delete next[scope];
+    return next;
+  });
+}
+
+function rememberPendingOperation(
+  scope: string,
+  operationId: string,
+  error: unknown,
+  setPendingOperations: Dispatch<SetStateAction<ScopedOperationMap>>,
+): void {
+  const state = isOperationIdentityConflict(error) ? "conflict" : "unknown";
+  if (state === "unknown" && !isUnknownStartFailure(error)) return;
+  setPendingOperations((current) => ({ ...current, [scope]: { operationId, state } }));
+}
+
+function isUnknownStartFailure(error: unknown): boolean {
+  return !(error instanceof MainAgentApiProblem) || error.status >= 500;
+}
+
+function isOperationIdentityConflict(error: unknown): error is MainAgentApiProblem {
+  return error instanceof MainAgentApiProblem && error.code === "operation_identity_conflict";
+}
+
+function startErrorMessage(error: unknown): string {
+  if (isOperationIdentityConflict(error)) {
+    return "原发送结果仍待确认，修改后的内容未发送。请先结束这次恢复，再发起新的发送。";
+  }
+  if (isUnknownStartFailure(error)) {
+    return "发送结果未知，未自动重发。输入内容已保留，再次发送会复用原操作。";
+  }
+  return "消息未发送，输入内容已保留。请检查 Gateway 后重试。";
 }
 
 function isRetryableThreadBusy(error: unknown): error is MainAgentApiProblem {

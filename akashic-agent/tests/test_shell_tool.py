@@ -826,6 +826,52 @@ def test_shell_env_sets_noninteractive_defaults(monkeypatch, tmp_path: Path) -> 
     assert env["GIT_PAGER"] == "cat"
 
 
+def test_shell_env_does_not_inherit_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensitive = {
+        "SIDERA_OPENCODE_GO_API_KEY": "provider-key",
+        "SIDERA_KNOWLEDGE_MAIN_AGENT_TOKEN": "knowledge-token",
+        "GITHUB_TOKEN": "github-token",
+        "AWS_ACCESS_KEY_ID": "aws-access-key",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret-key",
+        "DATABASE_URL": "postgresql://user:password@localhost/db",
+    }
+    for name, value in sensitive.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("SIDERA_ACCEPTANCE_SCENARIO", "profile")
+
+    env = _shell_env()
+
+    assert all(name not in env for name in sensitive)
+    assert env["SIDERA_ACCEPTANCE_SCENARIO"] == "profile"
+
+
+@pytest.mark.asyncio
+async def test_shell_spawn_hook_cannot_reintroduce_credentials() -> None:
+    manager = ShellProcessManager()
+    shell = ShellTool(
+        manager,
+        spawn_hook=lambda options: {
+            "env": {**options["env"], "GITHUB_TOKEN": "hook-token"}
+        },
+    )
+    try:
+        result = _decode(
+            await shell.execute(
+                command=(
+                    'python3 -c \'import os; print("GITHUB_TOKEN" '
+                    'if "GITHUB_TOKEN" in os.environ else "")\''
+                ),
+                description="检查 shell 凭据隔离",
+            )
+        )
+        assert result["process_status"] == "succeeded"
+        assert result["output"].strip() == ""
+    finally:
+        await manager.shutdown()
+
+
 def test_shell_env_exports_plugin_rollout_owner_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

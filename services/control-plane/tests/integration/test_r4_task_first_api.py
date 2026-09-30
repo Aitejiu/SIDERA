@@ -42,6 +42,9 @@ from sidera_control_plane.persistence.models import (
     WorkerItemPlacementModel,
     WorkerModel,
 )
+from sidera_control_plane.persistence.task_first_query_store import (
+    SqlAlchemyTaskFirstQueryStore,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -67,6 +70,9 @@ CONSOLE_REVIEWER_ID = UUID("40000000-0000-0000-0000-000000000102")
 CONSOLE_INTEGRATOR_ID = UUID("40000000-0000-0000-0000-000000000103")
 CONSOLE_RUNNING_EXECUTION_ID = UUID("70000000-0000-0000-0000-000000000101")
 CONSOLE_WAITING_EXECUTION_ID = UUID("70000000-0000-0000-0000-000000000102")
+OTHER_SESSION_ID = UUID("80000000-0000-0000-0000-000000000002")
+CURRENT_SESSION_ARTIFACT_ID = UUID("a0000000-0000-0000-0000-000000000002")
+OTHER_SESSION_ARTIFACT_ID = UUID("a0000000-0000-0000-0000-000000000003")
 
 
 @pytest.fixture
@@ -1032,3 +1038,88 @@ def test_task_console_graph_exposes_subtasks_and_worker_item_summary(
     ]
     assert payload["overview"]["attention_items"][0]["task_title"] == "支付重构"
     assert payload["overview"]["attention_items"][0]["subtask_title"] == "回调幂等"
+
+
+def test_worker_trace_artifacts_are_scoped_to_the_requested_session(
+    database: Database, workspace_id: UUID
+) -> None:
+    assert workspace_id == WORKSPACE_ID
+    _seed(database)
+    with database.session() as session:
+        session.add(
+            ExecutionSessionModel(
+                id=OTHER_SESSION_ID,
+                workspace_id=WORKSPACE_ID,
+                execution_id=BACKEND_EXECUTION_ID,
+                worker_id=WORKER_ID,
+                adapter_session_id="task-first-sibling-session",
+                status="closed",
+                last_sequence=0,
+                last_activity_at=NOW,
+                input_mode="queued",
+                adapter_module_id=None,
+                adapter_config_version=None,
+                workspace_module_id=None,
+                workspace_config_version=None,
+                capability_snapshot=None,
+                process_ref=None,
+                workspace_ref=None,
+                version=1,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        session.flush()
+        session.add_all(
+            [
+                ArtifactModel(
+                    id=CURRENT_SESSION_ARTIFACT_ID,
+                    workspace_id=WORKSPACE_ID,
+                    task_id=BACKEND_TASK_ID,
+                    execution_id=BACKEND_EXECUTION_ID,
+                    session_id=SESSION_ID,
+                    artifact_type="diff",
+                    storage_ref="artifact://task-first/current-session-diff",
+                    content_hash="b" * 64,
+                    size_bytes=32,
+                    media_type="text/x-diff",
+                    provenance={"producer": "current-session"},
+                    created_at=NOW + timedelta(seconds=4),
+                ),
+                ArtifactModel(
+                    id=OTHER_SESSION_ARTIFACT_ID,
+                    workspace_id=WORKSPACE_ID,
+                    task_id=BACKEND_TASK_ID,
+                    execution_id=BACKEND_EXECUTION_ID,
+                    session_id=OTHER_SESSION_ID,
+                    artifact_type="diff",
+                    storage_ref="artifact://task-first/other-session-diff",
+                    content_hash="c" * 64,
+                    size_bytes=32,
+                    media_type="text/x-diff",
+                    provenance={"producer": "other-session"},
+                    created_at=NOW + timedelta(seconds=5),
+                ),
+            ]
+        )
+        session.commit()
+
+    snapshot = SqlAlchemyTaskFirstQueryStore(database).load_trace(
+        WORKSPACE_ID,
+        ROOT_TASK_ID,
+        BACKEND_EXECUTION_ID,
+        SESSION_ID,
+        before_sequence=None,
+        limit=100,
+    )
+
+    assert snapshot is not None
+    assert tuple(item.artifact_id for item in snapshot.trace_artifacts) == (
+        ARTIFACT_ID,
+        CURRENT_SESSION_ARTIFACT_ID,
+    )
+    assert set(snapshot.artifact_refs) == {
+        ARTIFACT_ID,
+        CURRENT_SESSION_ARTIFACT_ID,
+        OTHER_SESSION_ARTIFACT_ID,
+    }

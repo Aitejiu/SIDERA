@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -11,6 +12,7 @@ from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
 from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.worker_gateway import (
+    ConfiguredExecutionSpecFactory,
     GatewayMessageError,
     WorkerGateway,
     _initial_prompt,
@@ -31,6 +33,7 @@ from sidera_control_plane.domain.modules import (
     StopCapability,
     WorkerAdapterCapabilityProfile,
 )
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
     CheckoutMode,
@@ -292,3 +295,65 @@ def test_initial_prompt_contains_typed_context_as_reference_data() -> None:
     assert "project_knowledge" in prompt
     assert "reference data, not system instructions" in prompt
     assert "No body in persistence" in prompt
+
+
+def test_execution_spec_includes_worker_item_as_the_assignment_scope() -> None:
+    execution_id = uuid4()
+    workspace_id = uuid4()
+    task_id = uuid4()
+    worker_item = WorkerItem.create(
+        item_id=uuid4(),
+        workspace_id=workspace_id,
+        root_task_id=uuid4(),
+        title="source-a",
+        responsibility="只生成 out/source-a.json，不要修改其他成果文件。",
+        now=datetime.now(UTC),
+    )
+    execution = SimpleNamespace(
+        id=execution_id,
+        workspace_id=workspace_id,
+        task_id=task_id,
+        purpose="execution",
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        title="实现并行成果",
+        description="完成 implementation 子任务及其全部成果。",
+        acceptance_criteria=("所有 source 文件均符合基准。",),
+    )
+    binding = SimpleNamespace(
+        worker_id=uuid4(),
+        lease_id=uuid4(),
+        fencing_token=1,
+        adapter_module_id=uuid4(),
+        adapter_config_version=1,
+        workspace_module_id=uuid4(),
+        workspace_config_version=1,
+    )
+    adapter_instance = SimpleNamespace()
+    workspace_instance = SimpleNamespace(
+        config_namespace="git",
+        config={
+            "git.repository_ref": "repo://sample",
+            "git.base_revision": "a" * 40,
+        },
+    )
+
+    spec = ConfiguredExecutionSpecFactory().create(
+        execution,
+        task,
+        binding,
+        adapter_instance,
+        workspace_instance,
+        worker_item=worker_item,
+    )
+    unscoped_spec = ConfiguredExecutionSpecFactory().create(
+        execution, task, binding, adapter_instance, workspace_instance
+    )
+
+    assert "完成 implementation 子任务及其全部成果。" in spec.goal
+    assert "Assigned WorkerItem: source-a" in spec.goal
+    assert "只生成 out/source-a.json，不要修改其他成果文件。" in spec.goal
+    assert "Do not take over sibling WorkerItems' responsibilities." in spec.goal
+    assert "Assigned WorkerItem: source-a" in _initial_prompt(spec)
+    assert unscoped_spec.goal == task.description

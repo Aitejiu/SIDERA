@@ -27,6 +27,35 @@ _MAX_OUTPUT = 30_000
 _LOCAL_OWNER_PREFIX = "local-shell"
 _PLUGIN_ROLLOUT_OWNER_TURN_ENV = "AKASHIC_PLUGIN_ROLLOUT_OWNER_TURN"
 _REMOVED_SHELL_ARGUMENTS = frozenset({"run_in_background", "auto_promote"})
+_SENSITIVE_ENV_NAME_PARTS = frozenset(
+    {
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "AUTHORIZATION",
+    }
+)
+_SENSITIVE_ENV_NAME_PAIRS = frozenset(
+    {
+        "ACCESS_KEY",
+        "API_KEY",
+        "DATABASE_URL",
+        "DATABASE_URI",
+        "DB_URL",
+        "DB_URI",
+        "POSTGRES_URL",
+        "POSTGRES_URI",
+        "PRIVATE_KEY",
+        "REDIS_URL",
+        "REDIS_URI",
+    }
+)
+_SENSITIVE_ENV_NAMES = frozenset(
+    {"DOCKER_AUTH_CONFIG", "MYSQL_PWD", "PGPASSWORD", "PGPASSFILE", "REDISCLI_AUTH"}
+)
 _UNIFIED_EXEC_ENV = {
     "NO_COLOR": "1",
     "TERM": "dumb",
@@ -217,6 +246,7 @@ class ShellTool(Tool):
             hooked_env = hooked.get("env")
             if isinstance(hooked_env, dict):
                 env = {str(key): str(value) for key, value in hooked_env.items()}
+        env = _without_sensitive_environment(env)
         if self._restricted_dir is not None and cwd is None:
             cwd = self._restricted_dir
 
@@ -365,7 +395,7 @@ def _owner_session_key(manager: ShellProcessManager) -> str:
 
 
 def _shell_env() -> dict[str, str]:
-    env = os.environ.copy()
+    env = _without_sensitive_environment(os.environ.copy())
     turn_id = running_turn_id.get()
     if turn_id:
         env[_PLUGIN_ROLLOUT_OWNER_TURN_ENV] = turn_id
@@ -374,6 +404,22 @@ def _shell_env() -> dict[str, str]:
     _prepend_existing_path_entries(env, _discover_user_path_entries(env))
     env.update(_UNIFIED_EXEC_ENV)
     return env
+
+
+def _without_sensitive_environment(env: dict[str, str]) -> dict[str, str]:
+    filtered: dict[str, str] = {}
+    for name, value in env.items():
+        normalized = name.upper()
+        parts = normalized.split("_")
+        pairs = {"_".join(parts[index : index + 2]) for index in range(len(parts) - 1)}
+        if (
+            normalized in _SENSITIVE_ENV_NAMES
+            or any(part in _SENSITIVE_ENV_NAME_PARTS for part in parts)
+            or pairs.intersection(_SENSITIVE_ENV_NAME_PAIRS)
+        ):
+            continue
+        filtered[name] = value
+    return filtered
 
 
 def _discover_user_path_entries(env: dict[str, str]) -> list[Path]:

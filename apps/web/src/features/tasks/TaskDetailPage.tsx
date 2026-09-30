@@ -1,10 +1,11 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ChevronDown, Clock3, History, MessageCircle, SlidersHorizontal } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { useTaskDetailsState } from "@/app/WorkspaceViewState";
+import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 import { AttentionPanel } from "@/features/attention/AttentionPanel";
 import { CollaborationSummary } from "@/features/collaboration/CollaborationSummary";
@@ -33,6 +34,7 @@ export function TaskDetailPage() {
   const { workspaceId, rootTaskId } = useParams<{ workspaceId: string; rootTaskId: string }>();
   const resolvedWorkspaceId = workspaceId ?? "";
   const resolvedRootTaskId = rootTaskId ?? "";
+  const stream = useWorkspaceStreamOptional();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const viewMode = searchParams.get("view") === "dag"
@@ -78,6 +80,12 @@ export function TaskDetailPage() {
       next_cursor: pages.at(-1)?.next_cursor ?? null,
     };
   }, [activityQuery.data?.pages]);
+
+  useEffect(() => {
+    if (graphQuery.data !== undefined && stream !== null) {
+      stream.seedSnapshotCursor(graphQuery.data.overview.last_change_cursor);
+    }
+  }, [graphQuery.data, stream]);
 
   const setViewMode = (nextMode: "board" | "dag" | "results") => {
     const nextParams = new URLSearchParams(searchParams);
@@ -125,6 +133,9 @@ export function TaskDetailPage() {
               void graphQuery.refetch();
               void rootTaskQuery.refetch();
             }}
+            onRefreshAttention={async () => {
+              await Promise.all([graphQuery.refetch(), rootTaskQuery.refetch()]);
+            }}
           />
         ) : null}
       </AsyncState>
@@ -147,6 +158,7 @@ function TaskDeliveryContent({
   workspaceId,
   rootTaskId,
   onAcknowledged,
+  onRefreshAttention,
 }: {
   graph: TaskGraphProjection;
   activity: TaskActivityProjection | undefined;
@@ -162,6 +174,7 @@ function TaskDeliveryContent({
   workspaceId: string;
   rootTaskId: string;
   onAcknowledged: () => void;
+  onRefreshAttention: () => Promise<void>;
 }) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const [detailsOpen, setDetailsOpen] = useTaskDetailsState(rootTaskId);
@@ -248,6 +261,7 @@ function TaskDeliveryContent({
             rootTaskTitle={graph.overview.title}
             items={graph.overview.attention_items}
             onAcknowledged={onAcknowledged}
+            onRefresh={onRefreshAttention}
             compact
           />
           {collaborationNeedsAttention ? collaboration : null}

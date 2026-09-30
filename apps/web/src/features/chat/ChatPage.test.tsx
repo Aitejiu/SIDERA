@@ -281,6 +281,90 @@ describe("Main Agent chat workspace", () => {
     expect(screen.queryByText("消息未发送，输入内容已保留。请检查 Gateway 后重试。")).not.toBeInTheDocument();
   });
 
+  it("reuses the same operation id after a lost start response", async () => {
+    const user = userEvent.setup();
+    useBaseHandlers();
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce("operation-lost-1")
+      .mockReturnValueOnce("operation-lost-2");
+    vi.stubGlobal("crypto", { randomUUID });
+    const operationIds: unknown[] = [];
+    let startCount = 0;
+    server.use(
+      http.post("/main-agent/v1/threads/:threadId/turns", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        operationIds.push(body.operationId);
+        startCount += 1;
+        if (startCount === 1) {
+          return HttpResponse.error();
+        }
+        return HttpResponse.json(turn({ id: "turn-recovered" }), { status: 202 });
+      }),
+    );
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    const composer = await screen.findByRole("textbox", { name: "给 Main Agent 的消息" });
+    await user.type(composer, "响应丢失后继续");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(await screen.findByRole("status", { name: "发送结果恢复状态" })).toHaveTextContent(
+      "结果待确认",
+    );
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() => expect(screen.getByText("服务端已恢复的回答")).toBeInTheDocument());
+    expect(operationIds).toEqual(["operation-lost-1", "operation-lost-1"]);
+    expect(randomUUID).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the operation id when text changes, then requires an explicit new send", async () => {
+    const user = userEvent.setup();
+    useBaseHandlers();
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce("operation-conflict-1")
+      .mockReturnValueOnce("operation-conflict-2");
+    vi.stubGlobal("crypto", { randomUUID });
+    const operationIds: unknown[] = [];
+    let startCount = 0;
+    server.use(
+      http.post("/main-agent/v1/threads/:threadId/turns", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        operationIds.push(body.operationId);
+        startCount += 1;
+        if (startCount === 1) return HttpResponse.error();
+        if (startCount === 2) {
+          return HttpResponse.json(
+            { error: { code: "operation_identity_conflict", message: "conflict", retryable: false } },
+            { status: 409 },
+          );
+        }
+        return HttpResponse.json(turn({ id: "turn-new-operation" }), { status: 202 });
+      }),
+    );
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    const composer = await screen.findByRole("textbox", { name: "给 Main Agent 的消息" });
+    await user.type(composer, "第一次内容");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByRole("status", { name: "发送结果恢复状态" });
+
+    await user.clear(composer);
+    await user.type(composer, "修改后的内容");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(screen.getByText("原发送结果仍待确认，修改后的内容未发送。请先结束这次恢复，再发起新的发送。")).toBeInTheDocument());
+    expect(operationIds).toEqual(["operation-conflict-1", "operation-conflict-1"]);
+
+    await user.click(screen.getByRole("button", { name: "开始新的发送" }));
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(screen.getByText("服务端已恢复的回答")).toBeInTheDocument());
+    expect(operationIds).toEqual([
+      "operation-conflict-1",
+      "operation-conflict-1",
+      "operation-conflict-2",
+    ]);
+    expect(randomUUID).toHaveBeenCalledTimes(2);
+  });
+
   it("interrupts only the current active turn", async () => {
     const user = userEvent.setup();
     useBaseHandlers({
@@ -418,6 +502,21 @@ describe("Main Agent chat workspace", () => {
     expect(await screen.findByText("Main Agent 暂不可用")).toBeInTheDocument();
     expect(screen.getByText("Gateway offline")).toBeInTheDocument();
     expect(screen.getByText("任务控制面仍可继续查看。")).toBeInTheDocument();
+  });
+
+  it("keeps restored history visible while the Gateway is unavailable", async () => {
+    useBaseHandlers({
+      health: "unavailable",
+      thread: thread({ turns: [turn()] }),
+    });
+
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+
+    expect(await screen.findByText("服务端已恢复的回答")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "历史只读提示" })).toHaveTextContent(
+      "当前显示已恢复历史",
+    );
+    expect(screen.getByRole("textbox", { name: "给 Main Agent 的消息" })).toBeDisabled();
   });
 
   it("renders a tool result and resolves its task reference in the context rail", async () => {

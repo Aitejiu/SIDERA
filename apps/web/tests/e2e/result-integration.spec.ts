@@ -26,7 +26,7 @@ test.describe("R6 result integration control room", () => {
     await expect(results).toContainText("Expired credentials are rejected");
     await expect(results).toContainText("检查未通过");
     await expect(results.getByRole("combobox", { name: "Expired credentials are rejected 的决定" })).toBeVisible();
-    await expect(results.getByRole("link", { name: "查看 / 下载" })).toHaveCount(4);
+    await expect(results.getByRole("link", { name: "查看 / 下载" })).toHaveCount(6);
 
     await expectNoHorizontalOverflow(page);
     await expect(page).toHaveScreenshot("result-integration-root.png", {
@@ -77,7 +77,7 @@ test.describe("R6 result integration control room", () => {
     await expect(page.locator("#worker-item-title")).toHaveText("Worker A");
     const executionFacts = page.getByRole("region", { name: "执行尝试" });
     await expect(executionFacts).toContainText("当前执行已绑定");
-    const traceButton = page.getByRole("button", { name: "查看 Agent Trace" }).first();
+    const traceButton = page.getByRole("button", { name: "查看当前 Agent Trace" });
     await expect(traceButton).toBeVisible();
     await traceButton.click();
     const traceDialog = page.getByRole("dialog", { name: "Agent Trace" });
@@ -87,6 +87,8 @@ test.describe("R6 result integration control room", () => {
     await traceDialog.getByRole("button", { name: "关闭 Agent Trace" }).click();
     await expect(traceDialog).toHaveCount(0);
 
+    const artifactsSection = page.locator("details.worker-item-sidebar__collapsible").filter({ hasText: "交付物" }).first();
+    await artifactsSection.locator("summary").click();
     const artifactLink = page.getByRole("link", { name: "diff 可查看" }).first();
     await expect(artifactLink).toBeVisible();
     await artifactLink.click();
@@ -113,8 +115,7 @@ test.describe("R6 result integration control room", () => {
         page.locator(".worker-item-page__heading .eyebrow"),
         page.locator(".worker-composer__scope"),
         page.getByRole("heading", { name: "Execution / Session" }).locator("..").locator(".worker-item-facts"),
-        page.locator(".result-input-panel__summary > div:first-child small"),
-        page.locator(".result-input-delivery .result-input-muted"),
+        page.locator(".worker-item-sidebar"),
         page.locator(".worker-timeline-item time"),
         page.locator(".worker-timeline-item--delivery strong"),
         page.locator(".worker-timeline-item--delivery p"),
@@ -186,6 +187,39 @@ test.describe("R6 result integration control room", () => {
     await expect(page).toHaveURL(new RegExp(`/workspaces/${seed.workspace_id}/tasks$`));
     await expect(page.getByRole("heading", { name: "任务", exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
+  });
+
+  test("re-reading the result report stays read-only", async ({
+    page,
+    seedResultIntegration,
+    prepareResultIntegrationBrowser,
+    observeResultIntegration,
+  }) => {
+    const seed = seedResultIntegration();
+    expect(prepareResultIntegrationBrowser(seed.workspace_id).phase).toBe("candidate_failed");
+    const initial = observeResultIntegration(seed.workspace_id);
+
+    const nonGetRequests: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET") {
+        nonGetRequests.push(`${request.method()} ${request.url()}`);
+      }
+    });
+
+    await page.goto(resultUrl(seed));
+    const results = page.getByRole("region", { name: "成果验收" });
+    await expect(results).toContainText("等待用户验收");
+    const afterFirstRead = observeResultIntegration(seed.workspace_id);
+
+    await page.reload();
+    await expect(results).toContainText("等待用户验收");
+    const afterSecondRead = observeResultIntegration(seed.workspace_id);
+
+    expect(afterFirstRead.read_only_counts).toEqual(initial.read_only_counts);
+    expect(afterSecondRead.read_only_counts).toEqual(initial.read_only_counts);
+    expect(afterFirstRead.read_only_counts.fake_transport_calls).toBe(0);
+    expect(afterFirstRead.read_only_counts.turns).toBe(0);
+    expect(nonGetRequests).toEqual([]);
   });
 });
 

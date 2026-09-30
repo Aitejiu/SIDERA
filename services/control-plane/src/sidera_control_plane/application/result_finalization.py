@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.events import EventData
@@ -25,6 +26,7 @@ from sidera_control_plane.domain.plan_transitions import (
     WriterState,
 )
 from sidera_control_plane.domain.result_operations import (
+    ResultError,
     ResultOperationStatus,
     TaskResultHead,
 )
@@ -39,6 +41,7 @@ _ACTIVE_EXECUTION_STATUSES = frozenset(
         ExecutionStatus.RUNNING,
     }
 )
+FINALIZATION_OPERATION_KIND = "finalization"
 
 
 class FinalizationState(StrEnum):
@@ -129,6 +132,7 @@ class ResultFinalizationService:
         acceptance = uow.results.get_record(
             "acceptance", head.current_acceptance_id, workspace_id
         )
+
         if not isinstance(acceptance, TaskAcceptanceDecisionV1):
             return _blocked("acceptance_record_missing")
         if (
@@ -402,6 +406,148 @@ class ResultFinalizationService:
         uow.events.append_with_outbox(event)
 
 
+def finalization_operation_id(acceptance_id: UUID) -> UUID:
+    if not isinstance(acceptance_id, UUID):
+        raise TypeError("acceptance_id must be a UUID")
+    return uuid5(
+        _FINALIZATION_NAMESPACE,
+        f"operation:{acceptance_id}",
+    )
+
+
+def build_finalization_operation(
+    *,
+    workspace_id: UUID,
+    root_task_id: UUID,
+    acceptance_id: UUID,
+    candidate_id: UUID,
+    result_version: int,
+    now: datetime,
+) -> ResultOperationAttemptV1:
+    for value, label in (
+        (workspace_id, "workspace_id"),
+        (root_task_id, "root_task_id"),
+        (acceptance_id, "acceptance_id"),
+        (candidate_id, "candidate_id"),
+    ):
+        if not isinstance(value, UUID):
+            raise TypeError(f"{label} must be a UUID")
+    if type(result_version) is not int or result_version < 1:
+        raise ValueError("result_version must be positive")
+    timestamp = _aware_now(now)
+    return ResultOperationAttemptV1(
+        operation_id=finalization_operation_id(acceptance_id),
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        operation_kind=FINALIZATION_OPERATION_KIND,
+        attempt=1,
+        status=ResultOperationStatus.PENDING,
+        payload={
+            "acceptance_id": str(acceptance_id),
+            "candidate_id": str(candidate_id),
+            "result_version": result_version,
+        },
+        lease_owner=None,
+        lease_token=None,
+        lease_expiry=None,
+        receipt_ref=None,
+        failure_code=None,
+        version=1,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+class ResultFinalizationHandler:
+    """Run a durable finalization intent and persist its next retry state."""
+
+    def __init__(
+        self,
+        uow_factory: Callable[[], ControlPlaneUnitOfWork],
+        *,
+        clock: Callable[[], datetime] | None = None,
+        owner_id: str = "result-finalizer-worker",
+    ) -> None:
+        if not owner_id.strip():
+            raise ValueError("finalization handler owner_id is required")
+        self._uow_factory = uow_factory
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._finalizer = ResultFinalizationService(
+            uow_factory,
+            clock=self._clock,
+            owner_id=owner_id,
+        )
+
+    def __call__(self, claimed: ResultOperationAttemptV1) -> None:
+        if claimed.operation_kind != FINALIZATION_OPERATION_KIND:
+            raise ResultError("finalization_operation_kind_invalid", {})
+        if claimed.status is not ResultOperationStatus.RUNNING:
+            raise ResultError("finalization_operation_not_claimed", {})
+        if not claimed.lease_owner or not claimed.lease_token:
+            raise ResultError("finalization_operation_lease_missing", {})
+
+        outcome = self._finalizer.reconcile(
+            workspace_id=claimed.workspace_id,
+            root_task_id=claimed.root_task_id,
+        )
+        if outcome.state == FinalizationState.COMPLETED.value:
+            next_status = ResultOperationStatus.SUCCEEDED
+            receipt_ref = f"finalization://{claimed.operation_id}"
+        elif outcome.state == FinalizationState.PENDING.value:
+            next_status = ResultOperationStatus.PENDING
+            receipt_ref = None
+        else:
+            next_status = ResultOperationStatus.BLOCKED
+            receipt_ref = None
+
+        now = _aware_now(self._clock())
+        with self._uow_factory() as uow:
+            current = uow.results.get_operation(
+                claimed.operation_id,
+                claimed.workspace_id,
+                for_update=True,
+            )
+            if not isinstance(current, ResultOperationAttemptV1):
+                raise ResultError("finalization_operation_missing", {})
+            if not _same_finalization_claim(current, claimed):
+                raise ResultError("finalization_operation_lease_lost", {})
+            updated = replace(
+                current,
+                status=next_status,
+                payload={
+                    **dict(current.payload),
+                    "outcome": outcome.state,
+                    "blocking_execution_ids": [
+                        str(item) for item in outcome.blocking_execution_ids
+                    ],
+                },
+                lease_owner=None,
+                lease_token=None,
+                lease_expiry=None,
+                receipt_ref=receipt_ref,
+                failure_code=outcome.failure_code,
+                version=current.version + 1,
+                updated_at=now,
+            )
+            stored = uow.results.save_operation(updated, expected_version=current.version)
+            if not isinstance(stored, ResultOperationAttemptV1):
+                raise ResultError("finalization_operation_conflict", {})
+
+
+def _same_finalization_claim(
+    current: ResultOperationAttemptV1,
+    claimed: ResultOperationAttemptV1,
+) -> bool:
+    return (
+        current.operation_id == claimed.operation_id
+        and current.version == claimed.version
+        and current.status is claimed.status
+        and current.lease_owner == claimed.lease_owner
+        and current.lease_token == claimed.lease_token
+        and current.lease_expiry == claimed.lease_expiry
+    )
+
+
 def complete_accepted_root(
     uow: ControlPlaneUnitOfWork,
     task: Task,
@@ -557,9 +703,19 @@ def _failure_code(error: DomainError, fallback: str) -> str:
     return code if isinstance(code, str) and code.strip() else fallback
 
 
+def _aware_now(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("finalization clock must return an aware datetime")
+    return value.astimezone(UTC)
+
+
 __all__ = [
+    "FINALIZATION_OPERATION_KIND",
     "FinalizationOutcome",
     "FinalizationState",
+    "ResultFinalizationHandler",
     "ResultFinalizationService",
+    "build_finalization_operation",
     "complete_accepted_root",
+    "finalization_operation_id",
 ]

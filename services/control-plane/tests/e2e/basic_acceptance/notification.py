@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Literal
 from uuid import UUID
 
-from .contracts import NotificationSnapshot, ScenarioEvidence
+from .contracts import NotificationSnapshot, ScenarioEvidence, WebNotificationSnapshot
 from .evidence import EvidenceBuilder
 
 
@@ -155,6 +155,85 @@ def run_notification(
             failure_code_override="notification_route_reference_missing",
         )
     return build_notification_evidence(builder, snapshot)
+
+
+def build_web_notification_evidence(
+    builder: EvidenceBuilder,
+    snapshot: WebNotificationSnapshot,
+) -> ScenarioEvidence:
+    failures: list[str] = []
+    incomplete: list[str] = []
+    checks: list[str] = []
+    if snapshot.channel != "web_inbox":
+        failures.append("web_notification_channel_mismatch")
+    if snapshot.deep_link_resource_id != snapshot.worker_item_id and (
+        snapshot.worker_item_id is not None
+    ):
+        failures.append("web_notification_deep_link_mismatch")
+    elif snapshot.deep_link_resource_id not in {
+        snapshot.root_task_id,
+        snapshot.subtask_id,
+        snapshot.worker_item_id,
+    }:
+        failures.append("web_notification_deep_link_unbound")
+    else:
+        checks.append("web_notification_deep_link_observed")
+    _require_fact(snapshot.event_observed, "web_event", incomplete, checks)
+    _require_fact(snapshot.inbox_created, "web_inbox_item", incomplete, checks)
+    _require_fact(snapshot.exact_mapping, "web_exact_mapping", incomplete, checks)
+    _require_fact(snapshot.user_read, "web_read", incomplete, checks)
+    _require_fact(snapshot.user_acknowledged, "web_ack", incomplete, checks)
+    _require_fact(
+        snapshot.task_state_preserved,
+        "web_task_state_preserved",
+        incomplete,
+        checks,
+    )
+    if snapshot.duplicate_count != 0:
+        failures.append("web_notification_duplicate")
+    else:
+        checks.append("web_notification_deduplicated")
+    failure_code = (failures or incomplete or [None])[0]
+    return builder.finish(
+        real_tests=1 if not failures and not incomplete else 0,
+        failed=1 if failures else 0,
+        incomplete=bool(incomplete and not failures),
+        check_codes=tuple(checks + failures + incomplete),
+        notification_fact_ids=(snapshot.event_id,),
+        notification_thread_ids=(snapshot.inbox_item_id,),
+        root_task_id=snapshot.root_task_id,
+        failure_code_override=failure_code,
+    )
+
+
+def run_web_notification(
+    manifest: Mapping[str, object],
+    *,
+    snapshot: WebNotificationSnapshot | None = None,
+    evidence_kind: Literal["contract", "real_user_flow"] = "contract",
+) -> ScenarioEvidence:
+    builder = EvidenceBuilder(
+        run_id=_uuid(manifest.get("run_id")),
+        scenario="web-notification",
+        evidence_kind=evidence_kind,
+        code_commit=_text(manifest.get("code_commit"), "0" * 40),
+        runtime_fingerprint=_text(manifest.get("runtime_fingerprint"), "0" * 64),
+    )
+    if snapshot is None:
+        return builder.finish(
+            real_tests=0,
+            incomplete=True,
+            check_codes=("web_notification_snapshot_not_supplied",),
+            failure_code_override="web_notification_snapshot_not_supplied",
+        )
+    if snapshot.run_id != _uuid(manifest.get("run_id")):
+        return builder.finish(
+            real_tests=0,
+            failed=1,
+            check_codes=("web_notification_snapshot_run_id_mismatch",),
+            failure_code_override="web_notification_snapshot_run_id_mismatch",
+        )
+    return build_web_notification_evidence(builder, snapshot)
 
 
 def _require_fact(

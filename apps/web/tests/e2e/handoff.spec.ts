@@ -11,7 +11,7 @@ import {
 } from "./fixtures";
 
 test.describe("R6.2 WorkerItem handoff vertical", () => {
-  test("reviews stale input, confirms a new proposal, and converges without sending the draft", async ({
+  test("@closure-handoff reviews stale input, confirms a new proposal, and converges without sending the draft", async ({
     page,
     seedR6Handoff,
   }) => {
@@ -141,7 +141,7 @@ test.describe("R6.2 WorkerItem handoff vertical", () => {
     await assertNoHorizontalOverflow(page);
   });
 
-  test("shows only authorized recovery choices for unknown target start and keeps the same WorkerItem path", async ({
+  test("@closure-recovery shows only authorized recovery choices for unknown target start and keeps the same WorkerItem path", async ({
     page,
     seedR6Handoff,
   }) => {

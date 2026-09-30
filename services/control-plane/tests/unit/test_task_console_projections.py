@@ -323,6 +323,54 @@ def test_task_attention_projects_scheduling_wait_facts() -> None:
     assert item.blocked_since == datetime(2026, 8, 22, 11, 55, tzinfo=UTC)
 
 
+def test_worker_input_request_projects_specific_worker_attention() -> None:
+    graph = TaskConsoleProjectionService().compose(
+        _plan(),
+        tasks=_tasks(),
+        worker_items=_worker_items(),
+        placements=_placements(),
+        executions=(
+            TaskConsoleExecutionFact(
+                id=WAITING_EXECUTION_ID,
+                task_id=CALLBACK_TASK_ID,
+                worker_item_id=REVIEWER_ID,
+                status="running",
+                updated_at=NOW,
+            ),
+        ),
+        evidence=(),
+        activity=(
+            TaskConsoleActivityFact(
+                id=UUID("70000000-0000-0000-0000-000000000002"),
+                task_id=CALLBACK_TASK_ID,
+                worker_item_id=REVIEWER_ID,
+                occurred_at=NOW,
+                kind="progress.updated",
+                summary="等待确认重试规则",
+                correlation_id=UUID("80000000-0000-0000-0000-000000000004"),
+                requires_user_input=True,
+            ),
+        ),
+        last_change_cursor=17,
+        as_of=NOW,
+    )
+
+    callback = graph.nodes[0]
+    assert callback.state == "waiting_user"
+    item = next(
+        item
+        for item in graph.overview.attention_items
+        if item.worker_item_id == REVIEWER_ID
+    )
+    assert item.kind == "waiting_user"
+    assert item.subtask_key == "callback-idempotency"
+    assert item.reason == "等待确认重试规则"
+    assert item.requires_operator is True
+    assert item.deep_link == (
+        f"/workspaces/{WORKSPACE_ID}/worker-items/{REVIEWER_ID}"
+    )
+
+
 def test_succeeded_requires_subtask_evidence() -> None:
     plan = _plan()
     graph = TaskConsoleProjectionService().compose(
@@ -355,6 +403,60 @@ def test_succeeded_requires_subtask_evidence() -> None:
     )
 
     assert graph.nodes[1].state != "succeeded"
+
+
+def test_completed_root_settles_console_subtasks_and_attention() -> None:
+    plan = _plan()
+    graph = TaskConsoleProjectionService().compose(
+        plan,
+        tasks={
+            **_tasks(),
+            ROOT_TASK_ID: TaskConsoleTaskFact(
+                id=ROOT_TASK_ID,
+                title="支付重构",
+                status="succeeded",
+                version=8,
+                updated_at=NOW,
+            ),
+            CALLBACK_TASK_ID: TaskConsoleTaskFact(
+                id=CALLBACK_TASK_ID,
+                title="回调幂等",
+                status="waiting",
+                version=5,
+                updated_at=NOW,
+            ),
+        },
+        worker_items=_worker_items(),
+        placements=_placements(),
+        executions=(
+            TaskConsoleExecutionFact(
+                id=WAITING_EXECUTION_ID,
+                task_id=CALLBACK_TASK_ID,
+                worker_item_id=REVIEWER_ID,
+                status="succeeded",
+                updated_at=NOW,
+            ),
+        ),
+        evidence=(),
+        activity=(
+            TaskConsoleActivityFact(
+                id=UUID("70000000-0000-0000-0000-000000000009"),
+                task_id=CALLBACK_TASK_ID,
+                worker_item_id=REVIEWER_ID,
+                occurred_at=NOW,
+                kind="session.succeeded",
+                summary="session.succeeded",
+                correlation_id=UUID("80000000-0000-0000-0000-000000000009"),
+            ),
+        ),
+        last_change_cursor=18,
+        as_of=NOW,
+    )
+
+    assert {node.state for node in graph.nodes} == {"succeeded"}
+    assert graph.overview.completed_subtask_count == len(plan.subtasks)
+    assert graph.overview.next_subtask_keys == ()
+    assert graph.overview.attention_items == ()
 
 
 def test_task_graph_projects_one_attention_item_per_pending_release_proposal() -> None:

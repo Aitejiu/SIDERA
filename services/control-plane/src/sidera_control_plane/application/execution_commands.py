@@ -3,6 +3,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.code_result_capture import (
+    code_capture_operation_id,
+)
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
     build_derived_execution_context_assembly_request,
@@ -24,6 +27,9 @@ from sidera_control_plane.application.ports import (
 from sidera_control_plane.application.result_gate import (
     ResultGateAction,
     require_result_gate,
+)
+from sidera_control_plane.application.result_integration_pipeline import (
+    enqueue_integration_candidate_publication,
 )
 from sidera_control_plane.application.result_source_fence import (
     discover_result_source_fence,
@@ -56,6 +62,10 @@ from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import TaskStatus
 from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
+
+
+class ExecutionCompletionDeferred(RuntimeError):
+    """A completion command can be retried after accepted input is settled."""
 
 
 def _continuation_worker_id(execution: Execution, session: ExecutionSession) -> UUID:
@@ -140,6 +150,7 @@ class ExecutionCommandHandler:
         *,
         lease_ttl_seconds: int = 30,
         execution_context_ttl_seconds: int = 7_200,
+        result_integration_enabled: bool = False,
     ) -> None:
         if lease_ttl_seconds <= 0:
             raise ValueError("lease_ttl_seconds must be positive")
@@ -148,6 +159,7 @@ class ExecutionCommandHandler:
         self._clock = clock
         self._lease_ttl = timedelta(seconds=lease_ttl_seconds)
         self._execution_context_ttl_seconds = execution_context_ttl_seconds
+        self._result_integration_enabled = result_integration_enabled
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
@@ -886,6 +898,10 @@ class ExecutionCommandHandler:
         session = uow.sessions.get_active_for_execution(execution.id, for_update=True)
         if session is None:
             raise NotFound("active execution session not found")
+        if uow.execution_inputs.get_pending_for_session(
+            session.id, envelope.workspace_id, for_update=True
+        ) is not None:
+            raise ExecutionCompletionDeferred("execution completion deferred")
 
         previous_execution_version = execution.version
         previous_lease_version = lease.version
@@ -905,6 +921,15 @@ class ExecutionCommandHandler:
                 failure_code=_required_str(envelope.payload, "failure_code"),
                 now=now,
             )
+        candidate_publication_operation_id = None
+        if succeeded and self._result_integration_enabled:
+            candidate_publication_operation_id = (
+                enqueue_integration_candidate_publication(
+                    uow,
+                    execution,
+                    now=now,
+                )
+            )
         lease.release(
             worker_id=worker_id,
             fencing_token=fencing_token,
@@ -923,6 +948,10 @@ class ExecutionCommandHandler:
             "status": execution.status.value,
             "failure_code": execution.failure_code,
         }
+        if candidate_publication_operation_id is not None:
+            execution_payload["candidate_publication_operation_id"] = str(
+                candidate_publication_operation_id
+            )
         events = [
             _event(
                 envelope,
@@ -1163,6 +1192,24 @@ class ExecutionInputCommandHandler:
                 aggregate_id=existing.id,
                 aggregate_version=existing.version,
                 event_ids=(),
+            )
+        terminal_operation = uow.results.get_operation(
+            code_capture_operation_id(execution.id),
+            envelope.workspace_id,
+            for_update=True,
+        )
+        terminal_payload = getattr(terminal_operation, "payload", None)
+        if (
+            isinstance(terminal_payload, Mapping)
+            and terminal_payload.get("terminal_observed") is True
+        ):
+            raise ExecutionContextChanged(
+                ("execution_finalizing",),
+                current={
+                    "execution_id": str(execution.id),
+                    "session_id": str(session_probe.id),
+                    "terminal_observed": True,
+                },
             )
         if (
             uow.execution_inputs.get_pending_for_session(

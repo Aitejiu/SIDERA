@@ -187,6 +187,21 @@ class ExecutionEventRepository:
         )
         return _to_domain_event(row) if row is not None else None
 
+    def list_for_session(
+        self,
+        session_id: UUID,
+        workspace_id: UUID,
+    ) -> tuple[ExecutionEvent, ...]:
+        rows = self._session.scalars(
+            select(ExecutionEventModel)
+            .where(
+                ExecutionEventModel.session_id == session_id,
+                ExecutionEventModel.workspace_id == workspace_id,
+            )
+            .order_by(ExecutionEventModel.sequence.asc())
+        ).all()
+        return tuple(_to_domain_event(row) for row in rows)
+
 
 class ArtifactRepository:
     def __init__(

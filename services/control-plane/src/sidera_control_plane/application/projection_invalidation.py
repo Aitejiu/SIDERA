@@ -582,6 +582,9 @@ def projection_targets_for_execution_event(
 ) -> tuple[ProjectionInvalidationTarget, ...]:
     return _targets(
         (
+            "task_overview",
+            "task_graph",
+            "subtask_workspace",
             "worker_item_workspace",
             "worker_item_activity",
             "worker_trace",

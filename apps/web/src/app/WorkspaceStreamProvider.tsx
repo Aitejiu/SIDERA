@@ -278,12 +278,13 @@ export function matchesProjectionQuery(
         || queryKey[2] === "planning-request"
       );
     case "context_package":
-      return queryType === "context-package" && (
-        change.resource_id === null
-        || queryKey[2] === change.resource_id
-        || queryKey[2] === "execution"
-        || queryKey[2] === "planning-run"
-      );
+      return queryType === "worker-result-inputs"
+        || (queryType === "context-package" && (
+          change.resource_id === null
+          || queryKey[2] === change.resource_id
+          || queryKey[2] === "execution"
+          || queryKey[2] === "planning-run"
+        ));
     case "knowledge_candidate_submission":
       // The CP projection is keyed by submission aggregate, while its task query
       // is a relation lookup. Keep this invalidation inside that query family.

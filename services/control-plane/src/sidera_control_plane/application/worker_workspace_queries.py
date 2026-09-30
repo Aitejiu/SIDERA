@@ -53,6 +53,7 @@ class WorkerWorkspaceQuerySnapshot:
     convergence_facts: PlanConvergenceFacts | None = None
     active_handoff: ActiveHandoffProjection | None = None
     collaboration_facts: CollaborationProjectionFacts | None = None
+    root_task_status: str | None = None
 
 
 class WorkerWorkspaceQueryStore(Protocol):
@@ -130,6 +131,7 @@ class WorkerWorkspaceQueryService:
             convergence_facts=snapshot.convergence_facts,
             active_handoff=snapshot.active_handoff,
             collaboration=collaboration,
+            root_task_status=snapshot.root_task_status,
         )
 
     @staticmethod

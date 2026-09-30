@@ -44,6 +44,7 @@ from sidera_control_plane.persistence.models import (
     ProjectionChangeModel,
     RootTaskPlanHeadModel,
     SchedulingBlockModel,
+    TaskModel,
     WorkerItemModel,
     WorkerItemPlacementModel,
     WorkerModel,
@@ -77,6 +78,12 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
             if worker_item_row is None:
                 return None
             worker_item = _worker_item(worker_item_row)
+            root_task_status = session.scalar(
+                select(TaskModel.status).where(
+                    TaskModel.workspace_id == workspace_id,
+                    TaskModel.id == worker_item.root_task_id,
+                )
+            )
 
             placement_rows = session.scalars(
                 select(WorkerItemPlacementModel)
@@ -324,6 +331,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 convergence_facts=convergence_facts,
                 active_handoff=active_handoff,
                 collaboration_facts=collaboration_facts,
+                root_task_status=root_task_status,
             )
 
 

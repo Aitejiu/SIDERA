@@ -120,7 +120,16 @@ export function WorkerComposer({
       setStatus("stop-requested");
     } catch (error) {
       setStatus("rejected");
-      setErrorMessage(describeError(error));
+      if (isContextChanged(error)) {
+        setErrorMessage("上下文已变化，当前 Session 已刷新。请确认最新 context 后再发送。");
+        try {
+          await onRefresh();
+        } catch {
+          // The user input remains visible while the latest context is unavailable.
+        }
+      } else {
+        setErrorMessage(describeError(error));
+      }
     }
   };
 
@@ -286,7 +295,8 @@ function statusLabel(status: string): string {
 }
 
 function isContextChanged(error: unknown): boolean {
-  return error instanceof ApiProblem && error.code === "execution_context_changed";
+  return error instanceof ApiProblem
+    && ["execution_context_changed", "version_conflict"].includes(error.code);
 }
 
 function describeError(error: unknown): string {

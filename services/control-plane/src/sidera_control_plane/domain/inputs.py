@@ -137,7 +137,6 @@ class ExecutionInput:
         self._transition(
             ExecutionInputStatus.DISPATCHING, ExecutionInputStatus.DELIVERED
         )
-        self.operation_id = None
 
     def block_unknown(self, *, failure_code: str) -> None:
         self._finish_dispatch(ExecutionInputStatus.BLOCKED, failure_code)

@@ -9,6 +9,7 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2.10,<3",
     "sqlalchemy>=2.0,<3",
+    "sidera-runtime-guard",
     "uvicorn>=0.41,<1",
 ]
 
@@ -24,6 +25,7 @@ sidera-result-worker = "sidera_control_plane.result_worker:main"
 [dependency-groups]
 dev = [
     "httpx2>=2.3,<3",
+    "numpy>=2.4,<3",
     "pyright>=1.1.403,<2",
     "pytest>=9,<10",
     "pytest-cov>=6,<7",
@@ -36,6 +38,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sidera_control_plane"]
+
+[tool.uv.sources]
+sidera-runtime-guard = { path = "../../packages/runtime-guard", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

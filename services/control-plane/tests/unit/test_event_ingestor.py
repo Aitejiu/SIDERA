@@ -47,3 +47,20 @@ def test_terminal_observation_only_accepts_control_plane_terminal_events() -> No
     assert completed.sequence == 4
     assert completed.payload["api_key"] == "[redacted]"
     assert progress is None
+
+
+def test_turn_completion_is_persisted_without_becoming_terminal_observation() -> None:
+    turn = _terminal_observation(
+        AdapterEvent(
+            event_type="turn.completed",
+            sequence=6,
+            payload={
+                "schema_version": 1,
+                "operation_id": "00000000-0000-0000-0000-000000000001",
+                "stop_reason": "end_turn",
+            },
+            occurred_at=datetime.now(UTC),
+        )
+    )
+
+    assert turn is None

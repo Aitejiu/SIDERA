@@ -43,6 +43,18 @@ class FakeHandle:
         return None
 
 
+class BlockingHandle(FakeHandle):
+    def __init__(self, thread_id: str, turn_id: str) -> None:
+        super().__init__(thread_id, turn_id)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def events(self) -> AsyncIterator[MainAgentEvent]:
+        self.started.set()
+        await self.release.wait()
+        yield provider_event("completed")
+
+
 def provider_event(event_type: str, sequence: int = 1) -> MainAgentEvent:
     return MainAgentEvent(
         sequence=sequence,
@@ -169,3 +181,17 @@ async def test_active_turn_without_relay_reports_poll_recovery_mode() -> None:
     assert availability.stream_available is False
     assert availability.recovery_mode == "poll"
     assert registry.availability("thread-1", "turn-1", "completed").recovery_mode is None
+
+
+@pytest.mark.asyncio
+async def test_registry_can_shutdown_one_active_turn() -> None:
+    registry = TurnRelayRegistry(event_limit=8)
+    handle = BlockingHandle("thread-1", "turn-1")
+    relay = await registry.start(handle)
+    await handle.started.wait()
+
+    await registry.shutdown_turn(handle.thread_id, handle.id)
+
+    assert relay.closed is True
+    assert relay.stream_available is False
+    await registry.shutdown()

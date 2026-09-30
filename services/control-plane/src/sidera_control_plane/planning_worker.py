@@ -7,10 +7,13 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol, cast
 
 from pydantic import SecretStr
 
+from sidera_control_plane.acceptance_guard import load_acceptance_guard
+from sidera_control_plane.adapters.demo_planner import DemoPlannerAdapter
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
     FakePlannerConfig,
@@ -33,6 +36,7 @@ from sidera_control_plane.application.planning_runner import (
     RegistryPlannerAdapterFactory,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.demo.manifest import load_manifest, validate_manifest
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -88,6 +92,7 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
         materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
     )
+    acceptance_guard = load_acceptance_guard()
 
     def fake_builder(
         config: Mapping[str, object], _secrets: tuple[SecretStr, ...]
@@ -132,13 +137,28 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             stop_grace_seconds=settings.planning_opencode_stop_grace_seconds,
             stderr_limit_bytes=settings.planning_acp_stderr_limit_bytes,
             secret_values=secrets,
+            acceptance_guard=acceptance_guard,
         )
 
+    builders = {
+        "fake": fake_builder,
+        "opencode-acp-planner": opencode_builder,
+    }
+    if settings.interview_demo_manifest is not None:
+        manifest = load_manifest(settings.interview_demo_manifest)
+        validate_manifest(manifest, Path(__file__).resolve().parents[4])
+
+        def demo_builder(
+            _config: Mapping[str, object], secrets: tuple[SecretStr, ...]
+        ) -> DemoPlannerAdapter:
+            if secrets:
+                raise ValueError("interview demo planner does not accept secrets")
+            return DemoPlannerAdapter(manifest)
+
+        builders = {"interview-demo-planner": demo_builder}
+
     factory = RegistryPlannerAdapterFactory(
-        {
-            "fake": fake_builder,
-            "opencode-acp-planner": opencode_builder,
-        },
+        builders,
         temp_root=settings.planning_temp_root,
     )
     try:
@@ -164,6 +184,7 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             context_materializer=ContextMaterializer(catalog),
             context_package_cutover_at=settings.context_package_cutover_at,
             candidate_submission_service=candidate_submission_service,
+            acceptance_guard=acceptance_guard,
         )
         reconciler = PlanningReconciler(
             uow_factory=uow_factory,

@@ -5,6 +5,7 @@
 - [快速开始](deployment/initial-demo.md)：在 macOS 启动本地 Demo，不需要模型 API key。
 - [使用指南](guide/workspace.md)：从任务总览逐层进入子任务和 WorkerItem，查看进度并介入。
 - [常见问题](deployment/initial-demo.md#常见问题)：连接、端口、演示数据和聊天不可用的处理。
+- [本地维护现状](deployment/initial-demo.md#本地维护现状)：检查 Demo 运行状态，查看显式 inventory 维护命令和恢复边界。
 
 ## 接入与开发
 

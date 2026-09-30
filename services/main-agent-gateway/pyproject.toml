@@ -11,6 +11,8 @@ dependencies = [
     "fastapi>=0.134,<1",
     "pydantic>=2.11,<3",
     "pydantic-settings>=2.10,<3",
+    "sidera-akashic-task-bridge",
+    "sidera-runtime-guard",
     "uvicorn>=0.41,<1",
 ]
 
@@ -26,6 +28,8 @@ dev = [
 
 [tool.uv.sources]
 akashic-agent-sdk = { path = "../../akashic-agent/sdk/python", editable = true }
+sidera-akashic-task-bridge = { path = "../../integrations/akashic", editable = true }
+sidera-runtime-guard = { path = "../../packages/runtime-guard", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sidera_main_agent_gateway"]
@@ -33,6 +37,9 @@ packages = ["src/sidera_main_agent_gateway"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: exercises live or cross-service integration boundaries",
+]
 
 [tool.ruff]
 line-length = 88

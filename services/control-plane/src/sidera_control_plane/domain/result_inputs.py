@@ -663,6 +663,10 @@ class InputGroupRequirementsV1:
             "required_evidence_refs",
             _evidence_refs(self.required_evidence_refs, "required_evidence_refs"),
         )
+        if not self.required_artifact_refs and not self.required_evidence_refs:
+            raise InputGroupInvalid(
+                "input requirements need an artifact or evidence selector"
+            )
         object.__setattr__(
             self,
             "evidence_status",
@@ -930,8 +934,6 @@ def _string_array(value: object, name: str) -> tuple[str, ...]:
 
 def _artifact_refs(value: object, name: str) -> tuple[str, ...]:
     refs = _string_array(value, name)
-    if not refs:
-        raise InputGroupInvalid(f"{name} must contain at least one selector")
     if len(refs) > MAX_INPUT_GROUP_ARTIFACT_SELECTORS:
         raise InputGroupInvalid(
             f"{name} cannot exceed {MAX_INPUT_GROUP_ARTIFACT_SELECTORS} selectors"

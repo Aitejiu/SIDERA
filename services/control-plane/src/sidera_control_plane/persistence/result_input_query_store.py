@@ -490,7 +490,6 @@ def _delivery_for_execution(
             ContextAssemblyRequestModel.consumer_type == "worker",
             ContextAssemblyRequestModel.consumer_id == execution.id,
             ContextAssemblyRequestModel.worker_item_id == request_row.worker_item_id,
-            ContextAssemblyRequestModel.manifest_schema_version == 2,
         )
         .order_by(
             ContextAssemblyRequestModel.updated_at.desc(),
@@ -506,7 +505,8 @@ def _delivery_for_execution(
             ContextPackageModel.purpose == "execution",
             ContextPackageModel.consumer_type == "worker",
             ContextPackageModel.consumer_id == execution.id,
-            ContextPackageModel.manifest_schema_version == 2,
+            ContextPackageModel.manifest_schema_version
+            == assembly.manifest_schema_version,
         )
     )
     acknowledgement = (

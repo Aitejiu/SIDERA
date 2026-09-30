@@ -124,7 +124,7 @@ class UserFlowSnapshot(BaseModel):
     accepted_candidate_id: UUID | None
     accepted_candidate_hash: str | None
     accepted: bool
-    accepted_tree_hash: str = Field(pattern=r"^[0-9a-f]{40}$")
+    accepted_tree_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     restored_tree_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     restore_check_passed: bool
     dependency_satisfied: bool
@@ -144,7 +144,17 @@ class InterventionSnapshot(BaseModel):
     input_command_id: UUID
     input_id: UUID
     input_target_worker_item_id: UUID
-    input_status: Literal["queued", "accepted", "delivered", "applied", "failed", "unknown"]
+    input_status: Literal[
+        "accepted",
+        "queued",
+        "dispatching",
+        "delivered",
+        "blocked",
+        "failed",
+        "cancelled",
+        "superseded",
+        "unknown",
+    ]
     adapter_acknowledged: bool
     observed_output_id: UUID | None
     observed_output_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -162,10 +172,11 @@ class InterventionSnapshot(BaseModel):
     rework_generation: int | None = Field(default=None, ge=1)
     replacement_candidate_id: UUID | None
     replacement_candidate_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    rework_round: int = Field(ge=0)
-    rework_round_limit: int = Field(ge=1)
+    rework_mode: Literal["automatic", "user"]
+    rework_round: int | None = Field(default=None, ge=1)
+    rework_round_limit: int | None = Field(default=None, ge=1)
     rework_elapsed_seconds: int = Field(ge=0)
-    rework_time_limit_seconds: int = Field(ge=1)
+    rework_time_limit_seconds: int | None = Field(default=None, ge=1)
     unaffected_result_ids_before: tuple[UUID, ...]
     unaffected_result_ids_after: tuple[UUID, ...]
 
@@ -303,6 +314,30 @@ class NotificationSnapshot(BaseModel):
     ack_loss_recovered: bool
     business_state_preserved_after_recovery: bool
     only_same_source_route_delivered: bool
+
+
+class WebNotificationSnapshot(BaseModel):
+    """Facts for the local inbox channel; no external IM receipt is implied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID | None = None
+    worker_item_id: UUID | None = None
+    event_id: UUID
+    inbox_item_id: UUID
+    channel: Literal["web_inbox"]
+    deep_link: str = Field(min_length=1, max_length=512)
+    deep_link_resource_id: UUID
+    event_observed: bool
+    inbox_created: bool
+    exact_mapping: bool
+    user_read: bool
+    user_acknowledged: bool
+    duplicate_count: int = Field(ge=0)
+    task_state_preserved: bool
 
 
 class RuntimeLimitEvidence(BaseModel):

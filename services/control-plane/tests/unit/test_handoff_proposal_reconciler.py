@@ -385,11 +385,9 @@ def test_execution_change_is_staled_once_and_is_idempotent() -> None:
     [
         ("sequence", "source_sequence_changed"),
         ("worker_item_context", "worker_item_context_changed"),
-        ("source_worker", "source_worker_changed"),
         ("workspace", "source_workspace_changed"),
         ("plan", "plan_head_changed"),
         ("input", "input_changed"),
-        ("target_worker", "target_worker_changed"),
         ("active_handoff", "handoff_already_active"),
     ],
 )
@@ -402,16 +400,12 @@ def test_each_authoritative_base_change_stales_the_proposal_once(
         uow.session.last_sequence += 1
     elif mutation == "worker_item_context":
         uow.worker_item.context_version += 1
-    elif mutation == "source_worker":
-        uow.source.version += 1
     elif mutation == "workspace":
         uow.manifest.version += 1
     elif mutation == "plan":
         uow.plan_head.version += 1
     elif mutation == "input":
         uow.pending_input = SimpleNamespace(id=uuid4(), version=1, status="accepted")
-    elif mutation == "target_worker":
-        uow.target.version += 1
     else:
         uow.active_handoff = object()
 
@@ -420,6 +414,21 @@ def test_each_authoritative_base_change_stales_the_proposal_once(
     assert result.status is HandoffProposalStatus.STALE
     assert result.stale_reason == reason
     assert len(uow.events.events) == 1
+
+
+@pytest.mark.parametrize("worker_name", ["source", "target"])
+def test_worker_heartbeat_version_advance_does_not_stale_prepared_proposal(
+    worker_name: str,
+) -> None:
+    proposal = _proposal()
+    uow = ReconcileUnitOfWork(proposal)
+    worker = getattr(uow, worker_name)
+    worker.version += 1
+
+    result = _reconciler(uow).reconcile(proposal.id, WORKSPACE_ID, NOW)
+
+    assert result.status is HandoffProposalStatus.PREPARED
+    assert not uow.events.events
 
 
 def test_ttl_expiry_becomes_expired_once() -> None:

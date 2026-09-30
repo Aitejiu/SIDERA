@@ -7,6 +7,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID
 
 from sidera_control_plane.adapters.git_results import GitResultStore, RepositoryResolver
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
@@ -14,8 +16,18 @@ from sidera_control_plane.application.result_apply import (
     ResultApplyOutcome,
     ResultApplyService,
 )
+from sidera_control_plane.application.result_finalization import (
+    FINALIZATION_OPERATION_KIND,
+    ResultFinalizationHandler,
+)
+from sidera_control_plane.application.result_integration_pipeline import (
+    INTEGRATION_CANDIDATE_PUBLICATION_KIND,
+    IntegrationCandidatePublicationHandler,
+)
 from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.config import Settings
+from sidera_control_plane.demo.manifest import load_manifest, validate_manifest
+from sidera_control_plane.demo.recovery import crash_after_candidate_publish
 from sidera_control_plane.domain.result_operations import ResultOperationStatus
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -60,6 +72,7 @@ class ResultWorker:
 
     _DEFAULT_OPERATION_KINDS = (
         "code_result_capture",
+        INTEGRATION_CANDIDATE_PUBLICATION_KIND,
         "verification",
         "rework",
         "finalization",
@@ -73,6 +86,7 @@ class ResultWorker:
         owner_id: str = "result-worker",
         clock: Callable[[], datetime] | None = None,
         operation_handlers: Mapping[str, ResultOperationHandler] | None = None,
+        after_candidate_publish: Callable[[UUID], None] | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("result worker owner_id is required")
@@ -81,6 +95,7 @@ class ResultWorker:
         self._owner_id = owner_id.strip()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._operation_handlers = dict(operation_handlers or {})
+        self._after_candidate_publish = after_candidate_publish
 
     def run_once(self, limit: int = 10) -> ResultWorkerRunResult:
         if type(limit) is not int or limit < 1:
@@ -131,6 +146,11 @@ class ResultWorker:
         for operation in claimed_attempts:
             handler = self._operation_handlers[operation.operation_kind]
             handler(operation)
+            if (
+                operation.operation_kind == INTEGRATION_CANDIDATE_PUBLICATION_KIND
+                and self._after_candidate_publish is not None
+            ):
+                self._after_candidate_publish(operation.operation_id)
         processed += len(claimed_attempts)
         observation = self._observe()
         return ResultWorkerRunResult(
@@ -224,15 +244,43 @@ def build_result_worker(
         clock=lambda: datetime.now(UTC),
         owner_id=owner_id,
     )
+    operation_handlers: dict[str, ResultOperationHandler] = {}
+    operation_handlers[FINALIZATION_OPERATION_KIND] = ResultFinalizationHandler(
+        uow_factory,
+        clock=lambda: datetime.now(UTC),
+        owner_id=f"{owner_id}:finalizer",
+    )
+    if settings.result_integration_enabled:
+        operation_handlers[INTEGRATION_CANDIDATE_PUBLICATION_KIND] = (
+            IntegrationCandidatePublicationHandler(
+                uow_factory,
+                clock=lambda: datetime.now(UTC),
+            )
+        )
     return ResultWorkerRuntime(
         worker=ResultWorker(
             uow_factory,
             apply_service,
             owner_id=owner_id,
             clock=lambda: datetime.now(UTC),
+            operation_handlers=operation_handlers,
+            after_candidate_publish=_demo_candidate_publish_fault(settings),
         ),
         database=database,
     )
+
+
+def _demo_candidate_publish_fault(
+    settings: Settings,
+) -> Callable[[UUID], None] | None:
+    raw_manifest = settings.interview_demo_manifest
+    if raw_manifest is None:
+        return None
+    manifest = load_manifest(Path(raw_manifest))
+    validate_manifest(manifest, Path(__file__).resolve().parents[4])
+    if manifest.scenario != "recovery":
+        return None
+    return lambda operation_id: crash_after_candidate_publish(manifest, operation_id)
 
 
 def summary_json(result: ResultWorkerRunResult) -> str:

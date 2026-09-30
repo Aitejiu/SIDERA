@@ -229,6 +229,27 @@ class Execution:
             now=now,
         )
 
+    def fail_before_start(
+        self,
+        *,
+        lease_id: UUID,
+        fencing_token: int,
+        failure_code: str,
+        now: datetime,
+    ) -> None:
+        clean_code = failure_code.strip()
+        if not clean_code:
+            raise ValidationError("failure_code is required")
+        self._assert_mutable()
+        if self.status is not ExecutionStatus.LEASED or self.started_at is not None:
+            raise InvalidTransition("only a leased execution can fail before start")
+        self.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
+        self.status = ExecutionStatus.FAILED
+        self.failure_code = clean_code
+        self.finished_at = now
+        self.active_lease_id = None
+        self.version += 1
+
     def _finish(
         self,
         *,

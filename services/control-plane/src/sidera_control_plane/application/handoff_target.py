@@ -174,9 +174,9 @@ class HandoffTargetService:
         expected_worker_version = proposal.payload.target_worker_version
         if (
             current_transition.logical_attempt == 1
-            and target_worker.version != expected_worker_version
+            and target_worker.version < expected_worker_version
         ):
-            raise HandoffTargetError("handoff target worker facts are stale")
+            raise HandoffTargetError("handoff target worker version regressed")
 
         request_id, execution_id = _target_ids(
             current_transition.id,

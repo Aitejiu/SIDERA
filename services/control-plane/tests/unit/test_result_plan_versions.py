@@ -84,6 +84,136 @@ def test_v6_mapping_dispatches_through_proposal_validation() -> None:
     ]
 
 
+def test_v6_rejects_input_evidence_not_declared_by_candidate_worker() -> None:
+    value = proposal_v6_mapping()
+    policy = value["collaboration_policy_request"]
+    assert isinstance(policy, dict)
+    groups = policy["input_groups"]
+    assert isinstance(groups, list)
+    requirements = groups[0]["requirements"]
+    assert isinstance(requirements, dict)
+    requirements["required_evidence_refs"] = ["acceptance:review"]
+
+    with pytest.raises(ProposalValidationError) as error:
+        validate_proposal(
+            value,
+            profile_snapshot=v6_profile_snapshot(),
+            brief_revision=1,
+        )
+
+    assert error.value.code == "proposal_input_group_unproducible"
+    assert error.value.offending_keys == ("implementation", "build-worker")
+
+
+def test_v6_rejects_input_artifact_not_declared_by_candidate_worker() -> None:
+    value = proposal_v6_mapping()
+    policy = value["collaboration_policy_request"]
+    assert isinstance(policy, dict)
+    groups = policy["input_groups"]
+    assert isinstance(groups, list)
+    requirements = groups[0]["requirements"]
+    assert isinstance(requirements, dict)
+    requirements["required_artifact_refs"] = ["artifact_type:report"]
+
+    with pytest.raises(ProposalValidationError) as error:
+        validate_proposal(
+            value,
+            profile_snapshot=v6_profile_snapshot(),
+            brief_revision=1,
+        )
+
+    assert error.value.code == "proposal_input_group_unproducible"
+    assert error.value.offending_keys == ("implementation", "build-worker")
+
+
+def test_v6_at_least_input_group_enforces_eligible_candidate_quorum() -> None:
+    value = proposal_v6_mapping()
+    worker_items = value["worker_items"]
+    intents = value["execution_intents"]
+    policy = value["collaboration_policy_request"]
+    assert isinstance(worker_items, list)
+    assert isinstance(intents, list)
+    assert isinstance(policy, dict)
+    groups = policy["input_groups"]
+    assert isinstance(groups, list)
+
+    second_worker = deepcopy(worker_items[0])
+    second_worker["key"] = "build-worker-2"
+    worker_items.append(second_worker)
+    second_intent = deepcopy(intents[0])
+    second_intent["worker_item_key"] = "build-worker-2"
+    second_intent["expected_artifact_refs"] = ["artifact_type:report"]
+    second_intent["required_evidence_refs"] = ["acceptance:review"]
+    intents.append(second_intent)
+
+    group = groups[0]
+    assert isinstance(group, dict)
+    candidates = group["candidates"]
+    assert isinstance(candidates, list)
+    candidates.append({"worker_item_key": "build-worker-2", "priority": 2})
+    group["mode"] = "at_least"
+    group["minimum_count"] = 1
+
+    validate_proposal(
+        value,
+        profile_snapshot=v6_profile_snapshot(),
+        brief_revision=1,
+    )
+
+    group["minimum_count"] = 2
+    with pytest.raises(ProposalValidationError) as error:
+        validate_proposal(
+            value,
+            profile_snapshot=v6_profile_snapshot(),
+            brief_revision=1,
+        )
+
+    assert error.value.code == "proposal_input_group_unproducible"
+    assert error.value.offending_keys == ("implementation", "build-worker-2")
+
+
+def test_v5_rejects_input_evidence_not_declared_by_candidate_worker() -> None:
+    value = proposal_v5_mapping()
+    policy = value["collaboration_policy_request"]
+    assert isinstance(policy, dict)
+    groups = policy["input_groups"]
+    assert isinstance(groups, list)
+    requirements = groups[0]["requirements"]
+    assert isinstance(requirements, dict)
+    requirements["required_evidence_refs"] = ["acceptance:review"]
+
+    with pytest.raises(ProposalValidationError) as error:
+        validate_proposal(
+            value,
+            profile_snapshot=v5_profile_snapshot(),
+            brief_revision=1,
+        )
+
+    assert error.value.code == "proposal_input_group_unproducible"
+    assert error.value.offending_keys == ("implementation", "build-worker")
+
+
+def test_v6_rejects_cross_subtask_worker_item_dependencies() -> None:
+    value = proposal_v6_mapping()
+    dependencies = value["worker_item_dependencies"]
+    assert isinstance(dependencies, list)
+    dependencies.append(
+        {
+            "upstream_worker_item_key": "build-worker",
+            "downstream_worker_item_key": "review-worker",
+            "kind": "hard",
+            "required_artifact_refs": [],
+        }
+    )
+
+    with pytest.raises(ProposalValidationError, match="cross_subtask_worker_dependency"):
+        validate_proposal(
+            value,
+            profile_snapshot=v6_profile_snapshot(),
+            brief_revision=1,
+        )
+
+
 def test_revision_v6_round_trips_and_hashes_the_integration_spec() -> None:
     raw = revision_v6_mapping()
 
@@ -182,6 +312,7 @@ def test_result_capabilities_are_explicit_and_legacy_payloads_do_not_infer_suppo
     restored_legacy = capability_profile_from_payload("worker_adapter", legacy_worker)
     assert restored_legacy.code_result_versions == ()
     assert restored_legacy.verification_versions == ()
+    assert restored_legacy.turn_completion_versions == ()
 
     workspace = WorkspaceProviderCapabilityProfile(
         isolation=SandboxCapability.ISOLATED_RUNTIME,

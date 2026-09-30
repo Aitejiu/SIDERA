@@ -17,6 +17,8 @@ export function TaskOverviewStrip({
   const collaborationAttention = collaboration?.attention_required === true
     ? collaboration.blocked_subtasks[0]
     : undefined;
+  const completed = overview.subtask_count > 0
+    && overview.completed_subtask_count === overview.subtask_count;
   return (
     <Link
       className="task-row"
@@ -34,7 +36,7 @@ export function TaskOverviewStrip({
       </div>
       <div className="task-row__metric task-row__metric--wide">
         <span className="eyebrow">子任务</span>
-        <strong><Layers3 size={14} aria-hidden="true" />{overview.subtask_count} / {overview.planned_subtask_count} 已规划</strong>
+        <strong><Layers3 size={14} aria-hidden="true" />{overview.completed_subtask_count} / {overview.subtask_count} 已完成</strong>
       </div>
       <div className="task-row__metric">
         <span className="eyebrow">调度</span>
@@ -51,8 +53,12 @@ export function TaskOverviewStrip({
       </div>
       <div className="task-row__metric task-row__metric--next">
         <span className="eyebrow">下一节点</span>
-        <strong>下一个 {overview.next_subtask_keys[0] ?? "等待规划"}</strong>
-        {overview.current_milestone_key ? <span>里程碑 {overview.current_milestone_key}</span> : <span>尚未进入里程碑</span>}
+        <strong>{completed ? "任务已完成" : `下一个 ${overview.next_subtask_keys[0] ?? "等待规划"}`}</strong>
+        {completed
+          ? <span>全部节点已收敛</span>
+          : overview.current_milestone_key
+            ? <span>里程碑 {overview.current_milestone_key}</span>
+            : <span>尚未进入里程碑</span>}
       </div>
       <div className="task-row__attention">
         <span className="eyebrow">需要我</span>

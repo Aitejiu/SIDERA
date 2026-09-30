@@ -9,6 +9,7 @@ import {
   executeTaskResultAction,
   getTaskResultAcceptanceBasis,
   getTaskResults,
+  resultRefreshInterval,
   taskResultsQueryKey,
   type AcceptanceCriterionDecision,
   type TaskResultOverview,
@@ -29,6 +30,8 @@ export function TaskResultPanel({
     queryKey: taskResultsQueryKey(workspaceId, rootTaskId),
     queryFn: ({ signal }) => getTaskResults(workspaceId, rootTaskId, { signal }),
     enabled: Boolean(workspaceId && rootTaskId),
+    refetchInterval: (query) => resultRefreshInterval(query.state.data),
+    refetchIntervalInBackground: false,
   });
 
   if (resultQuery.isPending) {
@@ -160,7 +163,7 @@ function AcceptanceSection({
   return (
     <div className="task-result-panel__acceptance">
       {error ? <div className="task-result-panel__error" role="alert"><AlertTriangle size={14} aria-hidden="true" />{error}</div> : null}
-      <AcceptanceForm key={`${view.root_task_id}:${view.result_version}`} view={view} action={action} onSubmit={submit} pending={pending} />
+      <AcceptanceForm view={view} action={action} onSubmit={submit} pending={pending} />
     </div>
   );
 }

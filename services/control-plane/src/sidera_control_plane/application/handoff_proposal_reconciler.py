@@ -525,8 +525,8 @@ def _first_changed_reason(
         return "source_session_changed"
     if payload.source_worker_id != current.source_worker_id:
         return "source_worker_changed"
-    if payload.source_worker_version != current.source_worker_version:
-        return "source_worker_changed"
+    # Worker aggregate versions advance on heartbeat; runtime snapshots carry
+    # the handoff-relevant worker configuration changes instead.
     if _mapping_intersection_changed(
         payload.source_runtime_snapshot,
         current.source_runtime_snapshot,
@@ -558,8 +558,6 @@ def _first_changed_reason(
     if payload.observed_plan_head_version != current.plan_head_version:
         return "plan_head_changed"
     if payload.target_worker_id != current.target_worker_id:
-        return "target_worker_changed"
-    if payload.target_worker_version != current.target_worker_version:
         return "target_worker_changed"
     if _mapping_intersection_changed(
         payload.target_runtime_snapshot,

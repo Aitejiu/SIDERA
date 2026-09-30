@@ -1323,6 +1323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             database,
             workspace_id,
             scenario=G4Scenario(args.scenario),
+            now=datetime.now(UTC),
             reset=args.reset,
         )
     finally:

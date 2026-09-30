@@ -320,7 +320,7 @@ class SideraTaskBridge(Plugin):
         context_refs: list,
         requested_outputs: list,
     ) -> str:
-        """Submit a structured user brief to the SIDERA planning control plane."""
+        """Create and coordinate a SIDERA task with subtasks and workers from a structured user brief."""
 
         return await self._toolset().sidera_submit_brief(
             event,

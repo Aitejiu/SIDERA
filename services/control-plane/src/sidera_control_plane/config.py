@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,6 +12,8 @@ class Settings(BaseSettings):
 
     database_url: str
     environment: str = "development"
+    restore_read_only: bool = False
+    restore_schema_validation: bool = False
     assignment_lease_seconds: int = Field(default=30, gt=0)
     assignment_lease_renew_interval_seconds: float = Field(default=10.0, gt=0)
     worker_heartbeat_timeout_seconds: int = Field(default=45, gt=0)
@@ -22,6 +25,7 @@ class Settings(BaseSettings):
     reconciler_poll_interval_seconds: float = Field(default=2.0, gt=0)
     gateway_batch_size: int = Field(default=20, gt=0)
     gateway_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    gateway_owner_start_concurrency: int = Field(default=2, ge=1, le=16)
     notification_enabled: bool = False
     notification_policy_version: int = Field(default=1, ge=1, le=1)
     notification_blocked_grace_seconds: int = Field(
@@ -53,6 +57,7 @@ class Settings(BaseSettings):
     collaboration_backoff_max_seconds: int = Field(default=60, gt=0, le=3600)
     collaboration_recovery_sweep_seconds: int = Field(default=30, gt=0, le=3600)
     collaboration_governance_enabled: bool = False
+    collaboration_workspace_id: UUID | None = None
     result_inputs_enabled: bool = False
     result_integration_enabled: bool = False
     result_apply_on_accept: bool = False
@@ -88,6 +93,8 @@ class Settings(BaseSettings):
     planning_lease_renew_interval_seconds: float = Field(default=10.0, gt=0)
     planning_max_diagnostic_bytes: int = Field(default=4096, gt=0)
     planning_temp_root: Path = Path(".sidera/planning")
+    interview_demo_manifest: Path | None = None
+    gateway_sync_workspace_id: UUID | None = None
     planning_opencode_executable: str = Field(default="opencode", min_length=1)
     planning_opencode_model: str | None = None
     planning_opencode_expected_version: str | None = None

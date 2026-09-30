@@ -9,12 +9,14 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
+from sidera_control_plane.adapters.git_workspace import opaque_repository_ref
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.runtime_commands import RuntimeCommandHandler
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
@@ -23,6 +25,16 @@ from sidera_control_plane.basic_acceptance_manifest import (
     BasicRunManifest,
     load_manifest,
     validate_manifest_isolation,
+)
+from sidera_control_plane.demo.results import (
+    closure_check_spec,
+    demo_check_spec,
+    patch_integrity_check_spec,
+    summary_json_check_spec,
+)
+from sidera_control_plane.domain.collaboration import (
+    CollaborationRuntimeBindingSnapshot,
+    CollaborationStrategy,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.modules import (
@@ -97,6 +109,7 @@ class _Resources:
     definitions: tuple[ModuleDefinition, ...]
     instances: tuple[ModuleInstance, ...]
     profile: PlanningProfile
+    revision_profile: PlanningProfile
     module_ids: Mapping[str, UUID]
     worker_names: Mapping[str, str]
 
@@ -190,7 +203,10 @@ def _inspect_or_apply(
             status="checked",
             workspace_id=manifest.workspace_id,
             module_ids=resources.module_ids,
-            profile_ids={"planning": resources.profile.id},
+            profile_ids={
+                "planning": resources.profile.id,
+                "revision": resources.revision_profile.id,
+            },
             worker_ids={},
             runtime_versions={},
             repository_head=repository_head,
@@ -206,12 +222,16 @@ def _inspect_or_apply(
         for instance in resources.instances:
             _ensure_instance(uow, instance)
         _ensure_profile(uow, resources.profile)
+        _ensure_profile(uow, resources.revision_profile)
         uow.flush()
 
         worker_ids: dict[str, UUID] = {}
         runtime_versions: dict[str, int] = {}
-        for role in ("worker", "second_worker"):
-            profile = _profile(manifest, role)
+        roles = ("worker", "second_worker")
+        if _result_plan_enabled():
+            roles += ("verification",)
+        for role in roles:
+            profile = None if role == "verification" else _profile(manifest, role)
             worker_id = _ensure_worker(
                 uow,
                 manifest,
@@ -225,8 +245,12 @@ def _inspect_or_apply(
                 manifest,
                 role=role,
                 worker_id=worker_id,
-                adapter_instance_id=resources.module_ids[role],
-                adapter_config_version=profile.config_version,
+                adapter_instance_id=resources.module_ids[
+                    "local_verification" if role == "verification" else role
+                ],
+                adapter_config_version=(
+                    1 if role == "verification" else profile.config_version
+                ),
                 workspace_instance_id=resources.module_ids["workspace"],
             )
         uow.flush()
@@ -235,7 +259,10 @@ def _inspect_or_apply(
         status=status,
         workspace_id=manifest.workspace_id,
         module_ids=resources.module_ids,
-        profile_ids={"planning": resources.profile.id},
+        profile_ids={
+            "planning": resources.profile.id,
+            "revision": resources.revision_profile.id,
+        },
         worker_ids=worker_ids,
         runtime_versions=runtime_versions,
         repository_head=repository_head,
@@ -247,10 +274,14 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
     planner_profile = _profile(manifest, "planner")
     worker_profile = _profile(manifest, "worker")
     second_profile = _profile(manifest, "second_worker")
+    result_plan_enabled = _result_plan_enabled()
+    planner_schema_version = 6 if result_plan_enabled else 2
+    planner_schema_versions = (planner_schema_version,)
     module_ids = {
         role: _stable_id(manifest.run_id, f"module-instance:{role}")
         for role in (
             "planner",
+            "revision_planner",
             "worker",
             "second_worker",
             "workspace",
@@ -263,6 +294,7 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
         role: _stable_id(manifest.run_id, f"module-definition:{role}")
         for role in (
             "planner",
+            "revision_planner",
             "worker",
             "second_worker",
             "workspace",
@@ -272,6 +304,21 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
         )
     }
     worker_capability = _worker_capabilities()
+    collaboration_capability = CollaborationRuntimeCapabilityProfile(
+        interface_version="sidera.collaboration.v1",
+        projection_schema_versions=(2,),
+        decision_schema_versions=(2,),
+        strategy_ids=(
+            CollaborationStrategy.ALL_REQUIRED.value,
+            COLLABORATION_INPUT_GROUPS_STRATEGY_ID,
+        ),
+        idempotency=IdempotencyCapability.OPERATION_ID,
+        max_projection_bytes=1_048_576,
+        max_decision_bytes=262_144,
+        max_intents_per_decision=1_000,
+        max_strategy_state_bytes=65_536,
+        stability=StabilityLevel.STABLE,
+    )
     definitions = (
         ModuleDefinition(
             id=definition_ids["planner"],
@@ -280,7 +327,19 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
             provider=planner_profile.provider,
             interface_version="sidera.planner.v1",
             config_schema_version=1,
-            capabilities=_planner_capabilities(),
+            capabilities=_planner_capabilities(
+                proposal_schema_versions=planner_schema_versions
+            ),
+            lifecycle=ModuleLifecycle.ACTIVE,
+        ),
+        ModuleDefinition(
+            id=definition_ids["revision_planner"],
+            workspace_id=manifest.workspace_id,
+            module_type="planner_adapter",
+            provider=planner_profile.provider,
+            interface_version="sidera.planner.v1",
+            config_schema_version=1,
+            capabilities=_planner_capabilities(proposal_schema_versions=(2, 3)),
             lifecycle=ModuleLifecycle.ACTIVE,
         ),
         ModuleDefinition(
@@ -315,6 +374,7 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
                 writable=True,
                 git_worktree=True,
                 stability=StabilityLevel.STABLE,
+                code_input_versions=(1,),
             ),
             lifecycle=ModuleLifecycle.ACTIVE,
         ),
@@ -344,18 +404,7 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
             provider="sidera-collaboration",
             interface_version="sidera.collaboration.v1",
             config_schema_version=1,
-            capabilities=CollaborationRuntimeCapabilityProfile(
-                interface_version="sidera.collaboration.v1",
-                projection_schema_versions=(2,),
-                decision_schema_versions=(2,),
-                strategy_ids=(COLLABORATION_INPUT_GROUPS_STRATEGY_ID,),
-                idempotency=IdempotencyCapability.OPERATION_ID,
-                max_projection_bytes=1_048_576,
-                max_decision_bytes=262_144,
-                max_intents_per_decision=1_000,
-                max_strategy_state_bytes=65_536,
-                stability=StabilityLevel.STABLE,
-            ),
+            capabilities=collaboration_capability,
             lifecycle=ModuleLifecycle.ACTIVE,
         ),
         ModuleDefinition(
@@ -382,6 +431,20 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
             module_ids["planner"],
             definition_ids["planner"],
             "planning",
+            "planning",
+            planner_profile.config_version,
+            {
+                "planning.executable": "opencode",
+                "planning.model": planner_profile.model_id,
+                "planning.context_package_versions": [1, 2, 3],
+            },
+            _secret_refs(planner_profile),
+            manifest.workspace_id,
+        ),
+        _instance(
+            module_ids["revision_planner"],
+            definition_ids["revision_planner"],
+            "revision-planning",
             "planning",
             planner_profile.config_version,
             {
@@ -434,7 +497,14 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
             "local-verification",
             "verification",
             1,
-            {"verification.check_specs": []},
+            {
+                "verification.check_specs": [
+                    demo_check_spec().to_mapping(),
+                    closure_check_spec().to_mapping(),
+                    summary_json_check_spec().to_mapping(),
+                    patch_integrity_check_spec(manifest.base_commit).to_mapping(),
+                ]
+            },
             (),
             manifest.workspace_id,
         ),
@@ -476,8 +546,24 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
         planner_module_config_version=planner_profile.config_version,
         planner_interface_version="sidera.planner.v1",
         prompt_policy_version="r6-basic-v1",
-        system_policy={},
-        proposal_schema_version=2,
+        system_policy={
+            "result_integration": {
+                "repository_ref": opaque_repository_ref(manifest.repository),
+                "base_commit": manifest.base_commit,
+                "verification_environment_ref": "env://interview-demo",
+                "verification_check_specs": [
+                    patch_integrity_check_spec(manifest.base_commit).to_mapping(),
+                    closure_check_spec().to_mapping(),
+                ],
+                "verification_binding": {
+                    "adapter_module_ref": str(module_ids["local_verification"]),
+                    "adapter_config_version": 1,
+                    "workspace_module_ref": str(module_ids["workspace"]),
+                    "workspace_config_version": 1,
+                },
+            }
+        },
+        proposal_schema_version=planner_schema_version,
         allowed_capabilities=("code", "python"),
         adapter_preferences=(planner_profile.provider,),
         adapter_forbidden=(),
@@ -502,16 +588,42 @@ def _resources(manifest: BasicRunManifest) -> _Resources:
         user_selectable=True,
         status=PlanningProfileStatus.ACTIVE,
         planner_secret_refs=_secret_refs(planner_profile),
+        collaboration_runtime_binding=(
+            CollaborationRuntimeBindingSnapshot(
+                runtime_definition_id=definition_ids["collaboration"],
+                runtime_instance_id=module_ids["collaboration"],
+                runtime_interface_version="sidera.collaboration.v1",
+                runtime_config_version=1,
+                runtime_capability_snapshot=collaboration_capability,
+            )
+            if result_plan_enabled
+            else None
+        ),
     )
+    revision_profile = replace(
+        profile,
+        id=_stable_id(manifest.run_id, "planning-profile:revision"),
+        profile_key=f"r6-basic-revision-{manifest.run_id.hex[:12]}",
+        display_name="R6 Basic OpenCode Revision Planner",
+        planner_module_instance_id=module_ids["revision_planner"],
+        prompt_policy_version="r6-basic-revision-v1",
+        proposal_schema_version=3,
+    )
+    worker_names = {
+        role: f"R6 basic {role.replace('_', ' ')} worker {manifest.run_id.hex[:8]}"
+        for role in ("worker", "second_worker")
+    }
+    if result_plan_enabled:
+        worker_names["verification"] = (
+            f"R6 basic verification worker {manifest.run_id.hex[:8]}"
+        )
     return _Resources(
         definitions=definitions,
         instances=instances,
         profile=profile,
+        revision_profile=revision_profile,
         module_ids=module_ids,
-        worker_names={
-            role: f"R6 basic {role.replace('_', ' ')} worker {manifest.run_id.hex[:8]}"
-            for role in ("worker", "second_worker")
-        },
+        worker_names=worker_names,
     )
 
 
@@ -546,21 +658,42 @@ def _profile(manifest: BasicRunManifest, role: str) -> AgentProfile:
 
 
 def _worker_config(profile: AgentProfile) -> dict[str, object]:
+    timeout_seconds = _worker_timeout_seconds()
     return {
         "worker.executable": "opencode",
         "worker.model": profile.model_id,
+        "worker.completion_policy": "initial_turn",
         "worker.context_package_versions": [1, 2, 3],
-        "worker.request_timeout_seconds": 60.0,
-        "worker.handoff_request_timeout_seconds": 60.0,
+        "worker.request_timeout_seconds": timeout_seconds,
+        "worker.handoff_request_timeout_seconds": timeout_seconds,
         "worker.stop_grace_seconds": 5.0,
     }
+
+
+def _worker_timeout_seconds() -> float:
+    raw = os.environ.get("SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS")
+    if raw is None or not raw.strip():
+        return 60.0
+    try:
+        timeout_seconds = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS must be a positive number"
+        ) from exc
+    if not isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError(
+            "SIDERA_OPENCODE_REQUEST_TIMEOUT_SECONDS must be a positive number"
+        )
+    return timeout_seconds
 
 
 def _secret_refs(profile: AgentProfile) -> tuple[str, ...]:
     return () if profile.credential_ref == "none" else (profile.credential_ref,)
 
 
-def _planner_capabilities() -> PlannerAdapterCapabilityProfile:
+def _planner_capabilities(
+    *, proposal_schema_versions: tuple[int, ...] = (2,)
+) -> PlannerAdapterCapabilityProfile:
     return PlannerAdapterCapabilityProfile(
         structured_output=StructuredOutputCapability.JSON_SCHEMA,
         clarification=True,
@@ -570,9 +703,15 @@ def _planner_capabilities() -> PlannerAdapterCapabilityProfile:
         max_context_bytes=128_000,
         stability=StabilityLevel.STABLE,
         interface_version="sidera.planner.v1",
-        proposal_schema_versions=(2,),
+        proposal_schema_versions=proposal_schema_versions,
         context_package_versions=(1, 2, 3),
     )
+
+
+def _result_plan_enabled() -> bool:
+    return os.environ.get("SIDERA_RESULT_INPUTS_ENABLED") == "1" or os.environ.get(
+        "SIDERA_RESULT_INTEGRATION_ENABLED"
+    ) == "1"
 
 
 def _worker_capabilities() -> WorkerAdapterCapabilityProfile:
@@ -584,6 +723,7 @@ def _worker_capabilities() -> WorkerAdapterCapabilityProfile:
         sandbox=SandboxCapability.FILESYSTEM,
         stability=StabilityLevel.EXPERIMENTAL,
         context_package_versions=(1, 2, 3),
+        turn_completion_versions=(1,),
         handoff_checkpoint_mode=HandoffCheckpointMode.CONTROL_EVENT,
         handoff_checkpoint_versions=(1,),
         handoff_session_context_versions=(1,),
@@ -664,11 +804,34 @@ def _ensure_worker(
     manifest: BasicRunManifest,
     *,
     role: str,
-    profile: AgentProfile,
+    profile: AgentProfile | None,
     now: datetime,
 ) -> UUID:
     resources = _resources(manifest)
     expected_name = resources.worker_names[role]
+    if role == "verification":
+        adapter_type = "local_verification"
+        capabilities = frozenset({"context_package:v3", "verification"})
+        capacity = 1
+        cost_per_hour_microunits = 0
+        startup_latency_ms = 10
+    else:
+        if profile is None:
+            raise BootstrapConflict(f"missing profile: {role}")
+        adapter_type = profile.provider
+        capabilities = frozenset(
+            {
+                "code",
+                "python",
+                "context_package:v3",
+                "result_integration:v1",
+                "result_inputs:v1",
+                "turn-completion:v1",
+            }
+        )
+        capacity = 1
+        cost_per_hour_microunits = 1
+        startup_latency_ms = 100
     matches = tuple(
         worker
         for worker in uow.workers.list_for_workspace(manifest.workspace_id)
@@ -678,9 +841,7 @@ def _ensure_worker(
         raise BootstrapConflict(f"duplicate worker identity: {expected_name}")
     if matches:
         worker = matches[0]
-        if worker.adapter_type != profile.provider or worker.capabilities != frozenset(
-            {"code", "python", "context_package:v3", "result_integration:v1", "result_inputs:v1"}
-        ):
+        if worker.adapter_type != adapter_type or worker.capabilities != capabilities:
             raise BootstrapConflict(f"worker config_version conflict: {role}")
         return worker.id
 
@@ -693,18 +854,12 @@ def _ensure_worker(
         actor_id="r6-basic-bootstrap",
         target_id=None,
         payload={
-            "adapter_type": profile.provider,
+            "adapter_type": adapter_type,
             "display_name": expected_name,
-            "capabilities": [
-                "code",
-                "python",
-                "context_package:v3",
-                "result_integration:v1",
-                "result_inputs:v1",
-            ],
-            "capacity": 1,
-            "cost_per_hour_microunits": 1,
-            "startup_latency_ms": 100,
+            "capabilities": sorted(capabilities),
+            "capacity": capacity,
+            "cost_per_hour_microunits": cost_per_hour_microunits,
+            "startup_latency_ms": startup_latency_ms,
         },
         expected_version=None,
         idempotency_key=f"r6-basic:register-worker:{role}:{manifest.run_id}",
@@ -743,7 +898,7 @@ def _ensure_runtime(
         id=_stable_id(manifest.run_id, f"command:configure-runtime:{role}"),
         workspace_id=manifest.workspace_id,
         command_type="ConfigureWorkerRuntime",
-        target_type="worker",
+        target_type="worker_runtime_configuration",
         actor_type="bootstrap",
         actor_id="r6-basic-bootstrap",
         target_id=worker_id,

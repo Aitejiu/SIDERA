@@ -7,6 +7,7 @@ import { server } from "@/test/server";
 import {
   executeTaskResultAction,
   getTaskResults,
+  resultRefreshInterval,
   type ResultCommandIdentity,
   taskResultsQueryKey,
 } from "./api";
@@ -20,6 +21,14 @@ import {
 } from "./testFixtures";
 
 describe("task result API", () => {
+  it("refreshes an in-progress or not-yet-materialized result, then stops", () => {
+    expect(resultRefreshInterval(resultView({ result_stage: "verifying", current_candidate: null }))).toBe(1_000);
+    expect(resultRefreshInterval(resultView({ result_stage: "reworking" }))).toBe(1_000);
+    expect(resultRefreshInterval(resultView({ result_stage: "awaiting_acceptance" }))).toBe(false);
+    expect(resultRefreshInterval(resultView({ result_stage: "completed", current_candidate: null }))).toBe(false);
+    expect(resultRefreshInterval(undefined)).toBe(false);
+  });
+
   it("scopes result caches to their task", () => {
     expect(taskResultsQueryKey("w1", "t1")).toEqual(["task-results", "w1", "t1"]);
     expect(taskResultsQueryKey("w1", "t2")).not.toEqual(taskResultsQueryKey("w1", "t1"));

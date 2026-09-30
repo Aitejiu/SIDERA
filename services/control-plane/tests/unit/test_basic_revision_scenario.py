@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from tests.e2e.basic_acceptance.contracts import RevisionSnapshot
 from tests.e2e.basic_acceptance.evidence import EvidenceBuilder
-from tests.e2e.basic_acceptance.revision import build_revision_evidence
+from tests.e2e.basic_acceptance.revision import build_revision_evidence, run_revision
 
 
 def _builder() -> EvidenceBuilder:
@@ -65,6 +65,18 @@ def test_revision_reuses_unaffected_worker_and_result_identity() -> None:
     assert "worker_reuse_scope_observed" in report.check_codes
 
 
+def test_revision_runner_rejects_snapshot_from_another_run() -> None:
+    manifest = {
+        "run_id": str(uuid4()),
+        "code_commit": "a" * 40,
+        "runtime_fingerprint": "b" * 64,
+    }
+    report = run_revision(manifest, snapshot=_snapshot())
+
+    assert report.status == "FAIL"
+    assert report.failure_code == "revision_snapshot_run_id_mismatch"
+
+
 def test_missing_main_agent_tool_call_is_incomplete() -> None:
     report = build_revision_evidence(
         _builder(),
@@ -103,3 +115,45 @@ def test_old_input_cannot_be_reused_by_new_plan() -> None:
 
     assert report.status == "INCOMPLETE"
     assert report.failure_code == "old_input_scope_not_rejected"
+
+
+def test_changed_worker_must_exist_in_old_plan() -> None:
+    report = build_revision_evidence(
+        _builder(),
+        _snapshot(changed_worker_item_ids=(uuid4(),)),
+    )
+
+    assert report.status == "FAIL"
+    assert report.failure_code == "changed_worker_not_in_old_plan"
+
+
+def test_added_worker_must_be_new_to_the_plan() -> None:
+    old_worker = uuid4()
+    report = build_revision_evidence(
+        _builder(),
+        _snapshot(
+            old_worker_item_ids=(old_worker,),
+            added_worker_item_ids=(old_worker,),
+            reused_worker_item_ids=(),
+            changed_worker_item_ids=(),
+            transition_worker_item_ids=(old_worker,),
+        ),
+    )
+
+    assert report.status == "FAIL"
+    assert report.failure_code == "added_worker_already_in_old_plan"
+
+
+def test_worker_cannot_be_marked_reused_and_added() -> None:
+    worker = uuid4()
+    report = build_revision_evidence(
+        _builder(),
+        _snapshot(
+            reused_worker_item_ids=(worker,),
+            added_worker_item_ids=(worker,),
+            transition_worker_item_ids=(worker,),
+        ),
+    )
+
+    assert report.status == "FAIL"
+    assert report.failure_code == "worker_marked_reused_and_added"

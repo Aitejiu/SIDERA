@@ -216,6 +216,40 @@ class ResultRepository:
         row = self._session.scalar(statement)
         return _to_verification(row) if row is not None else None
 
+    def find_pending_verification_attempt(
+        self,
+        *,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        request_id: UUID,
+        candidate_id: UUID,
+        check_key: str,
+        for_update: bool = False,
+    ) -> ResultOperationAttemptV1 | None:
+        statement = (
+            select(ResultOperationAttemptModel)
+            .where(
+                ResultOperationAttemptModel.workspace_id == workspace_id,
+                ResultOperationAttemptModel.root_task_id == root_task_id,
+                ResultOperationAttemptModel.operation_kind == "verification",
+                ResultOperationAttemptModel.status == ResultOperationStatus.PENDING.value,
+                ResultOperationAttemptModel.payload["request_id"].as_string()
+                == str(request_id),
+                ResultOperationAttemptModel.payload["candidate_id"].as_string()
+                == str(candidate_id),
+                ResultOperationAttemptModel.payload["check_key"].as_string() == check_key,
+            )
+            .order_by(
+                ResultOperationAttemptModel.created_at.asc(),
+                ResultOperationAttemptModel.operation_id.asc(),
+            )
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalar(statement)
+        return _to_operation_attempt(row) if row is not None else None
+
     def list_verification_results(
         self, candidate_id: UUID, workspace_id: UUID
     ) -> tuple[VerificationResultV1, ...]:

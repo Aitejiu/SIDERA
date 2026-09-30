@@ -145,6 +145,29 @@ describe("WorkerComposer", () => {
     expect(window.localStorage.getItem(workerItemDraftKey(WORKSPACE_ID, WORKER_ITEM_ID))).toContain("先补并发测试");
   });
 
+  it("refreshes after an optimistic session conflict and keeps the draft", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn(async () => undefined);
+    server.use(
+      http.post("/api/v1/commands", () => HttpResponse.json({
+        error: {
+          code: "version_conflict",
+          message: "expected version 4, actual 5",
+          details: { expected: 4, actual: 5 },
+        },
+      }, { status: 409 })),
+    );
+    renderComposer(workspace, onRefresh);
+
+    const input = screen.getByRole("textbox", { name: "介入这个 Worker" });
+    await user.type(input, "先补并发测试");
+    await user.click(screen.getByRole("button", { name: "发送到当前 Session" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("草稿已保留");
+    expect(input).toHaveValue("先补并发测试");
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+  });
+
   it("requires explicit context confirmation before sending a retained draft", async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(workerItemDraftKey(WORKSPACE_ID, WORKER_ITEM_ID), JSON.stringify({

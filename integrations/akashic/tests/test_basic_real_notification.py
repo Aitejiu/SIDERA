@@ -37,6 +37,18 @@ def test_basic_real_notification_entry() -> None:
     ):
         pytest.fail("manifest must select an explicit notification route reference")
 
+    child_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENCODE_API_KEY",
+        }
+    }
+    child_env["SIDERA_RUN_REAL_BASIC"] = "1"
     result = subprocess.run(
         [
             sys.executable,
@@ -52,17 +64,7 @@ def test_basic_real_notification_entry() -> None:
         check=False,
         capture_output=True,
         text=True,
-        env={
-            key: value
-            for key, value in os.environ.items()
-            if key
-            not in {
-                "ANTHROPIC_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "OPENAI_API_KEY",
-                "OPENCODE_API_KEY",
-            }
-        },
+        env=child_env,
     )
     if result.returncode != 0:
         pytest.fail(

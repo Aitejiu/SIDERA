@@ -43,3 +43,27 @@ def test_environment_secret_resolver_reports_structured_failures(
 def test_environment_secret_resolver_never_accepts_raw_values() -> None:
     with pytest.raises(SecretResolutionError, match="unsupported_scheme"):
         EnvironmentSecretResolver().resolve("raw-secret-value")
+
+
+def test_environment_secret_resolver_accepts_declared_local_credential_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIDERA_CREDENTIAL_STORE_READY", "1")
+
+    resolved = EnvironmentSecretResolver().resolve("store:opencode-go")
+
+    assert isinstance(resolved, SecretStr)
+    assert resolved.get_secret_value() == "credential-store:opencode-go"
+    assert "opencode-go" not in repr(resolved)
+
+
+def test_environment_secret_resolver_rejects_unavailable_local_credential_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SIDERA_CREDENTIAL_STORE_READY", raising=False)
+
+    with pytest.raises(SecretResolutionError) as error:
+        EnvironmentSecretResolver().resolve("store:opencode-go")
+
+    assert error.value.code == "credential_store_unavailable"
+    assert "opencode-go" not in str(error.value)

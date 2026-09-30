@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from akashic_sdk import AsyncAkashic, ConnectionClosedError, RemoteError, TurnHandle
+from sidera_runtime_guard import RuntimeBudgetGuard
 
+from sidera_main_agent_gateway.acceptance_guard import (
+    begin_main_turn,
+    settle_main_turn,
+)
 from sidera_main_agent_gateway.config import Settings
 from sidera_main_agent_gateway.contracts import (
     EventType,
@@ -94,9 +99,11 @@ class AkashicAdapter(MainAgentAdapter):
         settings: Settings,
         *,
         client_factory: ClientFactory = AsyncAkashic.connect,
+        acceptance_guard: RuntimeBudgetGuard | None = None,
     ) -> None:
         self._settings = settings
         self._client_factory = client_factory
+        self._acceptance_guard = acceptance_guard
         self._client: Any | None = None
         self._client_lock = asyncio.Lock()
 
@@ -296,21 +303,41 @@ class AkashicAdapter(MainAgentAdapter):
         self,
         thread_id: str,
         input_text: str,
+        *,
+        operation_id: str | None = None,
     ) -> MainAgentTurnHandle:
-        await self.read_thread(thread_id)
-        thread = await self._read_with_reconnect(
-            lambda client: client.thread_resume(thread_id)
+        guard, guarded_operation_id = begin_main_turn(
+            self._acceptance_guard,
+            operation_id=operation_id,
+            thread_id=thread_id,
+            input_text=input_text,
         )
         try:
+            await self.read_thread(thread_id)
+            thread = await self._read_with_reconnect(
+                lambda client: client.thread_resume(thread_id)
+            )
             provider_handle = await thread.turn(input_text)
         except RemoteError as exc:
+            settle_main_turn(guard, guarded_operation_id, outcome="unknown")
             raise self._map_remote_error(exc) from exc
         except _CONNECTION_ERRORS as exc:
             client = self._client
             if client is not None:
                 await self._invalidate(client)
+            settle_main_turn(guard, guarded_operation_id, outcome="unknown")
             raise ProviderUnavailable("Akashic provider is unavailable") from exc
-        return self.wrap_turn_handle(provider_handle)
+        except Exception:
+            settle_main_turn(guard, guarded_operation_id, outcome="unknown")
+            raise
+        handle = self.wrap_turn_handle(provider_handle)
+        settle_main_turn(
+            guard,
+            guarded_operation_id,
+            outcome="completed",
+            resource_id=f"turn:{handle.id}",
+        )
+        return handle
 
     async def read_turn(self, thread_id: str, turn_id: str) -> MainAgentTurn:
         await self.read_thread(thread_id)

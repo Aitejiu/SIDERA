@@ -22,6 +22,7 @@ from sidera_task_bridge.contracts import (
 )
 
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
+BRIDGE_PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "sidera_task_bridge"
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000002")
 TASK_ID = UUID("00000000-0000-0000-0000-000000000020")
 THREAD_ID = UUID("00000000-0000-0000-0000-000000000030")
@@ -658,10 +659,8 @@ def test_neutral_client_modules_have_no_akashic_imports() -> None:
         "knowledge_client.py",
         "knowledge_contracts.py",
     ):
-        tree = ast.parse(
-            Path(f"integrations/akashic/sidera_task_bridge/{filename}").read_text(),
-            filename=filename,
-        )
+        source_path = BRIDGE_PACKAGE_ROOT / filename
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=filename)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 roots = [alias.name.split(".", 1)[0] for alias in node.names]

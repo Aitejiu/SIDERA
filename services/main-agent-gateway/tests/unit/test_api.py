@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -96,6 +97,7 @@ class FakeAdapter:
         self.health_error: BaseException | None = None
         self.closed = False
         self.created: list[tuple[str, tuple[str, ...]]] = []
+        self.operations: list[str | None] = []
         self.thread_detail = thread()
 
     async def health(self) -> Mapping[str, JsonValue]:
@@ -132,7 +134,10 @@ class FakeAdapter:
         self,
         thread_id: str,
         input_text: str,
+        *,
+        operation_id: str | None = None,
     ) -> MainAgentTurnHandle:
+        self.operations.append(operation_id)
         if self.start_error is not None:
             raise self.start_error
         return FakeHandle()
@@ -149,17 +154,43 @@ class FakeAdapter:
 
 def build_client(
     adapter: FakeAdapter | None = None,
+    *,
+    restore_read_only: bool = False,
 ) -> tuple[TestClient, FakeAdapter]:
     resolved_adapter = adapter or FakeAdapter()
     app = create_app(
         Settings(
             akashic_endpoint="/tmp/akashic/control.sock",
             sidera_workspace_id=WORKSPACE_ID,
+            restore_read_only=restore_read_only,
         ),
         adapter=resolved_adapter,
         relay_registry=TurnRelayRegistry(event_limit=32),
     )
     return TestClient(app), resolved_adapter
+
+
+def test_restore_read_only_rejects_turn_writes_without_calling_provider() -> None:
+    test_client, adapter = build_client(restore_read_only=True)
+    with test_client:
+        health = test_client.get("/main-agent/v1/health")
+        created = test_client.post(
+            "/main-agent/v1/threads",
+            json={"title": "must not be created"},
+        )
+        started = test_client.post(
+            "/main-agent/v1/threads/thread-1/turns",
+            json={"input": "must not be sent"},
+        )
+
+    assert health.status_code == 200
+    assert health.json()["provider"] == "unavailable"
+    assert created.status_code == 409
+    assert created.json()["error"]["code"] == "restore_read_only"
+    assert started.status_code == 409
+    assert started.json()["error"]["code"] == "restore_read_only"
+    assert adapter.created == []
+    assert adapter.operations == []
 
 
 @pytest.fixture
@@ -183,6 +214,20 @@ def test_health_and_capabilities_are_provider_neutral(
     assert capabilities.json()["stream_resume_after_gateway_restart"] is False
 
 
+def test_start_turn_forwards_stable_operation_id(
+    client: tuple[TestClient, FakeAdapter],
+) -> None:
+    test_client, adapter = client
+
+    response = test_client.post(
+        "/main-agent/v1/threads/thread-1/turns",
+        json={"input": "hello", "operationId": "operation-1"},
+    )
+
+    assert response.status_code == 202
+    assert adapter.operations == ["operation-1"]
+
+
 def test_health_stays_200_when_provider_is_unavailable() -> None:
     adapter = FakeAdapter()
     adapter.health_error = ProviderUnavailable("offline")
@@ -192,6 +237,35 @@ def test_health_stays_200_when_provider_is_unavailable() -> None:
 
     assert response.status_code == 200
     assert response.json()["provider"] == "unavailable"
+
+
+def test_app_selects_interview_demo_adapter_from_explicit_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    constructed: list[Settings] = []
+
+    class DemoAdapter(FakeAdapter):
+        def __init__(self, settings: Settings) -> None:
+            super().__init__()
+            constructed.append(settings)
+
+    monkeypatch.setattr(
+        "sidera_main_agent_gateway.api.app.DemoMainAgentAdapter",
+        DemoAdapter,
+    )
+    settings = Settings(
+        adapter_kind="interview-demo",
+        demo_manifest=tmp_path / "manifest.json",
+        sidera_workspace_id=WORKSPACE_ID,
+    )
+
+    with TestClient(create_app(settings)) as test_client:
+        response = test_client.get("/main-agent/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "available"
+    assert constructed == [settings]
 
 
 def test_cors_allows_only_configured_origin(

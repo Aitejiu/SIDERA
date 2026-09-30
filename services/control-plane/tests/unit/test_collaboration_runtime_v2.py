@@ -1,10 +1,14 @@
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.adapters.reference_collaboration_runtime import (
+    ReferenceCollaborationRuntime,
+)
 from sidera_control_plane.application.collaboration_projection import (
     CollaborationProjectionAssembler,
     CollaborationRequestFact,
@@ -370,6 +374,37 @@ def test_assembler_builds_v2_evaluations_from_authoritative_source_facts() -> No
     assert result.evaluation.ready_count == 1
     assert result.evaluation.ready_sources[0].worker_item_key == "worker-a"
     assert "result_inputs" in projection.fingerprints
+
+
+def test_reference_runtime_releases_from_active_source_when_history_shares_placement() -> None:
+    facts = _assembler_v2_facts()
+    current_source = facts.requests[0]
+    historical_source = replace(
+        current_source,
+        id=UUID("6d4a0902-3a0e-4fbc-b3ec-47c717b3e01a"),
+        execution_lineage_id=UUID("f41ab4dd-41d7-4a0d-9e27-883a77f75eca"),
+        first_execution_id=UUID("f41ab4dd-41d7-4a0d-9e27-883a77f75eca"),
+    )
+    projection = CollaborationProjectionAssembler().assemble(
+        replace(facts, result_source_requests=(historical_source,)),
+        fact_cursor=42,
+    )
+
+    decision = ReferenceCollaborationRuntime().evaluate(
+        projection,
+        operation_id=OPERATION_ID,
+        deadline=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+
+    assert isinstance(decision, RuntimeDecisionV2)
+    assert decision.outcome is RuntimeDecisionOutcome.INTENTS
+    assert len(decision.intents) == 1
+    intent = decision.intents[0]
+    assert intent.target_execution_request_id == SUMMARY_REQUEST_ID
+    assert len(intent.input_group_selections) == 1
+    assert intent.input_group_selections[0].sources[0].worker_item_key == (
+        current_source.worker_item_key
+    )
 
 
 def test_assembler_rejects_v2_policy_without_complete_pinned_capability() -> None:

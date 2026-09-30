@@ -145,6 +145,33 @@ def test_root_ready_request_creates_execution_and_marks_subtask_ready(
     assert repeated == type(result)(0, 0, 0, 0, 0, ())
 
 
+def test_long_execution_request_purpose_is_preserved_on_materialization(
+    client: TestClient,
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    _materialize_plan(client, uow_factory, workspace_id)
+    sentence = "Preserve the complete worker instructions during activation."
+    purpose = " ".join([sentence] * 7)
+    assert len(purpose) > 255
+
+    with database.session() as session:
+        request = session.scalar(select(ExecutionRequestModel))
+        assert request is not None
+        request.purpose = purpose
+        session.commit()
+
+    result = _reconciler(database, uow_factory).run_once(limit=10)
+
+    assert result.materialized == 1
+    assert result.failed == 0
+    with database.session() as session:
+        execution = session.get(ExecutionModel, result.execution_ids[0])
+        assert execution is not None
+        assert execution.purpose == purpose
+
+
 def test_context_assembly_creation_rolls_back_execution_materialization(
     client: TestClient,
     database,

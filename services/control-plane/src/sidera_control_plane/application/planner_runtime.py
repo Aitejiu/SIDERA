@@ -13,6 +13,7 @@ from sidera_control_plane.application.revision_planning_context import (
     PlanningContextV1,
     RevisionPlanningContextV1,
 )
+from sidera_control_plane.domain.collaboration import CollaborationStrategy
 from sidera_control_plane.domain.context_packages import ContextMaterializationV1
 from sidera_control_plane.domain.planning import (
     PlanningBriefRevision,
@@ -90,6 +91,9 @@ class PlannerPolicyConstraints:
         cls, profile_snapshot: PlanningProfileSnapshot
     ) -> PlannerPolicyConstraints:
         binding = profile_snapshot.collaboration_runtime_binding
+        policy_strategy_ids = frozenset(
+            strategy.value for strategy in CollaborationStrategy
+        )
         return cls(
             allowed_capabilities=profile_snapshot.allowed_capabilities,
             adapter_preferences=profile_snapshot.adapter_preferences,
@@ -108,7 +112,11 @@ class PlannerPolicyConstraints:
             collaboration_strategy_ids=(
                 ()
                 if binding is None
-                else binding.runtime_capability_snapshot.strategy_ids
+                else tuple(
+                    strategy_id
+                    for strategy_id in binding.runtime_capability_snapshot.strategy_ids
+                    if strategy_id in policy_strategy_ids
+                )
             ),
         )
 
@@ -181,6 +189,7 @@ class PlannerInput:
     context_materialization: ContextMaterializationV1 | None = None
     planning_context: PlanningContextV1 | None = None
     kind: PlanningRequestKind = PlanningRequestKind.CREATE
+    acceptance_resource_chain: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.interface_version.strip():
@@ -231,6 +240,16 @@ class PlannerInput:
 
         object.__setattr__(self, "planning_context", planning_context)
         object.__setattr__(self, "kind", normalized_kind)
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.acceptance_resource_chain
+        ):
+            raise ValueError("planner acceptance resource chain is invalid")
+        object.__setattr__(
+            self,
+            "acceptance_resource_chain",
+            tuple(self.acceptance_resource_chain),
+        )
         if self.context_materialization is not None:
             if not isinstance(self.context_materialization, ContextMaterializationV1):
                 raise TypeError("planner context_materialization must be typed")
@@ -270,6 +289,7 @@ class PlannerInputAssembler:
         context_materialization: ContextMaterializationV1 | None = None,
         planning_context: PlanningContextV1 | None = None,
         kind: PlanningRequestKind | None = None,
+        acceptance_resource_chain: Sequence[str] = (),
     ) -> PlannerInput:
         normalized_refs = () if context_materialization is not None else tuple(context_refs)
         if context_materialization is None:
@@ -299,6 +319,7 @@ class PlannerInputAssembler:
                     else PlanningRequestKind.CREATE
                 )
             ),
+            acceptance_resource_chain=tuple(acceptance_resource_chain),
         )
 
 

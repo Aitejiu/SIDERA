@@ -1,7 +1,9 @@
 import ipaddress
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, cast
+from uuid import UUID
 
 from fastapi import Depends, Request
 
@@ -108,6 +110,12 @@ from sidera_control_plane.application.worker_workspace_queries import (
     WorkerWorkspaceQueryService,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.demo.contracts import DemoManifest
+from sidera_control_plane.demo.manifest import (
+    DemoConfigurationError,
+    load_manifest,
+    validate_manifest,
+)
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.persistence.artifact_content_store import (
     LocalArtifactContentStore,
@@ -172,6 +180,8 @@ from sidera_control_plane.persistence.worker_workspace_query_store import (
     SqlAlchemyWorkerWorkspaceQueryStore,
 )
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[5]
+
 
 def get_database(request: Request) -> Database:
     database: Database = request.app.state.database
@@ -220,6 +230,125 @@ def require_result_integration_enabled(settings: Settings) -> None:
         )
 
 
+class DemoRuntimeBindingForbidden(ValidationError):
+    code = "demo_runtime_binding_forbidden"
+
+
+_DEMO_RUNTIME_COMMAND_TYPES = frozenset(
+    {"ConfigureWorkerRuntime", "PinExecutionWorker", "ClearExecutionWorkerPin"}
+)
+_DEMO_WORKER_ADAPTER_KEYS = {
+    "verification": frozenset({"verification"}),
+    "validation": frozenset({"worker_primary", "worker_secondary"}),
+    "report": frozenset({"worker_primary", "worker_secondary"}),
+    "review": frozenset({"worker_primary", "worker_secondary"}),
+    "integration": frozenset({"worker_primary", "worker_secondary"}),
+    "replacement": frozenset({"worker_primary", "worker_secondary"}),
+}
+_DEMO_RUNTIME_CONFIG_VERSION = 1
+
+
+def require_demo_runtime_binding(request: object, settings: Settings) -> None:
+    """Reject runtime mutations that escape the explicitly configured demo run."""
+
+    command_type = getattr(request, "command_type", None)
+    manifest_path = settings.interview_demo_manifest
+    if command_type not in _DEMO_RUNTIME_COMMAND_TYPES or manifest_path is None:
+        return
+
+    manifest = _load_validated_demo_manifest(manifest_path)
+    workspace_id = getattr(request, "workspace_id", None)
+    if workspace_id != manifest.workspace_id:
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime command workspace does not match the active run",
+            details={"workspace_id": str(workspace_id)},
+        )
+
+    if command_type == "ConfigureWorkerRuntime":
+        _require_demo_runtime_configuration(request, manifest)
+        return
+
+    payload = getattr(request, "payload", {})
+    if not isinstance(payload, dict):
+        raise DemoRuntimeBindingForbidden("demo runtime command payload is invalid")
+    if command_type == "PinExecutionWorker":
+        worker_id = _demo_uuid(payload.get("worker_id"), "worker_id")
+        if worker_id not in manifest.worker_ids.values():
+            raise DemoRuntimeBindingForbidden(
+                "demo execution pin must target a Worker from this run",
+                details={"worker_id": str(worker_id)},
+            )
+
+
+def _load_validated_demo_manifest(path: Path) -> DemoManifest:
+    try:
+        manifest = load_manifest(path.expanduser())
+        validate_manifest(manifest, _PROJECT_ROOT)
+        return manifest
+    except (DemoConfigurationError, OSError, ValueError) as exc:
+        raise DemoRuntimeBindingForbidden(
+            "the configured interview demo manifest is invalid",
+            details={"reason": type(exc).__name__},
+        ) from exc
+
+
+def _require_demo_runtime_configuration(
+    request: object, manifest: DemoManifest
+) -> None:
+    target_id = getattr(request, "target_id", None)
+    if not isinstance(target_id, UUID):
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime configuration must target a Worker from this run"
+        )
+    worker_key = next(
+        (key for key, value in manifest.worker_ids.items() if value == target_id),
+        None,
+    )
+    if worker_key is None:
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime configuration must target a Worker from this run",
+            details={"worker_id": str(target_id)},
+        )
+    payload = getattr(request, "payload", {})
+    if not isinstance(payload, dict):
+        raise DemoRuntimeBindingForbidden("demo runtime configuration payload is invalid")
+    allowed_adapter_ids = frozenset(
+        manifest.module_ids[key] for key in _DEMO_WORKER_ADAPTER_KEYS[worker_key]
+    )
+    expected_workspace = manifest.module_ids["workspace"]
+    adapter_id = _demo_uuid(payload.get("adapter_module_instance_id"), "adapter_module_instance_id")
+    workspace_id = _demo_uuid(payload.get("workspace_module_instance_id"), "workspace_module_instance_id")
+    if adapter_id not in allowed_adapter_ids:
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime configuration adapter is outside the allowed provider binding",
+            details={"worker_key": worker_key, "adapter_module_instance_id": str(adapter_id)},
+        )
+    if workspace_id != expected_workspace:
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime configuration workspace provider is outside the active run",
+            details={"workspace_module_instance_id": str(workspace_id)},
+        )
+    for key in (
+        "adapter_module_config_version",
+        "workspace_module_config_version",
+    ):
+        if payload.get(key) != _DEMO_RUNTIME_CONFIG_VERSION:
+            raise DemoRuntimeBindingForbidden(
+                "demo runtime configuration module version is not supported",
+                details={"field": key, "expected": _DEMO_RUNTIME_CONFIG_VERSION},
+            )
+
+
+def _demo_uuid(value: object, field: str) -> UUID:
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime command contains an invalid UUID",
+            details={"field": field},
+        ) from exc
+
+
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -265,6 +394,7 @@ def get_command_service(
             ExecutionCommandHandler(
                 lambda: datetime.now(UTC),
                 lease_ttl_seconds=settings.assignment_lease_seconds,
+                result_integration_enabled=settings.result_integration_enabled,
             ),
             ExecutionInputCommandHandler(lambda: datetime.now(UTC)),
             ResultReworkService(

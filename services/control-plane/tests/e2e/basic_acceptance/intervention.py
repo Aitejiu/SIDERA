@@ -35,9 +35,11 @@ def build_intervention_evidence(
     else:
         checks.append("unaffected_results_preserved")
 
-    if snapshot.input_status in {"failed", "unknown", "queued", "accepted"}:
-        incomplete.append("worker_input_not_applied")
-    elif snapshot.adapter_acknowledged:
+    if snapshot.input_status in {"blocked", "failed", "cancelled", "superseded"}:
+        failures.append("worker_input_delivery_failed")
+    elif snapshot.input_status in {"unknown", "queued", "accepted", "dispatching"}:
+        incomplete.append("worker_input_not_delivered")
+    elif snapshot.input_status == "delivered" and snapshot.adapter_acknowledged:
         checks.append("worker_input_acknowledged")
     else:
         incomplete.append("adapter_ack_missing")
@@ -79,7 +81,26 @@ def build_intervention_evidence(
     else:
         checks.append("replacement_candidate_is_new")
 
-    if snapshot.rework_round > snapshot.rework_round_limit or snapshot.rework_elapsed_seconds > snapshot.rework_time_limit_seconds:
+    if snapshot.rework_mode == "user":
+        if snapshot.rework_round is not None:
+            failures.append("user_rework_round_unexpected")
+        elif (
+            snapshot.rework_round_limit is not None
+            or snapshot.rework_time_limit_seconds is not None
+        ):
+            failures.append("user_rework_auto_budget_unexpected")
+        else:
+            checks.append("user_rework_round_not_applicable")
+    elif (
+        snapshot.rework_round is None
+        or snapshot.rework_round_limit is None
+        or snapshot.rework_time_limit_seconds is None
+    ):
+        incomplete.append("rework_round_not_observed")
+    elif (
+        snapshot.rework_round > snapshot.rework_round_limit
+        or snapshot.rework_elapsed_seconds > snapshot.rework_time_limit_seconds
+    ):
         incomplete.append("rework_budget_exhausted")
     else:
         checks.append("rework_budget_within_limit")
@@ -107,8 +128,9 @@ def run_intervention(
     snapshot: InterventionSnapshot | None = None,
     evidence_kind: Literal["contract", "real_user_flow"] = "contract",
 ) -> ScenarioEvidence:
+    run_id = _uuid(manifest.get("run_id"))
     builder = EvidenceBuilder(
-        run_id=_uuid(manifest.get("run_id")),
+        run_id=run_id,
         scenario="intervention",
         evidence_kind=evidence_kind,
         code_commit=_text(manifest.get("code_commit"), "0" * 40),
@@ -121,6 +143,13 @@ def run_intervention(
             real_tests=0,
             incomplete=True,
             check_codes=("intervention_snapshot_not_supplied",),
+        )
+    if snapshot.run_id != run_id:
+        return builder.finish(
+            real_tests=0,
+            failed=1,
+            check_codes=("intervention_snapshot_run_id_mismatch",),
+            failure_code_override="intervention_snapshot_run_id_mismatch",
         )
     return build_intervention_evidence(builder, snapshot)
 

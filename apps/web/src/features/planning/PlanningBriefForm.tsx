@@ -33,7 +33,13 @@ export function PlanningBriefForm() {
     enabled: resolvedWorkspaceId.length > 0,
   });
   const profiles = profilesQuery.data?.items.filter((profile) => profile.user_selectable) ?? [];
-  const selectedProfile = profiles.find((profile) => profile.id === profileId) ?? profiles[0];
+  const selectedProfile = profiles.find((profile) => profile.id === profileId)
+    ?? profiles.find((profile) => (
+      profile.capabilities.proposal_schema_versions.length === 1
+      && profile.capabilities.proposal_schema_versions[0] === 2
+    ))
+    ?? profiles.find((profile) => profile.capabilities.proposal_schema_versions.length === 1)
+    ?? profiles[0];
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -194,8 +200,12 @@ export function PlanningBriefForm() {
           </FormSection>
           <div className="planning-brief-form__submit">
             {submitError ? <p className="planning-form-error" role="alert">{submitError}</p> : null}
-            <button className="quiet-button planning-submit" type="submit" disabled={submitting}>
-              {submitting ? "正在提交" : "提交需求"}
+            <button
+              className="quiet-button planning-submit"
+              type="submit"
+              disabled={submitting || profilesQuery.isPending}
+            >
+              {submitting ? "正在提交" : profilesQuery.isPending ? "正在读取配置" : "提交需求"}
             </button>
           </div>
         </aside>

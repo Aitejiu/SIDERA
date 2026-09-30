@@ -27,6 +27,12 @@ class WorkspaceProviderError(RuntimeError):
     """The workspace provider cannot safely perform the requested operation."""
 
 
+def opaque_repository_ref(repository: Path) -> str:
+    canonical = Path(repository).expanduser().resolve(strict=False)
+    digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()
+    return f"git-repository://{digest}"
+
+
 class GitWorktreeWorkspaceManager:
     """Prepare one deterministic, isolated Git worktree per Execution."""
 
@@ -623,8 +629,7 @@ class GitWorktreeWorkspaceManager:
 
     @staticmethod
     def _opaque_repository_ref(repository: Path) -> str:
-        digest = hashlib.sha256(str(repository).encode("utf-8")).hexdigest()
-        return f"git-repository://{digest}"
+        return opaque_repository_ref(repository)
 
     def _resolve_repository(self, repository_ref: str) -> Path:
         repository = Path(repository_ref).expanduser()

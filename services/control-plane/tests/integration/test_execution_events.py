@@ -166,9 +166,14 @@ def _seed_session(database: Database, workspace_id: UUID) -> dict[str, UUID]:
     }
 
 
-def _event(sequence: int, *, payload: dict[str, object] | None = None) -> AdapterEvent:
+def _event(
+    sequence: int,
+    *,
+    event_type: str = "progress.updated",
+    payload: dict[str, object] | None = None,
+) -> AdapterEvent:
     return AdapterEvent(
-        event_type="progress.updated",
+        event_type=event_type,
         sequence=sequence,
         payload=payload or {"progress": sequence},
         occurred_at=NOW,
@@ -239,6 +244,44 @@ def test_event_ingestor_records_sequence_gap_before_raising(
         stored_session = session.get(ExecutionSessionModel, ids["session_id"])
         assert stored_session is not None
         assert stored_session.last_sequence == 1
+
+
+def test_turn_completion_is_stored_but_not_reported_as_terminal(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    ingestor = _ingestor(database)
+    operation_id = uuid4()
+    kwargs = {
+        "workspace_id": workspace_id,
+        "execution_id": ids["execution_id"],
+        "session_id": ids["session_id"],
+        "lease_id": ids["lease_id"],
+        "fencing_token": 1,
+    }
+
+    report = ingestor.ingest(
+        events=(
+            _event(
+                1,
+                event_type="turn.completed",
+                payload={
+                    "schema_version": 1,
+                    "operation_id": str(operation_id),
+                    "stop_reason": "end_turn",
+                },
+            ),
+        ),
+        **kwargs,
+    )
+
+    assert [event.event_type for event in report.events] == ["turn.completed"]
+    assert report.terminal_observations == ()
+    with database.session() as session:
+        stored = session.query(ExecutionEventModel).one()
+        assert stored.event_type == "turn.completed"
+        assert stored.payload["operation_id"] == str(operation_id)
 
 
 def test_artifact_registry_is_idempotent_and_only_creates_candidate_evidence(

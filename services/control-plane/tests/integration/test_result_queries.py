@@ -33,7 +33,7 @@ def _results_path(workspace_id: UUID, root_task_id: UUID) -> str:
     return f"/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results"
 
 
-def test_result_overview_distinguishes_candidate_from_root_completion(
+def test_result_overview_keeps_unverified_candidate_in_verifying_stage(
     client: TestClient, result_scenario
 ) -> None:
     result_scenario.seed_plan()
@@ -47,15 +47,47 @@ def test_result_overview_distinguishes_candidate_from_root_completion(
     body = response.json()
     assert body["workspace_id"] == str(result_scenario.workspace_id)
     assert body["root_task_id"] == str(result_scenario.root_id)
+    assert body["result_stage"] == "verifying"
+    assert body["current_candidate"]["candidate_id"] == str(candidate.id)
+    with result_scenario.uow() as uow:
+        code_result = uow.results.get_record(
+            "code_snapshot", candidate.code_result_id, result_scenario.workspace_id
+        )
+    assert code_result is not None
+    expected_artifact_ids = {str(item) for item in code_result.artifact_ids}
+    actual_artifact_ids = {
+        artifact["artifact_id"]
+        for artifact in body["current_candidate"]["artifacts"]
+    }
+    assert expected_artifact_ids <= actual_artifact_ids
+    assert body["acceptance"] is None
+    assert all(
+        action["command_type"] != "CompleteTask"
+        for action in body["available_actions"]
+    )
+    assert result_scenario.events("TaskCompleted") == ()
+
+
+def test_result_overview_exposes_acceptance_after_automatic_checks_finish(
+    client: TestClient, result_scenario
+) -> None:
+    result_scenario.seed_plan()
+    candidate = result_scenario.candidate(check_exit_code=0)
+
+    response = client.get(
+        _results_path(result_scenario.workspace_id, result_scenario.root_id)
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
     assert body["result_stage"] == "awaiting_acceptance"
     assert body["current_candidate"]["candidate_id"] == str(candidate.id)
-    assert body["acceptance"] is None
-    assert body["available_actions"]
+    assert body["criteria"][0]["observed_status"] == "passed"
+    assert body["criteria"][0]["verification_status"] == "passed"
     assert any(
         action["command_type"] == "CompleteTask"
         for action in body["available_actions"]
     )
-    assert result_scenario.events("TaskCompleted") == ()
 
 
 def test_result_detail_is_fixed_to_candidate_and_has_bounded_subresources(

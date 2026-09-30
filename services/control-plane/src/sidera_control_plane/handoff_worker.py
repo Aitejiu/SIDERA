@@ -23,7 +23,7 @@ from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
 from sidera_control_plane.application.workspace_handoff import WorkspaceHandoffService
 from sidera_control_plane.config import Settings
-from sidera_control_plane.gateway_worker import build_gateway
+from sidera_control_plane.gateway_worker import GatewayRuntime
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -40,8 +40,9 @@ class HandoffWorkerRuntime:
     catalog: object
 
 
-def build_handoff_worker(settings: Settings) -> HandoffWorkerRuntime:
-    gateway_runtime = build_gateway(settings)
+def build_handoff_worker(
+    settings: Settings, *, gateway_runtime: GatewayRuntime
+) -> HandoffWorkerRuntime:
     database = gateway_runtime.database
     uow_factory = lambda: SqlAlchemyUnitOfWork(
         database,
@@ -49,46 +50,39 @@ def build_handoff_worker(settings: Settings) -> HandoffWorkerRuntime:
             settings.projection_change_retention_seconds
         ),
     )
-    try:
-        workspace_provider = GitWorktreeWorkspaceManager(
-            settings.workspace_root,
-            retention_seconds=settings.workspace_retention_seconds,
-            git_executable=settings.git_executable,
-        )
-        scheduler = Scheduler(
+    workspace_provider = GitWorktreeWorkspaceManager(
+        settings.workspace_root,
+        retention_seconds=settings.workspace_retention_seconds,
+        git_executable=settings.git_executable,
+    )
+    scheduler = Scheduler(
+        uow_factory=uow_factory,
+        policy=LowestCostWorkerPolicy(),
+        clock=lambda: datetime.now(UTC),
+        assignment_lease_seconds=settings.assignment_lease_seconds,
+        worker_heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds,
+        context_enforcement=True,
+        context_package_cutover_at=settings.context_package_cutover_at,
+    )
+    coordinator = HandoffCoordinator(
+        uow_factory=uow_factory,
+        gateway=gateway_runtime.worker_gateway,
+        workspace_handoff=WorkspaceHandoffService(
+            workspace_provider,
             uow_factory=uow_factory,
-            policy=LowestCostWorkerPolicy(),
-            clock=lambda: datetime.now(UTC),
-            assignment_lease_seconds=settings.assignment_lease_seconds,
-            worker_heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds,
-            context_enforcement=True,
-            context_package_cutover_at=settings.context_package_cutover_at,
-        )
-        coordinator = HandoffCoordinator(
-            uow_factory=uow_factory,
-            gateway=gateway_runtime.worker_gateway,
-            workspace_handoff=WorkspaceHandoffService(
-                workspace_provider,
-                uow_factory=uow_factory,
-            ),
-            target_service=HandoffTargetService(uow_factory),
-            context_service=HandoffContextService(
-                uow_factory,
-                context_ttl_seconds=settings.execution_context_ttl_seconds,
-            ),
-            input_transfer=HandoffInputTransferService(uow_factory),
-            scheduler=scheduler,
-            owner_id=f"handoff-coordinator:{settings.local_actor_id}",
-            lease_ttl_seconds=settings.handoff_lease_ttl_seconds,
-            backoff_max_seconds=settings.handoff_backoff_max_seconds,
-            clock=lambda: datetime.now(UTC),
-        )
-    except BaseException:
-        database.dispose()
-        close = getattr(gateway_runtime.catalog, "close", None)
-        if callable(close):
-            close()
-        raise
+        ),
+        target_service=HandoffTargetService(uow_factory),
+        context_service=HandoffContextService(
+            uow_factory,
+            context_ttl_seconds=settings.execution_context_ttl_seconds,
+        ),
+        input_transfer=HandoffInputTransferService(uow_factory),
+        scheduler=scheduler,
+        owner_id=f"handoff-coordinator:{settings.local_actor_id}",
+        lease_ttl_seconds=settings.handoff_lease_ttl_seconds,
+        backoff_max_seconds=settings.handoff_backoff_max_seconds,
+        clock=lambda: datetime.now(UTC),
+    )
     return HandoffWorkerRuntime(
         coordinator=coordinator,
         database=database,
@@ -125,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     runtime: HandoffWorkerRuntime | None = None
     try:
         settings = Settings()  # pyright: ignore[reportCallIssue]
-        runtime = build_handoff_worker(settings)
+        raise RuntimeError("gateway_owner_required")
         while True:
             result = runtime.coordinator.run_once(settings.handoff_batch_size)
             print(summary_json(result))

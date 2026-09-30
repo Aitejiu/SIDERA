@@ -1,23 +1,36 @@
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from threading import Event
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import update
 
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
+from sidera_control_plane.application import worker_gateway as worker_gateway_module
+from sidera_control_plane.application.code_result_capture import (
+    code_capture_operation_id,
+)
 from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.application.input_dispatcher import InputDispatcher
 from sidera_control_plane.application.outbox_dispatcher import OutboxMessage
+from sidera_control_plane.application.reconciler import Reconciler
 from sidera_control_plane.application.worker_gateway import (
     ASSIGNMENT_TOPIC,
     STOP_TOPIC,
     AssignmentLeaseKeeper,
+    GatewayMessageError,
     GatewayRecoveryRequired,
     GatewayStopResult,
     WorkerGateway,
     _operation_id,
 )
+from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_patches import (
     ContextPatchMaterializationV1,
@@ -31,6 +44,7 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperationType,
     context_patch_operation_id,
 )
+from sidera_control_plane.domain.inputs import ExecutionInput, input_operation_id
 from sidera_control_plane.domain.modules import (
     CapabilityInput,
     CapabilityProfile,
@@ -82,12 +96,27 @@ def _capabilities() -> CapabilityProfile:
 
 
 class RecordingFakeAdapter(FakeWorkerAdapter):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        artifacts: tuple[ArtifactCandidate, ...] = (),
+        turn_completion_enabled: bool = False,
+        observation_order: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            artifacts=artifacts,
+            turn_completion_enabled=turn_completion_enabled,
+        )
         self.start_count = 0
         self.input_count = 0
         self.stop_count = 0
         self.stop_results: list[DeliveryResult] = []
+        self.observation_order = observation_order
+
+    def read_events(self, handle: AdapterSessionHandle):
+        if self.observation_order is not None:
+            self.observation_order.append("observe")
+        return super().read_events(handle)
 
     def start_session(
         self,
@@ -193,7 +222,12 @@ class FakeWorkspaceProvider:
 
 
 def _seed_assignment(
-    database: Database, workspace_id: UUID, *, name_suffix: str = ""
+    database: Database,
+    workspace_id: UUID,
+    *,
+    name_suffix: str = "",
+    completion_policy: str = "explicit",
+    turn_completion_versions: tuple[int, ...] = (),
 ) -> dict[str, UUID]:
     task_id = uuid4()
     worker_id = uuid4()
@@ -203,7 +237,10 @@ def _seed_assignment(
     workspace_definition_id = uuid4()
     adapter_instance_id = uuid4()
     workspace_instance_id = uuid4()
-    capabilities = _capabilities()
+    capabilities = replace(
+        _capabilities(),
+        turn_completion_versions=turn_completion_versions,
+    )
     with database.session() as session:
         session.add(
             TaskModel(
@@ -254,6 +291,9 @@ def _seed_assignment(
                         "context_patch_versions": list(
                             capabilities.context_patch_versions
                         ),
+                        "turn_completion_versions": list(
+                            capabilities.turn_completion_versions
+                        ),
                     },
                     lifecycle="active",
                 ),
@@ -284,7 +324,10 @@ def _seed_assignment(
                     instance_name=f"fake-adapter{name_suffix}",
                     config_version=1,
                     config_namespace="fake",
-                    config={"fake.name": "integration"},
+                    config={
+                        "fake.name": "integration",
+                        "fake.completion_policy": completion_policy,
+                    },
                     secret_refs=[],
                     lifecycle="active",
                 ),
@@ -366,6 +409,9 @@ def _seed_assignment(
                     "context_patch_versions": list(
                         capabilities.context_patch_versions
                     ),
+                    "turn_completion_versions": list(
+                        capabilities.turn_completion_versions
+                    ),
                 },
                 lease_id=lease_id,
                 fencing_token=1,
@@ -406,6 +452,63 @@ def _message(workspace_id: UUID, execution_id: UUID, lease_id: UUID) -> OutboxMe
         attempts=1,
         claim_token=uuid4(),
     )
+
+
+def _add_input_model(
+    database: Database,
+    workspace_id: UUID,
+    execution_id: UUID,
+    session_id: UUID,
+    *,
+    client_key: str,
+    text: str,
+    status: str = "queued",
+    version: int = 1,
+    operation_id: UUID | None = None,
+    failure_code: str | None = None,
+) -> UUID:
+    input_id = uuid4()
+    source_command_id = uuid4()
+    with database.session() as session:
+        session.add(
+            CommandModel(
+                id=source_command_id,
+                workspace_id=workspace_id,
+                command_type="SendExecutionInput",
+                actor_type="user",
+                actor_id="integration",
+                target_type="execution_session",
+                target_id=session_id,
+                payload={"source": "integration-helper"},
+                expected_version=1,
+                idempotency_key=f"input-helper:{source_command_id}",
+                request_hash="2" * 64,
+                correlation_id=uuid4(),
+                status="applied",
+                result={},
+                rejection_reason=None,
+            )
+        )
+        session.add(
+            ExecutionInputModel(
+                id=input_id,
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                session_id=session_id,
+                client_idempotency_key=client_key,
+                text=text,
+                attachment_refs=[],
+                status=status,
+                operation_id=operation_id,
+                failure_code=failure_code,
+                version=version,
+                source_command_id=source_command_id,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        session.commit()
+    return input_id
 
 
 def _patch_materialization(
@@ -542,6 +645,858 @@ def test_gateway_starts_once_and_replays_duplicate_assignment(
         assert session.query(GatewayOperationModel).filter_by(status="succeeded").count() == 3
 
 
+def test_gateway_rejects_unsupported_completion_contract_before_external_calls(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(
+        database,
+        workspace_id,
+        completion_policy="initial_turn",
+        turn_completion_versions=(),
+    )
+    adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(GatewayMessageError) as caught:
+        gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+
+    assert caught.value.code == "turn_completion_capability_unsupported"
+    assert adapter.start_count == 0
+    assert provider.prepare_count == 0
+
+
+def test_gateway_rejects_invalid_completion_policy_before_external_calls(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(
+        database,
+        workspace_id,
+        completion_policy="guess",
+        turn_completion_versions=(1,),
+    )
+    adapter = RecordingFakeAdapter(turn_completion_enabled=True)
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(GatewayMessageError) as caught:
+        gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+
+    assert caught.value.code == "completion_policy_invalid"
+    assert adapter.start_count == 0
+    assert provider.prepare_count == 0
+
+
+def test_gateway_completes_initial_turn_once_and_captures_before_artifacts(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(
+        database,
+        workspace_id,
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+    adapter = RecordingFakeAdapter(turn_completion_enabled=True)
+    provider = FakeWorkspaceProvider()
+    order: list[str] = []
+
+    class RecordingCompletionCapture:
+        def record_execution_start(self, **kwargs):
+            del kwargs
+            order.append("result_capture_start")
+            return object()
+
+        def observe_terminal(self, **kwargs):
+            del kwargs
+            order.append("result_capture")
+            return object()
+
+        def capture_execution(self, **kwargs):
+            del kwargs
+            order.append("result_capture_snapshot")
+            with SqlAlchemyUnitOfWork(database) as uow:
+                execution = uow.executions.get(
+                    ids["execution_id"], workspace_id, for_update=True
+                )
+                assert execution is not None
+                previous_version = execution.version
+                execution.version += 1
+                uow.executions.save(execution, previous_version)
+            return object()
+
+    class RecordingArtifacts:
+        def register(self, **kwargs):
+            del kwargs
+            order.append("artifact_register")
+            return worker_gateway_module.ArtifactRegistrationReport((), ())
+
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        artifact_registry=cast(ArtifactRegistry, RecordingArtifacts()),
+        code_result_capture_service=cast(object, RecordingCompletionCapture()),
+        clock=lambda: NOW,
+    )
+    original_report = gateway._report_execution_completion
+
+    def report_with_order(*args, **kwargs):
+        order.append("completion_command")
+        return original_report(*args, **kwargs)
+
+    gateway._report_execution_completion = report_with_order  # type: ignore[method-assign]
+    started = gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+    gateway.sync_session(
+        workspace_id=workspace_id,
+        execution_id=ids["execution_id"],
+        session_id=started.session_id,
+        lease_id=ids["lease_id"],
+        fencing_token=1,
+    )
+
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        worker = session.get(WorkerModel, ids["worker_id"])
+        stored_session = session.get(ExecutionSessionModel, started.session_id)
+        events = (
+            session.query(ExecutionEventModel)
+            .filter_by(session_id=started.session_id)
+            .order_by(ExecutionEventModel.sequence.asc())
+            .all()
+        )
+        command = session.query(CommandModel).filter_by(
+            command_type="ReportExecutionSucceeded"
+        ).one()
+        assert execution is not None
+        assert lease is not None
+        assert worker is not None
+        assert stored_session is not None
+        assert execution.status == "succeeded"
+        assert execution.active_lease_id is None
+        assert execution.finished_at is not None
+        assert lease.status == "released"
+        assert worker.current_load == 0
+        assert stored_session.status == "closed"
+        assert events[-1].event_type == "turn.completed"
+        assert command.command_type == "ReportExecutionSucceeded"
+
+    assert order.index("result_capture") < order.index("artifact_register")
+    assert order.index("artifact_register") < order.index("completion_command")
+    assert order.count("completion_command") == 1
+
+
+@pytest.mark.parametrize("code_capture_enabled", (True, False))
+def test_gateway_delivers_input_accepted_before_first_sync_before_completing(
+    database: Database,
+    workspace_id: UUID,
+    code_capture_enabled: bool,
+) -> None:
+    ids = _seed_assignment(
+        database,
+        workspace_id,
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+
+    artifact_collection_calls: list[UUID] = []
+
+    class AcceptInputBeforeFirstSyncAdapter(RecordingFakeAdapter):
+        def send_input(
+            self,
+            handle: AdapterSessionHandle,
+            text: str,
+            attachment_refs: tuple[str, ...],
+            *,
+            operation_id: UUID,
+        ) -> DeliveryResult:
+            result = super().send_input(
+                handle, text, attachment_refs, operation_id=operation_id
+            )
+            if self.input_count == 1:
+                command_id = uuid4()
+                with database.session() as session:
+                    session.add(
+                        CommandModel(
+                            id=command_id,
+                            workspace_id=workspace_id,
+                            command_type="SendExecutionInput",
+                            actor_type="user",
+                            actor_id="integration",
+                            target_type="execution_session",
+                            target_id=handle.execution_session_id,
+                            payload={"source": "integration-race"},
+                            expected_version=1,
+                            idempotency_key=f"input-race:{command_id}",
+                            request_hash="1" * 64,
+                            correlation_id=uuid4(),
+                            status="applied",
+                            result={},
+                            rejection_reason=None,
+                        )
+                    )
+                    session.add(
+                        ExecutionInputModel(
+                            id=uuid4(),
+                            workspace_id=workspace_id,
+                            execution_id=ids["execution_id"],
+                            session_id=handle.execution_session_id,
+                            client_idempotency_key="input-before-first-sync",
+                            text="Please include the missing edge case",
+                            attachment_refs=[],
+                            status="queued",
+                            operation_id=None,
+                            failure_code=None,
+                            version=1,
+                            source_command_id=command_id,
+                            created_at=NOW,
+                            updated_at=NOW,
+                        )
+                    )
+                    session.commit()
+            return result
+
+        def collect_artifacts(
+            self,
+            handle: AdapterSessionHandle,
+            *,
+            operation_id: UUID,
+        ):
+            artifact_collection_calls.append(operation_id)
+            if not code_capture_enabled:
+                with SqlAlchemyUnitOfWork(database) as uow:
+                    fence = uow.results.get_operation(
+                        code_capture_operation_id(ids["execution_id"]), workspace_id
+                    )
+                assert fence is not None
+                assert fence.payload.get("terminal_observed") is True
+            return super().collect_artifacts(handle, operation_id=operation_id)
+
+    capture_calls: list[str] = []
+
+    class RecordingCompletionCapture:
+        def record_execution_start(self, **_kwargs):
+            capture_calls.append("start")
+
+        def observe_terminal(self, **_kwargs):
+            with database.session() as session:
+                pending_count = session.query(ExecutionInputModel).filter(
+                    ExecutionInputModel.status.in_(
+                        ("accepted", "queued", "dispatching", "blocked")
+                    )
+                ).count()
+            assert pending_count == 0
+            capture_calls.append("observe")
+
+        def capture_execution(self, **_kwargs):
+            capture_calls.append("capture")
+            return object()
+
+    adapter = AcceptInputBeforeFirstSyncAdapter(turn_completion_enabled=True)
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        code_result_capture_service=(
+            cast(object, RecordingCompletionCapture())
+            if code_capture_enabled
+            else None
+        ),
+        clock=lambda: NOW,
+    )
+
+    started = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        stored_session = session.get(ExecutionSessionModel, started.session_id)
+        queued_input = session.query(ExecutionInputModel).one()
+        completion_commands = session.query(CommandModel).filter(
+            CommandModel.command_type.in_(
+                ("ReportExecutionSucceeded", "ReportExecutionFailed")
+            )
+        )
+        assert execution is not None
+        assert lease is not None
+        assert stored_session is not None
+        assert execution.status == "running"
+        assert lease.status == "active"
+        assert stored_session.status == "active"
+        assert queued_input.status == "queued"
+        assert completion_commands.count() == 0
+    assert capture_calls == (["start"] if code_capture_enabled else [])
+    assert artifact_collection_calls == []
+
+    adapter.release_boundary(adapter.active_sessions()[0])
+    dispatcher = InputDispatcher(
+        lambda: SqlAlchemyUnitOfWork(database), gateway, clock=lambda: NOW
+    )
+    delivery = dispatcher.run_once()
+
+    assert delivery.claimed == 1
+    assert delivery.delivered == 1
+    assert gateway.sync_active_sessions(workspace_id) == 1
+    assert capture_calls == (
+        ["start", "observe", "capture"] if code_capture_enabled else []
+    )
+    assert len(artifact_collection_calls) == 1
+
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        worker = session.get(WorkerModel, ids["worker_id"])
+        stored_session = session.get(ExecutionSessionModel, started.session_id)
+        inputs = session.query(ExecutionInputModel).all()
+        completion_commands = session.query(CommandModel).filter(
+            CommandModel.command_type == "ReportExecutionSucceeded"
+        )
+        assert execution is not None and execution.status == "succeeded"
+        assert lease is not None and lease.status == "released"
+        assert worker is not None and worker.current_load == 0
+        assert stored_session is not None and stored_session.status == "closed"
+        assert len(inputs) == 1 and inputs[0].status == "delivered"
+        assert completion_commands.count() == 1
+        assert session.query(ExecutionSessionModel).count() == 1
+    if not code_capture_enabled:
+        with SqlAlchemyUnitOfWork(database) as uow:
+            fence = uow.results.get_operation(
+                code_capture_operation_id(ids["execution_id"]), workspace_id
+            )
+        assert fence is not None
+        assert fence.operation_kind == "execution_completion_fence"
+        assert fence.payload.get("terminal_observed") is True
+
+
+def test_gateway_persists_completion_fence_before_artifacts_without_code_capture(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(
+        database,
+        workspace_id,
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+
+    class FenceCheckingAdapter(RecordingFakeAdapter):
+        def collect_artifacts(
+            self,
+            handle: AdapterSessionHandle,
+            *,
+            operation_id: UUID,
+        ):
+            with SqlAlchemyUnitOfWork(database) as uow:
+                fence = uow.results.get_operation(
+                    code_capture_operation_id(ids["execution_id"]), workspace_id
+                )
+            assert fence is not None
+            assert fence.payload.get("terminal_observed") is True
+            assert fence.payload.get("terminal_outcome") == "succeeded"
+            return super().collect_artifacts(handle, operation_id=operation_id)
+
+    adapter = FenceCheckingAdapter(turn_completion_enabled=True)
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={
+            "fake-workspace": lambda _instance: FakeWorkspaceProvider()
+        },
+        clock=lambda: NOW,
+    )
+
+    gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+
+    with SqlAlchemyUnitOfWork(database) as uow:
+        fence = uow.results.get_operation(
+            code_capture_operation_id(ids["execution_id"]), workspace_id
+        )
+        execution = uow.executions.get(ids["execution_id"], workspace_id)
+        assert fence is not None
+        assert fence.operation_kind == "execution_completion_fence"
+        assert fence.payload.get("terminal_observed") is True
+        assert execution is not None and execution.status.value == "succeeded"
+
+
+@pytest.mark.parametrize("succeeded", (True, False))
+@pytest.mark.parametrize("settlement", ("delivered", "cancelled"))
+def test_report_completion_defers_without_recording_rejection_while_input_pending(
+    database: Database,
+    workspace_id: UUID,
+    succeeded: bool,
+    settlement: str,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+    started = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    input_id = uuid4()
+    with database.session() as session:
+        session.add(
+            ExecutionInputModel(
+                id=input_id,
+                workspace_id=workspace_id,
+                execution_id=ids["execution_id"],
+                session_id=started.session_id,
+                client_idempotency_key="completion-waits-for-input",
+                text="Wait for this accepted input",
+                attachment_refs=[],
+                status="queued",
+                operation_id=None,
+                failure_code=None,
+                version=1,
+                source_command_id=None,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        session.commit()
+
+    with SqlAlchemyUnitOfWork(database) as uow:
+        execution = uow.executions.get(ids["execution_id"], workspace_id)
+        assert execution is not None
+        payload = {
+            "worker_id": str(ids["worker_id"]),
+            "lease_id": str(ids["lease_id"]),
+            "fencing_token": 1,
+        }
+        if not succeeded:
+            payload["failure_code"] = "worker_session_failed"
+        completion = CommandEnvelope(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            command_type=(
+                "ReportExecutionSucceeded"
+                if succeeded
+                else "ReportExecutionFailed"
+            ),
+            target_type="execution",
+            actor_type="worker",
+            actor_id=str(ids["worker_id"]),
+            target_id=ids["execution_id"],
+            payload=payload,
+            expected_version=execution.version,
+            idempotency_key=f"completion-deferred:{ids['execution_id']}",
+            correlation_id=ids["task_id"],
+        )
+    command_service = CommandService(
+        lambda: SqlAlchemyUnitOfWork(database),
+        (ExecutionCommandHandler(lambda: NOW),),
+    )
+
+    with pytest.raises(RuntimeError, match="execution completion deferred"):
+        command_service.handle(completion)
+
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        stored_session = session.get(ExecutionSessionModel, started.session_id)
+        assert execution is not None and execution.status == "running"
+        assert stored_session is not None and stored_session.status == "active"
+        assert session.get(CommandModel, completion.id) is None
+
+        pending = session.get(ExecutionInputModel, input_id)
+        assert pending is not None
+        pending.status = settlement
+        session.commit()
+
+    command_service.handle(completion)
+
+    with database.session() as session:
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        command = session.get(CommandModel, completion.id)
+        expected_status = "succeeded" if succeeded else "failed"
+        assert execution is not None and execution.status == expected_status
+        assert command is not None and command.status == "applied"
+
+
+def test_blocked_input_stops_active_session_lease_renewal(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(
+        database,
+        workspace_id,
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+
+    class BlockedInputBeforeFirstSyncAdapter(RecordingFakeAdapter):
+        def send_input(
+            self,
+            handle: AdapterSessionHandle,
+            text: str,
+            attachment_refs: tuple[str, ...],
+            *,
+            operation_id: UUID,
+        ) -> DeliveryResult:
+            result = super().send_input(
+                handle, text, attachment_refs, operation_id=operation_id
+            )
+            if self.input_count == 1:
+                _add_input_model(
+                    database,
+                    workspace_id,
+                    ids["execution_id"],
+                    handle.execution_session_id,
+                    client_key="blocked-before-first-sync",
+                    text="Input delivery outcome is unknown",
+                    status="blocked",
+                    version=4,
+                    operation_id=uuid4(),
+                    failure_code="prompt_result_unknown",
+                )
+            return result
+
+    adapter = BlockedInputBeforeFirstSyncAdapter(turn_completion_enabled=True)
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+    started = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        assert lease is not None
+        version_before_sync = lease.version
+
+    assert gateway.sync_active_sessions(workspace_id) == 1
+    assert gateway.sync_active_sessions(workspace_id) == 1
+
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        execution = session.get(ExecutionModel, ids["execution_id"])
+        stored_session = session.get(ExecutionSessionModel, started.session_id)
+        pending = session.query(ExecutionInputModel).one()
+        assert lease is not None and lease.version == version_before_sync
+        assert execution is not None and execution.status == "running"
+        assert stored_session is not None and stored_session.status == "active"
+        assert pending.status == "blocked"
+
+
+def test_send_input_renews_lease_during_slow_adapter_prompt(
+    database: Database,
+    workspace_id: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    prompt_entered = Event()
+    release_prompt = Event()
+    renewal_observed = Event()
+
+    class SlowSecondPromptAdapter(RecordingFakeAdapter):
+        block_next_prompt = False
+
+        def send_input(
+            self,
+            handle: AdapterSessionHandle,
+            text: str,
+            attachment_refs: tuple[str, ...],
+            *,
+            operation_id: UUID,
+        ) -> DeliveryResult:
+            if self.block_next_prompt:
+                self.block_next_prompt = False
+                prompt_entered.set()
+                if not release_prompt.wait(timeout=4):
+                    raise TimeoutError("test prompt was not released")
+            return super().send_input(
+                handle, text, attachment_refs, operation_id=operation_id
+            )
+
+    adapter = SlowSecondPromptAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        assignment_lease_ttl_seconds=300,
+        assignment_lease_renew_interval_seconds=0.02,
+        clock=lambda: NOW,
+    )
+    started = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    adapter.release_boundary(adapter.active_sessions()[0])
+    adapter.block_next_prompt = True
+    input_id = _add_input_model(
+        database,
+        workspace_id,
+        ids["execution_id"],
+        started.session_id,
+        client_key="slow-prompt-renewal",
+        text="Hold this prompt while the lease renews",
+    )
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        assert lease is not None
+        version_before_prompt = lease.version
+
+    original_renew_once = AssignmentLeaseKeeper.renew_once
+
+    def observe_renewal(keeper: AssignmentLeaseKeeper) -> bool:
+        result = original_renew_once(keeper)
+        if result:
+            renewal_observed.set()
+        return result
+
+    monkeypatch.setattr(AssignmentLeaseKeeper, "renew_once", observe_renewal)
+    dispatcher = InputDispatcher(
+        lambda: SqlAlchemyUnitOfWork(database), gateway, clock=lambda: NOW
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(dispatcher.run_once)
+        prompt_started = prompt_entered.wait(timeout=2)
+        try:
+            renewed = renewal_observed.wait(timeout=1)
+        finally:
+            release_prompt.set()
+        report = future.result(timeout=4)
+
+    assert prompt_started
+    assert renewed
+    assert report.delivered == 1
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        stored_input = session.get(ExecutionInputModel, input_id)
+        assert lease is not None and lease.version > version_before_prompt
+        assert lease.renewed_at == NOW
+        assert stored_input is not None and stored_input.status == "delivered"
+
+
+def test_input_becomes_unknown_when_lease_renewal_fails_during_prompt(
+    database: Database,
+    workspace_id: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    prompt_entered = Event()
+    release_prompt = Event()
+    renewal_failed = Event()
+
+    class SlowSecondPromptAdapter(RecordingFakeAdapter):
+        block_next_prompt = False
+
+        def send_input(
+            self,
+            handle: AdapterSessionHandle,
+            text: str,
+            attachment_refs: tuple[str, ...],
+            *,
+            operation_id: UUID,
+        ) -> DeliveryResult:
+            if self.block_next_prompt:
+                self.block_next_prompt = False
+                prompt_entered.set()
+                if not release_prompt.wait(timeout=4):
+                    raise TimeoutError("test prompt was not released")
+            return super().send_input(
+                handle, text, attachment_refs, operation_id=operation_id
+            )
+
+    adapter = SlowSecondPromptAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        assignment_lease_ttl_seconds=300,
+        assignment_lease_renew_interval_seconds=0.02,
+        clock=lambda: NOW,
+    )
+    started = gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    adapter.release_boundary(adapter.active_sessions()[0])
+    adapter.block_next_prompt = True
+    input_id = _add_input_model(
+        database,
+        workspace_id,
+        ids["execution_id"],
+        started.session_id,
+        client_key="renewal-failure-during-prompt",
+        text="Do not replay after lease renewal fails",
+    )
+
+    def fail_renewal(_keeper: AssignmentLeaseKeeper) -> bool:
+        renewal_failed.set()
+        raise RuntimeError("injected lease renewal failure")
+
+    monkeypatch.setattr(AssignmentLeaseKeeper, "renew_once", fail_renewal)
+    dispatcher = InputDispatcher(
+        lambda: SqlAlchemyUnitOfWork(database), gateway, clock=lambda: NOW
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(dispatcher.run_once)
+        prompt_started = prompt_entered.wait(timeout=2)
+        try:
+            failed = renewal_failed.wait(timeout=1)
+        finally:
+            release_prompt.set()
+        report = future.result(timeout=4)
+
+    assert prompt_started
+    assert failed
+    assert report.unknown == 1
+    with database.session() as session:
+        stored_input = session.get(ExecutionInputModel, input_id)
+        assert stored_input is not None and stored_input.status == "blocked"
+        operation = session.query(GatewayOperationModel).filter_by(
+            operation_type=GatewayOperationType.SEND_INPUT.value,
+            status="unknown",
+        ).one()
+        assert operation.failure_code == "assignment_lease_renewal_failed"
+
+    sends_before_recheck = adapter.input_count
+    retried = dispatcher.run_once()
+    assert retried.claimed == 0
+    assert adapter.input_count == sends_before_recheck
+
+
+def test_two_source_turn_completions_release_capacity_before_downstream_activation(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    source_a = _seed_assignment(
+        database,
+        workspace_id,
+        name_suffix="-source-a",
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+    source_b = _seed_assignment(
+        database,
+        workspace_id,
+        name_suffix="-source-b",
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+
+    def artifact(execution_id: UUID, name: str) -> ArtifactCandidate:
+        body = f"{name}: complete\n".encode()
+        return ArtifactCandidate(
+            artifact_type=ArtifactType.BUILD,
+            storage_ref=f"fake://artifact/{execution_id}/{name}",
+            content_hash=hashlib.sha256(body).hexdigest(),
+            size_bytes=len(body),
+            media_type="text/plain",
+            provenance={"source": name},
+            content=body,
+        )
+
+    adapters = {
+        source_a["adapter_instance_id"]: RecordingFakeAdapter(
+            turn_completion_enabled=True,
+            artifacts=(artifact(source_a["execution_id"], "source-a"),),
+        ),
+        source_b["adapter_instance_id"]: RecordingFakeAdapter(
+            turn_completion_enabled=True,
+            artifacts=(artifact(source_b["execution_id"], "source-b"),),
+        ),
+    }
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda instance: adapters[instance.id]},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+
+    started = {}
+    for ids in (source_a, source_b):
+        started[ids["execution_id"]] = gateway.handle(
+            _message(workspace_id, ids["execution_id"], ids["lease_id"])
+        )
+    for ids in (source_a, source_b):
+        gateway.sync_session(
+            workspace_id=workspace_id,
+            execution_id=ids["execution_id"],
+            session_id=started[ids["execution_id"]].session_id,
+            lease_id=ids["lease_id"],
+            fencing_token=1,
+        )
+
+    with database.session() as session:
+        executions = [
+            session.get(ExecutionModel, ids["execution_id"])
+            for ids in (source_a, source_b)
+        ]
+        leases = [
+            session.get(AssignmentLeaseModel, ids["lease_id"])
+            for ids in (source_a, source_b)
+        ]
+        workers = [
+            session.get(WorkerModel, ids["worker_id"])
+            for ids in (source_a, source_b)
+        ]
+        events = tuple(
+            session.query(ExecutionEventModel)
+            .filter(ExecutionEventModel.execution_id.in_(
+                [ids["execution_id"] for ids in (source_a, source_b)]
+            ))
+            .all()
+        )
+
+    assert all(item is not None and item.status == "succeeded" for item in executions)
+    assert all(item is not None and item.active_lease_id is None for item in executions)
+    assert all(item is not None and item.status == "released" for item in leases)
+    assert all(item is not None and item.current_load == 0 for item in workers)
+    assert {event.event_type for event in events} >= {
+        "input.accepted",
+        "turn.completed",
+    }
+    windows = tuple(
+        (item.started_at, item.finished_at)
+        for item in executions
+        if item is not None
+    )
+    assert all(start is not None and finish is not None for start, finish in windows)
+    assert max(start for start, _finish in windows if start is not None) <= min(
+        finish for _start, finish in windows if finish is not None
+    )
+
+    # The downstream assignment is created only after both durable source facts
+    # exist, matching the input-selection gate used by the result scheduler.
+    downstream = _seed_assignment(
+        database,
+        workspace_id,
+        name_suffix="-integration",
+        completion_policy="initial_turn",
+        turn_completion_versions=(1,),
+    )
+    with database.session() as session:
+        integration = session.get(ExecutionModel, downstream["execution_id"])
+        assert integration is not None
+        assert integration.status == "leased"
+
+
 def test_gateway_delivers_patch_as_independent_idempotent_operation(
     database: Database,
     workspace_id: UUID,
@@ -623,6 +1578,123 @@ def test_assignment_lease_keeper_persists_command_for_audited_renewal(
         command = session.get(CommandModel, renewal_event.causation_id)
         assert command is not None
         assert command.command_type == "RenewLease"
+
+
+def test_active_session_sync_renews_lease_after_successful_observation(
+    database: Database,
+    workspace_id: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    order: list[str] = []
+    adapter = RecordingFakeAdapter(observation_order=order)
+    provider = FakeWorkspaceProvider()
+    current_time = [NOW]
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: current_time[0],
+    )
+    gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+    order.clear()
+    with database.session() as session:
+        session.execute(
+            update(AssignmentLeaseModel)
+            .where(AssignmentLeaseModel.id == ids["lease_id"])
+            .values(expires_at=NOW + timedelta(seconds=5))
+        )
+        session.commit()
+
+    current_time[0] = NOW + timedelta(seconds=4)
+    original_renew_once = AssignmentLeaseKeeper.renew_once
+
+    def record_renewal(keeper: AssignmentLeaseKeeper) -> bool:
+        order.append("renew")
+        return original_renew_once(keeper)
+
+    monkeypatch.setattr(AssignmentLeaseKeeper, "renew_once", record_renewal)
+    assert gateway.sync_active_demo_sessions(workspace_id) == 1
+    assert order.index("observe") < order.index("renew")
+
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        assert lease is not None
+        assert lease.expires_at == NOW + timedelta(seconds=34)
+        assert lease.version == 2
+
+
+def test_unobservable_same_process_session_is_not_renewed(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    first_adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    first_gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: first_adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+    started = first_gateway.handle(
+        _message(workspace_id, ids["execution_id"], ids["lease_id"])
+    )
+    with database.session() as session:
+        session.execute(
+            update(AssignmentLeaseModel)
+            .where(AssignmentLeaseModel.id == ids["lease_id"])
+            .values(expires_at=NOW + timedelta(seconds=5))
+        )
+        session.commit()
+        original = session.get(AssignmentLeaseModel, ids["lease_id"])
+        assert original is not None
+        original_expires_at = original.expires_at
+        original_version = original.version
+
+    restarted_gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: RecordingFakeAdapter()},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW + timedelta(seconds=4),
+    )
+
+    synced = restarted_gateway.sync_active_sessions(workspace_id)
+
+    assert synced == 0
+    with database.session() as session:
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        assert lease is not None
+        assert lease.expires_at == original_expires_at
+        assert lease.version == original_version
+        assert started.session_id is not None
+
+    reconciler = Reconciler(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(database),
+        clock=lambda: NOW + timedelta(seconds=6),
+        worker_heartbeat_timeout_seconds=30,
+    )
+    result = reconciler.run_once(limit=10)
+
+    assert result.expired_leases == 1
+    with database.session() as session:
+        execution_rows = (
+            session.query(ExecutionModel)
+            .filter_by(lineage_id=ids["execution_id"])
+            .order_by(ExecutionModel.attempt.asc())
+            .all()
+        )
+        lease = session.get(AssignmentLeaseModel, ids["lease_id"])
+        worker = session.get(WorkerModel, ids["worker_id"])
+        session_row = session.get(ExecutionSessionModel, started.session_id)
+        lost_events = session.query(EventModel).filter_by(event_type="ExecutionLost").all()
+    assert len(execution_rows) == 2
+    assert execution_rows[0].status == "lost"
+    assert execution_rows[1].status == "queued"
+    assert lease is not None and lease.status == "expired"
+    assert worker is not None and worker.current_load == 0
+    assert session_row is not None and session_row.status == "lost"
+    assert len(lost_events) == 1
 
 
 def test_gateway_marks_unresolved_running_operation_unknown_without_restart(
@@ -770,7 +1842,7 @@ def test_input_dispatcher_delivers_to_exact_gateway_session(
         stored_input = session.get(ExecutionInputModel, input_id)
         assert stored_input is not None
         assert stored_input.status == "delivered"
-        assert stored_input.operation_id is None
+        assert stored_input.operation_id == input_operation_id(input_id)
         operations = session.query(GatewayOperationModel).filter_by(
             execution_id=ids["execution_id"],
             operation_type=GatewayOperationType.SEND_INPUT.value,
@@ -790,6 +1862,53 @@ def test_input_dispatcher_delivers_to_exact_gateway_session(
         assert stored_session is not None
         assert stored_session.last_sequence == 4
         assert session.query(ExecutionEventModel).count() == 4
+
+
+def test_replaying_a_lost_input_response_reuses_operation_and_session(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_assignment(database, workspace_id)
+    adapter = RecordingFakeAdapter()
+    provider = FakeWorkspaceProvider()
+    gateway = WorkerGateway(
+        lambda: SqlAlchemyUnitOfWork(database),
+        adapter_factories={"fake": lambda _instance: adapter},
+        workspace_factories={"fake-workspace": lambda _instance: provider},
+        clock=lambda: NOW,
+    )
+
+    started = gateway.handle(_message(workspace_id, ids["execution_id"], ids["lease_id"]))
+    adapter.release_boundary(adapter.active_sessions()[0])
+    prompt_count_before_replay = adapter.input_count
+    item = ExecutionInput.accept(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        execution_id=ids["execution_id"],
+        session_id=started.session_id,
+        client_idempotency_key="lost-response-input",
+        text="continue on the same Session",
+        attachment_refs=(),
+        now=NOW,
+    )
+    item.queue()
+    operation_id = uuid4()
+    item.begin_dispatch(operation_id=operation_id)
+
+    first = gateway.send_input(item)
+    replay = gateway.send_input(item)
+
+    assert first == replay
+    assert first.operation_id == operation_id
+    assert first.outcome is DeliveryOutcome.DELIVERED
+    assert adapter.input_count == prompt_count_before_replay + 1
+    with database.session() as session:
+        assert session.query(ExecutionSessionModel).count() == 1
+        operation = session.query(GatewayOperationModel).filter_by(
+            operation_id=operation_id
+        ).one()
+        assert operation.status == "succeeded"
+        assert operation.session_id == started.session_id
 
 
 def test_gateway_stops_exact_execution_and_continues_without_touching_sibling(

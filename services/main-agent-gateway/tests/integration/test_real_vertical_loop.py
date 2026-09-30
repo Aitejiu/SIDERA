@@ -214,6 +214,118 @@ async def _wait_for_status(
     raise AssertionError(f"PlanningRequest did not reach {sorted(statuses)}")
 
 
+async def _read_task_results(
+    client: httpx.AsyncClient,
+    control_plane_url: str,
+    workspace_id: str,
+    root_task_id: str,
+) -> dict[str, Any]:
+    response = await client.get(
+        f"{control_plane_url}/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results",
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict):
+        raise TypeError("Task result overview is not an object")
+    return body
+
+
+async def _wait_for_result_stage(
+    client: httpx.AsyncClient,
+    control_plane_url: str,
+    workspace_id: str,
+    root_task_id: str,
+    stages: set[str],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = await _read_task_results(
+            client,
+            control_plane_url,
+            workspace_id,
+            root_task_id,
+        )
+        if result.get("result_stage") in stages:
+            return result
+        await asyncio.sleep(2.0)
+    raise AssertionError(f"Task result did not reach {sorted(stages)}")
+
+
+async def _accept_verified_candidate(
+    client: httpx.AsyncClient,
+    control_plane_url: str,
+    workspace_id: str,
+    root_task_id: str,
+    result: Mapping[str, Any],
+) -> None:
+    candidate = result.get("current_candidate")
+    criteria = result.get("criteria")
+    actions = result.get("available_actions")
+    if not isinstance(candidate, Mapping) or not isinstance(criteria, list):
+        raise TypeError("Task result has no reviewable candidate")
+    if not isinstance(actions, list):
+        raise TypeError("Task result has no action catalog")
+    decisions = [
+        {
+            "criterion_key": str(criterion["criterion_key"]),
+            "decision": "accept_passed",
+            "reason": None,
+        }
+        for criterion in criteria
+        if isinstance(criterion, Mapping)
+    ]
+    if len(decisions) != len(criteria) or not decisions:
+        raise AssertionError("Task result criteria are malformed")
+    action = next(
+        (
+            item
+            for item in actions
+            if isinstance(item, Mapping) and item.get("command_type") == "CompleteTask"
+        ),
+        None,
+    )
+    if not isinstance(action, Mapping):
+        raise TypeError("Verified candidate cannot be accepted")
+
+    candidate_id = str(candidate["candidate_id"])
+    basis_response = await client.post(
+        f"{control_plane_url}/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis",
+        json={"criteria": decisions},
+        timeout=20.0,
+    )
+    basis_response.raise_for_status()
+    basis = basis_response.json()
+    command_response = await client.post(
+        f"{control_plane_url}/api/v1/commands",
+        json={
+            "command_id": str(uuid4()),
+            "workspace_id": workspace_id,
+            "command_type": "CompleteTask",
+            "actor": {
+                "type": os.environ.get("SIDERA_LOCAL_ACTOR_TYPE", "local"),
+                "id": os.environ.get("SIDERA_LOCAL_ACTOR_ID", "aitejiu"),
+            },
+            "target_type": "task",
+            "target_id": root_task_id,
+            "expected_version": action["expected_version"],
+            "idempotency_key": f"real-vertical-accept-{uuid4()}",
+            "correlation_id": str(uuid4()),
+            "payload": {
+                "candidate_id": basis["candidate_id"],
+                "candidate_hash": basis["candidate_hash"],
+                "acceptance_basis_hash": basis["acceptance_basis_hash"],
+                "expected_result_version": basis["expected_result_version"],
+                "criteria": decisions,
+            },
+        },
+        timeout=20.0,
+    )
+    command_response.raise_for_status()
+
+
 async def test_real_main_agent_web_to_task_vertical_loop() -> None:
     config = _require_real_environment()
     gateway_url = config["SIDERA_MAIN_AGENT_GATEWAY_URL"].rstrip("/")
@@ -246,7 +358,8 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
                 f"请创建一个真实的 SIDERA 任务，唯一标记是 {marker}。目标是在当前工作区新增 "
                 "scripts/sidera-r5-release-check.sh：当环境变量 SIDERA_R5_RELEASE=1 时输出 "
                 "SIDERA_R5_RELEASE_OK，否则以非零状态退出；同时提供一个 shell 测试和回滚说明。"
-                "约束是只使用当前工作区和一个最小 WorkerItem，不引入额外依赖或外部服务；"
+                "约束是只使用当前工作区和一个最小子任务，仅使用实现与验证所需的少量 "
+                "WorkerItem，不引入额外依赖或外部服务；"
                 "验收标准是脚本行为、测试和回滚步骤都明确；"
                 "输出要求是先形成 Planning Proposal，获得确认后再物化 Task。信息已经足够，"
                 "不要提出澄清问题，直接生成 Proposal 并等待确认。"
@@ -282,13 +395,19 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
         assert isinstance(proposal.get("current_proposal_revision"), int) or proposal.get("status") == "materialized"
 
         if proposal.get("status") != "materialized":
-            await _start_turn(
+            proposal_version = int(proposal["version"])
+            proposal_revision = int(proposal["current_proposal_revision"])
+            proposal_hash = str(proposal["current_proposal_content_hash"])
+            revision_events, _ = await _start_turn(
                 client,
                 gateway_url,
                 thread_id,
                 "请先做一个保持目标不变的小幅方案修订，补充测试与回滚验收，然后重新生成最新 Proposal。",
                 timeout_seconds=timeout_seconds,
             )
+            revision_tools = _tool_names(revision_events)
+            assert "sidera_request_proposal_revision" in revision_tools
+            assert "sidera_submit_brief" not in revision_tools
             revised = await _wait_for_status(
                 client,
                 control_plane_url,
@@ -297,7 +416,9 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
                 {"proposal_ready", "awaiting_confirmation", "needs_confirmation", "materialized"},
                 timeout_seconds=timeout_seconds,
             )
-            assert revised.get("version", 0) >= proposal.get("version", 0)
+            assert revised.get("version", 0) > proposal_version
+            assert revised.get("current_proposal_revision", 0) > proposal_revision
+            assert revised.get("current_proposal_content_hash") != proposal_hash
             await _start_turn(
                 client,
                 gateway_url,
@@ -354,6 +475,41 @@ async def test_real_main_agent_web_to_task_vertical_loop() -> None:
         assert status_terminal.get("_event") == "completed"
         assert "sidera_get_task_status" in _tool_names(status_events)
         assert root_task_id in _event_text(status_events)
+
+        reviewable = await _wait_for_result_stage(
+            client,
+            control_plane_url,
+            workspace_id,
+            root_task_id,
+            {"awaiting_acceptance"},
+            timeout_seconds=timeout_seconds,
+        )
+        assert reviewable.get("blocking_reasons") == []
+        criteria = reviewable.get("criteria")
+        assert isinstance(criteria, list) and criteria
+        assert all(
+            isinstance(criterion, Mapping)
+            and criterion.get("observed_status") == "passed"
+            and criterion.get("verification_status") == "passed"
+            for criterion in criteria
+        )
+        await _accept_verified_candidate(
+            client,
+            control_plane_url,
+            workspace_id,
+            root_task_id,
+            reviewable,
+        )
+        completed = await _wait_for_result_stage(
+            client,
+            control_plane_url,
+            workspace_id,
+            root_task_id,
+            {"completed"},
+            timeout_seconds=timeout_seconds,
+        )
+        assert completed.get("task_status") == "succeeded"
+        assert completed.get("acceptance") is not None
 
 
 async def test_real_main_agent_revision_stays_pending_until_user_confirmation() -> None:

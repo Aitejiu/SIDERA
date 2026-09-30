@@ -46,6 +46,7 @@ _LLM_PAYLOAD_SNAPSHOT_ENABLED = False
 _LAST_PAYLOAD_PATH = Path(tempfile.gettempdir()) / "akashic-last-llm-payload.json"
 _PAYLOAD_SNAPSHOT_DIR = Path(tempfile.gettempdir()) / "akashic-llm-payloads"
 _PAYLOAD_SNAPSHOT_SEQ = itertools.count(1)
+_OPENCODE_GO_USER_AGENT = "sidera-akashic/1.0"
 StreamDelta = dict[str, str]
 
 # 安全审查错误码（各厂商）
@@ -361,6 +362,11 @@ class ChatCompletionsRuntime:
             kwargs,
             merged_extra_body,
             disable_thinking=self._force_disable_thinking or request.disable_thinking,
+        )
+        kwargs = _with_provider_session_headers(
+            kwargs,
+            provider_name=self._provider_name,
+            provider_session_id=request.provider_session_id,
         )
 
         if request.on_delta is not None:
@@ -764,6 +770,7 @@ class LLMProvider:
     ) -> LLMResponse:
         merged_extra = {**self._extra_body, **(extra_body or {})}
         effort = merged_extra.get("reasoning_effort")
+        provider_session_namespace = cache_namespace or f"auxiliary:{self._runtime_id}"
         request = ModelRequest(
             messages=messages,
             tools=tools,
@@ -780,6 +787,9 @@ class LLMProvider:
                 _stable_prompt_cache_key(self._runtime_id, model, cache_namespace)
                 if cache_namespace
                 else None
+            ),
+            provider_session_id=(
+                _stable_opencode_session_id(provider_session_namespace)
             ),
             on_delta=on_content_delta,
             extra_body=dict(extra_body or {}),
@@ -878,6 +888,29 @@ def _stable_prompt_cache_key(runtime_id: str, model: str, namespace: str) -> str
     """生成不泄露 session 标识的稳定缓存路由键。"""
     raw = f"{runtime_id}\0{model}\0{namespace}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _stable_opencode_session_id(namespace: str) -> str:
+    """为 OpenCode Go 生成不泄露原始会话 key 的稳定路由标识。"""
+
+    raw = f"sidera\0opencode-go\0{namespace}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _with_provider_session_headers(
+    kwargs: dict[str, Any],
+    *,
+    provider_name: str,
+    provider_session_id: str | None,
+) -> dict[str, Any]:
+    """给需要会话路由的 Provider 加 header，不把标识放进请求体。"""
+
+    if provider_name.strip().lower() != "opencode-go" or not provider_session_id:
+        return kwargs
+    headers = dict(kwargs.get("extra_headers") or {})
+    headers.setdefault("x-opencode-session", provider_session_id)
+    headers.setdefault("user-agent", _OPENCODE_GO_USER_AGENT)
+    return {**kwargs, "extra_headers": headers}
 
 
 def _get_field(delta: Any, name: str) -> Any:

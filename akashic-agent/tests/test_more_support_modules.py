@@ -313,6 +313,59 @@ async def test_provider_chat_and_retry_paths(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_opencode_go_sends_stable_session_header(monkeypatch: pytest.MonkeyPatch):
+    fake = _FakeClient(
+        [
+            _Response(content="first"),
+            _Response(content="second"),
+            _Response(content="auxiliary"),
+        ]
+    )
+    monkeypatch.setattr("agent.provider.AsyncOpenAI", lambda **_: fake)
+    provider = LLMProvider(
+        api_key="k",
+        provider_name="opencode-go",
+        max_retries=0,
+    )
+
+    await provider.chat(
+        [],
+        [],
+        "deepseek-v4-flash",
+        1,
+        cache_namespace="web:conversation-123",
+    )
+    await provider.chat(
+        [],
+        [],
+        "mimo-v2.5",
+        1,
+        cache_namespace="web:conversation-123",
+    )
+    await provider.chat([], [], "mimo-v2.5", 1)
+
+    first_headers = fake.calls[0]["extra_headers"]
+    second_headers = fake.calls[1]["extra_headers"]
+    assert first_headers["x-opencode-session"] == second_headers["x-opencode-session"]
+    assert len(first_headers["x-opencode-session"]) == 64
+    assert "web:conversation-123" not in first_headers["x-opencode-session"]
+    auxiliary_headers = fake.calls[2]["extra_headers"]
+    assert len(auxiliary_headers["x-opencode-session"]) == 64
+    assert auxiliary_headers["x-opencode-session"] != first_headers["x-opencode-session"]
+
+    non_opencode = _FakeClient([_Response(content="plain")])
+    monkeypatch.setattr("agent.provider.AsyncOpenAI", lambda **_: non_opencode)
+    await LLMProvider(api_key="k", provider_name="deepseek").chat(
+        [],
+        [],
+        "deepseek-v4-flash",
+        1,
+        cache_namespace="web:conversation-123",
+    )
+    assert "extra_headers" not in non_opencode.calls[0]
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_omits_zero_max_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ):

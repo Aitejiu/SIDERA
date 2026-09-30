@@ -340,6 +340,13 @@ describe("WorkspaceStreamProvider projection matching", () => {
     ).toBe(true);
     expect(
       matchesProjectionQuery(
+        ["worker-result-inputs", WORKSPACE_ID, WORKER_ITEM_ID],
+        WORKSPACE_ID,
+        packageChange,
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectionQuery(
         ["context-package", "other-workspace", "execution", EXECUTION_ID],
         WORKSPACE_ID,
         packageChange,

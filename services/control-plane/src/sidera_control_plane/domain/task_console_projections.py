@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -95,6 +95,7 @@ class TaskConsoleActivityFact:
     summary: str
     correlation_id: UUID
     source_type: str = "execution_event"
+    requires_user_input: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +257,9 @@ class TaskConsoleProjectionService:
         executions_by_task = _group_executions_by_task(execution_values)
         evidence_by_task = _group_evidence_by_task(evidence_values)
         activity_by_task = _group_activity_by_task(activity_values)
+        latest_activity_by_worker_item = _latest_activity_by_worker_item(
+            activity_values
+        )
 
         nodes: list[SubtaskNodeProjection] = []
         for subtask in plan.subtasks:
@@ -269,6 +273,13 @@ class TaskConsoleProjectionService:
                         executions_by_worker_item.get(placement.worker_item_id, ())
                     ),
                     task,
+                    requires_user_input=(
+                        latest_activity_by_worker_item.get(placement.worker_item_id)
+                        is not None
+                        and latest_activity_by_worker_item[
+                            placement.worker_item_id
+                        ].requires_user_input
+                    ),
                 )
                 for placement in item_placements
             )
@@ -286,6 +297,14 @@ class TaskConsoleProjectionService:
             )
             latest_activity = _latest(
                 activity_by_task.get(task_id, ()) if task_id else ()
+            )
+            latest_waiting_input = _latest(
+                activity
+                for placement in item_placements
+                for activity in (
+                    latest_activity_by_worker_item.get(placement.worker_item_id),
+                )
+                if activity is not None and activity.requires_user_input
             )
             task_executions = executions_by_task.get(task_id, ()) if task_id else ()
             latest_block = _latest(
@@ -322,7 +341,9 @@ class TaskConsoleProjectionService:
                     evidence_required=len(subtask.acceptance_refs),
                     evidence_satisfied=evidence_satisfied,
                     current_action=(
-                        latest_block.active_block_summary
+                        latest_waiting_input.summary
+                        if latest_waiting_input is not None
+                        else latest_block.active_block_summary
                         if latest_block is not None
                         and latest_block.active_block_summary is not None
                         else latest_activity.summary
@@ -330,22 +351,30 @@ class TaskConsoleProjectionService:
                         else None
                     ),
                     waiting_reason=(
-                        latest_block.active_block_reason
+                        "worker_input_required"
+                        if latest_waiting_input is not None
+                        else latest_block.active_block_reason
                         if latest_block is not None
                         else None
                     ),
                     waiting_details_summary=(
-                        latest_block.active_block_summary
+                        latest_waiting_input.summary
+                        if latest_waiting_input is not None
+                        else latest_block.active_block_summary
                         if latest_block is not None
                         else None
                     ),
                     requires_operator=(
-                        latest_block.active_block_requires_operator
+                        True
+                        if latest_waiting_input is not None
+                        else latest_block.active_block_requires_operator
                         if latest_block is not None
                         else False
                     ),
                     blocked_since=(
-                        latest_block.active_block_first_seen_at
+                        latest_waiting_input.occurred_at
+                        if latest_waiting_input is not None
+                        else latest_block.active_block_first_seen_at
                         if latest_block is not None
                         else None
                     ),
@@ -370,6 +399,25 @@ class TaskConsoleProjectionService:
             )
 
         nodes = self._apply_dependency_state(plan, nodes)
+        root_task = tasks.get(plan.root_task_id)
+        if root_task is not None and root_task.status == "succeeded":
+            nodes = [
+                replace(
+                    node,
+                    state="succeeded",
+                    running_worker_item_count=0,
+                    attention_worker_item_count=0,
+                    current_action=None,
+                    waiting_reason=None,
+                    waiting_details_summary=None,
+                    requires_operator=False,
+                    blocked_since=None,
+                    handoff_running_count=0,
+                    handoff_blocked_count=0,
+                    handoff_worker_item_ids=(),
+                )
+                for node in nodes
+            ]
         node_by_key = {node.subtask_key: node for node in nodes}
         edges = tuple(
             SubtaskEdgeProjection(
@@ -538,6 +586,7 @@ class TaskConsoleProjectionService:
             None,
         )
         activity_by_task = _group_activity_by_task(activity)
+        latest_activity_by_worker_item = _latest_activity_by_worker_item(activity)
         executions_by_task = _group_executions_by_task(executions)
         attention: list[TaskConsoleAttentionProjection] = []
         placement_by_worker_item = {
@@ -656,6 +705,59 @@ class TaskConsoleProjectionService:
             task_executions = (
                 executions_by_task.get(task_id, ()) if task_id is not None else ()
             )
+            waiting_inputs = tuple(
+                (placement, requested)
+                for placement in placements
+                if placement.subtask_key == node.subtask_key
+                for requested in (
+                    latest_activity_by_worker_item.get(placement.worker_item_id),
+                )
+                if requested is not None and requested.requires_user_input
+            )
+            if waiting_inputs:
+                for placement, requested in sorted(
+                    waiting_inputs,
+                    key=lambda value: (
+                        value[1].occurred_at,
+                        str(value[1].correlation_id),
+                    ),
+                ):
+                    item = TaskConsoleAttentionProjection(
+                        key=(
+                            f"worker_input:{placement.worker_item_id}:"
+                            f"{requested.correlation_id}"
+                        ),
+                        kind="waiting_user",
+                        task_title=plan.title,
+                        subtask_key=node.subtask_key,
+                        subtask_title=node.title,
+                        reason=requested.summary,
+                        resource_id=placement.worker_item_id,
+                        resource_version=1,
+                        correlation_id=requested.correlation_id,
+                        occurred_at=requested.occurred_at,
+                        waiting_reason="worker_input_required",
+                        waiting_details_summary=requested.summary,
+                        requires_operator=True,
+                        worker_item_id=placement.worker_item_id,
+                        deep_link=(
+                            f"/workspaces/{plan.workspace_id}/worker-items/"
+                            f"{placement.worker_item_id}"
+                        ),
+                    )
+                    source = AttentionSource(
+                        attention_key=item.key,
+                        root_task_id=plan.root_task_id,
+                        resource_id=item.resource_id,
+                        resource_version=item.resource_version,
+                        correlation_id=item.correlation_id,
+                    )
+                    if not any(
+                        acknowledgement.applies_to(source)
+                        for acknowledgement in acknowledgements
+                    ):
+                        attention.append(item)
+                continue
             latest_block = _latest(
                 execution
                 for execution in task_executions
@@ -816,6 +918,19 @@ def _group_activity_by_task(
     return {key: tuple(value) for key, value in grouped.items()}
 
 
+def _latest_activity_by_worker_item(
+    values: Iterable[TaskConsoleActivityFact],
+) -> dict[UUID, TaskConsoleActivityFact]:
+    grouped: dict[UUID, list[TaskConsoleActivityFact]] = defaultdict(list)
+    for value in values:
+        if value.worker_item_id is not None:
+            grouped[value.worker_item_id].append(value)
+    return {
+        worker_item_id: _latest(worker_item_values)
+        for worker_item_id, worker_item_values in grouped.items()
+    }
+
+
 def _latest(values: Iterable[Any]) -> Any:
     return max(values, key=_fact_sort_key, default=None)
 
@@ -824,12 +939,16 @@ def _worker_item_state(
     worker_item: TaskConsoleWorkerItemFact | None,
     execution: TaskConsoleExecutionFact | None,
     task: TaskConsoleTaskFact | None,
+    *,
+    requires_user_input: bool = False,
 ) -> str:
     if worker_item is not None:
         if worker_item.status == "retired":
             return "retired"
         if worker_item.status == "paused":
             return "paused"
+    if requires_user_input:
+        return "waiting_user"
     if execution is not None:
         if execution.active_block_id is not None and execution.status == "queued":
             return "blocked"

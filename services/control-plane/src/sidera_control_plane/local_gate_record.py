@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 DirtyScope = Literal["clean", "protected-only", "dirty"]
 GateStatus = Literal["PASS", "FAIL"]
+IMPLEMENTATION_FINGERPRINT_VERSION = 2
 
 DEFAULT_PROTECTED_PATHS = (
     ".superpowers/",
@@ -85,12 +87,43 @@ class LocalGateRecordV1(BaseModel):
 
     @model_validator(mode="after")
     def _status_matches_checks(self) -> LocalGateRecordV1:
-        checks_pass = all(check.status == "PASS" for check in self.checks.values())
-        if self.status == "PASS" and (
-            not checks_pass or self.dirty_scope == "dirty" or not self.provider_free
-        ):
-            raise ValueError("a local gate PASS requires clean checks and provider-free state")
-        return self
+       checks_pass = all(check.status == "PASS" for check in self.checks.values())
+       if self.status == "PASS" and (
+            not self.checks
+            or not checks_pass
+            or self.dirty_scope == "dirty"
+            or not self.provider_free
+       ):
+           raise ValueError("a local gate PASS requires clean checks and provider-free state")
+       return self
+
+
+class LocalGateRecordV2(BaseModel):
+    """Current local-gate evidence with an explicit fingerprint algorithm."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
+    fingerprint_version: Literal[2] = IMPLEMENTATION_FINGERPRINT_VERSION
+    commit: str = Field(pattern=_SHA1.pattern)
+    implementation_fingerprint: str = Field(pattern=_SHA256.pattern)
+    dirty_scope: DirtyScope
+    database: DatabaseIdentity
+    checks: dict[str, GateCheckRecord]
+    status: GateStatus
+    provider_free: bool = True
+
+    @model_validator(mode="after")
+    def _status_matches_checks(self) -> LocalGateRecordV2:
+       checks_pass = all(check.status == "PASS" for check in self.checks.values())
+       if self.status == "PASS" and (
+            not self.checks
+            or not checks_pass
+            or self.dirty_scope == "dirty"
+            or not self.provider_free
+       ):
+           raise ValueError("a local gate PASS requires clean checks and provider-free state")
+       return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,24 +223,39 @@ def current_commit(repository: Path) -> str:
 
 
 def _fingerprint_path(path: str) -> bool:
-    if any(path.startswith(prefix) for prefix in _EXCLUDED_FINGERPRINT_PREFIXES):
+    normalized = path.removeprefix("./")
+    if any(
+        normalized == prefix.rstrip("/")
+        or normalized.startswith(prefix)
+        for prefix in _EXCLUDED_FINGERPRINT_PREFIXES
+    ):
         return False
-    name = Path(path).name.casefold()
+    parts = normalized.split("/")
+    if any(
+        part in {"node_modules", "__pycache__", ".pytest_cache"}
+        for part in parts
+    ):
+        return False
+    if "test-results" in parts or "playwright-report" in parts:
+        return False
+    name = Path(normalized).name.casefold()
+    if name.startswith(".env") and name != ".env.example":
+        return False
     return not any(name == suffix or name.endswith(suffix) for suffix in _EXCLUDED_SECRET_NAMES)
 
 
 def implementation_fingerprint(repository: Path) -> str:
-    """Hash tracked executable/configuration inputs while ignoring documentation."""
+    """Hash implementation inputs, including untracked non-ignored source files."""
 
     try:
         completed = subprocess.run(
-            ["git", "ls-files", "-z"],
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=repository,
             check=True,
             capture_output=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise LocalGateRecordError("git tracked-file lookup failed") from exc
+        raise LocalGateRecordError("git implementation-file lookup failed") from exc
 
     digest = hashlib.sha256()
     paths = sorted(
@@ -220,9 +268,38 @@ def implementation_fingerprint(repository: Path) -> str:
         digest.update(relative.encode("utf-8", errors="surrogateescape"))
         digest.update(b"\0")
         try:
+            file_stat = path.lstat()
+        except FileNotFoundError:
+            # A deleted tracked input must invalidate an earlier record, while
+            # still producing a deterministic fingerprint for the current tree.
+            digest.update(b"missing\0")
+            continue
+        except OSError as exc:
+            raise LocalGateRecordError(
+                f"implementation-file stat failed:{relative}"
+            ) from exc
+        digest.update(str(stat.S_IFMT(file_stat.st_mode)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(stat.S_IMODE(file_stat.st_mode)).encode("ascii"))
+        digest.update(b"\0")
+        if stat.S_ISLNK(file_stat.st_mode):
+            resolved = path.resolve(strict=False)
+            repository_root = repository.resolve(strict=False)
+            if resolved != repository_root and repository_root not in resolved.parents:
+                raise LocalGateRecordError(
+                    f"implementation-file symlink escapes repository:{relative}"
+                )
+            digest.update(b"symlink\0")
+            digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            continue
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise LocalGateRecordError(f"unsupported implementation-file type:{relative}")
+        try:
             content = path.read_bytes()
-        except OSError:
-            content = b"<missing-tracked-file>"
+        except OSError as exc:
+            raise LocalGateRecordError(
+                f"implementation-file read failed:{relative}"
+            ) from exc
         digest.update(hashlib.sha256(content).digest())
     return digest.hexdigest()
 
@@ -263,7 +340,7 @@ def build_local_gate_record(
     status: GateStatus | None = None,
     dirty_scope: DirtyScope | None = None,
     commit: str | None = None,
-) -> LocalGateRecordV1:
+) -> LocalGateRecordV2:
     normalized_checks = _normalise_checks(checks)
     resolved_scope = dirty_scope or classify_dirty_scope(repository)
     resolved_status = status or (
@@ -273,7 +350,7 @@ def build_local_gate_record(
         and resolved_scope != "dirty"
         else "FAIL"
     )
-    return LocalGateRecordV1(
+    return LocalGateRecordV2(
         commit=commit or current_commit(repository),
         implementation_fingerprint=implementation_fingerprint(repository),
         dirty_scope=resolved_scope,
@@ -283,7 +360,9 @@ def build_local_gate_record(
     )
 
 
-def write_local_gate_record(path: Path, record: LocalGateRecordV1) -> None:
+def write_local_gate_record(
+    path: Path, record: LocalGateRecordV1 | LocalGateRecordV2
+) -> None:
     """Write evidence atomically so a failed run cannot leave a stale PASS file."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -308,10 +387,13 @@ def write_local_gate_record(path: Path, record: LocalGateRecordV1) -> None:
         raise
 
 
-def read_local_gate_record(path: Path) -> LocalGateRecordV1:
+def read_local_gate_record(path: Path) -> LocalGateRecordV1 | LocalGateRecordV2:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return LocalGateRecordV1.model_validate(raw)
+        if not isinstance(raw, dict):
+            raise LocalGateRecordError("local gate record is not an object")
+        model = LocalGateRecordV2 if raw.get("schema_version") == 2 else LocalGateRecordV1
+        return model.model_validate(raw)
     except (OSError, json.JSONDecodeError, ValidationError) as exc:
         raise LocalGateRecordError("local gate record is invalid") from exc
 
@@ -322,13 +404,20 @@ def validate_local_gate_record(
 ) -> GateValidationResult:
     try:
         value = read_local_gate_record(record) if isinstance(record, Path) else record
-        parsed = (
-            value
-            if isinstance(value, LocalGateRecordV1)
-            else LocalGateRecordV1.model_validate(value)
-        )
+        if isinstance(value, (LocalGateRecordV1, LocalGateRecordV2)):
+            parsed = value
+        elif isinstance(value, Mapping) and value.get("schema_version") == 2:
+            parsed = LocalGateRecordV2.model_validate(value)
+        else:
+            parsed = LocalGateRecordV1.model_validate(value)
     except (LocalGateRecordError, ValidationError) as exc:
         return GateValidationResult(False, "local_gate_invalid", str(exc))
+    if isinstance(parsed, LocalGateRecordV1):
+        return GateValidationResult(
+            False,
+            "legacy_evidence_identity",
+            "schema 1 local-gate evidence cannot be used as the current gate",
+        )
     if parsed.status != "PASS":
         return GateValidationResult(False, "local_gate_failed", "record status is FAIL")
     try:

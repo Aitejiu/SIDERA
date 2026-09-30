@@ -9,6 +9,10 @@ from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
+)
 from sidera_control_plane.application.event_ingestor import ArtifactRegistry
 from sidera_control_plane.application.ports import (
     ArtifactContentWriter,
@@ -22,12 +26,18 @@ from sidera_control_plane.application.result_ports import (
 from sidera_control_plane.domain.artifacts import ArtifactCandidate, ArtifactType
 from sidera_control_plane.domain.code_results import CodeResultSnapshotV1
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.domain.context_packages import (
+    ContextConsumerType,
+    ContextPackageManifestV3,
+    ContextPurpose,
+)
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import (
     TERMINAL_EXECUTION_STATUSES,
     Execution,
     ExecutionStatus,
 )
+from sidera_control_plane.domain.execution_requests import ExecutionRequest
 from sidera_control_plane.domain.result_operations import (
     ResultError,
     ResultOperationStatus,
@@ -41,6 +51,17 @@ CODE_RESULT_CAPTURE_OPERATION_KIND = "code_result_capture"
 DEFAULT_MAX_EXPORT_BYTES = 10 * 1024 * 1024
 _SUCCESSFUL_TERMINAL_OUTCOME = "succeeded"
 _TERMINAL_OUTCOMES = frozenset({"succeeded", "failed", "canceled", "lost"})
+
+
+def _capture_request(
+    uow: ControlPlaneUnitOfWork,
+    execution: Execution,
+) -> ExecutionRequest | None:
+    try:
+        authority = resolve_execution_context_authorization(uow, execution)
+    except ExecutionContextAuthorizationError as exc:
+        raise ResultError("result_capture_context_mismatch", {}) from exc
+    return None if authority is None else authority.request
 
 
 def code_capture_operation_id(execution_id: UUID) -> UUID:
@@ -61,6 +82,7 @@ class _CaptureContext:
     operation: ResultOperationAttemptV1
     input_commit: str
     writable_paths: tuple[str, ...]
+    consumed_result_ids: tuple[UUID, ...]
 
 
 class CodeResultCaptureService:
@@ -113,7 +135,7 @@ class CodeResultCaptureService:
         )
         paths = _normalize_paths(writable_paths)
         now = self._now()
-        payload = {
+        payload: dict[str, object] = {
             "schema_version": 1,
             "manifest_id": str(manifest.id),
             "manifest_version": manifest.version,
@@ -143,6 +165,28 @@ class CodeResultCaptureService:
                 )
             if execution.active_lease_id is None or execution.last_fencing_token != manifest.fencing_token:
                 raise ResultError("result_execution_fence_invalid", {})
+            root_task_id = self._root_task_id(
+                uow, execution.worker_item_id, manifest.workspace_id
+            )
+            request = _capture_request(uow, execution)
+            if (
+                request is None
+                or request.worker_item_id != execution.worker_item_id
+                or request.root_task_id != root_task_id
+            ):
+                raise ResultError("result_capture_context_mismatch", {})
+            consumed_result_ids = self._consumed_result_ids_for_execution(
+                uow,
+                workspace_id=manifest.workspace_id,
+                root_task_id=root_task_id,
+                worker_item_id=execution.worker_item_id,
+                execution_id=execution.id,
+                request_id=request.id,
+                repository_ref=checkout.repository_ref,
+            )
+            payload["consumed_result_ids"] = [
+                str(item) for item in consumed_result_ids
+            ]
             existing = uow.results.get_operation(
                 operation_id, manifest.workspace_id, for_update=True
             )
@@ -159,9 +203,7 @@ class CodeResultCaptureService:
             operation = ResultOperationAttemptV1(
                 operation_id=operation_id,
                 workspace_id=manifest.workspace_id,
-                root_task_id=self._root_task_id(
-                    uow, execution.worker_item_id, manifest.workspace_id
-                ),
+                root_task_id=root_task_id,
                 operation_kind=CODE_RESULT_CAPTURE_OPERATION_KIND,
                 attempt=1,
                 status=ResultOperationStatus.PENDING,
@@ -192,10 +234,10 @@ class CodeResultCaptureService:
         normalized = _terminal_outcome(outcome)
         now = self._now()
         with self._uow_factory() as uow:
+            execution = uow.executions.get(execution_id, workspace_id, for_update=True)
             operation = self._capture_operation(
                 uow, operation_id, workspace_id, for_update=True
             )
-            execution = uow.executions.get(execution_id, workspace_id, for_update=True)
             if execution is None or operation.root_task_id != self._root_task_id(
                 uow, execution.worker_item_id, workspace_id
             ):
@@ -210,6 +252,13 @@ class CodeResultCaptureService:
                 raise ResultError("result_terminal_observation_too_late", {})
             if execution.status is not ExecutionStatus.RUNNING:
                 raise ResultError("result_terminal_execution_not_running", {})
+            session = uow.sessions.get_active_for_execution(
+                execution_id, for_update=True
+            )
+            if session is not None and uow.execution_inputs.get_pending_for_session(
+                session.id, workspace_id, for_update=True
+            ) is not None:
+                raise ResultError("result_capture_input_pending", {})
             expected_token = payload.get("fencing_token")
             if fencing_token is not None and fencing_token != expected_token:
                 raise ResultError("result_execution_fence_invalid", {})
@@ -338,17 +387,38 @@ class CodeResultCaptureService:
             if execution.worker_item_id is None:
                 raise ResultError("result_worker_item_missing", {})
             worker_item = uow.worker_items.get(execution.worker_item_id, workspace_id)
-            request = uow.execution_requests.get_by_execution_lineage(
-                execution.lineage_id, workspace_id
-            )
-            if worker_item is None or request is None:
+            if worker_item is None:
                 raise ResultError("result_capture_context_missing", {})
-            if request.worker_item_id != worker_item.id:
+            request = _capture_request(uow, execution)
+            if request is None:
+                raise ResultError("result_capture_context_missing", {})
+            if (
+                request.worker_item_id != worker_item.id
+                or request.root_task_id != worker_item.root_task_id
+            ):
                 raise ResultError("result_capture_context_mismatch", {})
             input_commit = payload.get("input_commit")
             writable_paths = payload.get("writable_paths")
-            if not isinstance(input_commit, str) or not isinstance(writable_paths, list):
+            if (
+                not isinstance(input_commit, str)
+                or not isinstance(writable_paths, list)
+            ):
                 raise ResultError("result_capture_operation_corrupt", {})
+            if "consumed_result_ids" in payload:
+                raw_consumed_result_ids = payload.get("consumed_result_ids")
+                if not isinstance(raw_consumed_result_ids, list):
+                    raise ResultError("result_capture_operation_corrupt", {})
+                consumed_result_ids = _parse_uuid_list(raw_consumed_result_ids)
+            else:
+                consumed_result_ids = self._consumed_result_ids_for_execution(
+                    uow,
+                    workspace_id=workspace_id,
+                    root_task_id=worker_item.root_task_id,
+                    worker_item_id=worker_item.id,
+                    execution_id=execution.id,
+                    request_id=request.id,
+                    repository_ref=manifest.checkouts[0].repository_ref,
+                )
             return _CaptureContext(
                 execution_id=execution.id,
                 workspace_id=workspace_id,
@@ -360,6 +430,7 @@ class CodeResultCaptureService:
                 operation=operation,
                 input_commit=input_commit,
                 writable_paths=_normalize_paths(writable_paths),
+                consumed_result_ids=consumed_result_ids,
             )
 
     def _persist_snapshot(
@@ -375,6 +446,32 @@ class CodeResultCaptureService:
             existing = uow.results.get_code_result_by_capture_operation(
                 context.operation.operation_id,
                 context.workspace_id,
+            )
+            if existing is not None:
+                return existing
+            execution = uow.executions.get(
+                context.execution_id,
+                context.workspace_id,
+                for_update=True,
+            )
+            if execution is None:
+                raise ResultError("result_execution_not_found", {})
+            if (
+                execution.task_id != context.task_id
+                or execution.worker_item_id != context.worker_item_id
+            ):
+                raise ResultError("result_capture_context_mismatch", {})
+            if execution.status not in {
+                ExecutionStatus.RUNNING,
+                ExecutionStatus.SUCCEEDED,
+            }:
+                raise ResultError(
+                    "result_execution_not_capturable",
+                    {"status": execution.status.value},
+                )
+            existing = uow.results.get_code_result_by_capture_operation(
+                context.operation.operation_id,
+                context.workspace_id,
                 for_update=True,
             )
             if existing is not None:
@@ -385,6 +482,16 @@ class CodeResultCaptureService:
                 context.workspace_id,
                 for_update=True,
             )
+            if (
+                operation.root_task_id != context.root_task_id
+                or operation.payload.get("execution_id") != str(context.execution_id)
+                or operation.payload.get("terminal_observed") is not True
+                or operation.payload.get("terminal_outcome")
+                != _SUCCESSFUL_TERMINAL_OUTCOME
+            ):
+                raise ResultError("result_capture_context_mismatch", {})
+            if execution.status is ExecutionStatus.RUNNING:
+                self._assert_active_fence(uow, execution, operation.payload)
             stored = cast(
                 CodeResultSnapshotV1,
                 uow.results.add_immutable("code_snapshot", snapshot),
@@ -409,6 +516,9 @@ class CodeResultCaptureService:
                 version=operation.version + 1,
             )
             uow.results.save_operation(succeeded, expected_version=operation.version)
+            previous_execution_version = execution.version
+            execution.version += 1
+            uow.executions.save(execution, previous_execution_version)
             command_id = uuid5(
                 NAMESPACE_URL,
                 f"sidera.code-result-capture-command:{context.operation.operation_id}",
@@ -431,9 +541,7 @@ class CodeResultCaptureService:
                     "snapshot_id": str(stored.id),
                 },
                 expected_version=None,
-                idempotency_key=(
-                    f"result-capture:{context.operation.operation_id}"
-                ),
+                idempotency_key=(f"result-capture:{context.operation.operation_id}"),
                 correlation_id=context.root_task_id,
             )
             if uow.commands.find_by_id(context.workspace_id, command_id) is None:
@@ -443,9 +551,7 @@ class CodeResultCaptureService:
                     CommandResult(
                         command_id=command_id,
                         aggregate_id=context.execution_id,
-                        aggregate_version=self._execution_version(
-                            uow, context.execution_id, context.workspace_id
-                        ),
+                        aggregate_version=execution.version,
                         event_ids=(event_id,),
                         data={"snapshot_id": str(stored.id)},
                     ),
@@ -456,7 +562,7 @@ class CodeResultCaptureService:
                     workspace_id=context.workspace_id,
                     aggregate_type="execution",
                     aggregate_id=context.execution_id,
-                    aggregate_version=self._execution_version(uow, context.execution_id, context.workspace_id),
+                    aggregate_version=execution.version,
                     event_type="CodeResultCaptured",
                     payload={
                         "execution_id": str(context.execution_id),
@@ -598,8 +704,57 @@ class CodeResultCaptureService:
             or operation.payload.get("input_commit") != payload.get("input_commit")
             or operation.payload.get("input_tree") != payload.get("input_tree")
             or operation.payload.get("writable_paths") != payload.get("writable_paths")
+            or (
+                "consumed_result_ids" in operation.payload
+                and operation.payload.get("consumed_result_ids")
+                != payload.get("consumed_result_ids")
+            )
         ):
             raise ResultError("result_capture_identity_changed", {})
+
+    @staticmethod
+    def _consumed_result_ids_for_execution(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        worker_item_id: UUID | None,
+        execution_id: UUID,
+        request_id: UUID | None,
+        repository_ref: str,
+    ) -> tuple[UUID, ...]:
+        if worker_item_id is None or request_id is None:
+            raise ResultError("result_capture_context_missing", {})
+        package = uow.context_packages.get_for_consumer(
+            ContextPurpose.EXECUTION,
+            execution_id,
+            workspace_id,
+            manifest_schema_version=3,
+        )
+        if package is None:
+            return ()
+        if not isinstance(package, ContextPackageManifestV3):
+            raise ResultError("result_capture_context_mismatch", {})
+        if (
+            package.workspace_id != workspace_id
+            or package.purpose is not ContextPurpose.EXECUTION
+            or package.consumer_type is not ContextConsumerType.WORKER
+            or package.consumer_id != execution_id
+            or package.worker_item_id != worker_item_id
+        ):
+            raise ResultError("result_capture_context_mismatch", {})
+        code_manifest = package.code_input_manifest
+        if code_manifest is None:
+            return ()
+        if (
+            code_manifest.workspace_id != workspace_id
+            or code_manifest.root_task_id != root_task_id
+            or code_manifest.request_id != request_id
+            or code_manifest.execution_id != execution_id
+            or code_manifest.repository_ref != repository_ref
+        ):
+            raise ResultError("result_capture_context_mismatch", {})
+        return tuple(source.result_id for source in code_manifest.sources)
 
     @staticmethod
     def _root_task_id(
@@ -613,15 +768,6 @@ class CodeResultCaptureService:
         if worker_item is None:
             raise ResultError("result_worker_item_missing", {})
         return worker_item.root_task_id
-
-    @staticmethod
-    def _execution_version(
-        uow: ControlPlaneUnitOfWork, execution_id: UUID, workspace_id: UUID
-    ) -> int:
-        execution = uow.executions.get(execution_id, workspace_id)
-        if execution is None:
-            raise ResultError("result_execution_not_found", {})
-        return execution.version
 
     @staticmethod
     def _validate_manifest(manifest: ExecutionWorkspaceManifest) -> None:
@@ -678,7 +824,9 @@ def _build_snapshot(
         "input_tree": captured.input_tree,
         "result_commit": captured.result_commit,
         "result_tree": captured.result_tree,
-        "consumed_result_ids": [],
+        "consumed_result_ids": [
+            str(item) for item in context.consumed_result_ids
+        ],
         "artifact_ids": [str(item) for item in artifact_ids],
         "capture_operation_id": str(captured.operation_id),
     }
@@ -696,7 +844,7 @@ def _build_snapshot(
         input_tree=captured.input_tree,
         result_commit=captured.result_commit,
         result_tree=captured.result_tree,
-        consumed_result_ids=(),
+        consumed_result_ids=context.consumed_result_ids,
         artifact_ids=artifact_ids,
         capture_operation_id=captured.operation_id,
         content_hash=content_hash,
@@ -738,6 +886,19 @@ def _normalize_paths(value: Sequence[str]) -> tuple[str, ...]:
         if path not in normalized:
             normalized.append(path)
     return (".",) if "." in normalized else tuple(normalized)
+
+
+def _parse_uuid_list(value: list[object]) -> tuple[UUID, ...]:
+    result: list[UUID] = []
+    for item in value:
+        try:
+            parsed = item if isinstance(item, UUID) else UUID(str(item))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ResultError("result_capture_operation_corrupt", {}) from exc
+        if parsed in result:
+            raise ResultError("result_capture_operation_corrupt", {})
+        result.append(parsed)
+    return tuple(result)
 
 
 __all__ = [

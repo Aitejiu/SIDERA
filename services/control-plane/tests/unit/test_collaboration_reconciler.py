@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Self
 from uuid import UUID
 
+import pytest
+
 from sidera_control_plane.application.collaboration_projection import (
     CollaborationExecutionFact,
     CollaborationFacts,
@@ -43,13 +45,22 @@ from sidera_control_plane.domain.plan_revisions import (
     RootTaskPlanHead,
     plan_snapshot_content_hash,
 )
+from sidera_control_plane.domain.plan_transitions import (
+    PlanTransition,
+    PlanTransitionStatus,
+)
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
 WORKSPACE_ID = UUID("21000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("31000000-0000-0000-0000-000000000001")
 PLAN_SNAPSHOT_ID = UUID("32000000-0000-0000-0000-000000000001")
+PARENT_PLAN_SNAPSHOT_ID = UUID("32000000-0000-0000-0000-000000000002")
+OTHER_PLAN_SNAPSHOT_ID = UUID("32000000-0000-0000-0000-000000000003")
 RUN_ID = UUID("33000000-0000-0000-0000-000000000001")
 REQUEST_ID = UUID("34000000-0000-0000-0000-000000000001")
+PLANNING_REQUEST_ID = UUID("34000000-0000-0000-0000-000000000002")
+PROPOSAL_REVISION_ID = UUID("34000000-0000-0000-0000-000000000003")
+PLAN_TRANSITION_ID = UUID("34000000-0000-0000-0000-000000000004")
 SUBTASK_ID = UUID("35000000-0000-0000-0000-000000000001")
 WORKER_ITEM_ID = UUID("36000000-0000-0000-0000-000000000001")
 DEFINITION_ID = UUID("37000000-0000-0000-0000-000000000001")
@@ -94,6 +105,7 @@ def _snapshot(
     *,
     snapshot_id: UUID = PLAN_SNAPSHOT_ID,
     generation: int = 3,
+    parent_snapshot_id: UUID | None = None,
     policy: CollaborationPolicySnapshotV1 | None = None,
 ) -> TaskPlanSnapshot:
     return TaskPlanSnapshot.create(
@@ -102,7 +114,7 @@ def _snapshot(
         workspace_id=WORKSPACE_ID,
         root_task_id=ROOT_TASK_ID,
         generation=generation,
-        parent_snapshot_id=None,
+        parent_snapshot_id=parent_snapshot_id,
         source_type="test",
         source_ref="reconciler-test",
         title="Reconciler plan",
@@ -111,6 +123,30 @@ def _snapshot(
         published_by="test",
         published_at=NOW,
         collaboration_policy=policy,
+    )
+
+
+def _transition(
+    snapshot: TaskPlanSnapshot,
+    *,
+    status: PlanTransitionStatus,
+    from_snapshot_id: UUID | None = None,
+) -> PlanTransition:
+    assert snapshot.parent_snapshot_id is not None
+    return PlanTransition(
+        id=PLAN_TRANSITION_ID,
+        workspace_id=snapshot.workspace_id,
+        root_task_id=snapshot.root_task_id,
+        planning_request_id=PLANNING_REQUEST_ID,
+        proposal_revision_id=PROPOSAL_REVISION_ID,
+        from_snapshot_id=from_snapshot_id or snapshot.parent_snapshot_id,
+        from_generation=snapshot.generation - 1,
+        to_snapshot_id=snapshot.id,
+        to_generation=snapshot.generation,
+        status=status,
+        started_at=NOW,
+        completed_at=NOW if status is not PlanTransitionStatus.CONVERGING else None,
+        version=1,
     )
 
 
@@ -168,6 +204,36 @@ def _facts(run: CollaborationRun, snapshot: TaskPlanSnapshot) -> CollaborationFa
     )
 
 
+def _terminal_request_facts(
+    run: CollaborationRun, snapshot: TaskPlanSnapshot
+) -> CollaborationFacts:
+    base = _facts(run, snapshot)
+    request = replace(
+        base.requests[0],
+        status="materialized",
+        execution_lineage_id=LINEAGE_ID,
+        first_execution_id=EXECUTION_ID,
+    )
+    return replace(
+        base,
+        requests=(request,),
+        executions=(
+            CollaborationExecutionFact(
+                id=EXECUTION_ID,
+                lineage_id=LINEAGE_ID,
+                task_id=SUBTASK_ID,
+                worker_item_id=WORKER_ITEM_ID,
+                attempt=1,
+                status=ExecutionStatus.SUCCEEDED.value,
+                failure_code=None,
+                started_at=NOW,
+                finished_at=NOW,
+                version=1,
+            ),
+        ),
+    )
+
+
 def _run(snapshot: TaskPlanSnapshot, *, run_id: UUID = RUN_ID) -> CollaborationRun:
     assert snapshot.collaboration_policy is not None
     binding = snapshot.collaboration_policy.binding
@@ -203,6 +269,31 @@ class FakePlanRepository:
 
     def get(self, snapshot_id: UUID, workspace_id: UUID) -> TaskPlanSnapshot | None:
         return self.snapshot if snapshot_id == self.snapshot.id else None
+
+
+class FakePlanTransitionRepository:
+    def __init__(self, transition: PlanTransition | None = None) -> None:
+        self.transition = transition
+
+    def get_for_target(
+        self,
+        *,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        plan_snapshot_id: UUID,
+        plan_generation: int,
+    ) -> PlanTransition | None:
+        transition = self.transition
+        if transition is None:
+            return None
+        if (
+            transition.workspace_id != workspace_id
+            or transition.root_task_id != root_task_id
+            or transition.to_snapshot_id != plan_snapshot_id
+            or transition.to_generation != plan_generation
+        ):
+            return None
+        return transition
 
 
 class FakeRunRepository:
@@ -488,8 +579,14 @@ class FakeCommands:
 
 
 class FakeUow:
-    def __init__(self, plan: FakePlanRepository, run_repo: FakeRunRepository) -> None:
+    def __init__(
+        self,
+        plan: FakePlanRepository,
+        run_repo: FakeRunRepository,
+        plan_transition: PlanTransition | None = None,
+    ) -> None:
         self.plans = plan
+        self.plan_transitions = FakePlanTransitionRepository(plan_transition)
         self.collaboration_runs = run_repo
         self.collaboration_evaluations = FakeEvaluationRepository()
         self.collaboration_ledger = FakeLedgerRepository()
@@ -575,18 +672,20 @@ def _harness(
     run: CollaborationRun | None = None,
     resolver: FakeRuntimeResolver | None = None,
     governance_reconciler: FakeGovernanceReconciler | None = None,
+    projection_assembler: CollaborationProjectionAssembler | None = None,
+    plan_transition: PlanTransition | None = None,
 ) -> Harness:
     selected_snapshot = snapshot or _snapshot(policy=_policy())
     plan = FakePlanRepository(selected_snapshot)
     run_repo = FakeRunRepository(run)
-    uow = FakeUow(plan, run_repo)
+    uow = FakeUow(plan, run_repo, plan_transition)
     facts = FakeFactStore(uow, selected_snapshot)
     runtime_resolver = resolver or FakeRuntimeResolver()
     reconciler = CollaborationReconciler(
         uow_factory=lambda: uow,
         fact_store_factory=lambda _: facts,
         runtime_resolver_factory=lambda _: runtime_resolver,
-        projection_assembler=CollaborationProjectionAssembler(),
+        projection_assembler=projection_assembler or CollaborationProjectionAssembler(),
         evaluation_lease_ttl=timedelta(minutes=5),
         governance_reconciler=governance_reconciler,
     )
@@ -960,6 +1059,289 @@ def test_terminal_request_and_lineage_complete_the_run() -> None:
         getattr(event, "event_type", None) == "CollaborationRunCompleted"
         for event in harness.uow.events.events
     )
+
+
+def test_terminal_run_is_completed_before_building_another_projection() -> None:
+    class TerminalProjectionMustNotBeBuilt(CollaborationProjectionAssembler):
+        def assemble(self, *args: object, **kwargs: object):
+            raise AssertionError("terminal collaboration run rebuilt its projection")
+
+    snapshot = _snapshot(policy=_policy())
+    run = _run(snapshot)
+    run.activate(now=NOW)
+    harness = _harness(
+        snapshot=snapshot,
+        run=run,
+        projection_assembler=TerminalProjectionMustNotBeBuilt(),
+    )
+    base = _facts(run, snapshot)
+    request = replace(
+        base.requests[0],
+        status="materialized",
+        execution_lineage_id=LINEAGE_ID,
+        first_execution_id=EXECUTION_ID,
+    )
+    harness.facts.override = replace(
+        base,
+        requests=(request,),
+        executions=(
+            CollaborationExecutionFact(
+                id=EXECUTION_ID,
+                lineage_id=LINEAGE_ID,
+                task_id=SUBTASK_ID,
+                worker_item_id=WORKER_ITEM_ID,
+                attempt=1,
+                status=ExecutionStatus.SUCCEEDED.value,
+                failure_code=None,
+                started_at=NOW,
+                finished_at=NOW,
+                version=1,
+            ),
+        ),
+    )
+
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert prepared is None
+    assert run.status is CollaborationRunStatus.COMPLETED
+
+
+def test_revision_run_waits_for_late_release_required_requests() -> None:
+    class CountingProjectionAssembler(CollaborationProjectionAssembler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def assemble(self, *args: object, **kwargs: object):
+            self.calls += 1
+            return super().assemble(*args, **kwargs)
+
+    snapshot = _snapshot(
+        snapshot_id=PLAN_SNAPSHOT_ID,
+        generation=2,
+        parent_snapshot_id=PARENT_PLAN_SNAPSHOT_ID,
+        policy=_policy(),
+    )
+    run = _run(snapshot)
+    run.activate(now=NOW)
+    assembler = CountingProjectionAssembler()
+    harness = _harness(
+        snapshot=snapshot,
+        run=run,
+        projection_assembler=assembler,
+        plan_transition=_transition(
+            snapshot, status=PlanTransitionStatus.CONVERGING
+        ),
+    )
+    base = _facts(run, snapshot)
+    harness.facts.override = replace(base, requests=())
+
+    first = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+    repeated = harness.reconciler.prepare_next(
+        owner_id="worker-b",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert first is None
+    assert repeated is None
+    assert run.status is CollaborationRunStatus.ACTIVE
+    assert harness.uow.collaboration_evaluations.evaluations == {}
+    assert not any(
+        getattr(event, "event_type", None) == "CollaborationRunCompleted"
+        for event in harness.uow.events.events
+    )
+    assert assembler.calls == 0
+
+    harness.facts.override = base
+    harness.uow.projection_changes.target_cursor += 1
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-c",
+        now=NOW + timedelta(seconds=1),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert prepared is not None
+    assert prepared.run.id == run.id
+    assert prepared.run.plan_snapshot_id == snapshot.id
+    assert prepared.projection.execution_requests[0]["id"] == str(REQUEST_ID)
+    assert assembler.calls == 1
+
+
+@pytest.mark.parametrize(
+    "transition", ("converging", "degraded", "missing", "wrong_parent")
+)
+def test_revision_with_closed_request_waits_for_exact_converged_transition(
+    transition: str,
+) -> None:
+    snapshot = _snapshot(
+        generation=2,
+        parent_snapshot_id=PARENT_PLAN_SNAPSHOT_ID,
+        policy=_policy(),
+    )
+    run = _run(snapshot)
+    run.activate(now=NOW)
+    transition_record = {
+        "converging": _transition(
+            snapshot, status=PlanTransitionStatus.CONVERGING
+        ),
+        "degraded": _transition(snapshot, status=PlanTransitionStatus.DEGRADED),
+        "missing": None,
+        "wrong_parent": _transition(
+            snapshot,
+            status=PlanTransitionStatus.CONVERGED,
+            from_snapshot_id=OTHER_PLAN_SNAPSHOT_ID,
+        ),
+    }[transition]
+    harness = _harness(
+        snapshot=snapshot,
+        run=run,
+        plan_transition=transition_record,
+    )
+    harness.facts.override = _terminal_request_facts(run, snapshot)
+
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert prepared is None
+    assert run.status is CollaborationRunStatus.ACTIVE
+    assert not any(
+        getattr(event, "event_type", None) == "CollaborationRunCompleted"
+        for event in harness.uow.events.events
+    )
+
+
+@pytest.mark.parametrize("request_kind", ("empty", "unmanaged"))
+def test_converged_revision_without_release_required_requests_completes(
+    request_kind: str,
+) -> None:
+    snapshot = _snapshot(
+        generation=2,
+        parent_snapshot_id=PARENT_PLAN_SNAPSHOT_ID,
+        policy=_policy(),
+    )
+    run = _run(snapshot)
+    run.activate(now=NOW)
+    harness = _harness(
+        snapshot=snapshot,
+        run=run,
+        plan_transition=_transition(
+            snapshot, status=PlanTransitionStatus.CONVERGED
+        ),
+    )
+    base = _facts(run, snapshot)
+    requests = () if request_kind == "empty" else (
+        replace(base.requests[0], collaboration_gate_mode="unmanaged"),
+    )
+    harness.facts.override = replace(base, requests=requests)
+
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert prepared is None
+    assert run.status is CollaborationRunStatus.COMPLETED
+    assert harness.uow.collaboration_evaluations.evaluations == {}
+
+
+def test_initial_empty_run_keeps_immediate_completion_behavior() -> None:
+    snapshot = _snapshot(generation=1, policy=_policy())
+    harness = _harness(snapshot=snapshot)
+    harness.facts.override = replace(_facts(_run(snapshot), snapshot), requests=())
+
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    created_run = next(iter(harness.uow.collaboration_runs.runs.values()))
+    assert prepared is None
+    assert created_run.status is CollaborationRunStatus.COMPLETED
+    assert harness.uow.collaboration_evaluations.evaluations == {}
+
+
+def test_transition_convergence_rechecks_completion_without_cursor_advance() -> None:
+    snapshot = _snapshot(
+        generation=2,
+        parent_snapshot_id=PARENT_PLAN_SNAPSHOT_ID,
+        policy=_policy(),
+    )
+    run = _run(snapshot)
+    run.activate(now=NOW)
+    run.last_projection_snapshot_id = UUID("3b000000-0000-0000-0000-000000000001")
+    run.last_evaluated_change_cursor = 17
+    harness = _harness(
+        snapshot=snapshot,
+        run=run,
+        plan_transition=_transition(
+            snapshot, status=PlanTransitionStatus.CONVERGED
+        ),
+    )
+    harness.facts.override = _terminal_request_facts(run, snapshot)
+
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert prepared is None
+    assert run.status is CollaborationRunStatus.COMPLETED
+    assert harness.facts.cursors == [17]
+    assert harness.uow.collaboration_evaluations.evaluations == {}
+
+
+def test_unchanged_cursor_with_open_request_does_not_duplicate_evaluation() -> None:
+    snapshot = _snapshot(
+        generation=2,
+        parent_snapshot_id=PARENT_PLAN_SNAPSHOT_ID,
+        policy=_policy(),
+    )
+    run = _run(snapshot)
+    run.activate(now=NOW)
+    run.last_projection_snapshot_id = UUID("3b000000-0000-0000-0000-000000000002")
+    run.last_evaluated_change_cursor = 17
+    harness = _harness(
+        snapshot=snapshot,
+        run=run,
+        plan_transition=_transition(
+            snapshot, status=PlanTransitionStatus.CONVERGED
+        ),
+    )
+
+    prepared = harness.reconciler.prepare_next(
+        owner_id="worker-a",
+        now=NOW,
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+    )
+
+    assert prepared is None
+    assert run.status is CollaborationRunStatus.ACTIVE
+    assert harness.facts.cursors == [17]
+    assert harness.uow.collaboration_evaluations.evaluations == {}
 
 
 def test_retry_failure_reuses_operation_id_and_emits_bounded_retry_event() -> None:

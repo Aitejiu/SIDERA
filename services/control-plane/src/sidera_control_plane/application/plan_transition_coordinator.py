@@ -4,17 +4,19 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_patch_delivery import (
     ContextPatchDeliveryService,
     ContextPatchGateway,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
-from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
+from sidera_control_plane.application.transition_execution_requests import (
+    TransitionExecutionRequestProducer,
+)
+from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
     ContextPackageStatus,
@@ -30,11 +32,8 @@ from sidera_control_plane.domain.execution import (
     ExecutionStatus,
 )
 from sidera_control_plane.domain.execution_requests import (
-    DependencyEnforcement,
     ExecutionRequest,
-    ExecutionRequestDependency,
     ExecutionRequestStatus,
-    collaboration_gate_mode_for_policy,
 )
 from sidera_control_plane.domain.gateway import (
     GatewayOperationStatus,
@@ -48,8 +47,6 @@ from sidera_control_plane.domain.plan_transitions import (
     WorkerTransition,
     WorkerTransitionStatus,
 )
-from sidera_control_plane.domain.planning import PlanningRequestStatus
-from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +101,9 @@ class PlanTransitionCoordinator:
         self._uow_factory = uow_factory
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner_id = owner_id.strip()
+        self._request_producer = TransitionExecutionRequestProducer(
+            owner_id=self._owner_id
+        )
         self._lease_ttl_seconds = lease_ttl_seconds
         self._backoff_max_seconds = backoff_max_seconds
         self._gateway = gateway
@@ -365,11 +365,10 @@ class PlanTransitionCoordinator:
         target_execution_id = transition.target_execution_id
         if target_execution_id is None:
             return "deferred"
-        execution = uow.executions.get(
-            target_execution_id,
-            transition.workspace_id,
-            for_update=True,
-        )
+        # Scheduler locks Execution before checking WorkerTransition. This
+        # path only observes the target and already holds WorkerTransition;
+        # avoid reversing that lock order. In-progress state is polled again.
+        execution = uow.executions.get(target_execution_id, transition.workspace_id)
         if execution is None:
             return self._mark_unknown(
                 uow,
@@ -780,153 +779,7 @@ class PlanTransitionCoordinator:
         *,
         now: datetime,
     ) -> ExecutionRequest:
-        plan = uow.plan_transitions.get(
-            transition.plan_transition_id,
-            transition.workspace_id,
-        )
-        snapshot = (
-            uow.plans.get(plan.to_snapshot_id, transition.workspace_id)
-            if plan is not None
-            else None
-        )
-        planning_request = (
-            uow.planning_requests.get(
-                plan.planning_request_id, transition.workspace_id
-            )
-            if plan is not None
-            else None
-        )
-        proposal = (
-            uow.planning_records.get_proposal(
-                plan.proposal_revision_id, transition.workspace_id
-            )
-            if plan is not None
-            else None
-        )
-        if plan is None or snapshot is None or planning_request is None or proposal is None:
-            raise InvalidTransition("transition target planning records are unavailable")
-        if planning_request.status is not PlanningRequestStatus.MATERIALIZED:
-            raise InvalidTransition("transition planning request is not materialized")
-        if proposal.id != plan.proposal_revision_id:
-            raise InvalidTransition("transition proposal revision is not current")
-
-        worker_plan = next(
-            (
-                item
-                for item in snapshot.worker_item_plans
-                if item.worker_item_id == transition.worker_item_id
-            ),
-            None,
-        )
-        if worker_plan is None:
-            raise InvalidTransition("transition target WorkerItem plan is missing")
-        subtask = next(
-            (item for item in snapshot.subtasks if item.key == worker_plan.subtask_key),
-            None,
-        )
-        if subtask is None or subtask.task_id is None:
-            raise InvalidTransition("transition target subtask is missing")
-        intent = next(
-            (
-                item
-                for item in proposal.payload.execution_intents
-                if item.worker_item_key == worker_plan.key
-            ),
-            None,
-        )
-        if intent is None:
-            raise InvalidTransition("transition target execution intent is missing")
-
-        source_execution_id = (
-            transition.source_execution_id
-            if transition.action is WorkerTransitionAction.CONTINUE
-            else None
-        )
-        source_session_id = (
-            transition.source_session_id
-            if source_execution_id is not None
-            else None
-        )
-        request = uow.execution_requests.get_by_proposal_worker_item(
-            plan.proposal_revision_id,
-            worker_plan.key,
-            transition.workspace_id,
-            for_update=True,
-        )
-        if request is not None:
-            self._assert_request_matches_transition(
-                request,
-                transition=transition,
-                plan=plan,
-                snapshot=snapshot,
-                subtask_id=subtask.task_id,
-                source_execution_id=source_execution_id,
-                source_session_id=source_session_id,
-            )
-            return request
-
-        request_id = uuid5(
-            NAMESPACE_URL,
-            f"sidera.plan-transition.execution-request:{transition.id}:{worker_plan.key}",
-        )
-        request = ExecutionRequest.create(
-            request_id=request_id,
-            workspace_id=transition.workspace_id,
-            planning_request_id=plan.planning_request_id,
-            proposal_revision_id=plan.proposal_revision_id,
-            plan_snapshot_id=plan.to_snapshot_id,
-            plan_generation=plan.to_generation,
-            root_task_id=plan.root_task_id,
-            subtask_id=subtask.task_id,
-            worker_item_id=transition.worker_item_id,
-            worker_item_key=worker_plan.key,
-            intent_key=worker_plan.key,
-            purpose=intent.purpose,
-            capability_requirements=frozenset(intent.capability_requirements),
-            adapter_preferences=intent.adapter_preferences,
-            adapter_forbidden=planning_request.profile_snapshot.adapter_forbidden,
-            budget_class=intent.budget_class,
-            not_before=now + timedelta(seconds=intent.not_before_seconds or 0),
-            max_attempts=intent.max_attempts,
-            expected_artifact_refs=intent.expected_artifact_refs,
-            expected_evidence_refs=intent.required_evidence_refs,
-            expected_outputs=subtask.expected_outputs,
-            collaboration_gate_mode=collaboration_gate_mode_for_policy(
-                snapshot.collaboration_policy,
-                subtask_key=worker_plan.subtask_key,
-            ),
-            now=now,
-            source_execution_id=source_execution_id,
-            source_session_id=source_session_id,
-        )
-        uow.execution_requests.add(request)
-        uow.flush()
-        self._add_request_dependencies(
-            uow, request, snapshot=snapshot, worker_plan_key=worker_plan.key
-        )
-        self._append_transition_event(
-            uow,
-            transition,
-            aggregate_type="execution_request",
-            aggregate_id=request.id,
-            aggregate_version=request.version,
-            event_type="ExecutionRequestCreatedByPlanTransition",
-            payload={
-                "execution_request_id": str(request.id),
-                "worker_item_id": str(request.worker_item_id),
-                "worker_item_key": request.worker_item_key,
-                "plan_snapshot_id": str(request.plan_snapshot_id),
-                "plan_generation": request.plan_generation,
-                "source_execution_id": str(source_execution_id)
-                if source_execution_id is not None
-                else None,
-                "source_session_id": str(source_session_id)
-                if source_session_id is not None
-                else None,
-            },
-            now=now,
-        )
-        return request
+        return self._request_producer.ensure_for_transition(uow, transition, now=now)
 
     def _supersede_pending_input(
         self,
@@ -1086,27 +939,16 @@ class PlanTransitionCoordinator:
         payload: dict[str, object],
         now: datetime,
     ) -> None:
-        del now
-        envelope = self._transition_envelope(
+        self._request_producer.append_transition_event(
+            uow,
             transition,
-            event_type=event_type,
-            aggregate_id=aggregate_id,
-            aggregate_version=aggregate_version,
-        )
-        event = EventData(
-            id=uuid4(),
-            workspace_id=transition.workspace_id,
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             aggregate_version=aggregate_version,
             event_type=event_type,
             payload=payload,
-            actor_type=envelope.actor_type,
-            actor_id=envelope.actor_id,
-            causation_id=envelope.id,
-            correlation_id=envelope.correlation_id,
+            now=now,
         )
-        self._record_internal_event(uow, envelope, event)
 
     @staticmethod
     def _record_internal_event(
@@ -1114,19 +956,7 @@ class PlanTransitionCoordinator:
         envelope: CommandEnvelope,
         event: EventData,
     ) -> None:
-        if uow.commands.find_by_id(envelope.workspace_id, envelope.id) is not None:
-            return
-        uow.commands.record_applied(
-            envelope,
-            hash_request(envelope),
-            CommandResult(
-                command_id=envelope.id,
-                aggregate_id=event.aggregate_id,
-                aggregate_version=event.aggregate_version,
-                event_ids=(event.id,),
-            ),
-        )
-        uow.events.append_with_outbox(event)
+        TransitionExecutionRequestProducer.record_internal_event(uow, envelope, event)
 
     def _transition_envelope(
         self,
@@ -1137,90 +967,13 @@ class PlanTransitionCoordinator:
         aggregate_version: int,
         command_id: UUID | None = None,
     ) -> CommandEnvelope:
-        resolved_command_id = command_id or uuid5(
-            NAMESPACE_URL,
-            f"sidera.plan-transition:{transition.id}:"
-            f"{event_type}:{aggregate_id}:v{aggregate_version}",
+        return self._request_producer.transition_envelope(
+            transition,
+            event_type=event_type,
+            aggregate_id=aggregate_id,
+            aggregate_version=aggregate_version,
+            command_id=command_id,
         )
-        return CommandEnvelope(
-            id=resolved_command_id,
-            workspace_id=transition.workspace_id,
-            command_type="PlanTransitionRuntime",
-            actor_type="system",
-            actor_id=self._owner_id,
-            target_type="worker_transition",
-            target_id=transition.id,
-            payload={
-                "worker_transition_id": str(transition.id),
-                "event_type": event_type,
-                "aggregate_id": str(aggregate_id),
-            },
-            expected_version=aggregate_version,
-            idempotency_key=(
-                f"plan-transition:{transition.id}:{event_type}:"
-                f"{aggregate_id}:v{aggregate_version}"
-            ),
-            correlation_id=transition.plan_transition_id,
-        )
-
-    @staticmethod
-    def _assert_request_matches_transition(
-        request: ExecutionRequest,
-        *,
-        transition: WorkerTransition,
-        plan: object,
-        snapshot: TaskPlanSnapshot,
-        subtask_id: UUID,
-        source_execution_id: UUID | None,
-        source_session_id: UUID | None,
-    ) -> None:
-        if (
-            request.workspace_id != transition.workspace_id
-            or request.plan_snapshot_id != snapshot.id
-            or request.plan_generation != snapshot.generation
-            or request.worker_item_id != transition.worker_item_id
-            or request.subtask_id != subtask_id
-            or request.source_execution_id != source_execution_id
-            or request.source_session_id != source_session_id
-        ):
-            raise InvalidTransition("existing transition request has different lineage")
-        if request.status in {
-            ExecutionRequestStatus.CANCELLED,
-            ExecutionRequestStatus.OBSOLETE,
-        }:
-            raise InvalidTransition("existing transition request is closed")
-        del plan
-
-    @staticmethod
-    def _add_request_dependencies(
-        uow: ControlPlaneUnitOfWork,
-        request: ExecutionRequest,
-        *,
-        snapshot: TaskPlanSnapshot,
-        worker_plan_key: str,
-    ) -> None:
-        for dependency in snapshot.worker_item_dependencies:
-            if dependency.downstream_worker_item_key != worker_plan_key:
-                continue
-            upstream = uow.execution_requests.get_by_proposal_worker_item(
-                request.proposal_revision_id,
-                dependency.upstream_worker_item_key,
-                request.workspace_id,
-            )
-            if upstream is None:
-                continue
-            uow.execution_requests.add_dependency(
-                ExecutionRequestDependency(
-                    downstream_request_id=request.id,
-                    upstream_request_id=upstream.id,
-                    enforcement=(
-                        DependencyEnforcement.HARD
-                        if dependency.kind == "dependency"
-                        else DependencyEnforcement.INFORMATIONAL
-                    ),
-                    required_artifact_refs=dependency.required_artifact_refs,
-                )
-            )
 
     def _converge_preserve_or_move(
         self, claimed: _ClaimedWorkerTransition, *, now: datetime
@@ -1266,6 +1019,12 @@ class PlanTransitionCoordinator:
         with self._uow_factory() as uow:
             plans = uow.plan_transitions.claim_converging(now=now, limit=limit)
             for plan in plans:
+                self._request_producer.ensure_preserved_pending_for_plan(
+                    uow,
+                    plan,
+                    now=now,
+                    require_materialization=True,
+                )
                 workers = uow.worker_transitions.list_for_plan_transition(
                     plan.id, plan.workspace_id
                 )

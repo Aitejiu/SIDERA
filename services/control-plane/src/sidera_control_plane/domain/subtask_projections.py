@@ -313,6 +313,8 @@ class SubtaskWorkspaceProjectionService:
         activity_by_task = _group_activity_by_task(activity_values)
         canonical_worker_items = {item.key: item for item in plan.worker_items}
         collaboration_worker_values = collaboration_workers or {}
+        root_task = tasks.get(plan.root_task_id)
+        root_completed = root_task is not None and root_task.status == "succeeded"
         placement_by_key = {
             placement.worker_item_key: placement for placement in placement_values
         }
@@ -324,6 +326,10 @@ class SubtaskWorkspaceProjectionService:
             )
             for placement in placement_values
         }
+        if root_completed:
+            item_states = {
+                worker_item_id: "succeeded" for worker_item_id in item_states
+            }
         state_by_subtask = _apply_dependency_state(
             plan,
             _subtask_states(
@@ -344,6 +350,10 @@ class SubtaskWorkspaceProjectionService:
                 ),
             ),
         )
+        if root_completed:
+            state_by_subtask = {
+                subtask_key: "succeeded" for subtask_key in state_by_subtask
+            }
         current_state = state_by_subtask[subtask_key]
         convergence = (
             self._convergence_service.compose_subtask(
@@ -357,7 +367,13 @@ class SubtaskWorkspaceProjectionService:
             if subtask.task_id is not None
             else None
         )
-        current_action = latest_task_activity.summary if latest_task_activity else None
+        current_action = (
+            None
+            if root_completed
+            else latest_task_activity.summary
+            if latest_task_activity
+            else None
+        )
         worker_summaries: list[WorkerItemSummaryProjection] = []
         attention: list[SubtaskAttentionProjection] = []
         for placement in placement_values:

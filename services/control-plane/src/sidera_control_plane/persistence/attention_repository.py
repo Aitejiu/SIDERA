@@ -62,6 +62,14 @@ class AttentionAcknowledgementRepository:
                 attention_key,
                 *scheduling_block_parts,
             )
+        worker_input_parts = _worker_input_attention_key_parts(attention_key)
+        if worker_input_parts is not None:
+            return self._get_current_worker_input_source(
+                snapshot,
+                workspace_id,
+                attention_key,
+                *worker_input_parts,
+            )
         subtask_parts = _subtask_attention_key_parts(attention_key, root_task_id)
         if subtask_parts is not None:
             return self._get_current_subtask_source(
@@ -181,6 +189,74 @@ class AttentionAcknowledgementRepository:
             resource_id=block.id,
             resource_version=block.version,
             correlation_id=block.id,
+        )
+
+    def _get_current_worker_input_source(
+        self,
+        snapshot: TaskPlanSnapshot,
+        workspace_id: UUID,
+        attention_key: str,
+        raw_worker_item_id: str,
+        raw_event_id: str,
+    ) -> AttentionSource | None:
+        try:
+            worker_item_id = UUID(raw_worker_item_id)
+            event_id = UUID(raw_event_id)
+        except ValueError:
+            return None
+
+        task_ids = tuple(
+            item.task_id
+            for item in self._normalizer.normalize(snapshot).subtasks
+            if item.task_id is not None
+        )
+        execution_filter = (
+            ExecutionModel.workspace_id == workspace_id,
+            ExecutionModel.worker_item_id == worker_item_id,
+            ExecutionModel.task_id.in_(task_ids or (UUID(int=0),)),
+        )
+        event = self._session.scalar(
+            select(ExecutionEventModel)
+            .join(
+                ExecutionModel,
+                (ExecutionModel.id == ExecutionEventModel.execution_id)
+                & (ExecutionModel.workspace_id == ExecutionEventModel.workspace_id),
+            )
+            .where(
+                ExecutionEventModel.id == event_id,
+                ExecutionEventModel.workspace_id == workspace_id,
+                *execution_filter,
+            )
+        )
+        if event is None or event.payload.get("requires_user_input") is not True:
+            return None
+
+        latest_event = self._session.scalar(
+            select(ExecutionEventModel)
+            .join(
+                ExecutionModel,
+                (ExecutionModel.id == ExecutionEventModel.execution_id)
+                & (ExecutionModel.workspace_id == ExecutionEventModel.workspace_id),
+            )
+            .where(
+                ExecutionEventModel.workspace_id == workspace_id,
+                *execution_filter,
+            )
+            .order_by(
+                ExecutionEventModel.occurred_at.desc(),
+                ExecutionEventModel.sequence.desc(),
+                ExecutionEventModel.id.desc(),
+            )
+            .limit(1)
+        )
+        if latest_event is None or latest_event.id != event.id:
+            return None
+        return AttentionSource(
+            attention_key=attention_key,
+            root_task_id=snapshot.root_task_id,
+            resource_id=worker_item_id,
+            resource_version=1,
+            correlation_id=event.id,
         )
 
     def _get_current_subtask_source(
@@ -370,6 +446,13 @@ def _subtask_attention_key_parts(
     if len(parts) < 4 or parts[0] != "subtask" or parts[1] != str(root_task_id):
         return None
     return ":".join(parts[2:-1]), parts[-1]
+
+
+def _worker_input_attention_key_parts(key: str) -> tuple[str, str] | None:
+    parts = key.split(":")
+    if len(parts) != 3 or parts[0] != "worker_input":
+        return None
+    return parts[1], parts[2]
 
 
 def _scheduling_block_attention_key_parts(

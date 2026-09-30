@@ -2388,14 +2388,28 @@ export interface components {
              * Format: uuid
              */
             command_id: string;
+            /** Command Type */
+            command_type?: string | null;
             /** Error Code */
             error_code?: string | null;
+            /** Expected Version */
+            expected_version?: number | null;
+            /** Payload */
+            payload?: {
+                [key: string]: unknown;
+            } | null;
+            /** Payload Sha256 */
+            payload_sha256?: string | null;
             result?: components["schemas"]["CommandResponse"] | null;
             /**
              * Status
              * @enum {string}
              */
             status: "pending" | "applied" | "rejected";
+            /** Target Id */
+            target_id?: string | null;
+            /** Target Type */
+            target_type?: ("task" | "worker" | "execution" | "execution_session" | "lease" | "workspace" | "planning_request" | "planning_run" | "work_context" | "worker_runtime_configuration" | "module_definition" | "module_instance" | "context_assembly" | "context_package" | "worker_transition" | "worker_item" | "handoff_proposal" | "handoff_transition" | "collaboration_governance_hold" | "collaboration_release_proposal" | "notification_delivery" | "notification_route" | "notification_thread" | "result_operation") | null;
         };
         /** ConfigureWorkerRuntimePayload */
         ConfigureWorkerRuntimePayload: {
@@ -10552,7 +10566,9 @@ export interface operations {
     };
     get_execution_context_package: {
         parameters: {
-            query?: never;
+            query?: {
+                manifest_schema_version?: number;
+            };
             header?: never;
             path: {
                 workspace_id: string;

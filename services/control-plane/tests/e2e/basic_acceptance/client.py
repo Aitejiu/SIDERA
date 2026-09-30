@@ -36,6 +36,7 @@ class BasicAcceptanceClient:
             base_url=base_url.rstrip("/"),
             timeout=timeout,
             transport=transport,
+            trust_env=False,
         )
 
     def __enter__(self) -> Self:

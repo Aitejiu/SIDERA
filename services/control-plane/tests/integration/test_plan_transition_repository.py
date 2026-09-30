@@ -1,8 +1,10 @@
+from dataclasses import replace
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.plan_revisions import WorkerTransitionAction
 from sidera_control_plane.domain.plan_transitions import (
     PlanTransition,
@@ -250,6 +252,90 @@ def test_transition_claims_use_skip_locked_and_round_trip_domain(
         )
         assert loaded == transition
         assert worker_loaded == worker_transition
+
+
+def test_get_for_target_is_scoped_to_exact_revision_identity(
+    database, workspace_id: UUID
+) -> None:
+    request_id, proposal_id, first_id, second_id, _ = _seed_records(
+        database, workspace_id
+    )
+    transition = _transition(
+        workspace_id, request_id, proposal_id, first_id, second_id
+    )
+    with database.session() as session:
+        repository = PlanTransitionRepository(session)
+        repository.add(transition)
+        session.commit()
+
+    with database.session() as session:
+        repository = PlanTransitionRepository(session)
+        exact = {
+            "workspace_id": workspace_id,
+            "root_task_id": ROOT_TASK_ID,
+            "plan_snapshot_id": second_id,
+            "plan_generation": 2,
+        }
+        assert repository.get_for_target(**exact) == transition
+        assert repository.get_for_target(
+            **{**exact, "workspace_id": uuid4()}
+        ) is None
+        assert repository.get_for_target(
+            **{**exact, "root_task_id": uuid4()}
+        ) is None
+        assert repository.get_for_target(
+            **{**exact, "plan_snapshot_id": first_id}
+        ) is None
+        assert repository.get_for_target(
+            **{**exact, "plan_generation": 3}
+        ) is None
+
+
+def test_get_for_target_rejects_ambiguous_target_transitions(
+    database, workspace_id: UUID
+) -> None:
+    request_id, proposal_id, first_id, second_id, module_id = _seed_records(
+        database, workspace_id
+    )
+    second_profile = make_profile(workspace_id, module_id)
+    second_request = make_request(workspace_id, second_profile)
+    with database.session() as session:
+        PlanningProfileRepository(session).add(second_profile)
+        PlanningRequestRepository(session).add(second_request)
+        session.flush()
+        second_proposal = make_proposal(
+            second_request,
+            revision=1,
+            run_id=second_request.runs[0].id,
+        )
+        PlanningRecordRepository(session).add_proposal(second_proposal, workspace_id)
+        session.commit()
+
+    transition = _transition(
+        workspace_id, request_id, proposal_id, first_id, second_id
+    )
+    ambiguous_transition = replace(
+        transition,
+        id=uuid4(),
+        planning_request_id=second_request.id,
+        proposal_revision_id=second_proposal.id,
+    )
+    with database.session() as session:
+        repository = PlanTransitionRepository(session)
+        repository.add(transition)
+        repository.add(ambiguous_transition)
+        session.commit()
+
+    with (
+        database.session() as session,
+        pytest.raises(ValidationError, match="ambiguous target plan transition"),
+    ):
+        PlanTransitionRepository(session).get_for_target(
+            workspace_id=workspace_id,
+            root_task_id=ROOT_TASK_ID,
+            plan_snapshot_id=second_id,
+            plan_generation=2,
+        )
 
 
 def test_worker_item_has_one_active_transition_and_lineage_is_workspace_scoped(

@@ -722,12 +722,22 @@ class ActivationReconciler:
         ledger = getattr(uow, "collaboration_ledger", None)
         if runs is None or plans is None or ledger is None:
             return CollaborationGateFact.run_pending()
-        run = runs.get_current(request.workspace_id, request.root_task_id)
         head = plans.get_head(request.root_task_id, request.workspace_id)
         release = ledger.get_release_for_request(
             request.workspace_id,
             request.id,
         )
+        run = runs.get_current(request.workspace_id, request.root_task_id)
+        if (
+            run is None
+            and request.purpose == "reintegrate"
+            and release is not None
+        ):
+            # Current-run queries intentionally exclude completed runs. An
+            # explicit reintegration request carries the exact release that
+            # authorizes it, so resolve that release's historical run for the
+            # final identity checks in CollaborationGateFact.
+            run = runs.get(request.workspace_id, release.run_id)
         return CollaborationGateFact.for_request(
             request,
             run=run,
@@ -760,10 +770,42 @@ class ActivationReconciler:
         if request.input_selection_id is not None:
             if selection is None:
                 return {}
-            return self._selected_hard_input_facts(
-                dependencies=dependency_values,
-                selection=selection,
+            facts = dict(
+                self._selected_hard_input_facts(
+                    dependencies=dependency_values,
+                    selection=selection,
+                )
             )
+            selected_request_ids = {
+                item.source.effective_request_id for item in selection.hard_inputs
+            }
+            selector_dependency_ids = {
+                dependency.upstream_request_id
+                for dependency in dependency_values
+                if dependency.is_blocking
+                and (
+                    dependency.required_artifact_refs
+                    or dependency.required_evidence_refs
+                )
+            }
+            for dependency in dependency_values:
+                if not dependency.is_blocking:
+                    continue
+                if dependency.upstream_request_id in selected_request_ids:
+                    continue
+                if dependency.upstream_request_id in selector_dependency_ids:
+                    # A selector-bearing dependency must be satisfied by the
+                    # committed result selection, never by a live request read.
+                    continue
+                upstream = uow.execution_requests.get(
+                    dependency.upstream_request_id,
+                    request.workspace_id,
+                )
+                if upstream is not None:
+                    facts[dependency.upstream_request_id] = self._fact_for_upstream(
+                        uow, upstream
+                    )
+            return facts
         facts: dict[UUID, UpstreamActivationFact] = {}
         upstream_ids = tuple(
             dict.fromkeys(
@@ -795,11 +837,9 @@ class ActivationReconciler:
             selected = selected_by_dependency.get(
                 f"request:{dependency.upstream_request_id}"
             )
-            if (
-                selected is None
-                or selected.source.effective_request_id
-                != dependency.upstream_request_id
-            ):
+            # A committed rework source can have a new request ID; the dependency key
+            # still names the original logical upstream request.
+            if selected is None:
                 continue
             source = selected.source
             facts[dependency.upstream_request_id] = UpstreamActivationFact(

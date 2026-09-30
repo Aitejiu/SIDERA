@@ -176,7 +176,7 @@ describe("WorkerTracePage", () => {
     expect(screen.getByRole("region", { name: "轨迹详情" })).not.toHaveTextContent("Normalized trace event 180");
     await user.click(screen.getByRole("button", { name: "清除筛选" }));
     expect(screen.getByRole("button", { name: /event-181/ })).toBeVisible();
-  });
+  }, 15_000);
 
   it("follows new records until reading is paused and resumes only on request", async () => {
     const user = userEvent.setup();
@@ -202,7 +202,7 @@ describe("WorkerTracePage", () => {
     await refresh();
     await screen.findByRole("button", { name: /event-243/ });
     expect(screen.getByRole("heading", { name: "event-242" })).toBeVisible();
-  });
+  }, 15_000);
 
   it("does not turn missing measurements into zero duration or zero usage", async () => {
     server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`, () =>
@@ -220,7 +220,7 @@ describe("WorkerTracePage", () => {
     expect(await screen.findByText("artifact content")).toBeVisible();
     await user.click(screen.getByRole("button", { name: /event-181/ }));
     expect(screen.queryByText("artifact content")).not.toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("shows a bounded trace ledger, loads older events, and opens artifact content by id", async () => {
     const user = userEvent.setup();

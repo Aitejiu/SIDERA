@@ -50,16 +50,16 @@ def _patch_runtime(monkeypatch, coordinator: _Coordinator) -> _Database:
     return database
 
 
-def test_handoff_worker_once_runs_one_batch(monkeypatch) -> None:
+def test_handoff_worker_standalone_refuses_before_claiming(monkeypatch) -> None:
     coordinator = _Coordinator()
     database = _patch_runtime(monkeypatch, coordinator)
 
-    assert handoff_worker.main(["--once"]) == 0
-    assert coordinator.calls == [12]
-    assert database.disposed is True
+    assert handoff_worker.main(["--once"]) == 1
+    assert coordinator.calls == []
+    assert database.disposed is False
 
 
-def test_handoff_worker_continuous_mode_stops_cleanly(monkeypatch) -> None:
+def test_handoff_worker_standalone_continuous_mode_refuses_before_sleep(monkeypatch) -> None:
     coordinator = _Coordinator()
     database = _patch_runtime(monkeypatch, coordinator)
     sleeps: list[float] = []
@@ -70,7 +70,7 @@ def test_handoff_worker_continuous_mode_stops_cleanly(monkeypatch) -> None:
 
     monkeypatch.setattr(handoff_worker.time, "sleep", stop_after_sleep)
 
-    assert handoff_worker.main([]) == 0
-    assert coordinator.calls == [12]
-    assert sleeps == [1.5]
-    assert database.disposed is True
+    assert handoff_worker.main([]) == 1
+    assert coordinator.calls == []
+    assert sleeps == []
+    assert database.disposed is False

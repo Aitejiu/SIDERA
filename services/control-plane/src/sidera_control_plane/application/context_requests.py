@@ -11,7 +11,10 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.code_results import CodeInputManifestV1
-from sidera_control_plane.domain.collaboration import RuntimeRelease
+from sidera_control_plane.domain.collaboration import (
+    CollaborationGateMode,
+    RuntimeRelease,
+)
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextAssemblyStatus,
@@ -107,7 +110,8 @@ def resolve_execution_context_authorization(
             # target request without a Selection must continue through its
             # explicit source execution/session link.
             if (
-                request.input_selection_id is None
+                request.collaboration_gate_mode is CollaborationGateMode.UNMANAGED
+                and request.input_selection_id is None
                 and request.source_execution_id is not None
                 and request.source_session_id is not None
             ):
@@ -736,7 +740,7 @@ def execution_context_manifest_schema_version(
     if authorization is None:
         return 1
     request = authorization.request
-    if request.result_derivation_kind == "verification":
+    if request.result_derivation_kind in {"verification", "rework"}:
         return 3
     if request.input_selection_id is None:
         return 1

@@ -42,10 +42,14 @@ from sidera_control_plane.application.result_apply import (
     ResultApplyService,
 )
 from sidera_control_plane.application.result_finalization import (
+    ResultFinalizationHandler,
     ResultFinalizationService,
 )
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
+)
+from sidera_control_plane.application.result_input_sources import (
+    load_code_result_dependency_closure,
 )
 from sidera_control_plane.application.result_integration import ResultIntegrationService
 from sidera_control_plane.application.result_ports import (
@@ -68,6 +72,7 @@ from sidera_control_plane.domain.code_results import (
 )
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_packages import (
+    ContextPackageManifestV3,
     ContextPurpose,
     ResultInputBudgetV1,
 )
@@ -122,6 +127,7 @@ class ResultIntegrationScenario:
         worker_runtime: ResultInputWorkerRuntime | None = None,
         repository_ref: str | None = None,
         repository_path: Path | None = None,
+        result_integration_enabled: bool = False,
     ) -> None:
         self.database = database
         self.workspace_id = workspace_id
@@ -131,11 +137,13 @@ class ResultIntegrationScenario:
         self.operation_id = UUID("80000000-0000-0000-0000-000000000002")
         self._worker_runtime = worker_runtime
         self._repository_ref = repository_ref or "repo://integration-test"
+        self._result_integration_enabled = result_integration_enabled
         self._planning = ResultInputScenario(
             database,
             workspace_id,
             tmp_path,
             worker_runtime=worker_runtime,
+            result_integration_enabled=result_integration_enabled,
         )
         self._seeded = False
         self.worker_item_ids: dict[str, UUID] = {}
@@ -262,16 +270,29 @@ class ResultIntegrationScenario:
     def worker_ids(self) -> tuple[UUID, ...]:
         return tuple(self.worker_item_ids.values())
 
-    def seed_plan(self, *, apply: bool = False) -> None:
+    def seed_plan(
+        self,
+        *,
+        apply: bool = False,
+        integration_base_commit: str | None = None,
+        hard_edges: tuple[tuple[str, str], ...] = (),
+        hard_edge_artifact_refs: tuple[str, ...] = ("artifact_type:build",),
+    ) -> None:
         if self._seeded:
             if apply and not self._apply_enabled:
                 raise AssertionError("result integration plan was seeded without apply")
             return
         self._planning.confirm_plan(
+            hard_edges=hard_edges,
+            hard_edge_artifact_refs=hard_edge_artifact_refs,
             result_inputs_enabled=True,
             proposal_schema_version=6,
             profile_key="r6-result-planning",
-            integration_base_commit=self._base_commit if apply else None,
+            integration_base_commit=(
+                self._base_commit
+                if apply or integration_base_commit is None
+                else integration_base_commit
+            ),
             apply_on_accept=apply,
             apply_target_ref="refs/heads/main" if apply else None,
         )
@@ -542,6 +563,14 @@ class ResultIntegrationScenario:
             snapshot
             for snapshot in snapshots
             if snapshot.execution_id in selected_execution_ids
+        )
+        snapshots_by_id = {snapshot.id: snapshot for snapshot in snapshots}
+        selected_snapshots = load_code_result_dependency_closure(
+            direct_snapshots=selected_snapshots,
+            load_snapshot=snapshots_by_id.get,
+            workspace_id=selection.workspace_id,
+            root_task_id=selection.root_task_id,
+            repository_ref=self._repository_ref,
         )
         return build_code_input_manifest(
             selection=selection,
@@ -889,12 +918,24 @@ class ResultIntegrationScenario:
         execution_id = request.first_execution_id
         if execution_id is None:
             raise AssertionError("rework execution was not materialized")
+        context_result = self._planning.run_context_worker(request.worker_item_key)
+        if context_result.ready < 1 or context_result.failed != 0:
+            raise AssertionError(
+                f"rework ContextPackage was not materialized: {context_result}"
+            )
+        with self.uow() as uow:
+            package = uow.context_packages.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                execution_id,
+                self.workspace_id,
+                manifest_schema_version=3,
+            )
+        if (
+            not isinstance(package, ContextPackageManifestV3)
+            or package.code_input_manifest is None
+        ):
+            raise AssertionError("rework code input manifest was not persisted")
         if self._worker_runtime is not None:
-            context_result = self._planning.run_context_worker(request.worker_item_key)
-            if context_result.ready < 1 or context_result.failed != 0:
-                raise AssertionError(
-                    f"real rework ContextPackage was not materialized: {context_result}"
-                )
             marker = _real_file_marker(files)
             self._planning.complete_prepared_worker(
                 request.worker_item_key,
@@ -913,14 +954,32 @@ class ResultIntegrationScenario:
         worker_id, lease_id, session_id, execution_version = (
             self._planning._start_source(execution_id, key=request.worker_item_key)
         )
-        worktree, manifest = self._create_worktree(execution_id)
+        code_inputs = package.code_input_manifest
+        worktree, manifest = self._create_worktree(
+            execution_id,
+            base_revision=code_inputs.base_commit,
+        )
         with self.uow() as uow:
             uow.workspaces.add(manifest)
+        receipt = GitResultStore(
+            {"repo://integration-test": self._repository}
+        ).materialize(
+            workspace_manifest=manifest,
+            code_inputs=code_inputs,
+            operation_id=uuid5(
+                NAMESPACE_URL,
+                f"sidera.rework-input:{execution_id}:{code_inputs.input_hash}",
+            ),
+        )
+        if not receipt.succeeded:
+            raise AssertionError(
+                f"rework inputs conflicted: {receipt.conflict_paths}"
+            )
         capture_operation = code_capture_operation_id(execution_id)
         service = self.capture_service
         service.record_execution_start(
             manifest=manifest,
-            input_commit=self._base_commit,
+            input_commit=receipt.actual_commit,
             writable_paths=(".",),
             operation_id=capture_operation,
         )
@@ -1064,6 +1123,9 @@ class ResultIntegrationScenario:
         if self._pending_reintegration_request_id is not None:
             request_id = self._pending_reintegration_request_id
             self._run_integration_execution(request_id=request_id)
+            if self._integration_execution_id is None:
+                self._pending_reintegration_request_id = None
+                return self.request(request_id)
             candidate = ResultIntegrationService(
                 self.uow,
                 clock=lambda: self._planning.now,
@@ -1226,19 +1288,20 @@ class ResultIntegrationScenario:
         )
         self._planning.reconcile()
         self._planning.activate()
-        execution_id = self._planning._execution_id("summary")
-        if execution_id is None:
-            raise AssertionError("integration execution was not activated")
         with self.uow() as uow:
             execution_request = uow.execution_requests.get(
                 request_id, self.workspace_id
             )
+        if execution_request is None:
+            raise AssertionError("integration execution request is unavailable")
+        execution_id = execution_request.first_execution_id
+        if execution_id is None:
+            return
+        with self.uow() as uow:
             execution = uow.executions.get(execution_id, self.workspace_id)
-        if execution_request is None or execution is None:
+        if execution is None:
             raise AssertionError("integration execution facts are unavailable")
-        if execution_request.first_execution_id != execution_id:
-            raise AssertionError("latest integration execution does not match request")
-        worker_id, lease_id, _session_id, execution_version = (
+        worker_id, lease_id, _session_id, _execution_version = (
             self._planning._start_source(execution_id, key="summary")
         )
         worktree, manifest = self._create_worktree(execution_id)
@@ -1329,9 +1392,20 @@ class ResultIntegrationScenario:
             execution_id=execution_id,
             operation_id=capture_operation_id,
         )
+        with self.uow() as uow:
+            captured_execution = uow.executions.get(
+                execution_id, self.workspace_id
+            )
+        if captured_execution is None:
+            raise AssertionError("integration execution disappeared after capture")
         CommandService(
             lambda: self.uow(),
-            (ExecutionCommandHandler(lambda: self._planning.now),),
+            (
+                ExecutionCommandHandler(
+                    lambda: self._planning.now,
+                    result_integration_enabled=self._result_integration_enabled,
+                ),
+            ),
         ).handle(
             CommandEnvelope(
                 id=uuid4(),
@@ -1346,7 +1420,7 @@ class ResultIntegrationScenario:
                     "lease_id": str(lease_id),
                     "fencing_token": 1,
                 },
-                expected_version=execution_version,
+                expected_version=captured_execution.version,
                 idempotency_key=f"result-capture-integration-succeeded:{execution_id}",
                 correlation_id=self.root_task_id,
             )
@@ -1391,6 +1465,13 @@ class ResultIntegrationScenario:
             ),
             owner_id=owner_id,
             clock=lambda: self._planning.now,
+            operation_handlers={
+                "finalization": ResultFinalizationHandler(
+                    self.uow,
+                    clock=lambda: self._planning.now,
+                    owner_id=f"{owner_id}:finalizer",
+                ),
+            },
         )
 
     @property

@@ -7,6 +7,13 @@ test.describe("R6 basic product read-only path", () => {
   });
 
   test("walks the persisted task hierarchy, trace, chat, inbox, and context without writes", async ({ page }) => {
+    const writes: string[] = [];
+    page.on("request", (request) => {
+      if (!new Set(["GET", "HEAD", "OPTIONS"]).has(request.method())) {
+        writes.push(`${request.method()} ${new URL(request.url()).pathname}`);
+      }
+    });
+
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}`);
     await expect(page.locator("#task-detail-title")).toHaveText("支付重构");
     await page.getByRole("tab", { name: "DAG", exact: true }).click();
@@ -30,5 +37,6 @@ test.describe("R6 basic product read-only path", () => {
     await expect(page.locator("#chat-page-title")).toHaveText("Main Agent");
     await page.goto(`/workspaces/${WORKSPACE_ID}/context-packages/b0000000-0000-0000-0000-000000000005`);
     await expect(page.locator("#context-package-title")).toHaveText("上下文包");
+    expect(writes).toEqual([]);
   });
 });

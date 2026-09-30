@@ -24,6 +24,9 @@ from sidera_control_plane.application.result_gate import (
 from sidera_control_plane.application.result_input_evaluation import (
     build_code_input_manifest,
 )
+from sidera_control_plane.application.result_input_sources import (
+    load_code_result_dependency_closure,
+)
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
     IntegrationCandidateV1,
@@ -948,6 +951,20 @@ def build_reintegration_context(
         if not isinstance(snapshot, CodeResultSnapshotV1):
             raise ResultError("reintegrate_result_not_found", {"result_id": str(result_id)})
         snapshots.append(snapshot)
+    try:
+        snapshots = list(
+            load_code_result_dependency_closure(
+                direct_snapshots=tuple(snapshots),
+                load_snapshot=lambda result_id: uow.results.get_record(
+                    "code_snapshot", result_id, request.workspace_id
+                ),
+                workspace_id=request.workspace_id,
+                root_task_id=request.root_task_id,
+                repository_ref=plan.integration_spec.repository_ref,
+            )
+        )
+    except ValueError as exc:
+        raise ResultError("reintegrate_result_not_found", {}) from exc
     manifest = build_code_input_manifest(
         selection=selection,
         snapshots=snapshots,
@@ -1121,9 +1138,15 @@ def _validate_replacement_results(
     repository_ref: str,
     workspace_id: UUID,
 ) -> tuple[ReworkRecordV1, tuple[tuple[CodeResultSnapshotV1, ExecutionRequest, Any], ...]]:
+    # A candidate's source results are the inputs consumed by integration,
+    # while code_result_id is the integration Worker's own current result.
+    # Both are replaceable when a rework targets the corresponding WorkerItem.
+    candidate_result_ids = tuple(
+        dict.fromkeys((*candidate.source_result_ids, candidate.code_result_id))
+    )
     record_by_id = {
         item: uow.results.get_record("code_snapshot", item, workspace_id)
-        for item in candidate.source_result_ids
+        for item in candidate_result_ids
     }
     old_by_worker = {
         item.worker_item_id: item

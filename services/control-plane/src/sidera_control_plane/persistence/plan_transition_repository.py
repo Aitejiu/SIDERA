@@ -7,7 +7,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from sidera_control_plane.domain.errors import VersionConflict
+from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.plan_revisions import WorkerTransitionAction
 from sidera_control_plane.domain.plan_transitions import (
     WORKER_TRANSITION_IN_FLIGHT,
@@ -63,6 +63,30 @@ class PlanTransitionRepository:
             statement = statement.with_for_update()
         row = self._session.scalar(statement)
         return _to_plan_transition(row) if row is not None else None
+
+    def get_for_target(
+        self,
+        *,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        plan_snapshot_id: UUID,
+        plan_generation: int,
+    ) -> PlanTransition | None:
+        rows = self._session.scalars(
+            select(PlanTransitionModel)
+            .where(
+                PlanTransitionModel.workspace_id == workspace_id,
+                PlanTransitionModel.root_task_id == root_task_id,
+                PlanTransitionModel.to_snapshot_id == plan_snapshot_id,
+                PlanTransitionModel.to_generation == plan_generation,
+            )
+            .limit(2)
+        ).all()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValidationError("ambiguous target plan transition")
+        return _to_plan_transition(rows[0])
 
     def save(self, transition: PlanTransition, previous_version: int) -> None:
         result = self._session.execute(

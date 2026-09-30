@@ -124,6 +124,10 @@ class ProjectionChangeRepository:
         return next_cursor is None or next_cursor != cursor + 1
 
     def _allocate_cursor(self, workspace_id: UUID) -> int:
+        lock_high, lock_low = _workspace_lock_keys(workspace_id)
+        self._session.execute(
+            select(func.pg_advisory_xact_lock(lock_high, lock_low))
+        )
         latest_projection_cursor = self._session.scalar(
             select(func.max(ProjectionChangeModel.cursor)).where(
                 ProjectionChangeModel.workspace_id == workspace_id
@@ -183,4 +187,13 @@ def _to_domain(row: ProjectionChangeModel) -> ProjectionChange:
         resource_version=row.resource_version,
         occurred_at=row.occurred_at,
         correlation_id=row.correlation_id,
+    )
+
+
+def _workspace_lock_keys(workspace_id: UUID) -> tuple[int, int]:
+    """Map a workspace UUID to PostgreSQL's two-int advisory lock namespace."""
+    raw = workspace_id.bytes
+    return (
+        int.from_bytes(raw[:4], byteorder="big", signed=True),
+        int.from_bytes(raw[4:8], byteorder="big", signed=True),
     )

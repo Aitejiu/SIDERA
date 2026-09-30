@@ -76,6 +76,8 @@ export function WorkerSidebar({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const currentExecution = workspace.execution_history[0] ?? null;
   const contextSynchronized = workerItem.context_version === workerItem.acknowledged_context_version;
+  const canOperateResult = !["retired", "paused"].includes(workerItem.status)
+    && !["context_not_acknowledged", "projection_stale"].includes(workspace.read_only_reason ?? "");
   const showExecutionConfiguration = currentExecution !== null && (
     currentExecution.status !== "running"
     || currentExecution.requires_operator
@@ -218,6 +220,7 @@ export function WorkerSidebar({
         isLoading={resultViewLoading}
         isError={resultViewError}
         canIntervene={workspace.can_intervene}
+        canOperateResult={canOperateResult}
         onRetry={onRetryResultView}
         onRefresh={onRefresh}
         onOpenResults={onOpenResults}

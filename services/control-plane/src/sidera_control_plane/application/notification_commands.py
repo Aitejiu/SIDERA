@@ -40,6 +40,8 @@ from sidera_control_plane.domain.planning import (
 )
 
 _AKASHIC_PRIVATE_CHANNEL = "akashic_private"
+_LOCAL_DEMO_CHANNEL = "local"
+_LOCAL_DEMO_SOURCE_TYPE = "sidera_web_chat"
 _WORKSPACE_OPERATOR_RECIPIENT = "workspace_operator"
 _LOCAL_RECIPIENT = "local"
 _DELIVERY_CONTRACT_VERSION = 1
@@ -476,7 +478,14 @@ def bind_planning_request_origin(
 
     if _request_kind(request) != PlanningRequestKind.CREATE.value:
         return False
-    if request.source_type != _AKASHIC_PRIVATE_CHANNEL or not request.source_ref:
+    route_channel = (
+        _AKASHIC_PRIVATE_CHANNEL
+        if request.source_type == _AKASHIC_PRIVATE_CHANNEL
+        else _LOCAL_DEMO_CHANNEL
+        if request.source_type == _LOCAL_DEMO_SOURCE_TYPE
+        else None
+    )
+    if route_channel is None or not request.source_ref:
         return False
     routes = tuple(
         route
@@ -484,7 +493,7 @@ def bind_planning_request_origin(
             request.workspace_id, request.source_ref
         )
         if (
-            route.channel_type == _AKASHIC_PRIVATE_CHANNEL
+            route.channel_type == route_channel
             and route.recipient_type == _WORKSPACE_OPERATOR_RECIPIENT
             and route.recipient_id == _LOCAL_RECIPIENT
         )
@@ -541,8 +550,19 @@ def _repair_origin_bindings(
 ) -> tuple[int, int]:
     request_bindings_created = 0
     root_bindings_created = 0
-    requests = uow.planning_requests.list_by_source_ref(
-        route.workspace_id, _AKASHIC_PRIVATE_CHANNEL, route.source_ref
+    source_types = (
+        (_AKASHIC_PRIVATE_CHANNEL,)
+        if route.channel_type == _AKASHIC_PRIVATE_CHANNEL
+        else (_LOCAL_DEMO_SOURCE_TYPE,)
+        if route.channel_type == _LOCAL_DEMO_CHANNEL
+        else ()
+    )
+    requests = tuple(
+        request
+        for source_type in source_types
+        for request in uow.planning_requests.list_by_source_ref(
+            route.workspace_id, source_type, route.source_ref
+        )
     )
     for request in requests:
         if _request_kind(request) != PlanningRequestKind.CREATE.value:
@@ -612,8 +632,10 @@ def _parse_route_payload(payload: Mapping[str, object]) -> Any:
     recipient_type = _required_text(payload.get("recipient_type"), "recipient_type")
     recipient_id = _required_text(payload.get("recipient_id"), "recipient_id")
     source_ref = _required_text(payload.get("source_ref"), "source_ref")
-    if channel_type != _AKASHIC_PRIVATE_CHANNEL:
-        raise ValidationError("only akashic_private notification routes are supported")
+    if channel_type not in {_AKASHIC_PRIVATE_CHANNEL, _LOCAL_DEMO_CHANNEL}:
+        raise ValidationError(
+            "only akashic_private or local notification routes are supported"
+        )
     if not _MIN_SOURCE_REF_LENGTH <= len(source_ref) <= _MAX_SOURCE_REF_LENGTH:
         raise ValidationError("source_ref length is outside the supported bounds")
     if _SOURCE_REF_PATTERN.fullmatch(source_ref) is None:

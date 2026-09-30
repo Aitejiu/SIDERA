@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -335,6 +336,11 @@ def test_r3_gateway_records_round_trip_through_unit_of_work(
         claim,
         item,
     ) = records
+    events = (
+        event,
+        replace(event, id=uuid4(), sequence=2, raw_ref="raw://event/2"),
+        replace(event, id=uuid4(), sequence=3, raw_ref="raw://event/3"),
+    )
 
     with uow_factory() as uow:
         uow.modules.add_definition(definition)
@@ -345,7 +351,8 @@ def test_r3_gateway_records_round_trip_through_unit_of_work(
         uow.workspaces.add(manifest)
     with uow_factory() as uow:
         uow.gateway_operations.add(operation)
-        uow.execution_events.add(event)
+        for item in events:
+            uow.execution_events.add(item)
         uow.artifacts.add(artifact)
         uow.evidence_claims.add(claim)
         uow.execution_inputs.add(item)
@@ -363,6 +370,9 @@ def test_r3_gateway_records_round_trip_through_unit_of_work(
             ids["execution_id"], workspace_id
         ) == (operation,)
         assert uow.execution_events.get(event.session_id, event.sequence, workspace_id) == event
+        assert uow.execution_events.list_for_session(
+            event.session_id, workspace_id
+        ) == events
         assert uow.artifacts.list_for_execution(ids["execution_id"], workspace_id) == (artifact,)
         assert uow.evidence_claims.list_for_task(ids["task_id"], workspace_id) == (claim,)
         assert uow.execution_inputs.get(item.id, workspace_id) == item

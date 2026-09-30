@@ -12,7 +12,10 @@ from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
     FakePlannerConfig,
 )
-from sidera_control_plane.application.planner_runtime import PlannerRateLimited
+from sidera_control_plane.application.planner_runtime import (
+    PlannerRateLimited,
+    PlannerUnknownOutcome,
+)
 from sidera_control_plane.application.planning_reconciler import PlanningReconciler
 from sidera_control_plane.application.planning_runner import PlanningRunner
 from sidera_control_plane.domain.modules import (
@@ -86,7 +89,11 @@ def module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
     )
 
 
-def profile(instance_id):
+def profile(
+    instance_id,
+    *,
+    unknown_outcome_policy: UnknownOutcomePolicy = UnknownOutcomePolicy.BLOCK,
+):
     return PlanningProfile(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -114,7 +121,7 @@ def profile(instance_id):
         retry_policy=PlanningRetryPolicy(
             max_retries=1,
             backoff_seconds=(1,),
-            unknown_outcome_policy=UnknownOutcomePolicy.BLOCK,
+            unknown_outcome_policy=unknown_outcome_policy,
             invalid_output_policy=InvalidOutputPolicy.RETRY,
         ),
         default_priority=50,
@@ -163,6 +170,26 @@ class RateLimitedAdapter(CountingAdapter):
         )
 
 
+class RaisingAdapter(CountingAdapter):
+    def plan(self, planner_input, control):
+        with self._lock:
+            self.calls += 1
+        raise RuntimeError("adapter transport failed after dispatch")
+
+
+class UnknownOutcomeAdapter(CountingAdapter):
+    def plan(self, planner_input, control):
+        with self._lock:
+            self.calls += 1
+        return PlannerUnknownOutcome(
+            code="unknown_outcome",
+            safe_message="planner prompt outcome could not be confirmed",
+            retryable=False,
+            unknown_outcome=True,
+            provider_ref="fake-planner",
+        )
+
+
 class StaticFactory:
     def __init__(self, adapter: CountingAdapter) -> None:
         self.adapter = adapter
@@ -171,7 +198,13 @@ class StaticFactory:
         return self.adapter
 
 
-def seed_request(uow_factory, workspace_id):
+def seed_request(
+    uow_factory,
+    workspace_id,
+    *,
+    idempotency: IdempotencyCapability = IdempotencyCapability.OPERATION_ID,
+    unknown_outcome_policy: UnknownOutcomePolicy = UnknownOutcomePolicy.BLOCK,
+):
     definition, instance = module_facts()
     definition = replace(definition, workspace_id=workspace_id)
     instance = replace(
@@ -179,8 +212,18 @@ def seed_request(uow_factory, workspace_id):
         workspace_id=workspace_id,
         definition_id=definition.id,
     )
-    stored_profile = replace(profile(instance.id), workspace_id=workspace_id)
     assert isinstance(definition.capabilities, PlannerAdapterCapabilityProfile)
+    definition = replace(
+        definition,
+        capabilities=replace(definition.capabilities, idempotency=idempotency),
+    )
+    stored_profile = replace(
+        profile(
+            instance.id,
+            unknown_outcome_policy=unknown_outcome_policy,
+        ),
+        workspace_id=workspace_id,
+    )
     snapshot = stored_profile.snapshot(definition.capabilities)
     request = PlanningRequest.create(
         request_id=uuid4(),
@@ -261,6 +304,84 @@ def test_rate_limit_uses_bounded_backoff_for_a_new_attempt(
         assert request is not None
         assert request.status is PlanningRequestStatus.PLANNING
         assert request.runs[-1].attempt == 2
+
+
+def test_unclassified_planner_exception_is_not_automatically_retried(
+    uow_factory, workspace_id
+) -> None:
+    request_id = seed_request(uow_factory, workspace_id)
+    adapter = RaisingAdapter()
+
+    assert runner(uow_factory, adapter).run_once(1).failed == 1
+    recovery = PlanningReconciler(
+        uow_factory=uow_factory,
+        owner_id="planning-reconciler:integration",
+        clock=lambda: NOW.replace(second=2),
+    ).run_once(10)
+
+    assert recovery.retried == 0
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        assert request.status is PlanningRequestStatus.FAILED
+        assert request.runs[-1].error_code == "planner_exception"
+        assert len(request.runs) == 1
+    assert adapter.calls == 1
+
+
+def test_unknown_planner_outcome_is_blocked_without_retry(
+    uow_factory, workspace_id
+) -> None:
+    request_id = seed_request(uow_factory, workspace_id)
+    adapter = UnknownOutcomeAdapter()
+
+    result = runner(uow_factory, adapter).run_once(1)
+    assert result.blocked == 1
+    recovery = PlanningReconciler(
+        uow_factory=uow_factory,
+        owner_id="planning-reconciler:integration",
+        clock=lambda: NOW.replace(second=2),
+    ).run_once(10)
+
+    assert recovery.retried == 0
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        assert request.status is PlanningRequestStatus.FAILED
+        assert request.runs[-1].status is PlanningRunStatus.BLOCKED
+        assert request.runs[-1].error_code == "unknown_outcome"
+        assert len(request.runs) == 1
+    assert adapter.calls == 1
+
+
+def test_unknown_non_idempotent_planner_is_not_retried_even_when_policy_allows_it(
+    uow_factory, workspace_id
+) -> None:
+    request_id = seed_request(
+        uow_factory,
+        workspace_id,
+        idempotency=IdempotencyCapability.NONE,
+        unknown_outcome_policy=UnknownOutcomePolicy.RETRY,
+    )
+    adapter = UnknownOutcomeAdapter()
+
+    result = runner(uow_factory, adapter).run_once(1)
+    assert result.blocked == 1
+    recovery = PlanningReconciler(
+        uow_factory=uow_factory,
+        owner_id="planning-reconciler:integration",
+        clock=lambda: NOW.replace(second=2),
+    ).run_once(10)
+
+    assert recovery.retried == 0
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        assert request.status is PlanningRequestStatus.FAILED
+        assert request.runs[-1].status is PlanningRunStatus.BLOCKED
+        assert request.runs[-1].error_code == "unknown_outcome"
+        assert len(request.runs) == 1
+    assert adapter.calls == 1
 
 
 def test_invalid_output_stops_after_profile_retry_limit(

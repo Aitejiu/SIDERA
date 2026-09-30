@@ -6,6 +6,9 @@ from uuid import UUID
 import pytest
 
 from sidera_control_plane.application.command_service import CommandService
+from sidera_control_plane.application.context_requests import (
+    execution_context_manifest_schema_version,
+)
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
 from sidera_control_plane.context_package_worker import ContextPackageWorker
 from sidera_control_plane.domain.context_packages import (
@@ -54,6 +57,13 @@ def test_rework_materializes_a_fresh_v3_context_for_the_same_worker(result_scena
     rework_request = result_scenario.request(UUID(result.data["request_ids"][0]))
     assert rework_request.first_execution_id is not None
     assert rework_request.first_execution_id != source_request.first_execution_id
+    with result_scenario.uow() as uow:
+        rework_execution = uow.executions.get(
+            rework_request.first_execution_id,
+            result_scenario.workspace_id,
+        )
+        assert rework_execution is not None
+        assert execution_context_manifest_schema_version(uow, rework_execution) == 3
     assembly = result_scenario.context_assembly_for_request(rework_request.id)
     assert assembly.manifest_schema_version == 3
     assert assembly.request_id != source_request.first_execution_id

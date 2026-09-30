@@ -34,7 +34,7 @@ const profile = {
     max_context_bytes: 200000,
     stability: "stable",
     interface_version: "1.0",
-    proposal_schema_versions: [1],
+    proposal_schema_versions: [2],
   },
   created_at: "2026-08-23T08:00:00Z",
 };
@@ -67,6 +67,135 @@ describe("PlanningBriefForm", () => {
   beforeEach(() => {
     server.resetHandlers();
     installProfileHandler();
+  });
+
+  it("defaults new tasks to the base planning profile when a revision profile is listed first", async () => {
+    const user = userEvent.setup();
+    const revisionProfile = {
+      ...profile,
+      id: "10000000-0000-0000-0000-000000000002",
+      profile_key: "revision-opencode",
+      display_name: "修订规划器",
+      capabilities: {
+        ...profile.capabilities,
+        proposal_schema_versions: [2, 3],
+      },
+    };
+    let submittedProfileId: string | undefined;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-profiles`, () =>
+        HttpResponse.json({ items: [revisionProfile, profile], next_cursor: null }),
+      ),
+      http.post("/api/v1/commands", async ({ request }) => {
+        const body = await request.json() as { payload?: { profile_id?: string } };
+        submittedProfileId = body.payload?.profile_id;
+        return HttpResponse.json({
+          aggregate_id: REQUEST_ID,
+          aggregate_version: 1,
+          command_id: "50000000-0000-0000-0000-000000000002",
+          event_ids: [],
+          data: { planning_request_id: REQUEST_ID },
+        }, { status: 201 });
+      }),
+    );
+    renderForm();
+
+    await screen.findByRole("option", { name: "修订规划器" });
+    await user.type(screen.getByLabelText("需求目标"), "使用基础规划配置");
+    await user.type(screen.getByLabelText("验收条件"), "创建普通规划请求");
+    await user.click(screen.getByRole("button", { name: "提交需求" }));
+
+    await screen.findByText("规划请求已创建");
+    expect(submittedProfileId).toBe(PROFILE_ID);
+  });
+
+  it("defaults result-enabled new tasks to the single-schema base profile", async () => {
+    const user = userEvent.setup();
+    const resultProfile = {
+      ...profile,
+      id: "10000000-0000-0000-0000-000000000003",
+      profile_key: "result-enabled-opencode",
+      display_name: "结果集成规划器",
+      capabilities: {
+        ...profile.capabilities,
+        proposal_schema_versions: [6],
+      },
+    };
+    const revisionProfile = {
+      ...profile,
+      id: "10000000-0000-0000-0000-000000000004",
+      profile_key: "revision-opencode",
+      display_name: "修订规划器",
+      capabilities: {
+        ...profile.capabilities,
+        proposal_schema_versions: [2, 3],
+      },
+    };
+    let submittedProfileId: string | undefined;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-profiles`, () =>
+        HttpResponse.json({ items: [revisionProfile, resultProfile], next_cursor: null }),
+      ),
+      http.post("/api/v1/commands", async ({ request }) => {
+        const body = await request.json() as { payload?: { profile_id?: string } };
+        submittedProfileId = body.payload?.profile_id;
+        return HttpResponse.json({
+          aggregate_id: REQUEST_ID,
+          aggregate_version: 1,
+          command_id: "50000000-0000-0000-0000-000000000004",
+          event_ids: [],
+          data: { planning_request_id: REQUEST_ID },
+        }, { status: 201 });
+      }),
+    );
+    renderForm();
+
+    await screen.findByRole("option", { name: "修订规划器" });
+    await user.type(screen.getByLabelText("需求目标"), "使用结果集成规划配置");
+    await user.type(screen.getByLabelText("验收条件"), "创建结果集成规划请求");
+    await user.click(screen.getByRole("button", { name: "提交需求" }));
+
+    await screen.findByText("规划请求已创建");
+    expect(submittedProfileId).toBe(resultProfile.id);
+  });
+
+  it("does not submit while planning profiles are still loading", async () => {
+    const user = userEvent.setup();
+    let releaseProfiles: (() => void) | undefined;
+    const profilesReady = new Promise<void>((resolve) => {
+      releaseProfiles = resolve;
+    });
+    let submitted = false;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-profiles`, async () => {
+        await profilesReady;
+        return HttpResponse.json({ items: [profile], next_cursor: null });
+      }),
+      http.post("/api/v1/commands", () => {
+        submitted = true;
+        return HttpResponse.json({
+          aggregate_id: REQUEST_ID,
+          aggregate_version: 1,
+          command_id: "50000000-0000-0000-0000-000000000003",
+          event_ids: [],
+          data: { planning_request_id: REQUEST_ID },
+        }, { status: 201 });
+      }),
+    );
+    renderForm();
+
+    await user.type(screen.getByLabelText("需求目标"), "避免加载竞态");
+    await user.type(screen.getByLabelText("验收条件"), "配置加载后才能提交");
+    const submitButton = screen.getByRole("button", { name: "正在读取配置" });
+    expect(submitButton).toBeDisabled();
+    await user.click(submitButton);
+    expect(submitted).toBe(false);
+
+    releaseProfiles?.();
+    await screen.findByRole("option", { name: "默认规划器" });
+    await user.click(screen.getByRole("button", { name: "提交需求" }));
+    await screen.findByText("规划请求已创建");
+    expect(submitted).toBe(true);
   });
 
   it("requires an objective and one acceptance criterion", async () => {

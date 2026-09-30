@@ -51,6 +51,9 @@ from sidera_control_plane.domain.result_verification import (
 )
 
 _REQUEST_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-verification-request:v1")
+_RETRY_REQUEST_NAMESPACE = uuid5(
+    NAMESPACE_URL, "sidera:result-verification-retry-request:v1"
+)
 _EVENT_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-verification-event:v1")
 _RESULT_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-verification-result:v1")
 _RETRY_NAMESPACE = uuid5(NAMESPACE_URL, "sidera:result-verification-retry:v1")
@@ -441,8 +444,20 @@ class ResultVerificationService:
                     "previous_operation_id": str(operation.operation_id),
                     "attempt": existing.attempt,
                     "status": existing.status.value,
+                    "execution_request_id": str(
+                        _payload_uuid(existing.payload, "request_id")
+                    ),
                 },
             )
+
+        retry_request, retry_request_event_id = _schedule_retry_request(
+            uow,
+            operation=operation,
+            candidate=candidate,
+            operation_id=next_operation_id,
+            attempt=next_attempt,
+            now=now,
+        )
 
         next_operation = ResultOperationAttemptV1(
             operation_id=next_operation_id,
@@ -453,6 +468,7 @@ class ResultVerificationService:
             status=ResultOperationStatus.PENDING,
             payload={
                 **dict(operation.payload),
+                "request_id": str(retry_request.id),
                 "previous_operation_id": str(operation.operation_id),
                 "retry_reason": reason,
                 "retry_requested_by": str(envelope.id),
@@ -469,6 +485,18 @@ class ResultVerificationService:
             updated_at=now,
         )
         uow.results.save_operation(next_operation, expected_version=0)
+        if retry_request_event_id is not None:
+            uow.events.append_with_outbox(
+                _retry_request_event(
+                    retry_request,
+                    previous_request_id=_payload_uuid(operation.payload, "request_id"),
+                    operation_id=next_operation_id,
+                    attempt=next_attempt,
+                    candidate_id=candidate.id,
+                    causation_id=envelope.id,
+                    correlation_id=candidate.root_task_id,
+                )
+            )
         event_id = uuid5(_EVENT_NAMESPACE, f"retry:{next_operation.operation_id}")
         uow.events.append_with_outbox(
             EventData(
@@ -491,16 +519,20 @@ class ResultVerificationService:
                 correlation_id=candidate.root_task_id,
             )
         )
+        retry_event_ids = (
+            () if retry_request_event_id is None else (retry_request_event_id,)
+        )
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=next_operation.operation_id,
             aggregate_version=next_operation.version,
-            event_ids=(event_id,),
+            event_ids=retry_event_ids + (event_id,),
             data={
                 "operation_id": str(next_operation.operation_id),
                 "previous_operation_id": str(operation.operation_id),
                 "attempt": next_attempt,
                 "status": next_operation.status.value,
+                "execution_request_id": str(retry_request.id),
             },
         )
 
@@ -509,6 +541,136 @@ class ResultVerificationService:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ResultError("verification_clock_invalid", {})
         return value.astimezone(UTC)
+
+
+def _schedule_retry_request(
+    uow: ControlPlaneUnitOfWork,
+    *,
+    operation: ResultOperationAttemptV1,
+    candidate: IntegrationCandidateV1,
+    operation_id: UUID,
+    attempt: int,
+    now: datetime,
+) -> tuple[ExecutionRequest, UUID | None]:
+    source_request_id = _payload_uuid(operation.payload, "request_id")
+    source_request = uow.execution_requests.get(
+        source_request_id,
+        operation.workspace_id,
+        for_update=True,
+    )
+    if (
+        source_request is None
+        or source_request.result_derivation_kind != "verification"
+        or source_request.source_candidate_id != candidate.id
+        or source_request.root_task_id != candidate.root_task_id
+    ):
+        raise ResultError("verification_retry_request_scope_changed", {})
+
+    # Re-run the immutable candidate/plan checks before making another request;
+    # a retry must never silently run against a changed integration basis.
+    verification_manifest_for_request(uow, source_request)
+    request_id = verification_retry_request_id(operation_id, attempt)
+    existing = uow.execution_requests.get(
+        request_id,
+        operation.workspace_id,
+        for_update=True,
+    )
+    if existing is not None:
+        _validate_retry_request(existing, source_request, candidate)
+        return existing, None
+
+    request = ExecutionRequest.create(
+        request_id=request_id,
+        workspace_id=source_request.workspace_id,
+        planning_request_id=source_request.planning_request_id,
+        proposal_revision_id=source_request.proposal_revision_id,
+        plan_snapshot_id=source_request.plan_snapshot_id,
+        plan_generation=source_request.plan_generation,
+        root_task_id=source_request.root_task_id,
+        subtask_id=source_request.subtask_id,
+        worker_item_id=source_request.worker_item_id,
+        worker_item_key=source_request.worker_item_key,
+        intent_key=f"verification:{candidate.id}:retry:{attempt}",
+        purpose=source_request.purpose,
+        capability_requirements=source_request.capability_requirements,
+        adapter_preferences=source_request.adapter_preferences,
+        adapter_forbidden=source_request.adapter_forbidden,
+        budget_class=source_request.budget_class,
+        not_before=now,
+        max_attempts=source_request.max_attempts,
+        expected_artifact_refs=source_request.expected_artifact_refs,
+        expected_evidence_refs=source_request.expected_evidence_refs,
+        expected_outputs=source_request.expected_outputs,
+        collaboration_gate_mode=source_request.collaboration_gate_mode,
+        result_derivation_kind="verification",
+        source_candidate_id=candidate.id,
+        now=now,
+    )
+    request.mark_ready(now=now)
+    uow.execution_requests.add(request)
+    event_id = uuid5(_EVENT_NAMESPACE, f"retry-execution:{request.id}")
+    return request, event_id
+
+
+def _retry_request_event(
+    request: ExecutionRequest,
+    *,
+    previous_request_id: UUID,
+    operation_id: UUID,
+    attempt: int,
+    candidate_id: UUID,
+    causation_id: UUID,
+    correlation_id: UUID,
+) -> EventData:
+    return EventData(
+        id=uuid5(_EVENT_NAMESPACE, f"retry-execution:{request.id}"),
+        workspace_id=request.workspace_id,
+        aggregate_type="execution_request",
+        aggregate_id=request.id,
+        aggregate_version=request.version,
+        event_type="VerificationRetryExecutionScheduled",
+        payload={
+            "execution_request_id": str(request.id),
+            "previous_request_id": str(previous_request_id),
+            "operation_id": str(operation_id),
+            "candidate_id": str(candidate_id),
+            "attempt": attempt,
+            "purpose": request.purpose,
+            "provider": LOCAL_VERIFICATION_PROVIDER,
+        },
+        actor_type="system",
+        actor_id="result-verification",
+        causation_id=causation_id,
+        correlation_id=correlation_id,
+    )
+
+
+def _validate_retry_request(
+    request: ExecutionRequest,
+    source_request: ExecutionRequest,
+    candidate: IntegrationCandidateV1,
+) -> None:
+    if (
+        request.result_derivation_kind != "verification"
+        or request.source_candidate_id != candidate.id
+        or request.workspace_id != source_request.workspace_id
+        or request.root_task_id != source_request.root_task_id
+        or request.worker_item_id != source_request.worker_item_id
+        or request.worker_item_key != source_request.worker_item_key
+        or request.status
+        not in {
+            ExecutionRequestStatus.READY,
+            ExecutionRequestStatus.MATERIALIZED,
+        }
+    ):
+        raise ResultError("verification_retry_request_conflict", {})
+
+
+def verification_retry_request_id(operation_id: UUID, attempt: int) -> UUID:
+    _require_uuid(operation_id, "operation_id")
+    if type(attempt) is not int or attempt < 2:
+        raise ResultError("verification_retry_attempt_invalid", {})
+    return uuid5(_RETRY_REQUEST_NAMESPACE, f"{operation_id}:{attempt}")
 
 
 def finish_verification_in_uow(
@@ -746,6 +908,45 @@ def record_verification_observation(
         "attempt": attempt,
         "observation": observation.to_mapping(),
     }
+    pending_retry = uow.results.find_pending_verification_attempt(
+        workspace_id=workspace_id,
+        root_task_id=request.root_task_id,
+        request_id=request.id,
+        candidate_id=candidate_id,
+        check_key=check_key,
+        for_update=True,
+    )
+    if pending_retry is not None:
+        retry_payload = {
+            **dict(pending_retry.payload),
+            "execution_id": str(execution.id),
+            "request_id": str(request.id),
+            "candidate_id": str(candidate_id),
+            "candidate_hash": payload.get("candidate_hash"),
+            "check_key": check_key,
+            "check_hash": payload.get("check_hash"),
+            "attempt": pending_retry.attempt,
+            "runner_operation_id": str(observation.operation_id),
+            "observation": observation.to_mapping(),
+        }
+        occurred_at = getattr(event, "occurred_at", None)
+        if not isinstance(occurred_at, datetime) or occurred_at.tzinfo is None:
+            occurred_at = datetime.now(UTC)
+        updated_retry = replace(
+            pending_retry,
+            status=_operation_status_for_observation(observation.status),
+            payload=retry_payload,
+            failure_code=observation.failure_code,
+            version=pending_retry.version + 1,
+            updated_at=occurred_at.astimezone(UTC),
+        )
+        uow.results.save_operation(updated_retry, expected_version=pending_retry.version)
+        return finish_verification_in_uow(
+            uow,
+            workspace_id=workspace_id,
+            operation_id=pending_retry.operation_id,
+        )
+
     existing = uow.results.get_operation(
         observation.operation_id,
         workspace_id,

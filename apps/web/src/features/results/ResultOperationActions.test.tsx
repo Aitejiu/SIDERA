@@ -110,6 +110,21 @@ describe("ResultOperationActions", () => {
     expect(screen.queryByRole("button", { name: "局部返工" })).not.toBeInTheDocument();
   });
 
+  it("keeps result operations available when the current verification adapter cannot accept input", () => {
+    renderActions(resultView({
+      available_actions: [{
+        ...resultAction("RequestTaskRework"),
+        allowed_worker_item_ids: [WORKER_ITEM_ID],
+      }],
+    }), {
+      canIntervene: false,
+      canOperateResult: true,
+    });
+
+    expect(screen.getByRole("button", { name: "局部返工" })).toBeVisible();
+    expect(screen.queryByText("当前 WorkerItem 只读，局部修改需主 Agent / Revision")).not.toBeInTheDocument();
+  });
+
   it("submits additional budget as an increment and displays cumulative usage", async () => {
     const user = userEvent.setup();
     const requests: Record<string, unknown>[] = [];

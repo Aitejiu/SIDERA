@@ -3215,6 +3215,14 @@ class CommandStatusResponse(BaseModel):
     status: Literal["pending", "applied", "rejected"]
     result: CommandResponse | None = None
     error_code: str | None = None
+    command_type: str | None = None
+    target_type: AggregateType | None = None
+    target_id: UUID | None = None
+    expected_version: int | None = None
+    payload_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    payload: dict[str, Any] | None = None
 
     @classmethod
     def from_view(cls, view: CommandStatusView) -> "CommandStatusResponse":
@@ -3227,6 +3235,12 @@ class CommandStatusResponse(BaseModel):
                 else None
             ),
             error_code=view.error_code,
+            command_type=view.command_type,
+            target_type=cast(AggregateType | None, view.target_type),
+            target_id=view.target_id,
+            expected_version=view.expected_version,
+            payload_sha256=view.payload_sha256,
+            payload=view.payload,
         )
 
 

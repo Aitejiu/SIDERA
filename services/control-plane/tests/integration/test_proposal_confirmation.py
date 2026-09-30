@@ -12,6 +12,10 @@ from sqlalchemy import func, select, update
 
 from sidera_control_plane.adapters.fake_planner import _proposal_payload
 from sidera_control_plane.api.app import create_app
+from sidera_control_plane.application.knowledge_candidate_submission import (
+    KnowledgeCandidateSubmission,
+    KnowledgeCandidateSubmissionStatus,
+)
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
 )
@@ -50,9 +54,11 @@ from sidera_control_plane.domain.work_context import (
     WorkContextRevisionReason,
 )
 from sidera_control_plane.persistence.models import (
+    CommandModel,
     EventModel,
     ExecutionModel,
     ExecutionRequestModel,
+    KnowledgeCandidateSubmissionModel,
     OutboxMessageModel,
     PlanningProfileModel,
     PlanSnapshotModel,
@@ -629,6 +635,85 @@ def test_stale_proposal_reference_returns_actionable_conflict(
     }
     with database.session() as session:
         _assert_no_materialization_rows(session)
+
+
+def test_request_proposal_revision_discards_planner_candidate_atomically(
+    client: TestClient,
+    database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    request_id, _profile_id, content_hash, _proposal_id = seed_proposal(
+        uow_factory, workspace_id
+    )
+    candidate_ids = (uuid4(), uuid4())
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(
+            request_id, workspace_id, for_update=True
+        )
+        assert request is not None
+        planning_run_id = request.runs[0].id
+        for ordinal, candidate_id in enumerate(candidate_ids):
+            candidate_hash = f"{ordinal + 1:064x}"
+            uow.knowledge_candidate_submissions.add(
+                KnowledgeCandidateSubmission(
+                    id=candidate_id,
+                    workspace_id=workspace_id,
+                    producer_type="planner",
+                    producer_id=planning_run_id,
+                    planning_run_id=planning_run_id,
+                    execution_id=None,
+                    worker_item_id=None,
+                    task_id=None,
+                    subtask_task_id=None,
+                    artifact_refs=(),
+                    evidence_refs=(),
+                    proposal_hash=candidate_hash,
+                    content_ref=f"{uuid4()}-{candidate_hash}.json",
+                    content_bytes=1,
+                    knowledge_command_id=None,
+                    status=KnowledgeCandidateSubmissionStatus.WAITING_FOR_TASK,
+                    attempt=1,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    next_attempt_at=None,
+                    terminal_candidate_id=None,
+                    error_code=None,
+                    version=1,
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+
+    command_id = uuid4()
+    response = client.post(
+        "/api/v1/commands",
+        json={
+            "command_id": str(command_id),
+            "workspace_id": str(workspace_id),
+            "command_type": "RequestProposalRevision",
+            "target_type": "planning_request",
+            "actor": {"type": "integration", "id": "akashic-task-bridge"},
+            "target_id": str(request_id),
+            "expected_version": 4,
+            "idempotency_key": f"request-proposal-revision-{command_id}",
+            "correlation_id": str(command_id),
+            "payload": {
+                "current_proposal_revision": 1,
+                "current_proposal_content_hash": content_hash,
+                "feedback": "Add explicit test and rollback acceptance.",
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["brief_revision"] == 2
+    with database.session() as session:
+        for candidate_id in candidate_ids:
+            candidate = session.get(KnowledgeCandidateSubmissionModel, candidate_id)
+            assert candidate is not None
+            assert candidate.status == "discarded"
+        assert session.get(CommandModel, command_id) is not None
 
 
 def test_disabled_profile_rejects_before_materialization(

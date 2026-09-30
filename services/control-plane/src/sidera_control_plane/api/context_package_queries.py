@@ -64,9 +64,15 @@ def get_execution_context_package(
     service: Annotated[
         ContextPackageQueryService, Depends(get_context_package_query_service)
     ],
+    manifest_schema_version: Annotated[int, Query(ge=1)] = 1,
 ) -> ContextPackageResponse:
     return ContextPackageResponse.from_view(
-        service.get_by_consumer(workspace_id, execution_id, ContextPurpose.EXECUTION)
+        service.get_by_consumer(
+            workspace_id,
+            execution_id,
+            ContextPurpose.EXECUTION,
+            manifest_schema_version=manifest_schema_version,
+        )
     )
 
 

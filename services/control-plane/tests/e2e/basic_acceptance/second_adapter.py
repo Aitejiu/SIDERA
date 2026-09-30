@@ -136,8 +136,9 @@ def run_second_adapter(
     snapshot: SecondAdapterSnapshot | None = None,
     evidence_kind: Literal["contract", "real_user_flow"] = "contract",
 ) -> ScenarioEvidence:
+    run_id = _uuid(manifest.get("run_id"))
     builder = EvidenceBuilder(
-        run_id=_uuid(manifest.get("run_id")),
+        run_id=run_id,
         scenario="second-adapter",
         evidence_kind=evidence_kind,
         code_commit=_text(manifest.get("code_commit"), "0" * 40),
@@ -149,6 +150,13 @@ def run_second_adapter(
             incomplete=True,
             check_codes=("second_adapter_snapshot_not_supplied",),
             failure_code_override="second_adapter_snapshot_not_supplied",
+        )
+    if snapshot.run_id != run_id:
+        return builder.finish(
+            real_tests=0,
+            failed=1,
+            check_codes=("second_adapter_snapshot_run_id_mismatch",),
+            failure_code_override="second_adapter_snapshot_run_id_mismatch",
         )
     return build_second_adapter_evidence(builder, snapshot)
 

@@ -23,10 +23,12 @@ from sidera_control_plane.domain.modules import (
     UsageReportingCapability,
 )
 from sidera_control_plane.domain.planning import (
+    PlanningBriefRevision,
     PlanningRequest,
     PlanningRequestStatus,
     PlanningRunLease,
     PlanningRunLeaseStatus,
+    PlanningUsage,
 )
 from sidera_control_plane.domain.planning_profiles import (
     InvalidOutputPolicy,
@@ -84,7 +86,7 @@ def module_facts() -> tuple[ModuleDefinition, ModuleInstance]:
     )
 
 
-def profile(instance_id):
+def profile(instance_id, *, max_retries: int = 1):
     return PlanningProfile(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -110,7 +112,7 @@ def profile(instance_id):
             max_concurrency=2,
         ),
         retry_policy=PlanningRetryPolicy(
-            max_retries=1,
+            max_retries=max_retries,
             backoff_seconds=(1,),
             unknown_outcome_policy=UnknownOutcomePolicy.BLOCK,
             invalid_output_policy=InvalidOutputPolicy.RETRY,
@@ -124,7 +126,13 @@ def profile(instance_id):
     )
 
 
-def seed_expired_running_request(uow_factory, workspace_id):
+def seed_expired_running_request(
+    uow_factory,
+    workspace_id,
+    *,
+    max_retries: int = 1,
+    revision: bool = False,
+):
     definition, instance = module_facts()
     definition = replace(definition, workspace_id=workspace_id)
     instance = replace(
@@ -132,7 +140,10 @@ def seed_expired_running_request(uow_factory, workspace_id):
         workspace_id=workspace_id,
         definition_id=definition.id,
     )
-    stored_profile = replace(profile(instance.id), workspace_id=workspace_id)
+    stored_profile = replace(
+        profile(instance.id, max_retries=max_retries),
+        workspace_id=workspace_id,
+    )
     assert isinstance(definition.capabilities, PlannerAdapterCapabilityProfile)
     snapshot = stored_profile.snapshot(definition.capabilities)
     request = PlanningRequest.create(
@@ -151,6 +162,55 @@ def seed_expired_running_request(uow_factory, workspace_id):
         run_id=uuid4(),
         now=NOW,
     )
+    if revision:
+        first_run = request.runs[-1]
+        first_lease_id = uuid4()
+        request.start_planning(
+            run_id=first_run.id,
+            lease_id=first_lease_id,
+            fencing_token=first_run.attempt,
+            now=NOW,
+        )
+        request.succeed_run(
+            run_id=first_run.id,
+            lease_id=first_lease_id,
+            fencing_token=first_run.attempt,
+            provider_ref="provider://recovery-test",
+            structured_result_type="proposal",
+            usage=PlanningUsage.zero(),
+            now=NOW,
+        )
+        request.mark_proposal_ready(
+            run_id=first_run.id,
+            proposal_revision=1,
+            content_hash="a" * 64,
+            now=NOW,
+        )
+        previous_brief = request.briefs[-1]
+        feedback = "Add explicit rollback verification."
+        revision_brief = PlanningBriefRevision.create(
+            planning_request_id=request.id,
+            revision=2,
+            objective=previous_brief.objective,
+            constraints=previous_brief.constraints,
+            acceptance_criteria=previous_brief.acceptance_criteria,
+            context_refs=previous_brief.context_refs,
+            requested_outputs=previous_brief.requested_outputs,
+            user_feedback=feedback,
+            source_correlation=previous_brief.source_correlation,
+            created_by="operator",
+            created_at=NOW,
+        )
+        request.request_revision(
+            expected_proposal_revision=1,
+            expected_content_hash="a" * 64,
+            feedback=feedback,
+            brief=revision_brief,
+            new_run_id=uuid4(),
+            actor="operator",
+            now=NOW,
+        )
+
     run = request.runs[-1]
     lease_id = uuid4()
     request.start_planning(
@@ -202,6 +262,59 @@ def test_expired_lease_is_retried_as_a_new_attempt(
         assert len(request.runs) == 2
         assert request.runs[0].status.value == "failed"
         assert request.runs[1].status.value == "queued"
+
+
+def test_expired_lease_persists_failed_request_when_retry_budget_is_exhausted(
+    uow_factory, workspace_id
+) -> None:
+    request_id = seed_expired_running_request(
+        uow_factory,
+        workspace_id,
+        max_retries=0,
+    )
+    reconciler = PlanningReconciler(
+        uow_factory=uow_factory,
+        owner_id="planning-reconciler:integration",
+        clock=lambda: NOW,
+    )
+
+    result = reconciler.run_once(limit=10)
+
+    assert result.expired == 1
+    assert result.retried == 0
+    assert result.failed == 1
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        assert request.status is PlanningRequestStatus.FAILED
+        assert request.runs[-1].status.value == "failed"
+
+
+def test_new_brief_revision_has_its_own_retry_budget(
+    uow_factory, workspace_id
+) -> None:
+    request_id = seed_expired_running_request(
+        uow_factory,
+        workspace_id,
+        revision=True,
+    )
+    reconciler = PlanningReconciler(
+        uow_factory=uow_factory,
+        owner_id="planning-reconciler:integration",
+        clock=lambda: NOW,
+    )
+
+    result = reconciler.run_once(limit=10)
+
+    assert result.expired == 1
+    assert result.retried == 1
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(request_id, workspace_id)
+        assert request is not None
+        assert request.status is PlanningRequestStatus.PLANNING
+        assert len(request.runs) == 3
+        assert request.runs[-1].brief_revision == 2
+        assert request.runs[-1].status.value == "queued"
 
 
 def test_expired_lease_retry_rebuilds_planning_context_assembly(

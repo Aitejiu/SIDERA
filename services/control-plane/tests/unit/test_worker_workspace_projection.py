@@ -286,6 +286,16 @@ def test_worker_workspace_exposes_current_runtime_and_placement_history() -> Non
     )
 
 
+def test_completed_root_settles_worker_item_without_discarding_runtime_history() -> None:
+    workspace = _service(root_task_status="succeeded").compose_workspace()
+
+    assert workspace.worker_item.status == "succeeded"
+    assert workspace.current_runtime is not None
+    assert workspace.current_runtime.execution_status == "running"
+    assert workspace.current_step == "任务已完成"
+    assert workspace.next_action is None
+
+
 def test_worker_workspace_keeps_governance_summary_next_to_work_surface() -> None:
     collaboration = WorkerItemCollaborationSummaryProjection(
         enabled=True,

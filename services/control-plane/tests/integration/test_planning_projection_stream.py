@@ -79,7 +79,10 @@ def test_planning_event_is_replayed_by_existing_projection_stream(
             schema_version=1,
         )
         try:
-            return await anext(stream)
+            async for event in stream:
+                if event.startswith("id: "):
+                    return event
+            raise AssertionError("projection stream ended before a change event")
         finally:
             await stream.aclose()
 

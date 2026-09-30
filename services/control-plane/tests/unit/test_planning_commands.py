@@ -1434,6 +1434,86 @@ def test_request_proposal_revision_preserves_old_proposal_and_appends_brief() ->
     assert len(unit_of_work.planning_records.briefs) == 1
 
 
+def test_request_proposal_revision_uses_current_feedback_after_prior_revision() -> None:
+    definition, instance = module_facts()
+    stored_profile = profile(instance.id)
+    request = proposal_ready_request(stored_profile)
+    unit_of_work = unit(
+        definition,
+        instance,
+        stored_profile,
+        request,
+        current_proposal=SimpleNamespace(revision=1, content_hash=PROPOSAL_HASH),
+    )
+    handler = PlanningCommandHandler(
+        local_actor_type="local", local_actor_id="operator", clock=lambda: NOW
+    )
+
+    handler.handle(
+        unit_of_work,
+        envelope(
+            "RequestProposalRevision",
+            {
+                "current_proposal_revision": 1,
+                "current_proposal_content_hash": PROPOSAL_HASH,
+                "feedback": "Split implementation and verification.",
+            },
+            target_type="planning_request",
+            target_id=request.id,
+            expected_version=request.version,
+        ),
+    )
+
+    second_run = request.runs[-1]
+    second_lease_id = uuid4()
+    second_proposal_hash = "b" * 64
+    request.start_planning(
+        run_id=second_run.id,
+        lease_id=second_lease_id,
+        fencing_token=second_run.attempt,
+        now=NOW,
+    )
+    request.succeed_run(
+        run_id=second_run.id,
+        lease_id=second_lease_id,
+        fencing_token=second_run.attempt,
+        provider_ref="fake:proposal-2",
+        structured_result_type="planning.proposal.v2",
+        usage=second_run.usage,
+        now=NOW,
+    )
+    request.mark_proposal_ready(
+        run_id=second_run.id,
+        proposal_revision=2,
+        content_hash=second_proposal_hash,
+        now=NOW,
+    )
+    unit_of_work.planning_records.current_proposal = SimpleNamespace(
+        revision=2, content_hash=second_proposal_hash
+    )
+
+    result = handler.handle(
+        unit_of_work,
+        envelope(
+            "RequestProposalRevision",
+            {
+                "current_proposal_revision": 2,
+                "current_proposal_content_hash": second_proposal_hash,
+                "feedback": "Require an automated CSV behavior check.",
+            },
+            target_type="planning_request",
+            target_id=request.id,
+            expected_version=request.version,
+        ),
+    )
+
+    assert result.data["brief_revision"] == 3
+    assert request.briefs[-1].user_feedback == (
+        "Require an automated CSV behavior check."
+    )
+    assert request.runs[-1].brief_revision == 3
+
+
 def test_reject_planning_proposal_records_reason_without_deleting_proposal() -> None:
     definition, instance = module_facts()
     stored_profile = profile(instance.id)

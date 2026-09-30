@@ -353,7 +353,7 @@ def test_one_stale_intent_rejects_the_whole_decision_without_a_release(
     workspace_id: UUID,
     uow_factory,
 ) -> None:
-    ids, _snapshot, _reconciler, prepared = _prepare(
+    ids, _snapshot, reconciler, prepared = _prepare(
         database, workspace_id, uow_factory
     )
     second_request_id = uuid4()
@@ -408,6 +408,17 @@ def test_one_stale_intent_rejects_the_whole_decision_without_a_release(
 
     assert releases == []
     assert len(applications) == 2
+
+    # A stale decision writes a durable wakeup. The next collaboration pass
+    # must be able to consume that wakeup and evaluate the current projection.
+    next_prepared = reconciler.prepare_next(
+        owner_id="collaboration-stale-retry",
+        now=NOW + timedelta(seconds=1),
+        workspace_id=workspace_id,
+        root_task_id=prepared.run.root_task_id,
+    )
+    assert next_prepared is not None
+    assert next_prepared.projection.content_hash != prepared.projection.content_hash
 
 
 def test_new_plan_head_makes_old_decision_stale_and_keeps_ledger_audit(

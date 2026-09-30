@@ -28,6 +28,7 @@ dist/
 coverage/
 playwright-report/
 test-results/
+/apps/web/test-results-interview/
 
 # Runtime state
 data/

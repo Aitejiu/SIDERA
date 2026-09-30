@@ -394,6 +394,33 @@ def test_create_target_is_new_held_lineage_and_idempotent() -> None:
     assert source_execution.version == 1
 
 
+def test_create_target_allows_target_heartbeat_version_to_advance() -> None:
+    (
+        uow,
+        proposal,
+        transition,
+        source_request,
+        source_execution,
+        source_manifest,
+        target_worker,
+    ) = _fixture()
+    uow.workers.values[target_worker.id] = replace(
+        target_worker,
+        version=target_worker.version + 1,
+    )
+
+    identity = HandoffTargetService(lambda: uow).create_target(
+        transition=transition,
+        proposal=proposal,
+        source_request=source_request,
+        source_execution=source_execution,
+        source_manifest=source_manifest,
+        now=NOW,
+    )
+
+    assert identity.execution_id != source_execution.id
+
+
 def test_target_creation_rejects_unfrozen_source() -> None:
     (
         uow,

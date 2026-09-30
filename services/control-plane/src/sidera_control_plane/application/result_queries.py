@@ -118,6 +118,7 @@ class ResultRootSnapshot:
     plan: TaskPlanSnapshot | None
     current_candidate: IntegrationCandidateV1 | None
     current_sources: tuple[CodeResultSnapshotV1, ...]
+    current_code_result: CodeResultSnapshotV1 | None
     current_verifications: tuple[VerificationResultV1, ...]
     verification_operation_versions: tuple[tuple[UUID, int], ...]
     current_rework: tuple[ReworkRecordV1, ...]
@@ -137,6 +138,7 @@ class ResultDetailSnapshot:
     plan: TaskPlanSnapshot | None
     candidate: IntegrationCandidateV1
     source_results: tuple[CodeResultSnapshotV1, ...]
+    code_result: CodeResultSnapshotV1 | None
     verifications: ResultPage[VerificationResultV1]
     rework: ResultPage[ReworkRecordV1]
     acceptance: TaskAcceptanceDecisionV1 | None
@@ -769,6 +771,11 @@ def _overview(
                     if current is not None and item.id == current.id
                     else ()
                 ),
+                code_result=(
+                    snapshot.current_code_result
+                    if current is not None and item.id == current.id
+                    else None
+                ),
                 artifacts=(
                     snapshot.artifacts
                     if current is not None and item.id == current.id
@@ -790,7 +797,7 @@ def _overview(
             candidate_id=None,
         ),
     )
-    actions = _actions(snapshot, stage)
+    actions = _actions(snapshot, stage, criteria)
     return TaskResultOverview(
         workspace_id=workspace_id,
         root_task_id=root_task_id,
@@ -806,6 +813,7 @@ def _overview(
                 current,
                 is_current=True,
                 sources=snapshot.current_sources,
+                code_result=snapshot.current_code_result,
                 artifacts=snapshot.artifacts,
                 storage_inspector=storage_inspector,
             )
@@ -835,6 +843,7 @@ def _detail(
         snapshot.candidate,
         is_current=snapshot.candidate.id == current_id,
         sources=snapshot.source_results,
+        code_result=snapshot.code_result,
         artifacts=snapshot.artifacts,
         storage_inspector=storage_inspector,
     )
@@ -879,12 +888,10 @@ def _candidate(
     *,
     is_current: bool,
     sources: Sequence[CodeResultSnapshotV1],
+    code_result: CodeResultSnapshotV1 | None,
     artifacts: Sequence[ResultArtifactFact],
     storage_inspector: ResultStorageInspector | None,
 ) -> ResultCandidateView:
-    code_result = next(
-        (item for item in sources if item.id == candidate.code_result_id), None
-    )
     return ResultCandidateView(
         candidate_id=candidate.id,
         candidate_hash=candidate.content_hash,
@@ -1033,7 +1040,11 @@ def _stage(snapshot: ResultRootSnapshot, criteria: Sequence[ResultCriterionView]
             ResultOperationStatus.PENDING.value,
             ResultOperationStatus.RUNNING.value,
         }:
-            return "applying" if operation.operation_kind == "apply" else "verifying"
+            if operation.operation_kind == "apply":
+                return "applying"
+            if operation.operation_kind == "finalization":
+                return "finalizing"
+            return "verifying"
         if operation.status in {
             ResultOperationStatus.BLOCKED.value,
             ResultOperationStatus.FAILED.value,
@@ -1046,6 +1057,8 @@ def _stage(snapshot: ResultRootSnapshot, criteria: Sequence[ResultCriterionView]
     if snapshot.current_candidate is not None:
         if any(item.verification_status in {"unknown", "interrupted", "blocked"} for item in criteria):
             return "attention"
+        if _automatic_verification_pending(criteria):
+            return "verifying"
         return "awaiting_acceptance"
     return "waiting"
 
@@ -1066,7 +1079,11 @@ def _blocking_reasons(snapshot: ResultRootSnapshot) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reasons))
 
 
-def _actions(snapshot: ResultRootSnapshot, stage: str) -> tuple[ResultActionView, ...]:
+def _actions(
+    snapshot: ResultRootSnapshot,
+    stage: str,
+    criteria: Sequence[ResultCriterionView],
+) -> tuple[ResultActionView, ...]:
     if snapshot.head is None or snapshot.current_candidate is None:
         return ()
     candidate = snapshot.current_candidate
@@ -1104,48 +1121,58 @@ def _actions(snapshot: ResultRootSnapshot, stage: str) -> tuple[ResultActionView
         return ()
     if snapshot.acceptance is not None or stage == "completed":
         return ()
-    actions: list[ResultActionView] = [
-        ResultActionView(
-            action="accept_candidate",
-            command_type="CompleteTask",
-            target_type="task",
-            target_id=snapshot.task.task_id,
-            expected_version=snapshot.task.version,
-            expected_result_version=head.result_version,
-            expected_fingerprint=candidate.content_hash,
-            candidate_id=candidate.id,
-            candidate_hash=candidate.content_hash,
-            plan_content_hash=candidate.plan_content_hash,
-            requires_reason=False,
-        ),
-        ResultActionView(
-            action="request_rework",
-            command_type="RequestTaskRework",
-            target_type="task",
-            target_id=snapshot.task.task_id,
-            expected_version=head.result_version,
-            expected_result_version=head.result_version,
-            expected_fingerprint=candidate.content_hash,
-            candidate_id=candidate.id,
-            candidate_hash=candidate.content_hash,
-            plan_content_hash=candidate.plan_content_hash,
-            requires_reason=True,
-            allowed_worker_item_ids=_rework_worker_ids(snapshot.plan),
-        ),
-        ResultActionView(
-            action="authorize_additional_rework",
-            command_type="AuthorizeAdditionalRework",
-            target_type="task",
-            target_id=snapshot.task.task_id,
-            expected_version=head.result_version,
-            expected_result_version=head.result_version,
-            expected_fingerprint=candidate.content_hash,
-            candidate_id=candidate.id,
-            candidate_hash=candidate.content_hash,
-            plan_content_hash=candidate.plan_content_hash,
-            requires_reason=True,
-        ),
-    ]
+    acceptance_blocked = _automatic_verification_pending(criteria) or any(
+        item.verification_status in {"unknown", "interrupted", "blocked"}
+        for item in criteria
+    )
+    actions: list[ResultActionView] = []
+    if not acceptance_blocked:
+        actions.append(
+            ResultActionView(
+                action="accept_candidate",
+                command_type="CompleteTask",
+                target_type="task",
+                target_id=snapshot.task.task_id,
+                expected_version=snapshot.task.version,
+                expected_result_version=head.result_version,
+                expected_fingerprint=candidate.content_hash,
+                candidate_id=candidate.id,
+                candidate_hash=candidate.content_hash,
+                plan_content_hash=candidate.plan_content_hash,
+                requires_reason=False,
+            )
+        )
+    actions.extend(
+        [
+            ResultActionView(
+                action="request_rework",
+                command_type="RequestTaskRework",
+                target_type="task",
+                target_id=snapshot.task.task_id,
+                expected_version=head.result_version,
+                expected_result_version=head.result_version,
+                expected_fingerprint=candidate.content_hash,
+                candidate_id=candidate.id,
+                candidate_hash=candidate.content_hash,
+                plan_content_hash=candidate.plan_content_hash,
+                requires_reason=True,
+                allowed_worker_item_ids=_rework_worker_ids(snapshot.plan),
+            ),
+            ResultActionView(
+                action="authorize_additional_rework",
+                command_type="AuthorizeAdditionalRework",
+                target_type="task",
+                target_id=snapshot.task.task_id,
+                expected_version=head.result_version,
+                expected_result_version=head.result_version,
+                expected_fingerprint=candidate.content_hash,
+                candidate_id=candidate.id,
+                candidate_hash=candidate.content_hash,
+                plan_content_hash=candidate.plan_content_hash,
+                requires_reason=True,
+            ),
+        ]
+    )
     actions.extend(
         _retry_verification_actions(
             snapshot.current_verifications,
@@ -1172,6 +1199,15 @@ def _actions(snapshot: ResultRootSnapshot, stage: str) -> tuple[ResultActionView
             )
         )
     return tuple(actions)
+
+
+def _automatic_verification_pending(
+    criteria: Sequence[ResultCriterionView],
+) -> bool:
+    return any(
+        item.mode == "automatic" and item.verification_status == "not_run"
+        for item in criteria
+    )
 
 
 _RETRYABLE_FAILURE_CODES = frozenset(

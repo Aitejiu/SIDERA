@@ -149,7 +149,7 @@ function SubtaskContent({
           <h1 id="subtask-title">{workspace.subtask.title}</h1>
           <p className="subtask-page__current-action">
             <span>当前进展</span>
-            {workspace.subtask.current_action ?? "尚未开始"}
+            {workspace.subtask.current_action ?? (status.kind === "completed" ? "已完成" : "尚未开始")}
           </p>
         </div>
         <div className="subtask-page__meta">

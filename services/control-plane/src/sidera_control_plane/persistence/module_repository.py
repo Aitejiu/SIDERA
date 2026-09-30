@@ -342,6 +342,10 @@ def capability_profile_to_payload(
             payload["code_result_versions"] = list(profile.code_result_versions)
         if profile.verification_versions:
             payload["verification_versions"] = list(profile.verification_versions)
+        if profile.turn_completion_versions:
+            payload["turn_completion_versions"] = list(
+                profile.turn_completion_versions
+            )
         return payload
     if isinstance(profile, WorkspaceProviderCapabilityProfile):
         payload = {
@@ -446,6 +450,9 @@ def capability_profile_from_payload(
             ),
             verification_versions=_version_tuple_capability(
                 payload, "verification_versions"
+            ),
+            turn_completion_versions=_version_tuple_capability(
+                payload, "turn_completion_versions"
             ),
         )
 
@@ -629,6 +636,7 @@ _WORKER_FIELDS = frozenset(
         "handoff_inspection",
         "code_result_versions",
         "verification_versions",
+        "turn_completion_versions",
     }
 )
 _LEGACY_WORKER_FIELDS = frozenset(

@@ -596,6 +596,11 @@ class ResultInputQueryService:
                 continue
             if getattr(dependency.enforcement, "value", dependency.enforcement) != "hard":
                 continue
+            if not (
+                dependency.required_artifact_refs
+                or dependency.required_evidence_refs
+            ):
+                continue
             upstream = requests.get(dependency.upstream_request_id)
             if upstream is None:
                 continue

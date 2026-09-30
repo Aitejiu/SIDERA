@@ -256,6 +256,29 @@ describe("SubtaskPage", () => {
     expect(screen.getByText("重复通知测试通过。")).toBeVisible();
   });
 
+  it("shows a completed subtask without a fake pending action", async () => {
+    server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/subtasks/${SUBTASK_KEY}`, () => HttpResponse.json({
+      ...workspace,
+      subtask: { ...workspace.subtask, state: "succeeded", current_action: null },
+      worker_items: workspace.worker_items.map((item) => ({ ...item, status: "succeeded" })),
+      attention_items: [],
+      collaboration: {
+        ...workspace.collaboration,
+        satisfied_input_count: workspace.collaboration.required_input_count,
+        waiting_upstream_subtasks: [],
+        missing_artifact_refs: [],
+        missing_evidence_refs: [],
+        waiting_worker_item_count: 0,
+      },
+    })));
+
+    renderPage();
+
+    const currentProgress = (await screen.findByText("当前进展")).closest("p");
+    expect(currentProgress).toHaveTextContent("已完成");
+    expect(screen.queryByRole("region", { name: "当前卡点与待处理" })).not.toBeInTheDocument();
+  });
+
   it("opens a normal attention item in its own WorkerItem workspace", async () => {
     server.use(http.get(`/api/v1/tasks/${ROOT_TASK_ID}/subtasks/${SUBTASK_KEY}`, () => HttpResponse.json({
       ...workspace,

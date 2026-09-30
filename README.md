@@ -34,5 +34,6 @@
 
 - [快速开始](docs/deployment/initial-demo.md)：安装、启动与常见问题。
 - [使用指南](docs/guide/workspace.md)：查看任务、定位卡点、介入和阅读 Trace。
+- [本地维护现状](docs/deployment/initial-demo.md#本地维护现状)：检查演示 run，查看显式 inventory 维护命令和恢复边界。
 - [集成与 API](docs/api/README.md)：接入自己的 Agent、工具或界面。
 - [问题反馈](https://github.com/Aitejiu/SIDERA/issues)：提交使用问题，请勿附带密钥或私人任务内容。

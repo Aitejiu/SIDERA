@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
@@ -27,6 +28,19 @@ const ITEM = {
 function LocationProbe() {
   const location = useLocation();
   return <output data-testid="attention-location">{location.pathname}</output>;
+}
+
+function RefreshingAttentionPanel() {
+  const [items, setItems] = useState([ITEM]);
+  return (
+    <AttentionPanel
+      workspaceId={WORKSPACE_ID}
+      rootTaskId={ROOT_TASK_ID}
+      rootTaskVersion={1}
+      items={items}
+      onRefresh={async () => setItems([])}
+    />
+  );
 }
 
 describe("AttentionPanel", () => {
@@ -136,6 +150,23 @@ describe("AttentionPanel", () => {
     expect((requestBody?.payload as Record<string, unknown>).attention_key).toBe(ITEM.key);
     expect((requestBody?.payload as Record<string, unknown>).source_correlation_id).toBe(ITEM.correlation_id);
     expect((requestBody?.payload as Record<string, unknown>).source_resource_version).toBe(ITEM.resource_version);
+  });
+
+  it("refreshes away a cached item when the source is no longer current", async () => {
+    server.use(
+      http.post("/api/v1/commands", () => HttpResponse.json(
+        { error: { code: "validation_error", message: "attention item is no longer current" } },
+        { status: 409 },
+      )),
+    );
+
+    const user = userEvent.setup();
+    render(<RefreshingAttentionPanel />, { wrapper: MemoryRouter });
+
+    await user.click(screen.getByRole("button", { name: "确认已处理" }));
+
+    expect(await screen.findByText("当前没有待确认事项")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("navigates to a release proposal without acknowledging it", async () => {

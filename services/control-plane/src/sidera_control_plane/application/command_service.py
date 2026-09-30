@@ -4,6 +4,8 @@ from collections.abc import Callable
 from typing import Any, Protocol
 from uuid import UUID
 
+from sqlalchemy.exc import OperationalError
+
 from sidera_control_plane.application.errors import (
     IdempotencyConflict,
     UnsupportedCommand,
@@ -16,6 +18,8 @@ from sidera_control_plane.domain.commands import (
 )
 from sidera_control_plane.domain.errors import DomainError, ReplayedDomainError
 from sidera_control_plane.persistence.repositories import ConcurrentCommandCommit
+
+_MAX_DEADLOCK_RETRIES = 2
 
 
 class CommandHandler(Protocol):
@@ -47,10 +51,18 @@ class CommandService:
             raise UnsupportedCommand(f"unsupported command: {envelope.command_type}")
 
         request_hash = hash_request(envelope)
-        try:
-            return self._handle_once(envelope, request_hash, handler)
-        except ConcurrentCommandCommit:
-            return self._recover_concurrent(envelope, request_hash)
+        deadlock_retries = 0
+        while True:
+            try:
+                return self._handle_once(envelope, request_hash, handler)
+            except ConcurrentCommandCommit:
+                return self._recover_concurrent(envelope, request_hash)
+            except OperationalError as exc:
+                if not _is_postgres_deadlock(exc):
+                    raise
+                if deadlock_retries >= _MAX_DEADLOCK_RETRIES:
+                    raise
+                deadlock_retries += 1
 
     def _handle_once(
         self,
@@ -103,6 +115,13 @@ class CommandService:
 
 def hash_request(envelope: CommandEnvelope) -> str:
     return _hash_request(envelope, include_target_type=True)
+
+
+def _is_postgres_deadlock(error: OperationalError) -> bool:
+    original = error.orig
+    return getattr(original, "sqlstate", None) == "40P01" or getattr(
+        original, "pgcode", None
+    ) == "40P01"
 
 
 def _legacy_hash_request(envelope: CommandEnvelope) -> str:

@@ -227,6 +227,8 @@ class MainAgentAdapter(Protocol):
         self,
         thread_id: str,
         input_text: str,
+        *,
+        operation_id: str | None = None,
     ) -> MainAgentTurnHandle: ...
 
     async def read_turn(self, thread_id: str, turn_id: str) -> MainAgentTurn: ...

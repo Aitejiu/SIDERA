@@ -34,6 +34,7 @@ def test_candidate_publish_does_not_complete_root(result_scenario) -> None:
         "subtask_workspace",
         "worker_item_workspace",
         "worker_item_activity",
+        "result_overview",
     }
     assert all(
         change.resource_id
@@ -42,7 +43,12 @@ def test_candidate_publish_does_not_complete_root(result_scenario) -> None:
             if change.projection_type == "executions"
             else result_scenario.root_task_id
             if change.projection_type
-            in {"task_overview", "task_graph", "subtask_workspace"}
+            in {
+                "task_overview",
+                "task_graph",
+                "subtask_workspace",
+                "result_overview",
+            }
             else result_scenario.worker_item_ids["summary"]
         )
         for change in changes

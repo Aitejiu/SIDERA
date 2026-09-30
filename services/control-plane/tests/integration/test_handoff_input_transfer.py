@@ -6,13 +6,20 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import func, select, update
 
+from sidera_control_plane.application.code_result_capture import (
+    CODE_RESULT_CAPTURE_OPERATION_KIND,
+    code_capture_operation_id,
+)
 from sidera_control_plane.application.handoff_input_transfer import (
+    HandoffInputTransferError,
     HandoffInputTransferService,
 )
+from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.domain.execution import ExecutionSession, ExecutionStatus
 from sidera_control_plane.domain.handoff_evidence import HandoffContextBundle
 from sidera_control_plane.domain.handoffs import HandoffPhase, HandoffWriterState
 from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
+from sidera_control_plane.domain.result_operations import ResultOperationStatus
 from sidera_control_plane.domain.workspace import workspace_location_ref_hash
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
@@ -195,3 +202,61 @@ def test_safe_input_transfer_persists_lineage_and_is_restart_idempotent(
     assert source.superseded_reason == "handoff_transferred"
     assert derived_count == 1
     assert persisted_session is not None
+
+
+def test_safe_input_transfer_rejects_a_finalizing_target_session(
+    database: Database,
+    workspace_id: UUID,
+    uow_factory,
+) -> None:
+    fixture, _runtime = seed_handoff(database, workspace_id)
+    target_session_id = _prepare_transfer(uow_factory, fixture, workspace_id)
+    service = HandoffInputTransferService(uow_factory)
+    with uow_factory() as uow:
+        transition = uow.handoff_transitions.get(fixture.transition_id, workspace_id)
+        target_execution = uow.executions.get(
+            fixture.target_execution_id, workspace_id
+        )
+        assert transition is not None
+        assert target_execution is not None
+        item = uow.worker_items.get(transition.worker_item_id, workspace_id)
+        assert item is not None
+        operation = ResultOperationAttemptV1(
+            operation_id=code_capture_operation_id(target_execution.id),
+            workspace_id=workspace_id,
+            root_task_id=item.root_task_id,
+            operation_kind=CODE_RESULT_CAPTURE_OPERATION_KIND,
+            attempt=1,
+            status=ResultOperationStatus.RUNNING,
+            payload={"terminal_observed": True, "terminal_outcome": "succeeded"},
+            lease_owner=None,
+            lease_token=None,
+            lease_expiry=None,
+            receipt_ref=None,
+            failure_code=None,
+            version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        uow.results.save_operation(operation, expected_version=0)
+    classification = service.classify_source_inputs(
+        transition=transition, now=NOW
+    )
+
+    with pytest.raises(HandoffInputTransferError) as caught:
+        service.transfer_safe_inputs(
+            transition=transition,
+            target_execution=target_execution,
+            target_session_id=target_session_id,
+            classification=classification,
+            now=NOW,
+        )
+
+    assert caught.value.code == "handoff_input_target_finalizing"
+    with database.session() as session:
+        derived_count = session.scalar(
+            select(func.count())
+            .select_from(ExecutionInputModel)
+            .where(ExecutionInputModel.handoff_transition_id == fixture.transition_id)
+        )
+    assert derived_count == 0

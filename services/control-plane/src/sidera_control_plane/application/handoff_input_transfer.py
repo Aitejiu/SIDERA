@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.code_result_capture import (
+    code_capture_operation_id,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.execution import (
@@ -506,6 +509,20 @@ class HandoffInputTransferService:
         target_session_id: UUID,
         now: datetime,
     ) -> ExecutionInput:
+        terminal_operation = uow.results.get_operation(
+            code_capture_operation_id(target_execution.id),
+            transition.workspace_id,
+            for_update=True,
+        )
+        terminal_payload = getattr(terminal_operation, "payload", None)
+        if (
+            isinstance(terminal_payload, Mapping)
+            and terminal_payload.get("terminal_observed") is True
+        ):
+            raise HandoffInputTransferError(
+                "handoff target execution is finalizing",
+                code="handoff_input_target_finalizing",
+            )
         key = f"handoff:{transition.id}:{source.id}"
         existing = uow.execution_inputs.find_by_client_idempotency_key(
             target_session_id,

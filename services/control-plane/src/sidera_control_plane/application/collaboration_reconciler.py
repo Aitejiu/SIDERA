@@ -43,6 +43,7 @@ from sidera_control_plane.domain.plan_revisions import (
     RootTaskPlanHead,
     plan_snapshot_content_hash,
 )
+from sidera_control_plane.domain.plan_transitions import PlanTransitionStatus
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 
 if TYPE_CHECKING:
@@ -65,6 +66,7 @@ class CollaborationRuntimeResolverPort(Protocol):
 
 
 FactStoreFactory = Callable[[ControlPlaneUnitOfWork], CollaborationFactStorePort]
+EvaluationGate = Callable[[CollaborationRun], bool]
 RuntimeResolverFactory = Callable[
     [ModuleRepositoryPort], CollaborationRuntimeResolverPort
 ]
@@ -96,6 +98,7 @@ class CollaborationReconciler:
         default_workspace_id: UUID | None = None,
         default_root_task_id: UUID | None = None,
         governance_reconciler: CollaborationGovernanceReconciler | None = None,
+        evaluation_gate: EvaluationGate | None = None,
     ) -> None:
         if evaluation_lease_ttl <= timedelta(0):
             raise ValueError("evaluation_lease_ttl must be positive")
@@ -115,6 +118,7 @@ class CollaborationReconciler:
         self._default_workspace_id = default_workspace_id
         self._default_root_task_id = default_root_task_id
         self._governance_reconciler = governance_reconciler
+        self._evaluation_gate = evaluation_gate
 
     def prepare_next(
         self,
@@ -436,10 +440,15 @@ class CollaborationReconciler:
         )
         if recovered is not None:
             return recovered
-        if (
-            run.last_projection_snapshot_id is not None
-            and fact_cursor <= run.last_evaluated_change_cursor
-        ):
+        producer_closed = _producer_closed(uow, snapshot)
+        cursor_advanced = (
+            run.last_projection_snapshot_id is None
+            or fact_cursor > run.last_evaluated_change_cursor
+        )
+        transition_just_closed = (
+            snapshot.parent_snapshot_id is not None and producer_closed
+        )
+        if not cursor_advanced and not transition_just_closed:
             return None
 
         facts = self._fact_store_factory(uow).load(
@@ -447,13 +456,8 @@ class CollaborationReconciler:
             run,
             fact_cursor=fact_cursor,
         )
-        projection = self._projection_assembler.assemble(
-            facts,
-            fact_cursor=fact_cursor,
-            now=now,
-        )
         if _run_is_complete(facts):
-            if run.status is CollaborationRunStatus.ACTIVE:
+            if producer_closed and run.status is CollaborationRunStatus.ACTIVE:
                 previous_version = run.resource_version
                 run.complete(now=now)
                 uow.collaboration_runs.save(run, previous_version)
@@ -464,6 +468,20 @@ class CollaborationReconciler:
                     owner_id=owner_id,
                     payload={},
                 )
+            return None
+
+        if not producer_closed and not _has_open_release_required_requests(facts):
+            return None
+        if not cursor_advanced:
+            return None
+
+        projection = self._projection_assembler.assemble(
+            facts,
+            fact_cursor=fact_cursor,
+            now=now,
+        )
+
+        if self._evaluation_gate is not None and not self._evaluation_gate(run):
             return None
 
         return self._prepare_evaluation(
@@ -958,6 +976,34 @@ def _run_is_complete(facts: CollaborationFacts) -> bool:
         ):
             return False
     return True
+
+
+def _producer_closed(
+    uow: ControlPlaneUnitOfWork, snapshot: TaskPlanSnapshot
+) -> bool:
+    if snapshot.parent_snapshot_id is None:
+        return True
+    transition = uow.plan_transitions.get_for_target(
+        workspace_id=snapshot.workspace_id,
+        root_task_id=snapshot.root_task_id,
+        plan_snapshot_id=snapshot.id,
+        plan_generation=snapshot.generation,
+    )
+    return (
+        transition is not None
+        and transition.from_snapshot_id == snapshot.parent_snapshot_id
+        and transition.from_generation == snapshot.generation - 1
+        and transition.status is PlanTransitionStatus.CONVERGED
+    )
+
+
+def _has_open_release_required_requests(facts: CollaborationFacts) -> bool:
+    closed_statuses = {"materialized", "cancelled", "obsolete"}
+    return any(
+        request.collaboration_gate_mode == "release_required"
+        and request.status not in closed_statuses
+        for request in facts.requests
+    )
 
 
 def _snapshot_hash(snapshot: TaskPlanSnapshot) -> str:

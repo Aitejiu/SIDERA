@@ -215,6 +215,12 @@ class TurnRelayRegistry:
     def get(self, thread_id: str, turn_id: str) -> TurnRelay | None:
         return self._relays.get((thread_id, turn_id))
 
+    async def shutdown_turn(self, thread_id: str, turn_id: str) -> None:
+        async with self._lock:
+            relay = self._relays.get((thread_id, turn_id))
+        if relay is not None:
+            await relay.shutdown()
+
     def availability(
         self,
         thread_id: str,

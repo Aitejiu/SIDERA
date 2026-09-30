@@ -7,6 +7,7 @@ from tests.e2e.basic_acceptance.evidence import EvidenceBuilder
 from tests.e2e.basic_acceptance.recovery import (
     build_recovery_evidence,
     build_runtime_limit_evidence,
+    run_recovery,
 )
 
 
@@ -74,6 +75,18 @@ def test_recovery_preserves_operation_and_pending_acceptance() -> None:
 
     assert report.status == "PASS"
     assert "unknown_outcome_reconciled" in report.check_codes
+
+
+def test_recovery_runner_rejects_snapshot_from_another_run() -> None:
+    manifest = {
+        "run_id": str(uuid4()),
+        "code_commit": "a" * 40,
+        "runtime_fingerprint": "b" * 64,
+    }
+    report = run_recovery(manifest, snapshot=_snapshot())
+
+    assert report.status == "FAIL"
+    assert report.failure_code == "recovery_snapshot_run_id_mismatch"
 
 
 def test_unknown_result_cannot_start_a_replacement() -> None:

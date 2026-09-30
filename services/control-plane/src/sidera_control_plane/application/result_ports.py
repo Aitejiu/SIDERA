@@ -861,6 +861,19 @@ class ResultRepositoryPort(Protocol):
     ) -> VerificationResultV1 | None:
         raise NotImplementedError
 
+    def find_pending_verification_attempt(
+        self,
+        *,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        request_id: UUID,
+        candidate_id: UUID,
+        check_key: str,
+        for_update: bool = False,
+    ) -> ResultOperationAttemptV1 | None:
+        """Find the logical retry operation owned by one verification request."""
+        raise NotImplementedError
+
     def list_verification_results(
         self, candidate_id: UUID, workspace_id: UUID
     ) -> tuple[VerificationResultV1, ...]:

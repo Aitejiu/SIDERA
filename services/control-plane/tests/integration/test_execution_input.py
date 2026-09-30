@@ -1,10 +1,17 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 
+from sidera_control_plane.application.code_result_capture import (
+    CODE_RESULT_CAPTURE_OPERATION_KIND,
+    CodeResultCaptureService,
+    code_capture_operation_id,
+)
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_commands import (
     ExecutionInputCommandHandler,
@@ -14,6 +21,7 @@ from sidera_control_plane.application.handoff_gate import (
     HandoffOperationGate,
 )
 from sidera_control_plane.application.ports import WorkerItemPlacement
+from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import (
     ExecutionContextChanged,
@@ -25,6 +33,10 @@ from sidera_control_plane.domain.plans import (
     TaskPlanSnapshot,
     WorkerItemPlanItem,
     WorkItemKind,
+)
+from sidera_control_plane.domain.result_operations import (
+    ResultError,
+    ResultOperationStatus,
 )
 from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.persistence.database import Database
@@ -378,6 +390,79 @@ def test_input_command_persists_queue_outbox_and_client_replay(
         ) == before_package_count
 
 
+def test_input_command_rejects_after_terminal_observation(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    now = NOW
+    operation = ResultOperationAttemptV1(
+        operation_id=code_capture_operation_id(ids["execution_id"]),
+        workspace_id=workspace_id,
+        root_task_id=ids["task_id"],
+        operation_kind=CODE_RESULT_CAPTURE_OPERATION_KIND,
+        attempt=1,
+        status=ResultOperationStatus.RUNNING,
+        payload={"terminal_observed": True, "terminal_outcome": "succeeded"},
+        lease_owner=None,
+        lease_token=None,
+        lease_expiry=None,
+        receipt_ref=None,
+        failure_code=None,
+        version=1,
+        created_at=now,
+        updated_at=now,
+    )
+    with SqlAlchemyUnitOfWork(database) as uow:
+        uow.results.save_operation(operation, expected_version=0)
+
+    envelope = _envelope(
+        workspace_id,
+        ids["session_id"],
+        ids["execution_id"],
+        "SendExecutionInput",
+        "after-terminal-observation",
+        payload={"text": "This input arrived too late", "attachment_refs": []},
+        context=_context(ids),
+    )
+
+    with pytest.raises(ExecutionContextChanged) as caught:
+        _service(database).handle(envelope)
+
+    assert "execution_finalizing" in caught.value.changed_fields
+    with database.session() as session:
+        assert session.query(ExecutionInputModel).count() == 0
+        rejected = session.query(CommandModel).filter_by(id=envelope.id).one()
+        assert rejected.status == "rejected"
+
+
+def test_input_command_rejects_a_target_session_different_from_context(
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    service = _service(database)
+    envelope = _envelope(
+        workspace_id,
+        uuid4(),
+        ids["execution_id"],
+        "SendExecutionInput",
+        "wrong-target-session",
+        payload={"text": "must not be queued", "attachment_refs": []},
+        context=_context(ids),
+    )
+
+    with pytest.raises(ExecutionContextChanged) as error:
+        service.handle(envelope)
+
+    assert error.value.changed_fields == ("session_id",)
+    with database.session() as db_session:
+        assert db_session.query(ExecutionInputModel).count() == 0
+        rejected = db_session.query(CommandModel).one()
+        assert rejected.status == "rejected"
+        assert rejected.rejection_reason == "execution_context_changed"
+
+
 def test_input_gate_uses_the_authoritative_handoff_repository(
     database: Database,
     workspace_id: UUID,
@@ -619,3 +704,144 @@ def test_superseded_input_is_retained_but_leaves_pending_slot(
             )
             is None
         )
+
+
+@pytest.mark.parametrize("lock_winner", ("input", "terminal"))
+def test_input_and_terminal_observation_serialize_on_execution_lock(
+    database: Database,
+    workspace_id: UUID,
+    lock_winner: str,
+) -> None:
+    ids = _seed_session(database, workspace_id)
+    operation_id = code_capture_operation_id(ids["execution_id"])
+    with SqlAlchemyUnitOfWork(database) as uow:
+        uow.results.save_operation(
+            ResultOperationAttemptV1(
+                operation_id=operation_id,
+                workspace_id=workspace_id,
+                root_task_id=ids["task_id"],
+                operation_kind=CODE_RESULT_CAPTURE_OPERATION_KIND,
+                attempt=1,
+                status=ResultOperationStatus.PENDING,
+                payload={
+                    "execution_id": str(ids["execution_id"]),
+                    "fencing_token": 1,
+                },
+                lease_owner=None,
+                lease_token=None,
+                lease_expiry=None,
+                receipt_ref=None,
+                failure_code=None,
+                version=1,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            expected_version=0,
+        )
+
+    capture = CodeResultCaptureService(
+        lambda: SqlAlchemyUnitOfWork(database),
+        code_store=object(),
+        clock=lambda: NOW,
+    )
+    envelope = _envelope(
+        workspace_id,
+        ids["session_id"],
+        ids["execution_id"],
+        "SendExecutionInput",
+        f"concurrent-input-{lock_winner}",
+        payload={"text": "Keep this intervention", "attachment_refs": []},
+        context=_context(ids),
+    )
+    lock_acquired = threading.Event()
+    contender_attempted_lock = threading.Event()
+    release_winner = threading.Event()
+    thread_state = threading.local()
+
+    def is_execution_for_update(statement: str) -> bool:
+        normalized = statement.lower()
+        return "executions" in normalized and "for update" in normalized
+
+    def before_cursor_execute(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if (
+            getattr(thread_state, "role", None) != lock_winner
+            and is_execution_for_update(statement)
+        ):
+            contender_attempted_lock.set()
+
+    def after_cursor_execute(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if (
+            getattr(thread_state, "role", None) == lock_winner
+            and is_execution_for_update(statement)
+        ):
+            lock_acquired.set()
+            if not release_winner.wait(timeout=5):
+                raise AssertionError("contended execution lock was not released")
+
+    def accept_input():
+        thread_state.role = "input"
+        return _service(database).handle(envelope)
+
+    def observe_terminal():
+        thread_state.role = "terminal"
+        return capture.observe_terminal(
+            workspace_id=workspace_id,
+            execution_id=ids["execution_id"],
+            operation_id=operation_id,
+            outcome="succeeded",
+            fencing_token=1,
+        )
+
+    event.listen(database.engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(database.engine, "after_cursor_execute", after_cursor_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winner = pool.submit(
+                accept_input if lock_winner == "input" else observe_terminal
+            )
+            assert lock_acquired.wait(timeout=5)
+            contender = pool.submit(
+                observe_terminal if lock_winner == "input" else accept_input
+            )
+            assert contender_attempted_lock.wait(timeout=5)
+            release_winner.set()
+            if lock_winner == "input":
+                assert winner.result(timeout=10).command_id == envelope.id
+                with pytest.raises(ResultError, match="result_capture_input_pending"):
+                    contender.result(timeout=10)
+            else:
+                assert winner.result(timeout=10).operation_id == operation_id
+                with pytest.raises(ExecutionContextChanged) as conflict:
+                    contender.result(timeout=10)
+                assert conflict.value.changed_fields == ("execution_finalizing",)
+    finally:
+        release_winner.set()
+        event.remove(database.engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(database.engine, "after_cursor_execute", after_cursor_execute)
+
+    with SqlAlchemyUnitOfWork(database) as uow:
+        operation = uow.results.get_operation(operation_id, workspace_id)
+        pending = uow.execution_inputs.get_pending_for_session(
+            ids["session_id"], workspace_id
+        )
+        assert isinstance(operation, ResultOperationAttemptV1)
+        if lock_winner == "input":
+            assert pending is not None
+            assert operation.payload.get("terminal_observed") is not True
+        else:
+            assert pending is None
+            assert operation.payload.get("terminal_observed") is True

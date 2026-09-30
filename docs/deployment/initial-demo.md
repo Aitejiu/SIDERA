@@ -69,6 +69,100 @@ SIDERA_ALLOW_E2E_SEED=1 uv run --frozen --project services/knowledge-service pyt
 
 重置演示时可再次运行上面两个 seed 命令；它们会覆盖样例中的本地介入等修改。
 
+## 可操作的网页版演示
+
+上面的入口适合浏览预置数据。如果要在面试或评审中演示“提交需求 → 规划 →
+确认 → 看板跟踪 → WorkerItem 介入 → Trace 与结果”的主链路，请使用隔离的
+Interview Demo。它仍然只绑定本机控制面、知识服务和 Web，不调用模型，也不连接
+Telegram 或其他外部消息通道；准备阶段会通过公开 API 建立可复现的本地场景。
+
+先在项目根目录准备一个新 run。`SIDERA_INTERVIEW_DEMO_ADMIN_DATABASE_URL`
+只用于创建和迁移本次演示数据库；如果本机应用角色已经有 `CREATEDB` 权限可以省略。
+它不是 provider key，也不要把带密码的连接串写入仓库：
+
+```bash
+export SIDERA_INTERVIEW_DEMO_ADMIN_DATABASE_URL="postgresql+psycopg://local-admin@127.0.0.1:55432/postgres"
+export SIDERA_INTERVIEW_DEMO_MANIFEST="$(uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli prepare --scenario mainline --print-manifest-path)"
+```
+
+常用操作如下：
+
+```bash
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli start --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli present --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli status --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli doctor --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli open --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+```
+
+`present` 会启动本 run 并把场景准备到公开的停靠点；主线停在空任务，现场再由
+用户在网页提交需求。`continue --gate parallel`、`before-artifact` 或 `handoff`
+只释放当前演示的受控输出门，不代替用户提交需求、确认计划或接受结果：
+
+真实 basic-acceptance bootstrap 为新创建的 Worker ModuleInstance 显式写入
+`worker.completion_policy=initial_turn`。它只表示初始 Agent 回合已经结束，仍需经过
+成果检查和用户验收；历史 ModuleInstance 不会被原地改写，旧配置继续按 `explicit` 行为运行。
+
+```bash
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli continue --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST" --gate parallel
+```
+
+演示结束只停止这个 manifest 对应的进程，数据库、事件、Trace 和结果会保留：
+
+```bash
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli stop --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+```
+
+需要重新开始时使用 `reset`。它会先停止旧 run，再创建新的隔离 run；输出中的新
+`manifest_path` 才是下一次操作的入口。不要用 seed 重置 Interview Demo，也不要
+结束其他项目的本地进程：
+
+```bash
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli reset --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+```
+
+Interview Demo 的“运行中”、用量、Worker 输出和 Agent 行为是受控的本地模拟数据，
+控制面 API、权限边界、状态变更和页面交互是真实的。它适合展示产品主链路，不代表
+生产环境已经完成认证、租户隔离、真实模型执行或公网部署。
+
+## R6 验收与长期交互 Demo
+
+R6 basic stack 有两种明确的运行模式。默认的 `acceptance` 模式只用于收集有预算、
+有 route 约束且可审计的真实验收证据；已经完成验收后，如果要继续在同一桌面工作空间
+中演示聊天、知识库和任务能力，显式切换到 `interactive` 模式。交互模式复用同一份
+manifest、数据库、Main Agent、Planner 和 Worker 配置，不替换成模拟 Agent，也不创建
+或延长 acceptance evidence。它会用独立的本地 Worker heartbeat 维持桌面执行节点在线，
+同时移除验收专用 heartbeat、预算与 Guard 注入。
+
+两种模式都只监听本机 loopback，不是生产部署或公网服务。每次 `start`、`status`、
+`restart` 和 `stop` 都要使用相同的运行目录和模式；manifest 中的 `env:` 数据库引用
+必须存在于当前 shell。provider 凭据继续由本机受保护的 credential store 提供，不要把
+key、带密码的连接串或 token 写入仓库。
+
+交互模式只复用已经由验收初始化完成的数据库资源，不会重新执行验收 seed，也不会
+覆盖用户随后在 Web 中保存的 Main Agent 或 Worker 配置。首次初始化仍应先完成对应
+acceptance manifest 的准备流程。
+
+已有验收 manifest 切换为桌面交互 Demo 时，使用绝对路径替换下面的占位值：
+
+```bash
+export SIDERA_R6_BASIC_MODE=interactive
+export SIDERA_R6_BASIC_RUNTIME_DIR=/absolute/path/to/runtime
+export SIDERA_R6_BASIC_MANIFEST=/absolute/path/to/manifest.json
+export SIDERA_R6_BASIC_AKASHIC_CONFIG=/absolute/path/to/akashic-config.toml
+
+scripts/r6-basic-stack.sh start --manifest "$SIDERA_R6_BASIC_MANIFEST"
+scripts/r6-basic-stack.sh status --manifest "$SIDERA_R6_BASIC_MANIFEST"
+```
+
+需要重启时保留同样的环境变量：
+
+```bash
+scripts/r6-basic-stack.sh restart --manifest "$SIDERA_R6_BASIC_MANIFEST"
+```
+
+不要用交互模式生成新的验收结论，也不要在验收运行仍需要继续取证时切换模式。
+
 ## 启动三个进程
 
 分别使用三个终端，工作目录均为项目根目录。下列固定 token 仅用于隔离的本地演示，
@@ -126,6 +220,67 @@ curl --fail http://127.0.0.1:18627/health/live
 
 页面中的日常操作见[使用指南](../guide/workspace.md)。
 
+## 本地维护现状
+
+Interview Demo 可使用本次 run 的 manifest 检查运行状态和本机环境；这些检查不调用模型：
+
+```bash
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli status --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+uv run --directory services/control-plane --frozen python -m sidera_control_plane.demo.cli doctor --manifest "$SIDERA_INTERVIEW_DEMO_MANIFEST"
+```
+
+`scripts/local-maintenance.py` 是另一条 provider-free 的本地维护入口，面向已经准备好
+source manifest 和完整 component inventory 的 SIDERA 安装。它不会从 Interview Demo
+manifest 自动推断数据库、主 Agent、bridge 或 Git 组件，也不会递归扫描项目目录；未在
+inventory 中明确声明的持久化组件会被拒绝。Interview Demo 仍然不会自动生成维护清单，
+所以不能把 Demo manifest 直接当成备份输入。
+
+当前支持的维护范围：
+
+- 已停止 writer 的 loopback PostgreSQL 数据库，通过 `pg_dump` 导出并在新数据库恢复。
+- 已声明的 Akashic/Main Agent SQLite、bridge metadata 和 Git repository bundle；Git
+  快照会保留可验证的 head/tree、工作树状态和受支持的 tracked internal symlink。
+- 备份后用 `inspect-backup` 校验 payload 与 manifest；恢复前用 `restore-preflight`
+  检查目标根目录为空、数据库身份不同、schema identity 匹配且目标为 `read_only`。
+- 恢复只写入新的目标根和新的 loopback 数据库。恢复完成后，服务必须显式以
+  `restore_read_only=true` 和 `restore_schema_validation=true` 启动；当前迁移必须由
+  运维步骤显式运行，不能由只读服务启动时暗中执行。
+
+维护入口不复制 provider key、模型 token、auth 数据库、系统 Keychain 或其他被排除的
+秘密；恢复结果要求重新配置这些能力。普通 external/untracked symlink、共享 Git
+common dir、非 loopback 目标和未停止的 writer 会 fail closed。它不是整个用户主目录的
+通用快照，也没有把回退实现成对升级数据库的原地 downgrade；回退应从未改写的备份恢复
+到另一个独立目标，再使用对应旧代码读取。
+
+只有在已经准备好绝对路径的 source manifest、可选的 companion inventory、备份目录和
+全新 target manifest 后，才运行以下命令。不要把示例路径或日常数据库直接替换成目标：
+
+```bash
+export SIDERA_MAINTENANCE_SOURCE_MANIFEST="/absolute/path/source-manifest.json"
+export SIDERA_MAINTENANCE_SOURCE_INVENTORY="/absolute/path/source-inventory.json"
+export SIDERA_MAINTENANCE_BACKUP_PATH="/absolute/path/sidera-backup"
+export SIDERA_MAINTENANCE_TARGET_MANIFEST="/absolute/path/target-manifest.json"
+
+uv run --directory services/control-plane --frozen python ../../scripts/local-maintenance.py doctor \
+  --manifest "$SIDERA_MAINTENANCE_SOURCE_MANIFEST"
+uv run --directory services/control-plane --frozen python ../../scripts/local-maintenance.py backup \
+  --manifest "$SIDERA_MAINTENANCE_SOURCE_MANIFEST" \
+  --source-inventory "$SIDERA_MAINTENANCE_SOURCE_INVENTORY" \
+  --destination "$SIDERA_MAINTENANCE_BACKUP_PATH"
+uv run --directory services/control-plane --frozen python ../../scripts/local-maintenance.py inspect-backup \
+  --backup "$SIDERA_MAINTENANCE_BACKUP_PATH"
+uv run --directory services/control-plane --frozen python ../../scripts/local-maintenance.py restore-preflight \
+  --backup "$SIDERA_MAINTENANCE_BACKUP_PATH" \
+  --target-manifest "$SIDERA_MAINTENANCE_TARGET_MANIFEST"
+uv run --directory services/control-plane --frozen python ../../scripts/local-maintenance.py restore \
+  --backup "$SIDERA_MAINTENANCE_BACKUP_PATH" \
+  --target-manifest "$SIDERA_MAINTENANCE_TARGET_MANIFEST"
+```
+
+`target-manifest.json` 至少需要新的 `run_id`、新的 `run_root`、`restore_mode: read_only`、
+两个与来源不同的 loopback PostgreSQL target ref，以及与备份组件匹配的 schema identity。
+`restore` 不会启动 API、Worker、通知或模型；导入完成后仍需按只读运行说明单独启动查询服务。
+
 ## 常见问题
 
 ### 页面打不开，或者任务加载失败
@@ -142,6 +297,19 @@ curl --fail http://127.0.0.1:18627/health/live
 
 默认 Demo 不运行真实 Agent，只保存介入记录。主 Agent 端口 `18628` 未启动，
 所以聊天不可用，信箱也可能为空。这不影响任务、看板、DAG 和 Trace 的浏览。
+
+### 已通过验收的 R6 Demo 为什么聊天返回 `429 deadline_exceeded`
+
+这表示该 run 仍在 `acceptance` 模式，而它的验收预算已经结束。停止后使用上面的
+`SIDERA_R6_BASIC_MODE=interactive` 重新启动同一个 manifest；不要修改 acceptance
+状态文件，也不要通过放宽服务内部 Guard 来解决。
+
+### 知识库页面为什么返回 `403 permission_denied`
+
+Web 代理和 knowledge-service 必须使用同一个 local-owner capability token。token 只
+应该由 Vite 服务端代理注入，不能放进浏览器代码或 URL。若仍返回 `403`，确认 Web 和
+knowledge-service 都是通过同一个 R6 stack manifest 启动的，不要把知识服务改成接受
+未知角色的 token。
 
 ### 重启会丢失任务吗
 

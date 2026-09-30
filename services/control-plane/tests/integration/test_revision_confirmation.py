@@ -581,6 +581,65 @@ def _confirm_command(seed: dict[str, Any], *, idempotency_key: str) -> dict[str,
     }
 
 
+def _reject_command(seed: dict[str, Any], *, idempotency_key: str) -> dict[str, Any]:
+    request = seed["request"]
+    proposal = seed["proposal"]
+    snapshot = seed["snapshot"]
+    return {
+        "command_id": str(uuid4()),
+        "workspace_id": str(snapshot.workspace_id),
+        "command_type": "RejectPlanningProposal",
+        "target_type": "planning_request",
+        "actor": {"type": "local", "id": "operator"},
+        "target_id": str(request.id),
+        "expected_version": request.version,
+        "idempotency_key": idempotency_key,
+        "correlation_id": str(uuid4()),
+        "payload": {
+            "current_proposal_revision": proposal.revision,
+            "current_proposal_content_hash": proposal.content_hash,
+            "reason": "The global change needs another review before activation.",
+        },
+    }
+
+
+def test_rejecting_revision_keeps_active_generation_and_worker_identity(
+    client: TestClient, database, workspace_id: UUID
+) -> None:
+    seed = _seed_revision_confirmation(database, workspace_id)
+
+    response = client.post(
+        "/api/v1/commands",
+        json=_reject_command(seed, idempotency_key="reject-plan-revision"),
+    )
+
+    assert response.status_code in {200, 201}, response.text
+    assert response.json()["data"]["status"] == "rejected"
+    with database.session() as session:
+        head = session.scalar(
+            select(RootTaskPlanHeadModel).where(
+                RootTaskPlanHeadModel.root_task_id == seed["root_task"].id
+            )
+        )
+        assert head is not None
+        assert head.active_generation == seed["snapshot"].generation
+        assert head.active_snapshot_id == seed["snapshot"].id
+        assert session.scalar(select(func.count()).select_from(PlanSnapshotModel)) == 1
+        assert session.scalar(select(func.count()).select_from(WorkerItemModel)) == 1
+        worker = session.scalar(
+            select(WorkerItemModel).where(WorkerItemModel.id == seed["worker_item"].id)
+        )
+        assert worker is not None
+        assert worker.id == seed["worker_item"].id
+        request = session.scalar(
+            select(PlanningRequestModel).where(
+                PlanningRequestModel.id == seed["request"].id
+            )
+        )
+        assert request is not None
+        assert request.status == PlanningRequestStatus.REJECTED.value
+
+
 def test_confirm_revision_materializes_new_generation_and_patch_fence(
     client: TestClient, database, workspace_id: UUID
 ) -> None:

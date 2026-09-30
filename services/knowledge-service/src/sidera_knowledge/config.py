@@ -11,6 +11,8 @@ class KnowledgeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SIDERA_KNOWLEDGE_")
 
     database_url: str
+    restore_read_only: bool = False
+    restore_schema_validation: bool = False
     workspace_id: UUID | None = None
     host: str = "127.0.0.1"
     port: int = Field(default=8020, ge=1, le=65_535)

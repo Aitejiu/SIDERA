@@ -1,6 +1,6 @@
 import { Bell, BellOff, Check, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 
@@ -17,9 +17,10 @@ export function NotificationCenter({ mode = "tray" }: { mode?: "tray" | "setting
 function NotificationTray() {
   const stream = useWorkspaceStreamOptional();
   const workspaceId = useWorkspaceIdFromPath();
+  const location = useLocation();
   const notices = stream?.notices ?? [];
 
-  if (notices.length === 0) {
+  if (location.pathname.endsWith("/inbox") || notices.length === 0) {
     return null;
   }
   return (

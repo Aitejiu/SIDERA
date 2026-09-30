@@ -5,6 +5,7 @@ import pytest
 from sidera_control_plane.application.projection_invalidation import (
     PROJECTION_TYPES,
     projection_targets_for_event,
+    projection_targets_for_execution_event,
 )
 from sidera_control_plane.domain.events import EventData
 
@@ -240,6 +241,21 @@ def test_collaboration_run_events_invalidate_the_root_runtime_projection() -> No
     targets = projection_targets_for_event(event)
 
     assert targets == (type(targets[0])("collaboration_runtime", ROOT_TASK_ID),)
+
+
+def test_execution_event_refreshes_task_graph_for_worker_attention() -> None:
+    targets = projection_targets_for_execution_event(
+        worker_item_id=WORKER_ITEM_ID,
+        root_task_id=ROOT_TASK_ID,
+        execution_id=EXECUTION_ID,
+    )
+
+    assert {
+        target.projection_type for target in targets
+    } >= {"task_graph", "task_overview", "worker_item_activity"}
+    assert next(
+        target for target in targets if target.projection_type == "task_graph"
+    ).resource_id == ROOT_TASK_ID
 
 
 @pytest.mark.parametrize(

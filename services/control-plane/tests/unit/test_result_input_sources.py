@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError, replace
+from uuid import UUID
 
 import pytest
 
@@ -102,6 +103,26 @@ def test_two_current_requests_are_ambiguous_instead_of_uuid_ordered() -> None:
     assert source.allowed_lineage_ids == ()
     assert source.outcome_unknown is True
     assert source.reason_code == "input_source_ambiguous"
+
+
+def test_current_plan_request_takes_precedence_over_historical_source_request() -> None:
+    facts = effective_source_facts(request_case="current")
+    current_request = facts.requests[0]
+    historical_request = replace(
+        current_request,
+        id=UUID("6d4a0902-3a0e-4fbc-b3ec-47c717b3e01a"),
+        execution_lineage_id=UUID("f41ab4dd-41d7-4a0d-9e27-883a77f75eca"),
+        first_execution_id=UUID("f41ab4dd-41d7-4a0d-9e27-883a77f75eca"),
+    )
+
+    source = resolve_result_input_source(
+        worker_item_key="a",
+        facts=replace(facts, result_source_requests=(historical_request,)),
+    )
+
+    assert source.effective_request_id == current_request.id
+    assert source.effective_execution_id == current_request.first_execution_id
+    assert source.reason_code is None
 
 
 def test_failed_source_preserves_retry_possibility_without_fake_attempt() -> None:

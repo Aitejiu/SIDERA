@@ -83,7 +83,7 @@ test.describe("R6.3.4 Task First result-input workflows", () => {
     await expect(page.locator("#task-detail-title")).toBeVisible();
   });
 
-  test("approves a fixed selection, opens sources and artifacts, then intervenes", async ({
+  test("@closure-intervention approves a fixed selection, opens sources and artifacts, then intervenes", async ({
     page,
     seedR6ResultInputs,
     prepareR6ResultInputsBrowser,
@@ -141,8 +141,18 @@ test.describe("R6.3.4 Task First result-input workflows", () => {
     await expect(governance).toContainText("已放行");
 
     expect(runR6ResultInputAction(seed.workspace_id, "recover-body").phase).toBe("recovered");
+    const summaryWorkspaceResponse = page.waitForResponse((response) => (
+      response.request().method() === "GET"
+      && response.status() === 200
+      && new URL(response.url()).pathname === `/api/v1/workspaces/${seed.workspace_id}/worker-items/${seed.summary_worker_item_id}/workspace`
+    ));
     await page.goto(`/workspaces/${seed.workspace_id}/worker-items/${seed.summary_worker_item_id}`);
     await expect(page.locator("#worker-item-title")).toHaveText("Summary worker");
+    const summaryWorkspace = await summaryWorkspaceResponse.then((response) => response.json()) as {
+      intervention_context?: Record<string, unknown> | null;
+    };
+    const currentContext = summaryWorkspace.intervention_context;
+    expect(currentContext).toBeTruthy();
 
     const resultInputs = page.getByRole("region", { name: "结果输入" });
     await expect(resultInputs).toBeVisible();
@@ -160,10 +170,8 @@ test.describe("R6.3.4 Task First result-input workflows", () => {
       .click();
     await expect(page.locator("#worker-item-title")).toHaveText("Worker B");
     const tabs = page.getByRole("navigation", { name: "已打开的任务" });
-    const sourceTabLabel = `WorkerItem ${seed.source_worker_item_ids[1]?.slice(0, 8) ?? ""}`;
-    const summaryTabLabel = `WorkerItem ${seed.summary_worker_item_id.slice(0, 8)}`;
-    await expect(tabs.getByRole("link", { name: sourceTabLabel, exact: true })).toBeVisible();
-    await tabs.getByRole("link", { name: summaryTabLabel, exact: true }).click();
+    await expect(tabs.getByRole("link", { name: "Worker B", exact: true })).toBeVisible();
+    await tabs.getByRole("link", { name: "Summary worker", exact: true }).click();
     await expect(page.locator("#worker-item-title")).toHaveText("Summary worker");
 
     const traceButton = page.getByRole("button", { name: "查看 Agent Trace" }).first();
@@ -172,7 +180,7 @@ test.describe("R6.3.4 Task First result-input workflows", () => {
     const traceDialog = page.getByRole("dialog", { name: "Agent Trace" });
     await expect(traceDialog).toBeVisible();
     await expect(traceDialog.getByRole("button", { name: "关闭 Agent Trace" })).toBeFocused();
-    await expect(traceDialog.getByRole("complementary", { name: "Trace 诊断信息" })).toBeVisible();
+    await expect(traceDialog.locator(".trace-reader")).toBeVisible();
     await traceDialog.getByRole("button", { name: "关闭 Agent Trace" }).click();
     await expect(traceDialog).toHaveCount(0);
 
@@ -187,7 +195,16 @@ test.describe("R6.3.4 Task First result-input workflows", () => {
     const interventionBody = await interventionRequest.then((request) => request.postDataJSON()) as CommandRequest;
     expect(interventionBody.target_type).toBe("execution_session");
     expect(interventionBody.payload.text).toBe(interventionText);
-    expect(interventionBody.payload.context).toBeTruthy();
+    const submittedContext = interventionBody.payload.context as Record<string, unknown>;
+    expect(submittedContext).toMatchObject({
+      worker_item_id: seed.summary_worker_item_id,
+      session_id: currentContext?.session_id,
+      plan_generation: currentContext?.plan_generation,
+      context_version: currentContext?.context_version,
+      session_version: currentContext?.session_version,
+    });
+    expect(interventionBody.target_id).toBe(currentContext?.session_id);
+    expect(interventionBody.target_id).toBe(submittedContext.session_id);
     await expect(page.getByText(interventionText, { exact: true })).toBeVisible();
 
     await page.goto(`/workspaces/${seed.workspace_id}/inbox`);

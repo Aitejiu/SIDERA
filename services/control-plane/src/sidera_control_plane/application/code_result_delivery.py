@@ -3,11 +3,15 @@ from __future__ import annotations
 from uuid import UUID
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_input_sources import (
+    order_code_result_dependency_closure,
+)
 from sidera_control_plane.application.result_rework import (
     require_authorized_source_candidate,
 )
 from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
+    CodeInputSourceV1,
     CodeResultSnapshotV1,
     IntegrationCandidateV1,
 )
@@ -77,7 +81,7 @@ def resolve_code_inputs(
     selected_by_execution = {
         source.effective_execution_id: source for source in selected_sources
     }
-    manifest_execution_ids: set[UUID] = set()
+    loaded_records: list[tuple[CodeInputSourceV1, CodeResultSnapshotV1]] = []
     for source in manifest.sources:
         record = uow.results.get_record(
             "code_snapshot",
@@ -94,19 +98,24 @@ def resolve_code_inputs(
                 "code_input_result_invalid",
                 {"result_id": str(source.result_id)},
             )
-        if record.execution_id not in selected_execution_ids:
-            raise ResultError(
-                "code_input_result_not_selected",
-                {"result_id": str(source.result_id)},
-            )
+        loaded_records.append((source, record))
+
+    if not any(
+        record.execution_id in selected_execution_ids
+        for _source, record in loaded_records
+    ):
+        raise ResultError(
+            "code_input_result_not_selected",
+            {"result_id": str(loaded_records[0][1].id)},
+        )
+
+    manifest_records: list[CodeResultSnapshotV1] = []
+    for source, record in loaded_records:
         if (
-            record.workspace_id != manifest.workspace_id
+            record.id != source.result_id
+            or record.workspace_id != manifest.workspace_id
             or record.root_task_id != manifest.root_task_id
             or record.content_hash != source.result_hash
-            or record.request_id
-            != selected_by_execution[record.execution_id].effective_request_id
-            or record.worker_item_id
-            != selected_by_execution[record.execution_id].worker_item_id
             or record.repository_ref != manifest.repository_ref
             or record.input_commit != source.input_commit
             or record.input_tree != source.input_tree
@@ -117,15 +126,50 @@ def resolve_code_inputs(
                 "code_input_result_mismatch",
                 {"result_id": str(source.result_id)},
             )
-        manifest_execution_ids.add(record.execution_id)
-    if manifest_execution_ids != selected_execution_ids:
+
+        manifest_records.append(record)
+
+    direct_by_execution: dict[UUID, CodeResultSnapshotV1] = {}
+    for record in manifest_records:
+        if record.execution_id not in selected_execution_ids:
+            continue
+        source = selected_by_execution[record.execution_id]
+        if (
+            record.request_id != source.effective_request_id
+            or record.worker_item_id != source.worker_item_id
+        ):
+            raise ResultError(
+                "code_input_result_mismatch",
+                {"result_id": str(record.id)},
+            )
+        if record.execution_id in direct_by_execution:
+            raise ResultError(
+                "code_input_result_set_mismatch",
+                {"execution_id": str(record.execution_id)},
+            )
+        direct_by_execution[record.execution_id] = record
+
+    if not direct_by_execution and manifest_records:
+        raise ResultError(
+            "code_input_result_not_selected",
+            {"result_id": str(manifest_records[0].id)},
+        )
+    if set(direct_by_execution) != selected_execution_ids:
         raise ResultError(
             "code_input_result_set_mismatch",
             {
                 "selected_count": len(selected_execution_ids),
-                "manifest_count": len(manifest_execution_ids),
+                "manifest_count": len(direct_by_execution),
             },
         )
+    _validate_manifest_dependency_closure(
+        manifest,
+        direct_snapshots=tuple(
+            direct_by_execution[source.effective_execution_id]
+            for source in selected_sources
+        ),
+        manifest_snapshots=tuple(manifest_records),
+    )
     return manifest
 
 
@@ -165,8 +209,7 @@ def _resolve_rework_code_inputs(
     ):
         raise ResultError("code_input_rework_scope_mismatch", {})
 
-    if tuple(source.result_id for source in manifest.sources) != candidate.source_result_ids:
-        raise ResultError("code_input_rework_result_set_mismatch", {})
+    manifest_records: list[CodeResultSnapshotV1] = []
     for source in manifest.sources:
         record_value = uow.results.get_record(
             "code_snapshot", source.result_id, manifest.workspace_id
@@ -176,7 +219,8 @@ def _resolve_rework_code_inputs(
                 "code_input_result_not_found", {"result_id": str(source.result_id)}
             )
         if (
-            record_value.workspace_id != manifest.workspace_id
+            record_value.id != source.result_id
+            or record_value.workspace_id != manifest.workspace_id
             or record_value.root_task_id != manifest.root_task_id
             or record_value.content_hash != source.result_hash
             or record_value.repository_ref != manifest.repository_ref
@@ -189,7 +233,45 @@ def _resolve_rework_code_inputs(
                 "code_input_rework_result_mismatch",
                 {"result_id": str(source.result_id)},
             )
+        manifest_records.append(record_value)
+
+    direct_records: list[CodeResultSnapshotV1] = []
+    records_by_id = {record.id: record for record in manifest_records}
+    for result_id in candidate.source_result_ids:
+        record_value = records_by_id.get(result_id)
+        if record_value is None:
+            raise ResultError("code_input_rework_result_set_mismatch", {})
+        direct_records.append(record_value)
+    _validate_manifest_dependency_closure(
+        manifest,
+        direct_snapshots=tuple(direct_records),
+        manifest_snapshots=tuple(manifest_records),
+        error_code="code_input_rework_result_set_mismatch",
+    )
     return manifest
+
+
+def _validate_manifest_dependency_closure(
+    manifest: CodeInputManifestV1,
+    *,
+    direct_snapshots: tuple[CodeResultSnapshotV1, ...],
+    manifest_snapshots: tuple[CodeResultSnapshotV1, ...],
+    error_code: str = "code_input_result_set_mismatch",
+) -> None:
+    try:
+        closure = order_code_result_dependency_closure(
+            direct_snapshots=direct_snapshots,
+            snapshots=manifest_snapshots,
+            workspace_id=manifest.workspace_id,
+            root_task_id=manifest.root_task_id,
+            repository_ref=manifest.repository_ref,
+        )
+    except ValueError as exc:
+        raise ResultError(error_code, {}) from exc
+    if tuple(item.id for item in closure) != tuple(
+        source.result_id for source in manifest.sources
+    ):
+        raise ResultError(error_code, {})
 
 
 def _selected_sources(

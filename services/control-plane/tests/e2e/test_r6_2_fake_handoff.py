@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -21,6 +26,8 @@ from sidera_control_plane.persistence.models import (
     ExecutionRequestModel,
     ExecutionSessionModel,
     ExecutionWorkspaceModel,
+    GatewayOperationModel,
+    HandoffTransitionModel,
     RootTaskPlanHeadModel,
     TaskModel,
     WorkerItemModel,
@@ -290,6 +297,155 @@ def test_g4_target_start_unknown_is_inspected_absent_and_retried_with_new_attemp
         call for call in runtime.adapter.calls if call[0] == "start_session"
     ]
     assert len(start_calls_after_recovery) == 3
+
+
+def _restart_snapshot(database, workspace_id: UUID, transition_id: UUID) -> dict[str, object]:
+    with database.session() as session:
+        transition = session.get(HandoffTransitionModel, transition_id)
+        assert transition is not None
+        operations = session.scalars(
+            select(GatewayOperationModel)
+            .where(GatewayOperationModel.workspace_id == workspace_id)
+            .order_by(GatewayOperationModel.operation_id)
+        ).all()
+        executions = session.scalars(
+            select(ExecutionModel)
+            .where(ExecutionModel.workspace_id == workspace_id)
+            .order_by(ExecutionModel.id)
+        ).all()
+        requests = session.scalars(
+            select(ExecutionRequestModel)
+            .where(ExecutionRequestModel.workspace_id == workspace_id)
+            .order_by(ExecutionRequestModel.id)
+        ).all()
+        sessions = session.scalars(
+            select(ExecutionSessionModel)
+            .where(ExecutionSessionModel.workspace_id == workspace_id)
+            .order_by(ExecutionSessionModel.id)
+        ).all()
+        workers = session.scalars(
+            select(WorkerModel)
+            .where(WorkerModel.workspace_id == workspace_id)
+            .order_by(WorkerModel.id)
+        ).all()
+        return {
+            "transition": (
+                transition.status,
+                transition.phase,
+                transition.writer_state,
+                transition.blocked_operation_id,
+                transition.logical_attempt,
+                transition.lease_owner,
+                transition.lease_expires_at,
+                transition.version,
+                transition.target_execution_id,
+                transition.target_session_id,
+            ),
+            "operations": tuple(
+                (
+                    operation.operation_id,
+                    operation.operation_type,
+                    operation.status,
+                    operation.attempt_count,
+                    operation.failure_code,
+                    operation.version,
+                )
+                for operation in operations
+            ),
+            "executions": tuple(
+                (
+                    execution.id,
+                    execution.status,
+                    execution.attempt,
+                    execution.max_attempts,
+                    execution.worker_item_id,
+                    execution.version,
+                )
+                for execution in executions
+            ),
+            "requests": tuple(
+                (
+                    request.id,
+                    request.status,
+                    request.max_attempts,
+                    request.execution_lineage_id,
+                    request.first_execution_id,
+                    request.version,
+                )
+                for request in requests
+            ),
+            "sessions": tuple(
+                (
+                    execution_session.id,
+                    execution_session.status,
+                    execution_session.last_sequence,
+                    execution_session.version,
+                )
+                for execution_session in sessions
+            ),
+            "workers": tuple(
+                (
+                    worker.id,
+                    worker.status,
+                    worker.current_load,
+                    worker.version,
+                )
+                for worker in workers
+            ),
+        }
+
+
+def test_g4_controlled_restart_preserves_unknown_without_replay(
+    database,
+    workspace_id: UUID,
+) -> None:
+    fixture = seed_g4_fixture(database, workspace_id, scenario=G4Scenario.NORMAL, now=NOW, reset=True)
+    runtime = FakeHandoffRuntime(
+        database,
+        workspace_id,
+        fixture,
+        now=NOW,
+        fault=FaultPoint.TARGET_START_AFTER,
+    )
+    transition = runtime.confirm_handoff(runtime.prepare_handoff())
+    blocked = runtime.run_until_unknown(transition.id)
+    inspection = runtime.recovery.inspect_unknown(transition=blocked, now=NOW)
+    runtime.recovery.persist_operation_inspection(transition=blocked, inspection=inspection)
+    before = _restart_snapshot(database, workspace_id, transition.id)
+
+    control_plane_root = Path(__file__).parents[2]
+    child_environment = os.environ.copy()
+    child_environment["SIDERA_ALLOW_E2E_SEED"] = "1"
+    child_environment["PYTHONPATH"] = os.pathsep.join(
+        item
+        for item in (str(control_plane_root), child_environment.get("PYTHONPATH", ""))
+        if item
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("r6_2_fake_runtime.py")),
+            "--workspace-id",
+            str(workspace_id),
+            "--scenario",
+            G4Scenario.NORMAL.value,
+            "--after-restart",
+        ],
+        cwd=control_plane_root,
+        env=child_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    child_result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert child_result["transition_status"] == "blocked_unknown"
+    assert child_result["blocked_operation_id"] == str(blocked.blocked_operation_id)
+    assert child_result["external_handoff_calls"] == []
+
+    after = _restart_snapshot(database, workspace_id, transition.id)
+    assert after == before
 
 
 @pytest.mark.parametrize(

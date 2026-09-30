@@ -131,6 +131,24 @@ a {
   color: var(--muted);
 }
 
+.demo-mode-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 9px;
+  border-left: 1px solid var(--structure);
+  color: var(--attention);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.demo-mode-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--attention);
+}
+
 .connection-mark,
 .status-dot {
   display: inline-block;

@@ -1,6 +1,6 @@
 from collections import deque
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from threading import RLock
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -85,7 +85,14 @@ class FakeWorkerAdapter:
         failures: Mapping[str, str] | None = None,
         handoff_context: tuple[UUID, str, int] | None = None,
         handoff_workspace_digest: str | None = None,
+        turn_completion_enabled: bool = False,
     ) -> None:
+        if not isinstance(turn_completion_enabled, bool):
+            raise TypeError("turn_completion_enabled must be a bool")
+        self._profile = replace(
+            self._CAPABILITIES,
+            turn_completion_versions=(1,) if turn_completion_enabled else (),
+        )
         self._artifacts = tuple(artifacts)
         if any(
             not isinstance(item, KnowledgeCandidateProposalV1)
@@ -125,7 +132,7 @@ class FakeWorkerAdapter:
     def probe(self, config: Mapping[str, object]) -> WorkerAdapterCapabilityProfile:
         del config
         self._maybe_fail("probe")
-        return self._CAPABILITIES
+        return self._profile
 
     def accept_context(
         self,
@@ -188,7 +195,7 @@ class FakeWorkerAdapter:
             execution_session_id=execution_session_id,
             adapter_session_id=adapter_session_id,
             process_ref=f"fake://{spec.execution_id}",
-            capability_snapshot=self._CAPABILITIES,
+            capability_snapshot=self._profile,
             last_accepted_sequence=0,
             started_at=now,
             context_binding=context_binding,
@@ -286,6 +293,22 @@ class FakeWorkerAdapter:
                     occurred_at=datetime.now(UTC),
                 )
             )
+            if self._profile.turn_completion_versions:
+                completion_sequence = session.next_sequence
+                session.next_sequence += 1
+                session.last_accepted_sequence = completion_sequence
+                session.events.append(
+                    AdapterEvent(
+                        event_type="turn.completed",
+                        sequence=completion_sequence,
+                        payload={
+                            "schema_version": 1,
+                            "operation_id": str(operation_id),
+                            "stop_reason": "end_turn",
+                        },
+                        occurred_at=datetime.now(UTC),
+                    )
+                )
             return DeliveryResult(
                 operation_id=operation_id,
                 outcome=DeliveryOutcome.DELIVERED,
@@ -495,8 +518,14 @@ class FakeWorkerAdapter:
         return self._artifacts
 
     def collect_knowledge_candidates(
-        self, handle: AdapterSessionHandle, *, operation_id: UUID
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+        worker_item_id: UUID | None = None,
+        source_artifact_ids: tuple[UUID, ...] = (),
     ) -> tuple[KnowledgeCandidateProposalV1, ...]:
+        del worker_item_id, source_artifact_ids
         if not isinstance(operation_id, UUID):
             raise TypeError("operation_id must be a UUID")
         self._maybe_fail("collect_knowledge_candidates")

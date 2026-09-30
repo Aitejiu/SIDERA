@@ -51,6 +51,7 @@ from sidera_control_plane.domain.modules import (
 )
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceCheckout,
@@ -215,6 +216,7 @@ class _Uow:
     def __init__(self, fixture):
         self.handoff_transitions = _TransitionRepository(fixture.transition)
         self.executions = _ExecutionRepository((fixture.execution,))
+        self.worker_items = _Repository((fixture.worker_item,))
         self.execution_requests = SimpleNamespace(
             get_effective_by_execution_lineage=lambda *_args, **_kwargs: None
         )
@@ -234,6 +236,8 @@ class _Uow:
         )
         self.events = SimpleNamespace(append_with_outbox=lambda event: None)
         self.commands = _CommandRepository()
+        self.plans = SimpleNamespace(get_head=lambda *_args, **_kwargs: None)
+        self.results = SimpleNamespace(get_head=lambda *_args, **_kwargs: None)
 
     def __enter__(self):
         return self
@@ -267,6 +271,15 @@ class _Fixture:
         )
         self.worker.reserve()
         self.execution_id = uuid4()
+        worker_item_id = uuid4()
+        self.worker_item = WorkerItem.create(
+            item_id=worker_item_id,
+            workspace_id=self.workspace_id,
+            root_task_id=self.task.id,
+            title="Source WorkerItem",
+            responsibility="Execute the source task.",
+            now=NOW,
+        )
         self.lease = AssignmentLease.issue(
             lease_id=uuid4(),
             workspace_id=self.workspace_id,
@@ -281,7 +294,7 @@ class _Fixture:
             execution_id=self.execution_id,
             workspace_id=self.workspace_id,
             task_id=self.task.id,
-            worker_item_id=uuid4(),
+            worker_item_id=worker_item_id,
             lineage_id=uuid4(),
             attempt=1,
             max_attempts=3,

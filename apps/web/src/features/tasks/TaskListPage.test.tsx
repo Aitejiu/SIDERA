@@ -80,7 +80,7 @@ const overviews = [
     running_subtask_count: 0,
     completed_subtask_count: 1,
     failed_subtask_count: 0,
-    next_subtask_keys: ["publish"],
+    next_subtask_keys: [],
     attention_items: [],
     last_change_cursor: 42,
     as_of: "2026-08-21T08:01:00Z",
@@ -119,11 +119,13 @@ describe("TaskListPage", () => {
     expect(await screen.findByText("Ship control room")).toBeVisible();
     expect(screen.getByText("Prepare release notes")).toBeVisible();
     expect(screen.getByText("GEN 3")).toBeVisible();
-    expect(screen.getByText("4 / 7 已规划")).toBeVisible();
+    expect(screen.getByText("2 / 4 已完成")).toBeVisible();
     expect(screen.getByText("运行中 2")).toBeVisible();
     expect(screen.getByText("失败 1")).toBeVisible();
     expect(screen.getByText("下一个 trace-viewer")).toBeVisible();
     expect(screen.getByText("协同已完成")).toBeVisible();
+    expect(screen.getByText("任务已完成")).toBeVisible();
+    expect(screen.getByText("全部节点已收敛")).toBeVisible();
     expect(screen.getByText("Ship control room / Trace viewer needs input")).toBeVisible();
     expect(screen.getByText("调度等待")).toBeVisible();
     expect(screen.getByText("1 个候选执行节点未配置运行环境")).toBeVisible();

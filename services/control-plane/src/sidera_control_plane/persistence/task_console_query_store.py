@@ -406,7 +406,12 @@ def _activity(
     row: ExecutionEventModel, execution: TaskConsoleExecutionFact
 ) -> TaskConsoleActivityFact:
     payload = dict(row.payload)
-    summary = str(payload.get("summary") or payload.get("title") or row.event_type)
+    summary = str(
+        payload.get("summary")
+        or payload.get("title")
+        or payload.get("trace_summary")
+        or row.event_type
+    )
     return TaskConsoleActivityFact(
         id=row.id,
         task_id=execution.task_id,
@@ -415,6 +420,7 @@ def _activity(
         kind=row.event_type,
         summary=summary,
         correlation_id=row.id,
+        requires_user_input=payload.get("requires_user_input") is True,
     )
 
 

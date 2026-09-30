@@ -67,6 +67,7 @@ class ModelRequest:
     tool_choice: str | dict[str, Any] = "auto"
     reasoning_effort: str | None = None
     prompt_cache_key: str | None = None
+    provider_session_id: str | None = None
     on_delta: StreamCallback | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
     disable_thinking: bool = False

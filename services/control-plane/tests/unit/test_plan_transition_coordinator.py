@@ -30,7 +30,10 @@ from sidera_control_plane.domain.plan_transitions import (
     WorkerTransitionStatus,
     WriterState,
 )
-from sidera_control_plane.domain.planning import PlanningRequestStatus
+from sidera_control_plane.domain.planning import (
+    PlanningRequestKind,
+    PlanningRequestStatus,
+)
 from sidera_control_plane.domain.plans import (
     SubtaskPlanItem,
     TaskPlanSnapshot,
@@ -259,6 +262,15 @@ class FakeUnitOfWork:
         self.executions = state.executions
         self.leases = state.leases
         self.sessions = state.sessions
+        self.planning_requests = SimpleNamespace(
+            get=lambda *_args, **_kwargs: None
+        )
+        self.planning_records = SimpleNamespace(
+            get_proposal=lambda *_args, **_kwargs: None
+        )
+        self.proposal_materializations = SimpleNamespace(
+            get_by_proposal=lambda *_args, **_kwargs: None
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -600,10 +612,15 @@ def test_new_transition_request_inherits_collaboration_gate_mode() -> None:
         effective_policy=lambda _subtask_key: SimpleNamespace(enabled=True)
     )
     worker_item_id = uuid4()
+    from_snapshot_id = uuid4()
+    subtask_id = uuid4()
     snapshot = SimpleNamespace(
         id=uuid4(),
+        workspace_id=WORKSPACE_ID,
         generation=2,
+        parent_snapshot_id=from_snapshot_id,
         root_task_id=ROOT_TASK_ID,
+        to_payload=dict,
         collaboration_policy=policy,
         worker_item_plans=(
             SimpleNamespace(
@@ -612,24 +629,35 @@ def test_new_transition_request_inherits_collaboration_gate_mode() -> None:
                 subtask_key="implementation",
             ),
         ),
-        subtasks=(SimpleNamespace(key="implementation", task_id=uuid4(), expected_outputs=()),),
+        worker_item_dependencies=(),
+        subtasks=(
+            SimpleNamespace(
+                key="implementation",
+                task_id=subtask_id,
+                expected_outputs=(),
+            ),
+        ),
     )
+    planning_request_id = uuid4()
+    proposal_revision_id = uuid4()
     plan = SimpleNamespace(
         id=uuid4(),
-        planning_request_id=uuid4(),
-        proposal_revision_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+        from_snapshot_id=from_snapshot_id,
+        from_generation=1,
+        planning_request_id=planning_request_id,
+        proposal_revision_id=proposal_revision_id,
         to_snapshot_id=snapshot.id,
         to_generation=snapshot.generation,
-        root_task_id=ROOT_TASK_ID,
     )
-    transition = SimpleNamespace(
-        id=uuid4(),
+    planning_request = SimpleNamespace(
+        id=planning_request_id,
         workspace_id=WORKSPACE_ID,
-        plan_transition_id=plan.id,
-        worker_item_id=worker_item_id,
-        action=WorkerTransitionAction.CREATE,
-        source_execution_id=None,
-        source_session_id=None,
+        root_task_id=ROOT_TASK_ID,
+        kind=PlanningRequestKind.REVISION,
+        status=PlanningRequestStatus.MATERIALIZED,
+        profile_snapshot=SimpleNamespace(adapter_forbidden=()),
     )
     intent = SimpleNamespace(
         worker_item_key="backend",
@@ -642,26 +670,64 @@ def test_new_transition_request_inherits_collaboration_gate_mode() -> None:
         expected_artifact_refs=(),
         required_evidence_refs=(),
     )
+    proposal = SimpleNamespace(
+        id=proposal_revision_id,
+        planning_request_id=planning_request_id,
+        payload=SimpleNamespace(execution_intents=(intent,)),
+    )
+    materialization = SimpleNamespace(
+        workspace_id=WORKSPACE_ID,
+        planning_request_id=planning_request_id,
+        proposal_revision_id=proposal_revision_id,
+        root_task_id=ROOT_TASK_ID,
+        plan_snapshot_id=snapshot.id,
+        plan_generation=snapshot.generation,
+        plan_transition_id=plan.id,
+    )
+    head = SimpleNamespace(
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+        active_snapshot_id=snapshot.id,
+        active_generation=snapshot.generation,
+        active_snapshot_hash=plan_snapshot_content_hash(snapshot),
+    )
+    transition = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        root_task_id=ROOT_TASK_ID,
+        plan_transition_id=plan.id,
+        worker_item_id=worker_item_id,
+        to_subtask_id=subtask_id,
+        action=WorkerTransitionAction.CREATE,
+        source_execution_id=None,
+        source_session_id=None,
+    )
     added = []
+    appended_events = []
     uow = SimpleNamespace(
         plan_transitions=SimpleNamespace(get=lambda *_args, **_kwargs: plan),
-        plans=SimpleNamespace(get=lambda *_args, **_kwargs: snapshot),
+        plans=SimpleNamespace(
+            get=lambda *_args, **_kwargs: snapshot,
+            get_head=lambda *_args, **_kwargs: head,
+        ),
         planning_requests=SimpleNamespace(
-            get=lambda *_args, **_kwargs: SimpleNamespace(
-                status=PlanningRequestStatus.MATERIALIZED,
-                profile_snapshot=SimpleNamespace(adapter_forbidden=()),
-            )
+            get=lambda *_args, **_kwargs: planning_request
         ),
         planning_records=SimpleNamespace(
-            get_proposal=lambda *_args, **_kwargs: SimpleNamespace(
-                id=plan.proposal_revision_id,
-                payload=SimpleNamespace(execution_intents=(intent,)),
-            )
+            get_proposal=lambda *_args, **_kwargs: proposal
+        ),
+        proposal_materializations=SimpleNamespace(
+            get_by_proposal=lambda *_args, **_kwargs: materialization
         ),
         execution_requests=SimpleNamespace(
             get_by_proposal_worker_item=lambda *_args, **_kwargs: None,
             add=added.append,
         ),
+        commands=SimpleNamespace(
+            find_by_id=lambda *_args, **_kwargs: None,
+            record_applied=lambda *_args, **_kwargs: None,
+        ),
+        events=SimpleNamespace(append_with_outbox=appended_events.append),
         flush=lambda: None,
     )
     coordinator = PlanTransitionCoordinator(
@@ -669,10 +735,8 @@ def test_new_transition_request_inherits_collaboration_gate_mode() -> None:
         clock=lambda: NOW,
         owner_id="test-coordinator",
     )
-    coordinator._add_request_dependencies = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
-    coordinator._append_transition_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
-
     request = coordinator._ensure_execution_request(uow, transition, now=NOW)
 
     assert added == [request]
     assert request.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED
+    assert len(appended_events) == 1

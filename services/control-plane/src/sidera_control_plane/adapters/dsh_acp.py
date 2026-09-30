@@ -356,50 +356,71 @@ class DshACPAdapter:
                     execution_session_id=session.handle.execution_session_id,
                 )
             session.prompt_busy = True
-            try:
-                prompt = _prompt_text(session, text)
-                result = session.transport.request(
-                    "session/prompt",
-                    {
-                        "sessionId": handle.adapter_session_id,
-                        "prompt": [{"type": "text", "text": prompt}],
-                    },
-                    timeout=self._request_timeout_seconds,
-                )
-                stop_reason = result.get("stopReason")
-                if stop_reason == "cancelled":
-                    delivery = _delivery(
-                        operation_id,
-                        DeliveryOutcome.FAILED,
-                        None,
-                        "prompt_cancelled",
-                        session,
-                    )
-                elif stop_reason != "end_turn":
+
+        # Do not hold session.lock while the ACP child waits for a model
+        # response.  stop_session must be able to send cancellation and fence
+        # the eventual response during this interval.
+        delivery: DeliveryResult | None = None
+        try:
+            prompt = _prompt_text(session, text)
+            result = session.transport.request(
+                "session/prompt",
+                {
+                    "sessionId": handle.adapter_session_id,
+                    "prompt": [{"type": "text", "text": prompt}],
+                },
+                timeout=self._request_timeout_seconds,
+            )
+            with session.lock:
+                if session.stopped:
                     delivery = _delivery(
                         operation_id,
                         DeliveryOutcome.UNKNOWN,
                         None,
-                        "prompt_completion_unproven",
+                        "prompt_cancelled",
                         session,
                     )
                 else:
-                    self._append_notifications(session)
-                    sequence = session.next_sequence
-                    session.next_sequence += 1
-                    session.last_accepted_sequence = sequence
-                    session.events.append(
-                        _event(session, "input.accepted", sequence, {"text_length": len(text)})
-                    )
-                    session.handle = _with_last_sequence(session.handle, sequence)
-                    delivery = _delivery(
-                        operation_id,
-                        DeliveryOutcome.DELIVERED,
-                        sequence,
-                        None,
-                        session,
-                    )
-            except ACPProcessTimeoutError:
+                    stop_reason = result.get("stopReason")
+                    if stop_reason == "cancelled":
+                        delivery = _delivery(
+                            operation_id,
+                            DeliveryOutcome.FAILED,
+                            None,
+                            "prompt_cancelled",
+                            session,
+                        )
+                    elif stop_reason != "end_turn":
+                        delivery = _delivery(
+                            operation_id,
+                            DeliveryOutcome.UNKNOWN,
+                            None,
+                            "prompt_completion_unproven",
+                            session,
+                        )
+                    else:
+                        self._append_notifications(session)
+                        sequence = session.next_sequence
+                        session.next_sequence += 1
+                        session.last_accepted_sequence = sequence
+                        session.events.append(
+                            _event(
+                                session,
+                                "input.accepted",
+                                sequence,
+                                {"text_length": len(text)},
+                            )
+                        )
+                        session.handle = _with_last_sequence(session.handle, sequence)
+                        delivery = _delivery(
+                            operation_id,
+                            DeliveryOutcome.DELIVERED,
+                            sequence,
+                            None,
+                            session,
+                        )
+        except ACPProcessTimeoutError:
+            with session.lock:
                 delivery = _delivery(
                     operation_id,
                     DeliveryOutcome.UNKNOWN,
@@ -407,7 +428,8 @@ class DshACPAdapter:
                     "acp_response_timeout",
                     session,
                 )
-            except ACPProcessProtocolError as exc:
+        except ACPProcessProtocolError as exc:
+            with session.lock:
                 delivery = _delivery(
                     operation_id,
                     DeliveryOutcome.FAILED,
@@ -415,7 +437,8 @@ class DshACPAdapter:
                     _safe_failure_code(exc),
                     session,
                 )
-            except ACPProcessError as exc:
+        except ACPProcessError as exc:
+            with session.lock:
                 delivery = _delivery(
                     operation_id,
                     DeliveryOutcome.UNKNOWN,
@@ -423,10 +446,14 @@ class DshACPAdapter:
                     _safe_failure_code(exc),
                     session,
                 )
-            finally:
+        finally:
+            with session.lock:
                 session.prompt_busy = False
-            session.operation_results[operation_id] = delivery
-            return delivery
+                if delivery is not None:
+                    session.operation_results[operation_id] = delivery
+        if delivery is None:
+            raise DshACPAdapterError("prompt outcome is unavailable")
+        return delivery
 
     def apply_context_patch(
         self,
@@ -543,9 +570,14 @@ class DshACPAdapter:
             )
 
     def collect_knowledge_candidates(
-        self, handle: AdapterSessionHandle, *, operation_id: UUID
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+        worker_item_id: UUID | None = None,
+        source_artifact_ids: tuple[UUID, ...] = (),
     ) -> tuple[KnowledgeCandidateProposalV1, ...]:
-        del handle
+        del handle, worker_item_id, source_artifact_ids
         if not isinstance(operation_id, UUID):
             raise TypeError("operation_id must be a UUID")
         return ()

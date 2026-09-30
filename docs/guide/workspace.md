@@ -7,6 +7,14 @@ SIDERA 按“任务 → 子任务 → WorkerItem”组织工作。先看任务�
 下文以随 Demo 提供的样例任务为例；其中状态和 Trace 是演示数据，
 不是正在执行的真实模型任务。
 
+## 选择网页演示入口
+
+快速开始中有两个相互独立的入口：预置浏览 Demo 用于直接查看任务、看板、DAG、
+WorkerItem 和 Trace；Interview Demo 用于在隔离 run 中操作一条受控的需求流程。
+后者会给出每个场景的停靠点，允许在网页上提交需求、确认规划、观察状态并留下介入
+记录，但不调用模型或外部消息通道。两者都以网页版为主，操作时不要混用各自的
+manifest、数据库或端口。
+
 ## 查看整体进展
 
 从侧边栏进入任务列表，打开“支付重构”。根任务页用于查看整体目标、
@@ -47,6 +55,15 @@ WorkerItem 是工作空间，具体执行的 Agent 与会话信息在其中查�
 如果提示执行上下文发生变化，保留草稿，重新查看当前执行信息后再决定是否发送。
 
 默认 Demo 只保存演示介入记录，不会启动真实 Worker，也不提供可用的主 Agent 对话。
+
+## 演示结束后的维护
+
+可以使用本次 run 的 manifest 执行 Demo 的 `status` 和 `doctor` 检查运行环境，见
+[本地维护现状](../deployment/initial-demo.md#本地维护现状)。Demo manifest 不会自动变成
+维护 inventory；需要备份时，先准备显式清单并停止所有 writer，再使用维护入口的
+`doctor`、`backup`、`inspect-backup`、`restore-preflight` 和 `restore`。恢复目标是新的
+空目录和新数据库，恢复后的服务默认按只读模式装配，凭据和 Keychain 不在备份范围内。
+不要把样例数据库当成日常任务库，也不要在没有确认 source/target 身份的情况下恢复。
 
 ## 查看 Agent Trace
 

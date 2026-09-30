@@ -22,6 +22,7 @@ export default defineConfig({
     host: "127.0.0.1",
     proxy: {
       "/api": `http://127.0.0.1:${controlPlanePort}`,
+      "/healthz": `http://127.0.0.1:${controlPlanePort}`,
       "/knowledge-api": {
         target: knowledgeProxyTarget(knowledgeServicePort),
         rewrite: rewriteKnowledgeProxyPath,

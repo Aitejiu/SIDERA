@@ -855,6 +855,8 @@ class KnowledgeCandidateSubmissionService:
             submission.task_id = root_task_id
             submission.queue(now=now)
             uow.knowledge_candidate_submissions.save(submission, previous_version)
+            activated.append(submission)
+        for submission in activated:
             self.record_event(
                 uow,
                 submission=submission,
@@ -864,7 +866,6 @@ class KnowledgeCandidateSubmissionService:
                 causation_id=causation_id,
                 actor_type=actor_type,
             )
-            activated.append(submission)
         return tuple(activated)
 
     def discard_planner_submissions(
@@ -889,6 +890,15 @@ class KnowledgeCandidateSubmissionService:
             previous_version = submission.version
             submission.discard(now=now, error_code=error_code)
             uow.knowledge_candidate_submissions.save(submission, previous_version)
+            try:
+                self._spool.delete(submission.content_ref)
+            except CandidateProposalSpoolError:
+                logger.warning(
+                    "planner candidate spool cleanup failed",
+                    extra={"submission_id": str(submission.id)},
+                )
+            discarded.append(submission)
+        for submission in discarded:
             self.record_event(
                 uow,
                 submission=submission,
@@ -898,14 +908,6 @@ class KnowledgeCandidateSubmissionService:
                 causation_id=causation_id,
                 actor_type=actor_type,
             )
-            try:
-                self._spool.delete(submission.content_ref)
-            except CandidateProposalSpoolError:
-                logger.warning(
-                    "planner candidate spool cleanup failed",
-                    extra={"submission_id": str(submission.id)},
-                )
-            discarded.append(submission)
         return tuple(discarded)
 
     @staticmethod

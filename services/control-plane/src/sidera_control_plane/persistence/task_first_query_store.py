@@ -21,7 +21,10 @@ from sidera_control_plane.application.task_first_queries import (
     TaskFact,
     WorkerFact,
 )
-from sidera_control_plane.application.worker_trace_queries import RawTraceFact
+from sidera_control_plane.application.worker_trace_queries import (
+    RawTraceFact,
+    TraceArtifactFact,
+)
 from sidera_control_plane.domain.attention import AttentionAcknowledgement
 from sidera_control_plane.domain.plan_convergence_projections import (
     PlanConvergenceFacts,
@@ -90,6 +93,7 @@ class WorkerTraceQuerySnapshot:
     worker_slot_key: str | None
     events: tuple[RawTraceFact, ...]
     artifact_refs: tuple[UUID, ...]
+    trace_artifacts: tuple[TraceArtifactFact, ...]
     last_change_cursor: int
     previous_before_sequence: int | None
 
@@ -507,6 +511,15 @@ class SqlAlchemyTaskFirstQueryStore:
                 )
                 .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
             ).all()
+            trace_artifact_rows = session.execute(
+                select(ArtifactModel.id, ArtifactModel.created_at)
+                .where(
+                    ArtifactModel.workspace_id == workspace_id,
+                    ArtifactModel.execution_id == execution_id,
+                    ArtifactModel.session_id == session_id,
+                )
+                .order_by(ArtifactModel.created_at.asc(), ArtifactModel.id.asc())
+            ).all()
             last_cursor = session.scalar(
                 select(WorkspaceProjectionCursorModel.last_cursor).where(
                     WorkspaceProjectionCursorModel.workspace_id == workspace_id
@@ -533,6 +546,10 @@ class SqlAlchemyTaskFirstQueryStore:
                 worker_slot_key=worker_slot_key,
                 events=facts,
                 artifact_refs=tuple(artifact_rows),
+                trace_artifacts=tuple(
+                    TraceArtifactFact(artifact_id=row.id, occurred_at=row.created_at)
+                    for row in trace_artifact_rows
+                ),
                 last_change_cursor=int(last_cursor),
                 previous_before_sequence=previous_before,
             )

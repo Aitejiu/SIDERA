@@ -68,6 +68,8 @@ async def _event_stream(
 ) -> AsyncGenerator[str, None]:
     cursor = start_cursor
     last_heartbeat = asyncio.get_running_loop().time()
+    # Flush the response through local development proxies before polling.
+    yield ": connected\n\n"
     while True:
         with database.session() as session:
             repository = ProjectionChangeRepository(

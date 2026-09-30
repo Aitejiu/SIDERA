@@ -1,21 +1,42 @@
 import json
 import logging
+import os
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_runtime_guard import RuntimeBudgetGuard, RuntimeGuardError
+from sqlalchemy.exc import OperationalError
+
+from sidera_control_plane.acceptance_guard import (
+    begin_call,
+    observe_call,
+    payload_hash,
+    route_id_from_env,
+)
+from sidera_control_plane.acceptance_resource_binding import (
+    bind_runtime_resource_chain,
+    derive_runtime_resource_chain,
+    load_execution_resource_facts,
+)
 from sidera_control_plane.application.artifact_content import (
     ALLOWED_ARTIFACT_MEDIA_TYPES,
 )
 from sidera_control_plane.application.code_result_capture import (
+    CODE_RESULT_CAPTURE_OPERATION_KIND,
     CodeResultCaptureService,
     code_capture_operation_id,
 )
 from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
-from sidera_control_plane.application.command_service import hash_request
+from sidera_control_plane.application.command_service import (
+    CommandService,
+    hash_request,
+)
 from sidera_control_plane.application.context_materialization import (
     ContextMaterializationError,
     ContextMaterializer,
@@ -31,6 +52,10 @@ from sidera_control_plane.application.event_ingestor import (
     ArtifactRegistry,
     EventIngestionReport,
     SessionEventIngestor,
+)
+from sidera_control_plane.application.execution_commands import (
+    ExecutionCommandHandler,
+    ExecutionCompletionDeferred,
 )
 from sidera_control_plane.application.handoff_gate import (
     HandoffGateOperation,
@@ -59,6 +84,13 @@ from sidera_control_plane.application.result_ports import (
     ResultOperationAttemptV1,
 )
 from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
+from sidera_control_plane.application.worker_completion import (
+    CompletionDecision,
+    CompletionPolicyError,
+    ExecutionCompletionPolicy,
+    decide_completion,
+    resolve_completion_policy,
+)
 from sidera_control_plane.domain.artifacts import ArtifactCandidate
 from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
@@ -118,7 +150,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffTransitionStatus,
 )
 from sidera_control_plane.domain.inputs import ExecutionInput, ExecutionInputStatus
-from sidera_control_plane.domain.lease import AssignmentLease
+from sidera_control_plane.domain.lease import AssignmentLease, LeaseStatus
 from sidera_control_plane.domain.modules import (
     LOCAL_VERIFICATION_PROVIDER,
     CapabilityInput,
@@ -130,14 +162,18 @@ from sidera_control_plane.domain.modules import (
     WorkerAdapterCapabilityProfile,
     WorkspaceProviderCapabilityProfile,
 )
-from sidera_control_plane.domain.result_operations import ResultError
+from sidera_control_plane.domain.result_operations import (
+    ResultError,
+    ResultOperationStatus,
+)
 from sidera_control_plane.domain.result_verification import VerificationManifestV1
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
     SchedulingIssue,
 )
-from sidera_control_plane.domain.task import Task
+from sidera_control_plane.domain.task import Task, TaskStatus
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
     CheckoutMode,
@@ -147,6 +183,8 @@ from sidera_control_plane.domain.workspace import (
     WorkspaceLifecycle,
     workspace_manifest_digest,
 )
+
+_MAX_ARTIFACT_REGISTRATION_DEADLOCK_RETRIES = 2
 
 ASSIGNMENT_TOPIC = "execution.ExecutionLeased"
 STOP_TOPIC = "execution.ExecutionStopRequested"
@@ -225,6 +263,18 @@ class GatewayMessageError(GatewayError):
         self.code = code
 
 
+class GatewayTerminalAssignmentError(GatewayError):
+    """The assignment reached a durable terminal state and must not be retried."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class GatewayObsoleteAssignmentError(GatewayError):
+    """Authoritative lease state proves the assignment is no longer current."""
+
+
 class GatewayRecoveryRequired(GatewayError):
     """A prior external side effect has no safe in-process retry path."""
 
@@ -244,6 +294,7 @@ class ExecutionSpecFactory(Protocol):
         context_materialization: ContextMaterialization | None = None,
         execution_purpose: Literal["code", "verification"] | None = None,
         physical_input_ack: Mapping[str, object] | None = None,
+        worker_item: WorkerItem | None = None,
     ) -> ExecutionSpec:
         raise NotImplementedError
 
@@ -266,6 +317,7 @@ class GatewaySessionSyncResult:
     event_report: EventIngestionReport
     artifact_report: ArtifactRegistrationReport
     code_result: CodeResultSnapshotV1 | None = None
+    renew_lease: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +333,7 @@ class GatewayStopResult:
 class _AssignmentContext:
     execution: Execution
     task: Task
+    worker_item: WorkerItem | None
     worker: Worker
     lease: AssignmentLease
     binding: ExecutionBinding
@@ -476,6 +529,7 @@ class ConfiguredExecutionSpecFactory:
         context_materialization: ContextMaterialization | None = None,
         execution_purpose: Literal["code", "verification"] | None = None,
         physical_input_ack: Mapping[str, object] | None = None,
+        worker_item: WorkerItem | None = None,
     ) -> ExecutionSpec:
         config = workspace_instance.config
         repository_ref = _required_config(config, workspace_instance.config_namespace, "repository_ref")
@@ -528,7 +582,7 @@ class ConfiguredExecutionSpecFactory:
             worker_id=binding.worker_id,
             lease_id=binding.lease_id,
             fencing_token=binding.fencing_token,
-            goal=task.description or task.title,
+            goal=_execution_goal(task, worker_item),
             acceptance_criteria=task.acceptance_criteria,
             context_package_ref=(
                 context_package_reference(
@@ -572,6 +626,7 @@ class ConfiguredExecutionSpecFactory:
             context_package=context_materialization,
             execution_purpose=execution_purpose,
             physical_input_ack=physical_input_ack,
+            request_purpose=execution.purpose,
         )
 
 
@@ -588,6 +643,7 @@ class LegacyExecutionSpecFactory(ConfiguredExecutionSpecFactory):
         context_materialization: ContextMaterialization | None = None,
         execution_purpose: Literal["code", "verification"] | None = None,
         physical_input_ack: Mapping[str, object] | None = None,
+        worker_item: WorkerItem | None = None,
     ) -> ExecutionSpec:
         if (
             context_materialization is not None
@@ -601,6 +657,7 @@ class LegacyExecutionSpecFactory(ConfiguredExecutionSpecFactory):
             binding,
             adapter_instance,
             workspace_instance,
+            worker_item=worker_item,
         )
 
 
@@ -623,8 +680,11 @@ class WorkerGateway:
         context_package_cutover_at: datetime | None = None,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
         code_result_capture_service: CodeResultCaptureService | None = None,
+        interview_demo_completion_enabled: bool = False,
+        result_integration_enabled: bool = False,
         assignment_lease_ttl_seconds: int = 30,
         assignment_lease_renew_interval_seconds: float = 0.0,
+        acceptance_guard: RuntimeBudgetGuard | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
@@ -651,10 +711,114 @@ class WorkerGateway:
         self._scheduling_blocks = SchedulingBlockService()
         self._candidate_submission_service = candidate_submission_service
         self._code_result_capture_service = code_result_capture_service
+        self._interview_demo_completion_enabled = interview_demo_completion_enabled
+        self._result_integration_enabled = result_integration_enabled
         self._assignment_lease_ttl_seconds = assignment_lease_ttl_seconds
         self._assignment_lease_renew_interval_seconds = (
             assignment_lease_renew_interval_seconds
         )
+        self._acceptance_guard = acceptance_guard
+
+    def _begin_acceptance_worker_call(
+        self,
+        *,
+        operation_id: UUID,
+        resource_key: str,
+        payload: str,
+        boundary: Literal["session", "prompt"],
+        provider: str | None = None,
+    ) -> str | None:
+        if self._acceptance_guard is None:
+            return None
+        if boundary == "session":
+            role = "worker"
+            route_id = route_id_from_env(
+                "SIDERA_ACCEPTANCE_WORKER_SESSION_ROUTE_ID",
+                "SIDERA_ACCEPTANCE_WORKER_ROUTE_ID",
+            )
+        else:
+            role = "second_worker"
+            route_id = route_id_from_env(
+                "SIDERA_ACCEPTANCE_SECOND_WORKER_ROUTE_ID",
+                "SIDERA_ACCEPTANCE_WORKER_PROMPT_ROUTE_ID",
+                "SIDERA_ACCEPTANCE_WORKER_ROUTE_ID",
+            )
+        try:
+            resource_chain: tuple[str, ...] = ()
+            if self._acceptance_guard.resource_binding_mode == "persisted":
+                resource_chain = self._bind_acceptance_execution_resource(resource_key)
+            costs = None
+            if boundary == "session" and provider == LOCAL_VERIFICATION_PROVIDER:
+                costs = {"worker_sessions": 1}
+            return begin_call(
+                self._acceptance_guard,
+                scenario=None,
+                role=role,
+                operation_id=str(operation_id),
+                resource_key=resource_key,
+                payload_digest=payload_hash(payload),
+                route_id=route_id,
+                resource_chain=resource_chain,
+                costs=costs,
+            )
+        except RuntimeGuardError as exc:
+            if exc.code == "operation_already_started":
+                raise GatewayRecoveryRequired(
+                    "acceptance operation requires reconciliation",
+                    code=exc.code,
+                ) from exc
+            raise GatewayMessageError(
+                "worker acceptance guard rejected the external call",
+                code=exc.code,
+            ) from exc
+
+    def _bind_acceptance_execution_resource(
+        self,
+        resource_key: str,
+    ) -> tuple[str, ...]:
+        if not resource_key.startswith("execution:"):
+            raise RuntimeGuardError("resource_key_invalid")
+        try:
+            execution_id = UUID(resource_key.removeprefix("execution:"))
+            workspace_id = UUID(self._acceptance_guard.workspace_id)  # type: ignore[union-attr]
+        except (ValueError, AttributeError) as exc:
+            raise RuntimeGuardError("resource_key_invalid") from exc
+        with self._uow_factory() as uow:
+            facts = load_execution_resource_facts(
+                uow.session,
+                execution_id=execution_id,
+                workspace_id=workspace_id,
+            )
+        chain = derive_runtime_resource_chain(
+            facts,
+            requested_scenario=os.environ.get("SIDERA_ACCEPTANCE_SCENARIO"),
+            requested_group=os.environ.get("SIDERA_ACCEPTANCE_GROUP"),
+            require_execution=True,
+        )
+        if chain.resource_key != resource_key:
+            raise RuntimeGuardError("resource_identity_mismatch")
+        bind_runtime_resource_chain(self._acceptance_guard, chain)  # type: ignore[arg-type]
+        return chain.keys
+
+    def _observe_acceptance_worker_call(
+        self,
+        operation_id: str | None,
+        *,
+        outcome: Literal["completed", "failed", "unknown"],
+        resource_ids: tuple[str, ...] = (),
+    ) -> None:
+        try:
+            observe_call(
+                self._acceptance_guard,
+                operation_id,
+                outcome=outcome,
+                resource_ids=resource_ids,
+            )
+        except RuntimeGuardError as exc:
+            raise GatewayRecoveryRequired(
+                "acceptance operation observation is invalid",
+                code=exc.code,
+            ) from exc
 
     def handle(
         self, message: OutboxMessage
@@ -667,6 +831,7 @@ class WorkerGateway:
                 raise
         try:
             context = self._load_context(message)
+            self._validate_completion_contract(context)
             self._require_normal_handoff_schedule(context.execution)
             keeper = self._lease_keeper(context)
             keeper.start()
@@ -687,12 +852,16 @@ class WorkerGateway:
                                 "verification execution requires the local verification provider",
                                 code="verification_input_unsupported",
                             )
-                        prepare_spec = self._spec_factory.create(
-                            context.execution,
-                            context.task,
-                            context.binding,
-                            context.adapter_instance,
-                            context.workspace_instance,
+                        prepare_spec = _bind_spec_to_revision(
+                            self._spec_factory.create(
+                                context.execution,
+                                context.task,
+                                context.binding,
+                                context.adapter_instance,
+                                context.workspace_instance,
+                                worker_item=context.worker_item,
+                            ),
+                            verification_manifest.result_commit,
                         )
                         workspace = self._ensure_workspace(context, prepare_spec)
                         physical_input_ack = _verification_input_ack(
@@ -704,15 +873,19 @@ class WorkerGateway:
                             context_materialization,
                             physical_input_ack=physical_input_ack,
                         )
-                        spec = self._spec_factory.create(
-                            context.execution,
-                            context.task,
-                            context.binding,
-                            context.adapter_instance,
-                            context.workspace_instance,
-                            context_materialization=context_materialization,
-                            execution_purpose="verification",
-                            physical_input_ack=physical_input_ack,
+                        spec = _bind_spec_to_revision(
+                            self._spec_factory.create(
+                                context.execution,
+                                context.task,
+                                context.binding,
+                                context.adapter_instance,
+                                context.workspace_instance,
+                                context_materialization=context_materialization,
+                                execution_purpose="verification",
+                                physical_input_ack=physical_input_ack,
+                                worker_item=context.worker_item,
+                            ),
+                            verification_manifest.result_commit,
                         )
                     else:
                         code_input_manifest = context_materialization.code_input_manifest
@@ -735,6 +908,7 @@ class WorkerGateway:
                             context.binding,
                             context.adapter_instance,
                             context.workspace_instance,
+                            worker_item=context.worker_item,
                         )
                         workspace = self._ensure_workspace(context, prepare_spec)
                         receipt = self._materialize_code_inputs(
@@ -763,6 +937,7 @@ class WorkerGateway:
                             context_materialization=context_materialization,
                             execution_purpose="code",
                             physical_input_ack=physical_input_ack,
+                            worker_item=context.worker_item,
                         )
                 else:
                     if context_materialization is not None:
@@ -777,6 +952,7 @@ class WorkerGateway:
                         context.adapter_instance,
                         context.workspace_instance,
                         context_materialization=context_materialization,
+                        worker_item=context.worker_item,
                     )
                     workspace = self._ensure_workspace(context, spec)
                     self._record_code_result_start(context, spec, workspace)
@@ -1309,6 +1485,7 @@ class WorkerGateway:
                 target.assignment.adapter_instance,
                 target.assignment.workspace_instance,
                 context_materialization=materialization,
+                worker_item=target.assignment.worker_item,
             )
             adapter = self._adapter(
                 target.assignment.adapter_definition,
@@ -1327,10 +1504,40 @@ class WorkerGateway:
             raise GatewayError("handoff target preflight failed") from exc
 
         try:
+            guard_operation = self._begin_acceptance_worker_call(
+                operation_id=operation_id,
+                resource_key=f"execution:{target.assignment.execution.id}",
+                payload=f"{target.manifest.workspace_id}:{spec.goal}",
+                boundary="session",
+                provider=target.assignment.adapter_definition.provider,
+            )
+        except GatewayMessageError as exc:
+            self._fail_operation(
+                operation_id,
+                target.assignment,
+                exc.code or _failure_code(exc),
+            )
+            raise
+        except GatewayRecoveryRequired as exc:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                _failure_code(exc),
+            )
+            raise
+
+        guard_observe_attempted = False
+        try:
             handle = adapter.start_session(
                 spec,
                 target.manifest,
                 operation_id=operation_id,
+            )
+            guard_observe_attempted = True
+            self._observe_acceptance_worker_call(
+                guard_operation,
+                outcome="completed",
+                resource_ids=(str(handle.execution_session_id),),
             )
             binding = self._validate_handoff_target_handle(
                 target,
@@ -1348,6 +1555,14 @@ class WorkerGateway:
                 "handoff target Session start returned an invalid binding"
             ) from exc
         except Exception as exc:
+            if guard_operation is not None and not guard_observe_attempted:
+                try:
+                    self._observe_acceptance_worker_call(
+                        guard_operation,
+                        outcome="unknown",
+                    )
+                except GatewayRecoveryRequired:
+                    pass
             failure_code = _failure_code(exc)
             self._mark_operation_unknown(operation_id, target.assignment, failure_code)
             raise GatewayRecoveryRequired(
@@ -1484,6 +1699,35 @@ class WorkerGateway:
         if adapter is None or handle is None:
             raise GatewayRecoveryRequired("handoff target writer adapter is unavailable")
         try:
+            guard_operation = self._begin_acceptance_worker_call(
+                operation_id=operation_id,
+                resource_key=f"execution:{target.assignment.execution.id}",
+                payload=f"handoff-writer:{transition_id}:{handle.execution_session_id}",
+                boundary="prompt",
+            )
+        except GatewayMessageError as exc:
+            self._fail_operation(
+                operation_id,
+                target.assignment,
+                exc.code or _failure_code(exc),
+            )
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.BLOCKED,
+                accepted_sequence=None,
+                failure_code=exc.code or _failure_code(exc),
+                execution_session_id=handle.execution_session_id,
+            )
+        except GatewayRecoveryRequired as exc:
+            self._mark_operation_unknown(
+                operation_id,
+                target.assignment,
+                _failure_code(exc),
+            )
+            raise
+
+        guard_observe_attempted = False
+        try:
             delivery = adapter.enable_handoff_writer(
                 handle,
                 fencing_token=target.assignment.binding.fencing_token,
@@ -1503,16 +1747,35 @@ class WorkerGateway:
                     code="handoff_writer_result_mismatch",
                 )
             if delivery.outcome is DeliveryOutcome.UNKNOWN:
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="unknown",
+                )
                 raise GatewayRecoveryRequired(
                     "handoff target writer result is unknown"
                 )
             if delivery.outcome is not DeliveryOutcome.DELIVERED:
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="failed",
+                )
                 self._fail_operation(
                     operation_id,
                     target.assignment,
                     delivery.failure_code or delivery.outcome.value,
                 )
                 return delivery
+            guard_observe_attempted = True
+            self._observe_acceptance_worker_call(
+                guard_operation,
+                outcome="completed",
+                resource_ids=(
+                    str(handle.execution_session_id),
+                    f"sequence:{delivery.accepted_sequence}",
+                ),
+            )
             with self._uow_factory() as uow:
                 self._succeed_operation(
                     uow,
@@ -1530,6 +1793,14 @@ class WorkerGateway:
             )
             raise GatewayRecoveryRequired(str(exc)) from exc
         except GatewayMessageError as exc:
+            if guard_operation is not None and not guard_observe_attempted:
+                try:
+                    self._observe_acceptance_worker_call(
+                        guard_operation,
+                        outcome="unknown",
+                    )
+                except GatewayRecoveryRequired:
+                    pass
             self._mark_operation_unknown(
                 operation_id,
                 target.assignment,
@@ -1539,6 +1810,14 @@ class WorkerGateway:
                 "handoff target writer result is not trustworthy"
             ) from exc
         except Exception as exc:
+            if guard_operation is not None and not guard_observe_attempted:
+                try:
+                    self._observe_acceptance_worker_call(
+                        guard_operation,
+                        outcome="unknown",
+                    )
+                except GatewayRecoveryRequired:
+                    pass
             failure_code = _failure_code(exc)
             self._mark_operation_unknown(operation_id, target.assignment, failure_code)
             raise GatewayRecoveryRequired(
@@ -2784,6 +3063,25 @@ class WorkerGateway:
             causation_id=causation_id,
         )
 
+    def _validate_completion_contract(self, context: _AssignmentContext) -> None:
+        try:
+            policy = resolve_completion_policy(context.adapter_instance)
+        except CompletionPolicyError as exc:
+            raise GatewayMessageError(
+                "worker completion policy is invalid",
+                code=exc.code,
+            ) from exc
+        if (
+            policy is ExecutionCompletionPolicy.INITIAL_TURN
+            and not context.binding.capability_snapshot.supports_turn_completion_version(
+                1
+            )
+        ):
+            raise GatewayMessageError(
+                "bound worker adapter does not support turn completion v1",
+                code="turn_completion_capability_unsupported",
+            )
+
     def _prepare_execution_context(
         self,
         context: _AssignmentContext,
@@ -3512,16 +3810,35 @@ class WorkerGateway:
         binding = uow.bindings.get_for_execution(
             execution_id, workspace_id, for_update=True
         )
+        lease = uow.leases.get(lease_id, workspace_id, for_update=True)
+        task = uow.tasks.get(execution.task_id, workspace_id)
+        if task is None:
+            raise GatewayMessageError("assigned task was not found")
+        worker_item = (
+            uow.worker_items.get(execution.worker_item_id, workspace_id)
+            if execution.worker_item_id is not None
+            else None
+        )
+        if execution.worker_item_id is not None and worker_item is None:
+            raise GatewayMessageError(
+                "assigned WorkerItem was not found", code="worker_item_not_found"
+            )
+        if lease is None:
+            raise GatewayMessageError("assignment lease was not found")
+        if operation is RuntimeModuleOperation.START and self._assignment_is_obsolete(
+            uow,
+            execution=execution,
+            lease=lease,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+        ):
+            raise GatewayObsoleteAssignmentError(
+                "assignment lease is expired, superseded, or terminal"
+            )
         if binding is None:
             raise GatewayMessageError(
                 "execution binding was not found", code="runtime_binding_missing"
             )
-        lease = uow.leases.get(lease_id, workspace_id, for_update=True)
-        if lease is None:
-            raise GatewayMessageError("assignment lease was not found")
-        task = uow.tasks.get(execution.task_id, workspace_id)
-        if task is None:
-            raise GatewayMessageError("assigned task was not found")
         if binding.lease_id != lease_id or binding.fencing_token != fencing_token:
             raise GatewayMessageError(
                 "assignment binding fence does not match event",
@@ -3584,6 +3901,7 @@ class WorkerGateway:
         return _AssignmentContext(
             execution=execution,
             task=task,
+            worker_item=worker_item,
             worker=worker,
             lease=lease,
             binding=binding,
@@ -3592,6 +3910,50 @@ class WorkerGateway:
             workspace_definition=workspace_definition,
             workspace_instance=workspace_instance,
             causation_id=causation_id,
+        )
+
+    def _assignment_is_obsolete(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        execution: Execution,
+        lease: AssignmentLease,
+        lease_id: UUID,
+        fencing_token: int,
+    ) -> bool:
+        if lease.execution_id != execution.id or lease.fencing_token != fencing_token:
+            return False
+        if execution.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELED,
+            ExecutionStatus.LOST,
+        } and execution.active_lease_id is None:
+            return True
+
+        now = self._clock()
+        if (
+            lease.status in {LeaseStatus.RELEASED, LeaseStatus.EXPIRED}
+            or now >= lease.expires_at
+        ):
+            return True
+        if execution.active_lease_id == lease_id:
+            return False
+        if execution.active_lease_id is None:
+            return False
+
+        current_lease = uow.leases.get(
+            execution.active_lease_id,
+            execution.workspace_id,
+            for_update=True,
+        )
+        return bool(
+            current_lease is not None
+            and current_lease.execution_id == execution.id
+            and current_lease.status is LeaseStatus.ACTIVE
+            and current_lease.expires_at > now
+            and current_lease.fencing_token > fencing_token
+            and current_lease.worker_id == execution.assigned_worker_id
         )
 
     def sync_session(
@@ -3603,13 +3965,36 @@ class WorkerGateway:
         lease_id: UUID,
         fencing_token: int,
     ) -> GatewaySessionSyncResult:
-        context = self._load_context_by_ids(
-            workspace_id=workspace_id,
-            execution_id=execution_id,
-            lease_id=lease_id,
-            fencing_token=fencing_token,
-            operation=RuntimeModuleOperation.OBSERVE,
-        )
+        try:
+            context = self._load_context_by_ids(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+                operation=RuntimeModuleOperation.OBSERVE,
+            )
+        except GatewayMessageError:
+            with self._uow_factory() as uow:
+                execution = uow.executions.get(execution_id, workspace_id)
+                session = uow.sessions.get_any(session_id, workspace_id)
+                if (
+                    execution is None
+                    or session is None
+                    or session.execution_id != execution_id
+                    or execution.status
+                    not in {
+                        ExecutionStatus.SUCCEEDED,
+                        ExecutionStatus.FAILED,
+                        ExecutionStatus.CANCELED,
+                        ExecutionStatus.LOST,
+                    }
+                ):
+                    raise
+            return GatewaySessionSyncResult(
+                EventIngestionReport((), (), ()),
+                ArtifactRegistrationReport((), ()),
+                None,
+            )
         with self._uow_factory() as uow:
             session = uow.sessions.get_active_for_execution(
                 execution_id, for_update=True
@@ -3631,16 +4016,44 @@ class WorkerGateway:
             fencing_token=fencing_token,
             events=adapter_events,
         )
-        code_result = (
-            None
-            if context.adapter_definition.provider == LOCAL_VERIFICATION_PROVIDER
-            else self._capture_observed_terminal(
+        completion_decision = self._load_completion_decision(
+            context,
+            session_id=session_id,
+        )
+        code_result = None
+        if context.adapter_definition.provider == LOCAL_VERIFICATION_PROVIDER:
+            completion_decision = None
+        elif context.adapter_definition.provider == "interview-demo-worker":
+            code_result = self._capture_observed_terminal(
                 workspace_id=workspace_id,
                 execution_id=execution_id,
                 fencing_token=fencing_token,
                 report=event_report,
             )
-        )
+            completion_decision = None
+        elif completion_decision is not None:
+            pending = self._pending_session_input(workspace_id, session_id)
+            if pending is not None:
+                return self._completion_deferred_sync_result(
+                    event_report, pending
+                )
+            try:
+                if self._code_result_capture_service is None:
+                    self._observe_completion_without_capture(
+                        context,
+                        session_id=session_id,
+                        decision=completion_decision,
+                    )
+                else:
+                    code_result = self._capture_completion_result(
+                        context,
+                        completion_decision,
+                    )
+            except GatewayMessageError as exc:
+                if exc.code != "result_capture_input_pending":
+                    raise
+                pending = self._pending_session_input(workspace_id, session_id)
+                return self._completion_deferred_sync_result(event_report, pending)
         candidates = adapter.collect_artifacts(
             handle,
             operation_id=uuid5(
@@ -3652,7 +4065,7 @@ class WorkerGateway:
             execution_id=execution_id,
             candidates=candidates,
         )
-        artifact_report = self._artifact_registry.register(
+        artifact_report = self._register_artifacts_with_deadlock_retry(
             workspace_id=workspace_id,
             task_id=context.task.id,
             execution_id=execution_id,
@@ -3669,8 +4082,404 @@ class WorkerGateway:
             workspace_id=workspace_id,
             execution_id=execution_id,
             session_id=session_id,
+            source_artifact_ids=tuple(
+                artifact.id for artifact in artifact_report.artifacts
+            ),
         )
+        self._report_local_verification_completion(context, event_report)
+        self._report_interview_demo_completion(context, event_report)
+        if completion_decision is not None:
+            reported = self._report_execution_completion(
+                context,
+                session_id=session_id,
+                decision=completion_decision,
+            )
+            if not reported:
+                pending = self._pending_session_input(workspace_id, session_id)
+                return self._completion_deferred_sync_result(event_report, pending)
         return GatewaySessionSyncResult(event_report, artifact_report, code_result)
+
+    def _pending_session_input(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> ExecutionInput | None:
+        with self._uow_factory() as uow:
+            return uow.execution_inputs.get_pending_for_session(
+                session_id, workspace_id
+            )
+
+    @staticmethod
+    def _completion_deferred_sync_result(
+        event_report: EventIngestionReport,
+        pending: ExecutionInput | None,
+    ) -> GatewaySessionSyncResult:
+        return GatewaySessionSyncResult(
+            event_report,
+            ArtifactRegistrationReport((), ()),
+            None,
+            renew_lease=(
+                pending is None
+                or pending.status is not ExecutionInputStatus.BLOCKED
+            ),
+        )
+
+    def _load_completion_decision(
+        self,
+        context: _AssignmentContext,
+        *,
+        session_id: UUID,
+    ) -> CompletionDecision | None:
+        try:
+            policy = resolve_completion_policy(context.adapter_instance)
+        except CompletionPolicyError as exc:
+            raise GatewayMessageError(
+                "worker completion policy is invalid",
+                code=exc.code,
+            ) from exc
+        initial_operation_id = _operation_id(
+            context.execution.id, GatewayOperationType.SEND_INPUT
+        )
+        with self._uow_factory() as uow:
+            initial_operation = uow.gateway_operations.get_by_operation_id(
+                initial_operation_id,
+                context.execution.workspace_id,
+            )
+            events = uow.execution_events.list_for_session(
+                session_id,
+                context.execution.workspace_id,
+            )
+        return decide_completion(
+            policy=policy,
+            capability_snapshot=context.binding.capability_snapshot,
+            events=events,
+            initial_operation_id=initial_operation_id,
+            initial_operation_succeeded=(
+                initial_operation is not None
+                and initial_operation.status is GatewayOperationStatus.SUCCEEDED
+            ),
+        )
+
+    def _register_artifacts_with_deadlock_retry(
+        self,
+        *,
+        workspace_id: UUID,
+        task_id: UUID,
+        execution_id: UUID,
+        session_id: UUID,
+        candidates: Sequence[ArtifactCandidate],
+        acceptance_criteria: Sequence[str],
+        producer: str,
+        environment_ref: str,
+    ) -> ArtifactRegistrationReport:
+        retries = 0
+        while True:
+            try:
+                return self._artifact_registry.register(
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    candidates=candidates,
+                    acceptance_criteria=acceptance_criteria,
+                    producer=producer,
+                    environment_ref=environment_ref,
+                )
+            except OperationalError as exc:
+                if (
+                    not _is_postgres_deadlock(exc)
+                    or retries >= _MAX_ARTIFACT_REGISTRATION_DEADLOCK_RETRIES
+                ):
+                    raise
+                retries += 1
+                time.sleep(0.05 * retries)
+
+    def sync_active_sessions(self, workspace_id: UUID) -> int:
+        """Renew and observe active sessions through the gateway path."""
+
+        targets: list[tuple[UUID, UUID, UUID, UUID, UUID]] = []
+        with self._uow_factory() as uow:
+            for session in uow.sessions.list_active(workspace_id):
+                execution = uow.executions.get(session.execution_id, workspace_id)
+                if execution is None or execution.active_lease_id is None:
+                    continue
+                if execution.status not in {
+                    ExecutionStatus.LEASED,
+                    ExecutionStatus.RUNNING,
+                }:
+                    continue
+                lease = uow.leases.get_active_for_execution(
+                    execution.id, workspace_id
+                )
+                if lease is None or lease.id != execution.active_lease_id:
+                    continue
+                targets.append(
+                    (
+                        workspace_id,
+                        execution.id,
+                        session.id,
+                        lease.id,
+                        session.worker_id,
+                    )
+                )
+
+        synced = 0
+        for (
+            target_workspace_id,
+            execution_id,
+            session_id,
+            lease_id,
+            worker_id,
+        ) in targets:
+            try:
+                with self._uow_factory() as uow:
+                    lease = uow.leases.get(lease_id, target_workspace_id)
+                    if lease is None:
+                        continue
+                    fencing_token = lease.fencing_token
+                sync_result = self.sync_session(
+                    workspace_id=target_workspace_id,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    lease_id=lease_id,
+                    fencing_token=fencing_token,
+                )
+                if not sync_result.renew_lease:
+                    synced += 1
+                    continue
+                with self._uow_factory() as uow:
+                    execution = uow.executions.get(execution_id, target_workspace_id)
+                    current_lease = uow.leases.get(lease_id, target_workspace_id)
+                if execution is None or current_lease is None:
+                    continue
+                if execution.status not in {
+                    ExecutionStatus.LEASED,
+                    ExecutionStatus.RUNNING,
+                }:
+                    synced += 1
+                    continue
+                if (
+                    execution.active_lease_id != lease_id
+                    or current_lease.status.value != "active"
+                    or current_lease.fencing_token != fencing_token
+                ):
+                    continue
+                keeper = AssignmentLeaseKeeper(
+                    uow_factory=self._uow_factory,
+                    lease_id=lease_id,
+                    workspace_id=target_workspace_id,
+                    execution_id=execution_id,
+                    worker_id=worker_id,
+                    fencing_token=fencing_token,
+                    lease_ttl_seconds=self._assignment_lease_ttl_seconds,
+                    clock=self._clock,
+                )
+                if not keeper.renew_once():
+                    continue
+            except GatewayError as exc:
+                logger.debug(
+                    "worker_gateway_active_demo_session_skipped "
+                    "execution_id=%s session_id=%s error_code=%s",
+                    execution_id,
+                    session_id,
+                    _failure_code(exc),
+                )
+            except Exception:
+                logger.exception(
+                    "worker_gateway_active_demo_session_failed "
+                    "execution_id=%s session_id=%s",
+                    execution_id,
+                    session_id,
+                )
+            else:
+                synced += 1
+        return synced
+
+    def sync_active_demo_sessions(self, workspace_id: UUID) -> int:
+        """Backward-compatible name for the interview demo integration."""
+
+        return self.sync_active_sessions(workspace_id)
+
+    def _report_local_verification_completion(
+        self,
+        context: _AssignmentContext,
+        report: EventIngestionReport,
+    ) -> None:
+        """Close a verification execution after a known terminal check outcome.
+
+        A failed check is still a completed verification execution. Its semantic
+        outcome is stored by ``record_verification_observation``; the execution
+        must also be closed so its lease and worker capacity are released.
+        Unknown process state is deliberately left to recovery/reconciliation.
+        """
+
+        if context.adapter_definition.provider != LOCAL_VERIFICATION_PROVIDER:
+            return
+        terminal_statuses = {
+            "passed",
+            "failed",
+            "environment_blocked",
+            "timed_out",
+            "interrupted",
+        }
+        terminal = tuple(
+            observation
+            for observation in report.terminal_observations
+            if observation.payload.get("purpose") == "verification"
+            and observation.payload.get("provider") == LOCAL_VERIFICATION_PROVIDER
+            and observation.payload.get("status") in terminal_statuses
+            and _optional_context_id_matches(
+                observation.payload.get("execution_id"), context.execution.id
+            )
+            and _optional_context_id_matches(
+                observation.payload.get("worker_id"), context.worker.id
+            )
+        )
+        if not terminal:
+            return
+
+        with self._uow_factory() as uow:
+            request = uow.execution_requests.get_by_execution_lineage(
+                context.execution.lineage_id,
+                context.execution.workspace_id,
+            )
+            execution = uow.executions.get(
+                context.execution.id,
+                context.execution.workspace_id,
+            )
+        if request is None:
+            raise GatewayMessageError(
+                "completed verification execution request is unavailable",
+                code="verification_completion_request_missing",
+            )
+        if execution is None:
+            raise GatewayMessageError(
+                "completed verification execution is unavailable",
+                code="verification_completion_execution_missing",
+            )
+        observation = max(terminal, key=lambda item: item.sequence)
+        command_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.local-verification.execution-succeeded:{context.execution.id}:{observation.sequence}",
+        )
+        CommandService(
+            self._uow_factory,
+            (
+                ExecutionCommandHandler(
+                    self._clock,
+                    result_integration_enabled=self._result_integration_enabled,
+                ),
+            ),
+        ).handle(
+            CommandEnvelope(
+                id=command_id,
+                workspace_id=context.execution.workspace_id,
+                command_type="ReportExecutionSucceeded",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(context.worker.id),
+                target_id=context.execution.id,
+                payload={
+                    "worker_id": str(context.worker.id),
+                    "lease_id": str(context.lease.id),
+                    "fencing_token": context.binding.fencing_token,
+                },
+                expected_version=execution.version,
+                idempotency_key=(
+                    f"local-verification-execution-succeeded:{context.execution.id}:"
+                    f"{observation.sequence}"
+                ),
+                correlation_id=request.root_task_id,
+            )
+        )
+
+    def _report_interview_demo_completion(
+        self,
+        context: _AssignmentContext,
+        report: EventIngestionReport,
+    ) -> None:
+        if (
+            not self._interview_demo_completion_enabled
+            or context.adapter_definition.provider != "interview-demo-worker"
+        ):
+            return
+        successful = tuple(
+            observation
+            for observation in report.terminal_observations
+            if observation.outcome == "succeeded"
+            and observation.payload.get("simulation") is True
+        )
+        if not successful:
+            return
+
+        with self._uow_factory() as uow:
+            request = uow.execution_requests.get_by_execution_lineage(
+                context.execution.lineage_id,
+                context.execution.workspace_id,
+            )
+            execution = uow.executions.get(
+                context.execution.id,
+                context.execution.workspace_id,
+            )
+        if request is None:
+            raise GatewayMessageError(
+                "completed demo execution request is unavailable",
+                code="demo_completion_request_missing",
+            )
+        if execution is None:
+            raise GatewayMessageError(
+                "completed demo execution is unavailable",
+                code="demo_completion_execution_missing",
+            )
+        # Event ingestion has already validated the active fence; payload redaction
+        # intentionally removes fencing_token before this completion check.
+        matching = tuple(
+            observation
+            for observation in successful
+            if observation.payload.get("execution_id") == str(context.execution.id)
+            and observation.payload.get("worker_id") == str(context.worker.id)
+            and observation.payload.get("worker_item_key") == request.worker_item_key
+            and observation.payload.get("adapter_module_id")
+            == str(context.adapter_instance.id)
+        )
+        if not matching:
+            raise GatewayMessageError(
+                "completed demo event does not match its execution context",
+                code="demo_completion_context_mismatch",
+            )
+        observation = max(matching, key=lambda item: item.sequence)
+        command_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.interview-demo.execution-succeeded:{context.execution.id}:{observation.sequence}",
+        )
+        CommandService(
+            self._uow_factory,
+            (
+                ExecutionCommandHandler(
+                    self._clock,
+                    result_integration_enabled=self._result_integration_enabled,
+                ),
+            ),
+        ).handle(
+            CommandEnvelope(
+                id=command_id,
+                workspace_id=context.execution.workspace_id,
+                command_type="ReportExecutionSucceeded",
+                target_type="execution",
+                actor_type="worker",
+                actor_id=str(context.worker.id),
+                target_id=context.execution.id,
+                payload={
+                    "worker_id": str(context.worker.id),
+                    "lease_id": str(context.lease.id),
+                    "fencing_token": context.binding.fencing_token,
+                },
+                expected_version=execution.version,
+                idempotency_key=(
+                    f"interview-demo-execution-succeeded:{context.execution.id}:"
+                    f"{observation.sequence}"
+                ),
+                correlation_id=request.root_task_id,
+            )
+        )
 
     def observe_terminal(
         self,
@@ -3715,6 +4524,270 @@ class WorkerGateway:
             raise GatewayMessageError(
                 "execution result capture was rejected", code=exc.code
             ) from exc
+
+    def _capture_completion_result(
+        self,
+        context: _AssignmentContext,
+        decision: CompletionDecision,
+    ) -> CodeResultSnapshotV1 | None:
+        if self._code_result_capture_service is None:
+            return None
+        details: dict[str, object] = {
+            "event_type": decision.event_type,
+            "sequence": decision.sequence,
+            "policy_version": decision.policy_version,
+        }
+        if decision.input_operation_id is not None:
+            details["input_operation_id"] = str(decision.input_operation_id)
+        self.observe_terminal(
+            workspace_id=context.execution.workspace_id,
+            execution_id=context.execution.id,
+            operation_id=code_capture_operation_id(context.execution.id),
+            outcome=decision.outcome,
+            fencing_token=context.binding.fencing_token,
+            details=details,
+        )
+        if decision.outcome != "succeeded":
+            return None
+        return self.capture_execution_result(
+            workspace_id=context.execution.workspace_id,
+            execution_id=context.execution.id,
+            operation_id=code_capture_operation_id(context.execution.id),
+        )
+
+    def _observe_completion_without_capture(
+        self,
+        context: _AssignmentContext,
+        *,
+        session_id: UUID,
+        decision: CompletionDecision,
+    ) -> ResultOperationAttemptV1:
+        execution_id = context.execution.id
+        workspace_id = context.execution.workspace_id
+        operation_id = code_capture_operation_id(execution_id)
+        now = self._clock()
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                execution_id, workspace_id, for_update=True
+            )
+            operation = uow.results.get_operation(
+                operation_id, workspace_id, for_update=True
+            )
+            session = uow.sessions.get_active_for_execution(
+                execution_id, for_update=True
+            )
+            if (
+                execution is None
+                or session is None
+                or session.id != session_id
+                or execution.status is not ExecutionStatus.RUNNING
+                or execution.active_lease_id != context.lease.id
+                or execution.last_fencing_token != context.binding.fencing_token
+            ):
+                raise GatewayMessageError(
+                    "execution completion fence context changed",
+                    code="execution_completion_fence_stale",
+                )
+            lease = uow.leases.get(context.lease.id, workspace_id)
+            if lease is None:
+                raise GatewayMessageError(
+                    "execution completion fence lease is missing",
+                    code="execution_completion_fence_stale",
+                )
+            try:
+                lease.assert_owner(
+                    context.worker.id,
+                    context.binding.fencing_token,
+                    now,
+                )
+            except DomainError as exc:
+                raise GatewayMessageError(
+                    "execution completion fence lease changed",
+                    code="execution_completion_fence_stale",
+                ) from exc
+            root_task_id = execution.task_id
+            if execution.worker_item_id is not None:
+                worker_item = uow.worker_items.get(
+                    execution.worker_item_id, workspace_id
+                )
+                if worker_item is None:
+                    raise GatewayMessageError(
+                        "execution completion WorkerItem is unavailable",
+                        code="execution_completion_fence_stale",
+                    )
+                root_task_id = worker_item.root_task_id
+            if uow.execution_inputs.get_pending_for_session(
+                session_id, workspace_id, for_update=True
+            ) is not None:
+                raise GatewayMessageError(
+                    "execution has a pending Session input",
+                    code="result_capture_input_pending",
+                )
+
+            if operation is not None and not isinstance(
+                operation, ResultOperationAttemptV1
+            ):
+                raise GatewayMessageError(
+                    "execution completion operation has an unexpected type",
+                    code="execution_completion_fence_conflict",
+                )
+            if operation is None:
+                operation = ResultOperationAttemptV1(
+                    operation_id=operation_id,
+                    workspace_id=workspace_id,
+                    root_task_id=root_task_id,
+                    operation_kind="execution_completion_fence",
+                    attempt=1,
+                    status=ResultOperationStatus.RUNNING,
+                    payload={},
+                    lease_owner=None,
+                    lease_token=None,
+                    lease_expiry=None,
+                    receipt_ref=None,
+                    failure_code=None,
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                expected_version = 0
+            else:
+                if operation.operation_kind not in {
+                    CODE_RESULT_CAPTURE_OPERATION_KIND,
+                    "execution_completion_fence",
+                } or (
+                    operation.operation_id != operation_id
+                    or operation.workspace_id != workspace_id
+                    or operation.root_task_id != root_task_id
+                    or operation.payload.get("execution_id") != str(execution_id)
+                    or operation.payload.get("fencing_token")
+                    != context.binding.fencing_token
+                    or operation.payload.get("session_id") not in (None, str(session_id))
+                ):
+                    raise GatewayMessageError(
+                        "execution completion operation identity conflicts",
+                        code="execution_completion_fence_conflict",
+                    )
+                payload = dict(operation.payload)
+                if payload.get("terminal_observed") is True:
+                    if (
+                        payload.get("terminal_outcome") != decision.outcome
+                        or payload.get("terminal_fencing_token")
+                        != context.binding.fencing_token
+                    ):
+                        raise GatewayMessageError(
+                            "execution terminal observation identity changed",
+                            code="result_terminal_observation_conflict",
+                        )
+                    return operation
+                expected_version = operation.version
+
+            payload = dict(operation.payload)
+            payload.update(
+                {
+                    "schema_version": 1,
+                    "execution_id": str(execution_id),
+                    "session_id": str(session_id),
+                    "fencing_token": context.binding.fencing_token,
+                    "terminal_observed": True,
+                    "terminal_outcome": decision.outcome,
+                    "terminal_observed_at": now.isoformat(),
+                    "terminal_fencing_token": context.binding.fencing_token,
+                    "terminal_details": {
+                        "event_type": decision.event_type,
+                        "sequence": decision.sequence,
+                        "policy_version": decision.policy_version,
+                        **(
+                            {"input_operation_id": str(decision.input_operation_id)}
+                            if decision.input_operation_id is not None
+                            else {}
+                        ),
+                    },
+                }
+            )
+            observed = replace(
+                operation,
+                status=ResultOperationStatus.RUNNING,
+                payload=payload,
+                updated_at=now,
+                version=operation.version + (0 if expected_version == 0 else 1),
+            )
+            return cast(
+                ResultOperationAttemptV1,
+                uow.results.save_operation(
+                    observed,
+                    expected_version=expected_version,
+                ),
+            )
+
+    def _report_execution_completion(
+        self,
+        context: _AssignmentContext,
+        *,
+        session_id: UUID,
+        decision: CompletionDecision,
+    ) -> bool:
+        with self._uow_factory() as uow:
+            request = uow.execution_requests.get_by_execution_lineage(
+                context.execution.lineage_id,
+                context.execution.workspace_id,
+            )
+            execution = uow.executions.get(
+                context.execution.id,
+                context.execution.workspace_id,
+            )
+        if execution is None:
+            raise GatewayMessageError(
+                "execution disappeared before its completion command",
+                code="execution_completion_target_missing",
+            )
+        correlation_id = (
+            request.root_task_id if request is not None else context.task.id
+        )
+        command_id = uuid5(
+            NAMESPACE_URL,
+            "sidera.execution-completion:"
+            f"{context.execution.id}:{session_id}:{decision.sequence}:"
+            f"{decision.policy_version}:{decision.outcome}",
+        )
+        payload: dict[str, object] = {
+            "worker_id": str(context.worker.id),
+            "lease_id": str(context.lease.id),
+            "fencing_token": context.binding.fencing_token,
+        }
+        if decision.outcome == "failed":
+            payload["failure_code"] = decision.failure_code or "worker_session_failed"
+        command_type = (
+            "ReportExecutionSucceeded"
+            if decision.outcome == "succeeded"
+            else "ReportExecutionFailed"
+        )
+        try:
+            CommandService(
+                self._uow_factory,
+                (
+                    ExecutionCommandHandler(
+                        self._clock,
+                        result_integration_enabled=self._result_integration_enabled,
+                    ),
+                ),
+            ).handle(
+                CommandEnvelope(
+                    id=command_id,
+                    workspace_id=context.execution.workspace_id,
+                    command_type=command_type,
+                    target_type="execution",
+                    actor_type="worker",
+                    actor_id=str(context.worker.id),
+                    target_id=context.execution.id,
+                    payload=payload,
+                    expected_version=execution.version,
+                    idempotency_key=f"sidera.execution-completion:{command_id}",
+                    correlation_id=correlation_id,
+                )
+            )
+        except ExecutionCompletionDeferred:
+            return False
+        return True
 
     def _record_code_result_start(
         self,
@@ -3855,6 +4928,7 @@ class WorkerGateway:
         workspace_id: UUID,
         execution_id: UUID,
         session_id: UUID,
+        source_artifact_ids: tuple[UUID, ...] = (),
     ) -> None:
         service = self._candidate_submission_service
         collect = cast(
@@ -3871,6 +4945,8 @@ class WorkerGateway:
                         NAMESPACE_URL,
                         f"sidera.gateway.collect_knowledge_candidates:{session_id}",
                     ),
+                    worker_item_id=context.execution.worker_item_id,
+                    source_artifact_ids=source_artifact_ids,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -4054,13 +5130,66 @@ class WorkerGateway:
             operation=RuntimeModuleOperation.INPUT,
         )
         try:
-            delivery = adapter.send_input(
-                handle,
-                item.text,
-                item.attachment_refs,
+            guard_operation = self._begin_acceptance_worker_call(
                 operation_id=operation_id,
+                resource_key=f"execution:{context.execution.id}",
+                payload="\0".join((item.text, *item.attachment_refs)),
+                boundary="prompt",
             )
+        except GatewayMessageError as exc:
+            self._fail_operation(operation_id, context, exc.code or _failure_code(exc))
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.BLOCKED,
+                accepted_sequence=None,
+                failure_code=exc.code or _failure_code(exc),
+            )
+        except GatewayRecoveryRequired as exc:
+            failure_code = _failure_code(exc)
+            self._mark_operation_unknown(operation_id, context, failure_code)
+            return DeliveryResult(
+                operation_id=operation_id,
+                outcome=DeliveryOutcome.UNKNOWN,
+                accepted_sequence=None,
+                failure_code=failure_code,
+            )
+
+        guard_observe_attempted = False
+        try:
+            keeper = self._lease_keeper(context)
+            keeper.start()
+            try:
+                delivery = adapter.send_input(
+                    handle,
+                    item.text,
+                    item.attachment_refs,
+                    operation_id=operation_id,
+                )
+            finally:
+                keeper.stop()
+            if keeper.health_error is not None:
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="unknown",
+                )
+                self._mark_operation_unknown(
+                    operation_id,
+                    context,
+                    "assignment_lease_renewal_failed",
+                )
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code="assignment_lease_renewal_failed",
+                )
             if delivery.operation_id != operation_id:
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="unknown",
+                )
                 self._mark_operation_unknown(
                     operation_id, context, "adapter_operation_id_mismatch"
                 )
@@ -4075,6 +5204,15 @@ class WorkerGateway:
                     raise GatewayRecoveryRequired(
                         "adapter marked input delivered without an accepted sequence"
                     )
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="completed",
+                    resource_ids=(
+                        str(item.session_id),
+                        f"sequence:{delivery.accepted_sequence}",
+                    ),
+                )
                 with self._uow_factory() as uow:
                     self._succeed_operation(
                         uow,
@@ -4086,11 +5224,29 @@ class WorkerGateway:
                 return delivery
             failure_code = delivery.failure_code or delivery.outcome.value
             if delivery.outcome is DeliveryOutcome.UNKNOWN:
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="unknown",
+                )
                 self._mark_operation_unknown(operation_id, context, failure_code)
             else:
+                guard_observe_attempted = True
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="failed",
+                )
                 self._fail_operation(operation_id, context, failure_code)
             return delivery
         except Exception as exc:  # noqa: BLE001
+            if guard_operation is not None and not guard_observe_attempted:
+                try:
+                    self._observe_acceptance_worker_call(
+                        guard_operation,
+                        outcome="unknown",
+                    )
+                except GatewayRecoveryRequired:
+                    pass
             failure_code = _failure_code(exc)
             self._mark_operation_unknown(operation_id, context, failure_code)
             return DeliveryResult(
@@ -4498,10 +5654,53 @@ class WorkerGateway:
             raise GatewayRecoveryRequired("worker adapter is unavailable")
 
         try:
+            guard_operation = self._begin_acceptance_worker_call(
+                operation_id=operation_id,
+                resource_key=f"execution:{context.execution.id}",
+                payload=f"{workspace.workspace_id}:{spec.goal}",
+                boundary="session",
+                provider=context.adapter_definition.provider,
+            )
+        except GatewayMessageError as exc:
+            if (
+                exc.code == "budget_exhausted"
+                and self._acceptance_guard is not None
+            ):
+                self._fail_prestart_budget_exhaustion(
+                    context,
+                    operation_id=operation_id,
+                    guard_failure_code=exc.code,
+                )
+                raise GatewayTerminalAssignmentError(
+                    "acceptance session budget is exhausted",
+                    code="acceptance_budget_exhausted",
+                ) from exc
+            self._fail_operation(operation_id, context, exc.code or _failure_code(exc))
+            raise
+        except GatewayRecoveryRequired as exc:
+            self._mark_operation_unknown(operation_id, context, _failure_code(exc))
+            raise
+
+        guard_observe_attempted = False
+        try:
             handle = adapter.start_session(spec, workspace, operation_id=operation_id)
+            guard_observe_attempted = True
+            self._observe_acceptance_worker_call(
+                guard_operation,
+                outcome="completed",
+                resource_ids=(str(handle.execution_session_id),),
+            )
             result = self._persist_session_success(context, handle, operation_id)
             return result
         except Exception as exc:
+            if guard_operation is not None and not guard_observe_attempted:
+                try:
+                    self._observe_acceptance_worker_call(
+                        guard_operation,
+                        outcome="unknown",
+                    )
+                except GatewayRecoveryRequired:
+                    pass
             # The adapter may have started a process before persistence failed;
             # an unknown start outcome must never be replayed automatically.
             self._mark_operation_unknown(operation_id, context, _failure_code(exc))
@@ -4569,13 +5768,50 @@ class WorkerGateway:
             raise GatewayRecoveryRequired("active session handle is unavailable")
         if adapter is None:
             raise GatewayRecoveryRequired("worker adapter is unavailable")
+
+        initial_prompt = _initial_prompt(spec)
+        try:
+            guard_operation = self._begin_acceptance_worker_call(
+                operation_id=operation_id,
+                resource_key=f"execution:{context.execution.id}",
+                payload=initial_prompt,
+                boundary="prompt",
+            )
+        except GatewayMessageError as exc:
+            self._fail_operation(operation_id, context, exc.code or _failure_code(exc))
+            raise
+        except GatewayRecoveryRequired as exc:
+            self._mark_operation_unknown(operation_id, context, _failure_code(exc))
+            raise
+
+        guard_observe_attempted = False
         try:
             delivery = adapter.send_input(
                 handle,
-                _initial_prompt(spec),
+                initial_prompt,
                 (),
                 operation_id=operation_id,
             )
+            guard_observe_attempted = True
+            if delivery.outcome is DeliveryOutcome.DELIVERED:
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="completed",
+                    resource_ids=(
+                        str(session_result.session_id),
+                        f"sequence:{delivery.accepted_sequence}",
+                    ),
+                )
+            elif delivery.outcome is DeliveryOutcome.UNKNOWN:
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="unknown",
+                )
+            else:
+                self._observe_acceptance_worker_call(
+                    guard_operation,
+                    outcome="failed",
+                )
             if delivery.operation_id != operation_id:
                 raise GatewayError("adapter returned a mismatched input operation id")
             if delivery.outcome is DeliveryOutcome.DELIVERED:
@@ -4599,6 +5835,14 @@ class WorkerGateway:
         except GatewayRecoveryRequired:
             raise
         except Exception as exc:
+            if guard_operation is not None and not guard_observe_attempted:
+                try:
+                    self._observe_acceptance_worker_call(
+                        guard_operation,
+                        outcome="unknown",
+                    )
+                except GatewayRecoveryRequired:
+                    pass
             self._fail_operation(operation_id, context, _failure_code(exc))
             raise GatewayError("initial prompt delivery failed") from exc
 
@@ -4741,6 +5985,39 @@ class WorkerGateway:
             uow.executions.save(execution, previous_execution_version)
             uow.workers.save(worker, previous_worker_version)
             uow.sessions.add(session)
+            if context.causation_id is not None:
+                for event in (
+                    _gateway_event(
+                        context.causation_id,
+                        workspace_id=execution.workspace_id,
+                        aggregate_type="execution",
+                        aggregate_id=execution.id,
+                        aggregate_version=execution.version,
+                        event_type="ExecutionStarted",
+                        payload={
+                            "status": execution.status.value,
+                            "lease_id": str(context.lease.id),
+                            "worker_id": str(worker.id),
+                            "fencing_token": context.binding.fencing_token,
+                        },
+                    ),
+                    _gateway_event(
+                        context.causation_id,
+                        workspace_id=session.workspace_id,
+                        aggregate_type="execution_session",
+                        aggregate_id=session.id,
+                        aggregate_version=session.version,
+                        event_type="ExecutionSessionStarted",
+                        payload={
+                            "execution_id": str(execution.id),
+                            "status": session.status.value,
+                            "adapter_session_id": session.adapter_session_id,
+                            "input_mode": session.input_mode,
+                            "last_sequence": session.last_sequence,
+                        },
+                    ),
+                ):
+                    uow.events.append_with_outbox(event)
             self._succeed_operation(
                 uow,
                 operation_id,
@@ -4754,6 +6031,199 @@ class WorkerGateway:
                 session_id=session.id,
                 adapter_session_id=session.adapter_session_id,
             )
+
+    def _fail_prestart_budget_exhaustion(
+        self,
+        context: _AssignmentContext,
+        *,
+        operation_id: UUID,
+        guard_failure_code: str,
+    ) -> None:
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                context.execution.id,
+                context.execution.workspace_id,
+                for_update=True,
+            )
+            lease = uow.leases.get(
+                context.lease.id,
+                context.execution.workspace_id,
+                for_update=True,
+            )
+            worker = uow.workers.get(
+                context.worker.id,
+                context.execution.workspace_id,
+                for_update=True,
+            )
+            task = uow.tasks.get(context.task.id, context.execution.workspace_id)
+            session = uow.sessions.get_active_for_execution(
+                context.execution.id,
+                for_update=True,
+            )
+            operation = uow.gateway_operations.get_by_operation_id(
+                operation_id,
+                context.execution.workspace_id,
+                for_update=True,
+            )
+            if (
+                execution is None
+                or lease is None
+                or worker is None
+                or task is None
+                or operation is None
+            ):
+                raise GatewayRecoveryRequired(
+                    "pre-start budget denial could not be durably finalized"
+                )
+            if session is not None:
+                raise GatewayRecoveryRequired(
+                    "budget denial is not pre-start because a session already exists"
+                )
+            if (
+                operation.operation_type is not GatewayOperationType.START_SESSION
+                or operation.status is not GatewayOperationStatus.RUNNING
+                or operation.lease_id != lease.id
+                or operation.fencing_token != context.binding.fencing_token
+            ):
+                raise GatewayRecoveryRequired(
+                    "session operation ownership changed before budget finalization"
+                )
+            execution.assert_fence(
+                lease_id=lease.id,
+                fencing_token=context.binding.fencing_token,
+            )
+            lease.assert_owner(
+                context.binding.worker_id,
+                context.binding.fencing_token,
+                self._clock(),
+            )
+
+            execution_version = execution.version
+            lease_version = lease.version
+            worker_version = worker.version
+            operation_version = operation.version
+            execution.fail_before_start(
+                lease_id=lease.id,
+                fencing_token=context.binding.fencing_token,
+                failure_code="acceptance_budget_exhausted",
+                now=self._clock(),
+            )
+            lease.revoke(now=self._clock())
+            worker.release()
+            operation.fail(failure_code=guard_failure_code, now=self._clock())
+            uow.executions.save(execution, execution_version)
+            uow.leases.save(lease, lease_version)
+            uow.workers.save(worker, worker_version)
+            uow.gateway_operations.save(operation, operation_version)
+
+            command = CommandEnvelope(
+                id=uuid5(
+                    NAMESPACE_URL,
+                    f"sidera.gateway.prestart-budget-failure:{operation_id}",
+                ),
+                workspace_id=execution.workspace_id,
+                command_type="FailExecutionBeforeStartBudgetExhaustion",
+                target_type="execution",
+                actor_type="system",
+                actor_id="worker-gateway",
+                target_id=execution.id,
+                payload={
+                    "execution_id": str(execution.id),
+                    "lease_id": str(lease.id),
+                    "worker_id": str(worker.id),
+                    "gateway_operation_id": str(operation_id),
+                    "failure_code": execution.failure_code,
+                },
+                expected_version=execution_version,
+                idempotency_key=f"gateway-prestart-budget-failure:{operation_id}",
+                correlation_id=context.causation_id or operation_id,
+            )
+            command_id = command.id
+            events = [
+                _gateway_event(
+                    command_id,
+                    workspace_id=execution.workspace_id,
+                    aggregate_type="execution",
+                    aggregate_id=execution.id,
+                    aggregate_version=execution.version,
+                    event_type="ExecutionFailed",
+                    payload={
+                        "status": execution.status.value,
+                        "failure_code": execution.failure_code,
+                        "lease_id": str(lease.id),
+                        "started_at": None,
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=lease.workspace_id,
+                    aggregate_type="lease",
+                    aggregate_id=lease.id,
+                    aggregate_version=lease.version,
+                    event_type="LeaseReleasedAfterStartBlock",
+                    payload={
+                        "status": lease.status.value,
+                        "fencing_token": lease.fencing_token,
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=worker.workspace_id,
+                    aggregate_type="worker",
+                    aggregate_id=worker.id,
+                    aggregate_version=worker.version,
+                    event_type="WorkerCapacityReleased",
+                    payload={
+                        "status": worker.status.value,
+                        "current_load": worker.current_load,
+                        "capacity": worker.capacity,
+                    },
+                ),
+                _gateway_event(
+                    command_id,
+                    workspace_id=operation.workspace_id,
+                    aggregate_type="gateway_operation",
+                    aggregate_id=operation.operation_id,
+                    aggregate_version=operation.version,
+                    event_type="ExecutionRuntimeStartBlocked",
+                    payload={
+                        "execution_id": str(execution.id),
+                        "binding_id": str(context.binding.id),
+                        "error_code": guard_failure_code,
+                    },
+                ),
+            ]
+            if (
+                not uow.executions.has_live_for_task(task.id)
+                and task.status in {TaskStatus.READY, TaskStatus.RUNNING}
+            ):
+                task_version = task.version
+                task.wait_for_decision()
+                uow.tasks.save(task, task_version)
+                events.append(
+                    _gateway_event(
+                        command_id,
+                        workspace_id=task.workspace_id,
+                        aggregate_type="task",
+                        aggregate_id=task.id,
+                        aggregate_version=task.version,
+                        event_type="TaskWaitingForDecision",
+                        payload={"status": task.status.value},
+                    )
+                )
+            uow.commands.record_applied(
+                command,
+                hash_request(command),
+                CommandResult(
+                    command_id=command.id,
+                    aggregate_id=execution.id,
+                    aggregate_version=execution.version,
+                    event_ids=tuple(event.id for event in events),
+                    data={"failure_code": execution.failure_code},
+                ),
+            )
+            for event in events:
+                uow.events.append_with_outbox(event)
 
     def _succeed_operation(
         self,
@@ -4886,6 +6356,65 @@ class WorkerGateway:
         return factory(instance)
 
 
+class OutboxClaimKeeper:
+    """Renew one durable outbox claim while its handler is externally blocked."""
+
+    def __init__(
+        self,
+        store: OutboxStore,
+        message: OutboxMessage,
+        *,
+        interval_seconds: float,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("claim renewal interval must be positive")
+        self._store = store
+        self._message = message
+        self._interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lost = False
+
+    @property
+    def lost(self) -> bool:
+        return self._lost
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("outbox claim keeper already started")
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"outbox-claim:{self._message.id}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval_seconds + 1.0)
+            if self._thread.is_alive():
+                self._lost = True
+
+    def renew_once(self) -> bool:
+        if self._lost:
+            return False
+        try:
+            renewed = self._store.renew_claim(
+                self._message.id, self._message.claim_token
+            )
+        except Exception:  # noqa: BLE001 - loss is a conservative fence
+            renewed = False
+        if not renewed:
+            self._lost = True
+        return renewed
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            if not self.renew_once():
+                return
+
+
 class GatewayAssignmentRunner:
     """Claim Gateway assignment and exact-stop messages."""
 
@@ -4894,48 +6423,198 @@ class GatewayAssignmentRunner:
         store: OutboxStore,
         gateway: GatewayHandler,
         *,
+        active_session_sync: Callable[[], int] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        claim_renew_interval_seconds: float = 10.0,
+        start_concurrency: int = 1,
     ) -> None:
+        if claim_renew_interval_seconds <= 0:
+            raise ValueError("claim renewal interval must be positive")
+        if not 1 <= start_concurrency <= 16:
+            raise ValueError("start concurrency must be between 1 and 16")
         self._store = store
         self._gateway = gateway
+        self._active_session_sync = active_session_sync
         self._clock = clock
+        self._claim_renew_interval_seconds = claim_renew_interval_seconds
+        self._start_concurrency = start_concurrency
 
     def run_once(self, batch_size: int = 20) -> tuple[int, int, int]:
         if not 1 <= batch_size <= 1_000:
             raise ValueError("batch_size must be between 1 and 1000")
-        messages = self._store.claim(
-            batch_size, topics={ASSIGNMENT_TOPIC, STOP_TOPIC}
-        )
+
+        claimed = 0
         processed = 0
         failed = 0
-        for message in messages:
-            try:
-                self._gateway.handle(message)
-            except Exception as exc:  # noqa: BLE001
-                failure_code = _failure_code(exc)
-                logger.warning(
-                    "worker_gateway_assignment_failed "
-                    "message_id=%s event_id=%s topic=%s attempts=%s error_code=%s",
-                    message.id,
-                    message.event_id,
-                    message.topic,
-                    message.attempts,
-                    failure_code,
+
+        # Handle already-published stops before claiming assignments, so a slow
+        # stop handler cannot leave a newly claimed assignment idle.
+        stop_messages = self._store.claim(batch_size, topics={STOP_TOPIC})
+        claimed += len(stop_messages)
+        stop_processed, stop_failed = self._process_messages(
+            stop_messages, max_workers=1
+        )
+        processed += stop_processed
+        failed += stop_failed
+
+        assignment_capacity = min(
+            batch_size - claimed, self._start_concurrency
+        )
+        assignment_messages = (
+            self._store.claim(assignment_capacity, topics={ASSIGNMENT_TOPIC})
+            if assignment_capacity > 0
+            else ()
+        )
+        claimed += len(assignment_messages)
+
+        with ThreadPoolExecutor(
+            max_workers=self._start_concurrency,
+            thread_name_prefix="gateway-message",
+        ) as executor:
+            pending = {
+                executor.submit(self._process_message, message)
+                for message in assignment_messages
+            }
+            while pending:
+                completed, pending = wait(
+                    pending,
+                    timeout=0.2,
+                    return_when=FIRST_COMPLETED,
                 )
-                retry_at = self._clock().replace(microsecond=0)
-                delay_seconds = min(300, 2 ** min(message.attempts, 8))
-                retry_at += timedelta(seconds=delay_seconds)
-                if self._store.reschedule(
-                    message.id,
-                    message.claim_token,
-                    retry_at,
-                    failure_code,
-                ):
-                    failed += 1
-            else:
-                if self._store.acknowledge(message.id, message.claim_token):
-                    processed += 1
-        return len(messages), processed, failed
+                for future in completed:
+                    message_processed, message_failed = future.result()
+                    processed += message_processed
+                    failed += message_failed
+
+                if not pending or claimed >= batch_size:
+                    continue
+
+                stop_capacity = batch_size - claimed
+                late_stop_messages = self._store.claim(
+                    stop_capacity, topics={STOP_TOPIC}
+                )
+                claimed += len(late_stop_messages)
+                stop_processed, stop_failed = self._process_messages(
+                    late_stop_messages, max_workers=1
+                )
+                processed += stop_processed
+                failed += stop_failed
+
+                completed_during_stop = {
+                    future for future in pending if future.done()
+                }
+                for future in completed_during_stop:
+                    message_processed, message_failed = future.result()
+                    processed += message_processed
+                    failed += message_failed
+                pending.difference_update(completed_during_stop)
+
+                if not pending or claimed >= batch_size:
+                    continue
+
+                assignment_capacity = min(
+                    batch_size - claimed,
+                    self._start_concurrency - len(pending),
+                )
+                if assignment_capacity <= 0:
+                    continue
+                late_assignment_messages = self._store.claim(
+                    assignment_capacity,
+                    topics={ASSIGNMENT_TOPIC},
+                )
+                claimed += len(late_assignment_messages)
+                for message in late_assignment_messages:
+                    pending.add(executor.submit(self._process_message, message))
+
+        if self._active_session_sync is not None:
+            try:
+                self._active_session_sync()
+            except Exception:
+                logger.exception("worker_gateway_active_session_sync_failed")
+        return claimed, processed, failed
+
+    def _process_messages(
+        self,
+        messages: Sequence[OutboxMessage],
+        *,
+        max_workers: int,
+    ) -> tuple[int, int]:
+        if not messages:
+            return 0, 0
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="gateway-message",
+        ) as executor:
+            results = executor.map(self._process_message, messages)
+            processed, failed = zip(*results, strict=True)
+        return sum(processed), sum(failed)
+
+    def _process_message(self, message: OutboxMessage) -> tuple[int, int]:
+        claim_keeper = OutboxClaimKeeper(
+            self._store,
+            message,
+            interval_seconds=self._claim_renew_interval_seconds,
+        )
+        claim_keeper.start()
+        try:
+            self._gateway.handle(message)
+        except (GatewayTerminalAssignmentError, GatewayObsoleteAssignmentError):
+            claim_keeper.stop()
+            if claim_keeper.lost:
+                self._log_claim_loss(message)
+                return 0, 0
+            return (
+                int(self._store.acknowledge(message.id, message.claim_token)),
+                0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            claim_keeper.stop()
+            if claim_keeper.lost:
+                self._log_claim_loss(message)
+                return 0, 0
+            failure_code = _failure_code(exc)
+            logger.warning(
+                "worker_gateway_assignment_failed "
+                "message_id=%s event_id=%s topic=%s attempts=%s error_code=%s",
+                message.id,
+                message.event_id,
+                message.topic,
+                message.attempts,
+                failure_code,
+            )
+            retry_at = self._clock().replace(microsecond=0)
+            delay_seconds = min(300, 2 ** min(message.attempts, 8))
+            retry_at += timedelta(seconds=delay_seconds)
+            return (
+                0,
+                int(
+                    self._store.reschedule(
+                        message.id,
+                        message.claim_token,
+                        retry_at,
+                        failure_code,
+                    )
+                ),
+            )
+
+        claim_keeper.stop()
+        if claim_keeper.lost:
+            self._log_claim_loss(message)
+            return 0, 0
+        return (
+            int(self._store.acknowledge(message.id, message.claim_token)),
+            0,
+        )
+
+    @staticmethod
+    def _log_claim_loss(message: OutboxMessage) -> None:
+        logger.warning(
+            "worker_gateway_assignment_claim_lost "
+            "message_id=%s event_id=%s topic=%s",
+            message.id,
+            message.event_id,
+            message.topic,
+        )
 
 
 def _load_module(
@@ -5106,6 +6785,19 @@ def _initial_prompt(spec: ExecutionSpec) -> str:
     )
 
 
+def _execution_goal(task: Task, worker_item: WorkerItem | None) -> str:
+    task_goal = task.description or task.title
+    if worker_item is None:
+        return task_goal
+    return (
+        f"{task_goal}\n\n"
+        f"Assigned WorkerItem: {worker_item.title}\n"
+        "WorkerItem responsibility (authoritative scope for this execution):\n"
+        f"{worker_item.responsibility}\n"
+        "Do not take over sibling WorkerItems' responsibilities."
+    )
+
+
 def _verification_input_ack(
     execution_id: UUID,
     manifest: VerificationManifestV1,
@@ -5121,6 +6813,28 @@ def _verification_input_ack(
         "actual_tree": manifest.result_tree,
         "verification_basis_hash": manifest.verification_basis_hash,
     }
+
+
+def _optional_context_id_matches(value: object, expected: UUID) -> bool:
+    """Accept adapters that omit identity fields already fenced by the gateway."""
+
+    return value is None or value == str(expected)
+
+
+def _bind_spec_to_revision(spec: ExecutionSpec, revision: str) -> ExecutionSpec:
+    """Pin a verification checkout to the immutable candidate commit."""
+
+    if not isinstance(spec, ExecutionSpec):
+        raise TypeError("execution spec is invalid")
+    if not isinstance(revision, str) or not revision.strip():
+        raise ValueError("verification revision is required")
+    if not spec.repositories:
+        raise GatewayMessageError(
+            "verification execution requires a repository checkout",
+            code="verification_repository_missing",
+        )
+    checkout = replace(spec.repositories[0], base_revision=revision)
+    return replace(spec, repositories=(checkout, *spec.repositories[1:]))
 
 
 def _assignment_ids(
@@ -5408,6 +7122,13 @@ def _failure_code(exc: Exception) -> str:
     value = str(exc).lower().replace(" ", "_")
     clean = "".join(char if char.isalnum() or char == "_" else "_" for char in value)
     return clean.strip("_")[:100] or type(exc).__name__.lower()
+
+
+def _is_postgres_deadlock(error: OperationalError) -> bool:
+    original = error.orig
+    return getattr(original, "sqlstate", None) == "40P01" or getattr(
+        original, "pgcode", None
+    ) == "40P01"
 
 
 def _log_gateway_error(message: OutboxMessage, error: GatewayError) -> None:

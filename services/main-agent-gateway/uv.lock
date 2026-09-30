@@ -408,6 +408,32 @@ wheels = [
 ]
 
 [[package]]
+name = "sidera-akashic-task-bridge"
+version = "0.1.0"
+source = { editable = "../../integrations/akashic" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "docstring-parser", specifier = ">=0.17,<1" },
+    { name = "genai-prices", specifier = "==0.0.71" },
+    { name = "json-repair", specifier = ">=0.58,<1" },
+    { name = "openai", specifier = ">=2,<3" },
+    { name = "pyright", specifier = ">=1.1.403,<2" },
+    { name = "pytest", specifier = ">=9,<10" },
+    { name = "ruff", specifier = ">=0.12,<1" },
+]
+
+[[package]]
 name = "sidera-main-agent-gateway"
 version = "0.1.0"
 source = { editable = "." }
@@ -416,6 +442,8 @@ dependencies = [
     { name = "fastapi" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "sidera-akashic-task-bridge" },
+    { name = "sidera-runtime-guard" },
     { name = "uvicorn" },
 ]
 
@@ -435,6 +463,8 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.134,<1" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
+    { name = "sidera-akashic-task-bridge", editable = "../../integrations/akashic" },
+    { name = "sidera-runtime-guard", editable = "../../packages/runtime-guard" },
     { name = "uvicorn", specifier = ">=0.41,<1" },
 ]
 
@@ -447,6 +477,11 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.2,<2" },
     { name = "ruff", specifier = ">=0.12,<1" },
 ]
+
+[[package]]
+name = "sidera-runtime-guard"
+version = "0.1.0"
+source = { editable = "../../packages/runtime-guard" }
 
 [[package]]
 name = "starlette"

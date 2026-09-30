@@ -61,16 +61,22 @@ def build_revision_evidence(
     changed = set(snapshot.changed_worker_item_ids)
     added = set(snapshot.added_worker_item_ids)
     transitioned = set(snapshot.transition_worker_item_ids)
-    if not reused.issubset(old_workers):
-        failures.append("reused_worker_not_in_old_plan")
-    elif reused & changed:
+    if reused & changed:
         failures.append("worker_marked_reused_and_changed")
+    elif reused & added:
+        failures.append("worker_marked_reused_and_added")
+    elif changed & added:
+        failures.append("worker_marked_changed_and_added")
+    elif not reused.issubset(old_workers):
+        failures.append("reused_worker_not_in_old_plan")
+    elif not changed.issubset(old_workers):
+        failures.append("changed_worker_not_in_old_plan")
+    elif added & old_workers:
+        failures.append("added_worker_already_in_old_plan")
     elif not (changed | added).issubset(transitioned):
         failures.append("affected_worker_transition_missing")
     else:
         checks.append("worker_reuse_scope_observed")
-    if changed & added:
-        failures.append("worker_marked_changed_and_added")
 
     before = set(snapshot.source_result_ids_before)
     after = set(snapshot.source_result_ids_after)
@@ -115,8 +121,9 @@ def run_revision(
     snapshot: RevisionSnapshot | None = None,
     evidence_kind: Literal["contract", "real_user_flow"] = "contract",
 ) -> ScenarioEvidence:
+    run_id = _uuid(manifest.get("run_id"))
     builder = EvidenceBuilder(
-        run_id=_uuid(manifest.get("run_id")),
+        run_id=run_id,
         scenario="revision",
         evidence_kind=evidence_kind,
         code_commit=_text(manifest.get("code_commit"), "0" * 40),
@@ -129,6 +136,13 @@ def run_revision(
             real_tests=0,
             incomplete=True,
             check_codes=("revision_snapshot_not_supplied",),
+        )
+    if snapshot.run_id != run_id:
+        return builder.finish(
+            real_tests=0,
+            failed=1,
+            check_codes=("revision_snapshot_run_id_mismatch",),
+            failure_code_override="revision_snapshot_run_id_mismatch",
         )
     return build_revision_evidence(builder, snapshot)
 

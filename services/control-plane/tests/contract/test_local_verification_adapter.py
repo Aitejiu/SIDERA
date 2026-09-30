@@ -287,6 +287,52 @@ def test_verifier_exposes_only_v3_verification_capability(verifier_case: dict[st
     assert len(verifier_case["runner"].starts) == 1
 
 
+def test_verifier_can_interrupt_demo_start_and_keep_real_stop_observation(
+    verifier_case: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = verifier_case["runner"]
+
+    def stop(operation_id: UUID) -> CheckRunObservation:
+        runner.stops.append(operation_id)
+        current = runner.observations[operation_id]
+        interrupted = replace(
+            current,
+            status=CheckRunStatus.INTERRUPTED,
+            finished_at=NOW + timedelta(seconds=1),
+            exit_code=None,
+            failure_code="stopped_by_request",
+        )
+        runner.observations[operation_id] = interrupted
+        return interrupted
+
+    monkeypatch.setattr(runner, "stop", stop)
+    adapter = LocalVerificationAdapter(
+        runner=runner,
+        check_specs={"unit": _check_spec()},
+        workspace_locator=lambda manifest: verifier_case["tmp_path"],
+        start_interruption=lambda _operation_id: True,
+    )
+    operation_id = uuid4()
+
+    handle = adapter.start_session(
+        verifier_case["spec"],
+        verifier_case["workspace"],
+        operation_id=operation_id,
+    )
+
+    observation = runner.inspect(operation_id)
+    assert observation is not None
+    assert observation.status is CheckRunStatus.INTERRUPTED
+    assert observation.failure_code == "stopped_by_request"
+    assert runner.stops == [operation_id]
+    events = tuple(adapter.read_events(handle))
+    assert [event.event_type for event in events] == [
+        "session.started",
+        "session.canceled",
+    ]
+
+
 def test_verifier_rejects_normal_agent_input(verifier_case: dict[str, Any]) -> None:
     response = verifier_case["adapter"].send_input(
         verifier_case["handle"],

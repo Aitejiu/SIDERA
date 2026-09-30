@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from tests.e2e.basic_acceptance.contracts import NotificationSnapshot
+from tests.e2e.basic_acceptance.contracts import (
+    NotificationSnapshot,
+    WebNotificationSnapshot,
+)
 from tests.e2e.basic_acceptance.evidence import EvidenceBuilder
 from tests.e2e.basic_acceptance.notification import (
     build_notification_evidence,
     run_notification,
+    run_web_notification,
 )
 
 
@@ -107,3 +111,54 @@ def test_notification_requires_a_snapshot_before_real_mode_can_pass() -> None:
 
     assert evidence.status == "INCOMPLETE"
     assert evidence.failure_code == "notification_snapshot_not_supplied"
+
+
+def test_web_notification_is_scoped_to_the_inbox_and_exact_resource() -> None:
+    root_task_id = uuid4()
+    worker_item_id = uuid4()
+    manifest = _manifest()
+    snapshot = WebNotificationSnapshot(
+        run_id=manifest["run_id"],
+        root_task_id=root_task_id,
+        worker_item_id=worker_item_id,
+        event_id=uuid4(),
+        inbox_item_id=uuid4(),
+        channel="web_inbox",
+        deep_link=f"/workspaces/w/tasks/{root_task_id}/worker-items/{worker_item_id}",
+        deep_link_resource_id=worker_item_id,
+        event_observed=True,
+        inbox_created=True,
+        exact_mapping=True,
+        user_read=True,
+        user_acknowledged=True,
+        duplicate_count=0,
+        task_state_preserved=True,
+    )
+    evidence = run_web_notification(manifest, snapshot=snapshot)
+
+    assert evidence.status == "PASS"
+    assert evidence.scenario == "web-notification"
+
+
+def test_web_notification_failure_does_not_become_a_private_receipt() -> None:
+    manifest = _manifest()
+    snapshot = WebNotificationSnapshot(
+        run_id=manifest["run_id"],
+        root_task_id=uuid4(),
+        event_id=uuid4(),
+        inbox_item_id=uuid4(),
+        channel="web_inbox",
+        deep_link="/wrong",
+        deep_link_resource_id=uuid4(),
+        event_observed=True,
+        inbox_created=True,
+        exact_mapping=False,
+        user_read=False,
+        user_acknowledged=False,
+        duplicate_count=1,
+        task_state_preserved=True,
+    )
+    evidence = run_web_notification(manifest, snapshot=snapshot)
+
+    assert evidence.status == "FAIL"
+    assert evidence.provider_receipt_refs == ()

@@ -84,8 +84,11 @@ def _turn_response(
 
 @router.get("/health", response_model=HealthResponse)
 async def health(
+    request: Request,
     adapter: Annotated[MainAgentAdapter, Depends(get_adapter)],
 ) -> HealthResponse:
+    if request.app.state.settings.restore_read_only:
+        return HealthResponse(provider="unavailable")
     try:
         await adapter.health()
     except Exception as exc:
@@ -142,7 +145,14 @@ async def start_turn(
     adapter: Annotated[MainAgentAdapter, Depends(get_adapter)],
     relays: Annotated[TurnRelayRegistry, Depends(get_relays)],
 ) -> TurnResponse:
-    handle = await adapter.start_turn(thread_id, payload.input)
+    if payload.operation_id is None:
+        handle = await adapter.start_turn(thread_id, payload.input)
+    else:
+        handle = await adapter.start_turn(
+            thread_id,
+            payload.input,
+            operation_id=payload.operation_id,
+        )
     await relays.start(handle)
     turn = await adapter.read_turn(thread_id, handle.id)
     return _turn_response(turn, relays)
@@ -240,4 +250,5 @@ async def interrupt_turn(
     relays: Annotated[TurnRelayRegistry, Depends(get_relays)],
 ) -> TurnResponse:
     turn = await adapter.interrupt_turn(thread_id, turn_id)
+    await relays.shutdown_turn(thread_id, turn_id)
     return _turn_response(turn, relays)

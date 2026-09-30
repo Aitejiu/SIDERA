@@ -317,8 +317,8 @@ class _CaptureWorkerAdapter(FakeWorkerAdapter):
         *,
         raise_after_start: bool = False,
     ) -> None:
-        super().__init__()
         self._CAPABILITIES = capabilities
+        super().__init__()
         self._raise_after_start = raise_after_start
         self.accepted_contexts: list[ContextMaterialization] = []
         self.start_calls: list[ExecutionSpec] = []
@@ -562,12 +562,14 @@ class ResultInputScenario:
         *,
         worker_runtime: ResultInputWorkerRuntime | None = None,
         code_result_capture_service: CodeResultCaptureService | None = None,
+        result_integration_enabled: bool = False,
     ) -> None:
         self.database = database
         self.workspace_id = workspace_id
         self.tmp_path = tmp_path
         self._worker_runtime = worker_runtime
         self._code_result_capture_service = code_result_capture_service
+        self._result_integration_enabled = result_integration_enabled
         self.now = FROZEN_NOW
         self.clock: Callable[[], datetime] = lambda: self.now
         self.uow_factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: (
@@ -660,6 +662,7 @@ class ResultInputScenario:
         *,
         groups: tuple[dict[str, object], ...] | None = None,
         hard_edges: tuple[tuple[str, str], ...] = (),
+        hard_edge_artifact_refs: tuple[str, ...] = ("artifact_type:build",),
         source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
         max_attempts: int = 1,
         result_inputs_enabled: bool = True,
@@ -856,6 +859,7 @@ class ResultInputScenario:
         proposal_mapping = _proposal_mapping(
             groups=groups,
             hard_edges=hard_edges,
+            hard_edge_artifact_refs=hard_edge_artifact_refs,
             source_worker_keys=source_worker_keys,
             max_attempts=max_attempts,
             browser_state=browser_state,
@@ -1358,7 +1362,15 @@ class ResultInputScenario:
             producer=f"scenario:{key}",
             environment_ref="env://result-input-scenario",
         )
-        CommandService(self.uow_factory, (ExecutionCommandHandler(self.clock),)).handle(
+        CommandService(
+            self.uow_factory,
+            (
+                ExecutionCommandHandler(
+                    self.clock,
+                    result_integration_enabled=self._result_integration_enabled,
+                ),
+            ),
+        ).handle(
             CommandEnvelope(
                 id=uuid4(),
                 workspace_id=self.workspace_id,
@@ -1835,7 +1847,15 @@ class ResultInputScenario:
             current = uow.executions.get(execution_id, self.workspace_id)
             assert current is not None
             execution_version = current.version
-        CommandService(self.uow_factory, (ExecutionCommandHandler(self.clock),)).handle(
+        CommandService(
+            self.uow_factory,
+            (
+                ExecutionCommandHandler(
+                    self.clock,
+                    result_integration_enabled=self._result_integration_enabled,
+                ),
+            ),
+        ).handle(
             CommandEnvelope(
                 id=uuid4(),
                 workspace_id=self.workspace_id,
@@ -2987,6 +3007,7 @@ def _proposal_mapping(
     *,
     groups: tuple[dict[str, object], ...] | None,
     hard_edges: tuple[tuple[str, str], ...],
+    hard_edge_artifact_refs: tuple[str, ...] = ("artifact_type:build",),
     source_worker_keys: tuple[str, ...] = ("a", "b", "c"),
     max_attempts: int = 1,
     browser_state: bool = False,
@@ -3099,12 +3120,15 @@ def _proposal_mapping(
         intents.append(integration_intent)
     for intent in intents:
         intent["max_attempts"] = max_attempts
+    if ("a", "summary") in hard_edges:
+        # Keep the regression edge within the proposal's required subtask scope.
+        build_worker["subtask_key"] = summary_worker["subtask_key"]
     summary_intent["activation_dependencies"] = [
         {
             "upstream_worker_item_key": upstream,
             "downstream_worker_item_key": downstream,
             "kind": "hard",
-            "required_artifact_refs": ["artifact_type:build"],
+            "required_artifact_refs": list(hard_edge_artifact_refs),
         }
         for upstream, downstream in hard_edges
     ]

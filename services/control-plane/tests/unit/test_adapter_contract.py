@@ -148,6 +148,55 @@ def test_fake_adapter_respects_prompt_boundary_and_emits_events() -> None:
     assert any(event.event_type == "session.canceled" for event in adapter.read_events(handle))
 
 
+def test_fake_adapter_turn_completion_is_opt_in_and_operation_scoped() -> None:
+    spec = _spec()
+    default_adapter = FakeWorkerAdapter()
+    completion_adapter = FakeWorkerAdapter(turn_completion_enabled=True)
+
+    assert default_adapter.probe({}).turn_completion_versions == ()
+    assert completion_adapter.probe({}).turn_completion_versions == (1,)
+
+    default_handle = default_adapter.start_session(
+        spec, _workspace(spec), operation_id=uuid4()
+    )
+    default_operation_id = uuid4()
+    default_result = default_adapter.send_input(
+        default_handle,
+        "default prompt",
+        (),
+        operation_id=default_operation_id,
+    )
+    default_events = tuple(default_adapter.read_events(default_handle))
+    assert default_result.accepted_sequence == 2
+    assert all(event.event_type != "turn.completed" for event in default_events)
+
+    completion_handle = completion_adapter.start_session(
+        spec, _workspace(spec), operation_id=uuid4()
+    )
+    completion_operation_id = uuid4()
+    completion_result = completion_adapter.send_input(
+        completion_handle,
+        "completion prompt",
+        (),
+        operation_id=completion_operation_id,
+    )
+    completion_events = tuple(completion_adapter.read_events(completion_handle))
+    completed = next(
+        event for event in completion_events if event.event_type == "turn.completed"
+    )
+    accepted = next(
+        event for event in completion_events if event.event_type == "input.accepted"
+    )
+    assert completed.sequence == accepted.sequence + 1
+    assert completed.payload == {
+        "schema_version": 1,
+        "operation_id": str(completion_operation_id),
+        "stop_reason": "end_turn",
+    }
+    assert completion_result.accepted_sequence == accepted.sequence
+    completion_adapter.stop_session(completion_handle, operation_id=uuid4())
+
+
 def test_fake_adapter_failure_injection_is_explicit() -> None:
     spec = _spec()
     adapter = FakeWorkerAdapter(failures={"start_session": "process_start_failed"})

@@ -18,6 +18,7 @@ export function ExecutionHorizon({ graph }: { graph: TaskGraph }) {
         : overview.running_subtask_count > 0
           ? "running"
           : "planned";
+  const completed = overallStatus === "completed";
 
   return (
     <section className="execution-horizon" aria-labelledby="horizon-title">
@@ -48,11 +49,11 @@ export function ExecutionHorizon({ graph }: { graph: TaskGraph }) {
       <div className="delivery-summary-context">
         <div>
           <span className="eyebrow">当前里程碑</span>
-          <strong>{currentMilestone?.title ?? "尚未开始"}</strong>
+          <strong>{completed ? "全部完成" : currentMilestone?.title ?? "尚未开始"}</strong>
         </div>
         <div>
           <span className="eyebrow">下一步</span>
-          <strong>{nextSubtasks.length > 0 ? nextSubtasks.join("、") : "等待规划"}</strong>
+          <strong>{completed ? "无需后续操作" : nextSubtasks.length > 0 ? nextSubtasks.join("、") : "等待规划"}</strong>
         </div>
       </div>
     </section>

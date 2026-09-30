@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 
+from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
+from sidera_control_plane.domain.execution_requests import ExecutionRequestStatus
 from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.result_verification import VerificationStatus
 
@@ -102,3 +106,30 @@ def test_interrupted_retry_creates_one_new_attempt_and_replays(result_scenario) 
     assert first.data["attempt"] == 2
     assert result_scenario.verification_results(candidate.id) == (original,)
     assert len(result_scenario.events("VerificationRetryRequested")) == 1
+
+
+def test_interrupted_retry_schedules_a_fresh_verification_execution_request(
+    result_scenario,
+) -> None:
+    result_scenario.seed_plan()
+    candidate = result_scenario.candidate(check_exit_code=7)
+    original = result_scenario.verification_operation()
+    original_request = result_scenario.request(UUID(str(original.payload["request_id"])))
+    result_scenario.mark_verification_interrupted()
+
+    retry = result_scenario.retry_verification(reason="runner stopped")
+
+    with result_scenario.uow() as uow:
+        retry_operation = uow.results.get_operation(
+            UUID(retry.data["operation_id"]), result_scenario.workspace_id
+        )
+    assert isinstance(retry_operation, ResultOperationAttemptV1)
+    retry_request_id = UUID(str(retry_operation.payload["request_id"]))
+    retry_request = result_scenario.request(retry_request_id)
+    assert retry_request.id != UUID(str(original.payload["request_id"]))
+    assert retry_request.result_derivation_kind == "verification"
+    assert retry_request.source_candidate_id == candidate.id
+    assert retry_request.worker_item_id == original_request.worker_item_id
+    assert retry_request.status is ExecutionRequestStatus.READY
+    assert retry_operation.payload["request_id"] == str(retry_request.id)
+    assert retry_operation.payload["attempt"] == 2

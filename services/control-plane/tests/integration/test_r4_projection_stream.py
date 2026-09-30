@@ -76,6 +76,31 @@ def append_change(
         return change.cursor
 
 
+def append_change_batch(
+    database: Database,
+    workspace_id: UUID,
+    batch_size: int,
+) -> list[int]:
+    with database.session() as session:
+        cursors = [
+            ProjectionChangeRepository(session)
+            .append(
+                workspace_id=workspace_id,
+                schema_version=1,
+                projection_type="task_overview",
+                resource_id=None,
+                change_type="upsert",
+                resource_version=1,
+                occurred_at=datetime(2026, 8, 21, tzinfo=UTC),
+                correlation_id=uuid4(),
+            )
+            .cursor
+            for _ in range(batch_size)
+        ]
+        session.commit()
+        return cursors
+
+
 def test_concurrent_cursor_allocation_is_unique_and_workspace_scoped(
     database: Database,
     workspace_id: UUID,
@@ -91,20 +116,21 @@ def test_concurrent_cursor_allocation_is_unique_and_workspace_scoped(
         )
         session.commit()
 
-    def allocate(_: int) -> int:
-        return append_change(database, workspace_id)
+    def allocate(_: int) -> list[int]:
+        return append_change_batch(database, workspace_id, batch_size=4)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        cursors = sorted(executor.map(allocate, range(2)))
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        batches = list(executor.map(allocate, range(8)))
+    cursors = sorted(cursor for batch in batches for cursor in batch)
 
-    assert cursors == [1, 2]
+    assert cursors == list(range(1, 33))
     assert append_change(database, WORKSPACE_B_ID) == 1
 
     with database.session() as session:
         changes = ProjectionChangeRepository(session).list_after(
             workspace_id, cursor=1, limit=100
         )
-    assert [change.cursor for change in changes] == [2]
+        assert [change.cursor for change in changes] == list(range(2, 33))
 
 
 def test_cursor_allocation_reconciles_legacy_projection_rows(
@@ -155,6 +181,7 @@ def test_sse_replays_after_cursor_and_emits_only_invalidation_metadata(
             schema_version=1,
         )
         try:
+            await anext(stream)
             return await anext(stream)
         finally:
             await stream.aclose()
@@ -170,12 +197,12 @@ def test_sse_replays_after_cursor_and_emits_only_invalidation_metadata(
     assert "projection" not in payload
 
 
-def test_sse_emits_heartbeat_when_no_change_arrives(
+def test_sse_emits_connection_heartbeat_before_polling(
     database: Database,
     database_url: str,
     workspace_id: UUID,
 ) -> None:
-    async def read_heartbeat() -> str:
+    async def read_heartbeats() -> tuple[str, str]:
         settings = Settings(
             database_url=database_url,
             projection_stream_poll_interval_seconds=0.01,
@@ -189,13 +216,14 @@ def test_sse_emits_heartbeat_when_no_change_arrives(
             schema_version=1,
         )
         try:
-            return await anext(stream)
+            return await anext(stream), await anext(stream)
         finally:
             await stream.aclose()
 
-    first_line = asyncio.run(read_heartbeat()).splitlines()[0]
+    connection_heartbeat, periodic_heartbeat = asyncio.run(read_heartbeats())
 
-    assert first_line.startswith(": heartbeat")
+    assert connection_heartbeat.splitlines()[0] == ": connected"
+    assert periodic_heartbeat.splitlines()[0].startswith(": heartbeat")
 
 
 def test_sse_requests_resync_for_unsupported_schema_or_expired_cursor(
@@ -224,7 +252,11 @@ def test_sse_requests_resync_for_unsupported_schema_or_expired_cursor(
             params=params,
         ) as response:
             lines_iter = response.iter_lines()
-            lines = [next(lines_iter) for _ in range(2)]
+            lines: list[str] = []
+            while len(lines) < 2:
+                line = next(lines_iter)
+                if line and line != ": connected":
+                    lines.append(line)
         assert response.status_code == 200
         assert lines[0] == "event: resync_required"
         assert json.loads(lines[1].removeprefix("data: "))["reason"] in {

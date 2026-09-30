@@ -13,6 +13,9 @@ from sidera_control_plane.application.result_gate import (
     ResultGateAction,
     require_result_gate,
 )
+from sidera_control_plane.application.transition_execution_requests import (
+    TransitionExecutionRequestProducer,
+)
 from sidera_control_plane.application.worker_item_materializer import (
     WorkerItemMaterializer,
 )
@@ -30,7 +33,7 @@ from sidera_control_plane.domain.errors import (
     ValidationError,
 )
 from sidera_control_plane.domain.events import EventData
-from sidera_control_plane.domain.execution import Execution
+from sidera_control_plane.domain.execution import Execution, ExecutionSessionStatus
 from sidera_control_plane.domain.modules import (
     WorkerAdapterCapabilityProfile,
     WorkspaceProviderCapabilityProfile,
@@ -58,6 +61,7 @@ from sidera_control_plane.domain.planning import (
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfile
 from sidera_control_plane.domain.planning_proposals import (
+    ExecutionIntent,
     ProposalRevision,
     proposal_content_hash,
 )
@@ -121,6 +125,9 @@ class RevisionMaterializer:
             worker_item_materializer or WorkerItemMaterializer()
         )
         self._result_inputs_enabled = result_inputs_enabled
+        self._request_producer = TransitionExecutionRequestProducer(
+            owner_id="plan-transition-coordinator"
+        )
 
     def materialize(
         self,
@@ -377,10 +384,20 @@ class RevisionMaterializer:
         target_snapshot = materialized_plan.snapshot
         uow.flush()
 
+        intents_by_key = {
+            item.worker_item_key: item for item in payload.execution_intents
+        }
+        target_intents = {
+            item.worker_item_id: intents_by_key[item.key]
+            for item in target_snapshot.worker_item_plans
+            if item.worker_item_id is not None and item.key in intents_by_key
+        }
         source_executions = self._source_executions(
             uow,
             tasks_by_id=tasks_by_id,
             workspace_id=request.workspace_id,
+            target_intents=target_intents,
+            retired_worker_item_ids=frozenset(payload.retired_worker_item_ids),
         )
         worker_transitions = self._worker_transitions(
             uow,
@@ -432,6 +449,25 @@ class RevisionMaterializer:
             uow.plan_entity_lineages.add(lineage)
         uow.flush()
 
+        request.materialize(
+            proposal_revision=proposal.revision,
+            content_hash=proposal.content_hash,
+            now=now,
+        )
+        uow.planning_requests.save(request, previous_request_version)
+        uow.plans.advance_head(
+            head,
+            expected_snapshot_id=base_snapshot.id,
+            target=target_snapshot,
+        )
+        execution_request_mapping = (
+            self._request_producer.ensure_preserved_pending_for_plan(
+                uow,
+                plan_transition,
+                now=now,
+                require_materialization=False,
+            )
+        )
         materialization = ProposalMaterialization(
             id=uuid4(),
             workspace_id=request.workspace_id,
@@ -442,7 +478,7 @@ class RevisionMaterializer:
             plan_generation=target_snapshot.generation,
             subtask_task_mapping=target_subtask_ids,
             worker_item_mapping=target_worker_ids,
-            execution_request_mapping={},
+            execution_request_mapping=execution_request_mapping,
             deep_link=f"/workspaces/{request.workspace_id}/tasks/{root_task.id}",
             confirmed_by=envelope.actor_id,
             created_at=now,
@@ -451,17 +487,6 @@ class RevisionMaterializer:
             plan_transition_id=plan_transition.id,
         )
         uow.proposal_materializations.add(materialization)
-        uow.plans.advance_head(
-            head,
-            expected_snapshot_id=base_snapshot.id,
-            target=target_snapshot,
-        )
-        request.materialize(
-            proposal_revision=proposal.revision,
-            content_hash=proposal.content_hash,
-            now=now,
-        )
-        uow.planning_requests.save(request, previous_request_version)
         events = self._events(
             envelope=envelope,
             request=request,
@@ -991,13 +1016,53 @@ class RevisionMaterializer:
         *,
         tasks_by_id: Mapping[UUID, Task],
         workspace_id: UUID,
+        target_intents: Mapping[UUID, ExecutionIntent],
+        retired_worker_item_ids: frozenset[UUID],
     ) -> Mapping[UUID, Execution]:
         executions = uow.executions.list_for_tasks(tuple(tasks_by_id), workspace_id)
-        result: dict[UUID, Execution] = {}
+        latest: dict[UUID, tuple[datetime, datetime, int, Execution]] = {}
         for execution in executions:
-            if execution.worker_item_id is not None:
-                result[execution.worker_item_id] = execution
-        return result
+            worker_item_id = execution.worker_item_id
+            if worker_item_id is None:
+                continue
+            intent = target_intents.get(worker_item_id)
+            if intent is None and worker_item_id not in retired_worker_item_ids:
+                continue
+
+            required_capabilities = frozenset(
+                intent.capability_requirements
+                if intent is not None
+                else execution.capability_requirements
+            )
+            if (
+                intent is not None
+                and intent.adapter_preferences
+                and tuple(execution.adapter_preferences)
+                != tuple(intent.adapter_preferences)
+            ):
+                continue
+
+            session = uow.sessions.get_latest_for_execution(execution.id, workspace_id)
+            if (
+                session is None
+                or session.execution_id != execution.id
+                or session.workspace_id != workspace_id
+                or session.status is ExecutionSessionStatus.LOST
+            ):
+                continue
+            worker = uow.workers.get(session.worker_id, workspace_id)
+            if worker is None or not required_capabilities.issubset(
+                worker.capabilities
+            ):
+                continue
+
+            activity_at = session.last_activity_at
+            created_at = execution.created_at or activity_at
+            candidate = (activity_at, created_at, execution.id.int, execution)
+            current = latest.get(worker_item_id)
+            if current is None or candidate[:3] > current[:3]:
+                latest[worker_item_id] = candidate
+        return {worker_item_id: item[3] for worker_item_id, item in latest.items()}
 
     @staticmethod
     def _worker_transitions(

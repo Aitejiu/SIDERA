@@ -2,13 +2,20 @@ from dataclasses import replace
 from hashlib import sha256
 from uuid import NAMESPACE_URL, uuid5
 
+import pytest
+
 from sidera_control_plane.application.result_input_evaluation import (
     ResultInputEvaluator,
+    build_hard_input_selections,
 )
 from sidera_control_plane.application.result_input_sources import (
     resolve_result_input_source,
 )
 from sidera_control_plane.domain.artifacts import ArtifactType
+from sidera_control_plane.domain.execution_requests import (
+    DependencyEnforcement,
+    ExecutionRequestDependency,
+)
 from sidera_control_plane.domain.result_inputs import (
     InputGroupV1,
     ResultInputArtifact,
@@ -119,6 +126,67 @@ def test_all_mode_requires_every_configured_candidate() -> None:
     assert result.required_count == 3
     assert result.ready_count == 2
     assert result.reason_code == "input_quorum_unreachable"
+
+
+def test_hard_edge_without_result_selectors_is_not_a_result_input() -> None:
+    facts = effective_source_facts(request_case="current")
+    upstream = facts.requests[0]
+    downstream = replace(
+        upstream,
+        id=uuid5(NAMESPACE_URL, "sidera:r6.3.4:downstream-request"),
+        worker_item_key="summary",
+    )
+    dependency = ExecutionRequestDependency(
+        downstream_request_id=downstream.id,
+        upstream_request_id=upstream.id,
+        enforcement=DependencyEnforcement.HARD,
+    )
+    facts = replace(
+        facts,
+        requests=(upstream, downstream),
+        dependencies=(dependency,),
+    )
+
+    assert build_hard_input_selections(request=downstream, facts=facts) == ()
+
+
+def test_evidence_only_hard_edge_selects_claim_and_backing_artifact() -> None:
+    facts = effective_source_facts(request_case="current")
+    upstream = facts.requests[0]
+    downstream = replace(
+        upstream,
+        id=uuid5(NAMESPACE_URL, "sidera:r6.3.4:evidence-only-downstream"),
+        worker_item_key="summary",
+    )
+    dependency = ExecutionRequestDependency(
+        downstream_request_id=downstream.id,
+        upstream_request_id=upstream.id,
+        enforcement=DependencyEnforcement.HARD,
+        required_evidence_refs=("acceptance:research-complete",),
+    )
+    facts = replace(facts, requests=(upstream, downstream), dependencies=(dependency,))
+
+    selected = build_hard_input_selections(request=downstream, facts=facts)
+
+    assert len(selected) == 1
+    assert selected[0].source.evidence[0].acceptance_criterion_ref == (
+        "acceptance:research-complete"
+    )
+    assert {item.artifact_id for item in selected[0].source.artifacts} == {
+        selected[0].source.evidence[0].artifact_ids[0]
+    }
+
+    with pytest.raises(ValueError):
+        build_hard_input_selections(
+            request=downstream, facts=replace(facts, evidence=())
+        )
+    foreign_id = uuid5(NAMESPACE_URL, "sidera:r6.3.4:foreign-hard-input")
+    foreign_claim = replace(facts.evidence[0], artifact_ids=(foreign_id,))
+    with pytest.raises(ValueError):
+        build_hard_input_selections(
+            request=downstream,
+            facts=replace(facts, evidence=(foreign_claim,)),
+        )
 
 
 def test_succeeded_source_without_required_files_is_not_ready() -> None:

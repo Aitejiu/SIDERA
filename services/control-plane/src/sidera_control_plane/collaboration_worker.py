@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -40,6 +41,12 @@ from sidera_control_plane.persistence.collaboration_fact_store import (
 )
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+
+from .demo.contracts import DemoManifest
+from .demo.governance import demo_governance_evaluation_armed
+from .demo.manifest import load_manifest, validate_manifest
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 class CollaborationReconcilerPort(Protocol):
@@ -301,13 +308,20 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
     runtime_factory = RegistryCollaborationRuntimeFactory(
-        {"reference": lambda _instance: ReferenceCollaborationRuntime()}
+        {
+            "reference": lambda _instance: ReferenceCollaborationRuntime(),
+            "sidera-collaboration": lambda _instance: ReferenceCollaborationRuntime(),
+        }
     )
     resolver_factory = lambda modules: CollaborationRuntimeResolver(
         modules, runtime_factory
     )
     owner_id = f"collaboration-worker:{settings.local_actor_id}"
     governance_reconciler = CollaborationGovernanceReconciler(uow_factory=uow_factory)
+    demo_manifest: DemoManifest | None = None
+    if settings.interview_demo_manifest is not None:
+        demo_manifest = load_manifest(settings.interview_demo_manifest)
+        validate_manifest(demo_manifest, _PROJECT_ROOT)
     try:
         decision_service = CollaborationDecisionService(
             uow_factory=uow_factory,
@@ -320,6 +334,12 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
             runtime_resolver_factory=resolver_factory,
             decision_service=decision_service,
             governance_reconciler=governance_reconciler,
+            default_workspace_id=settings.collaboration_workspace_id,
+            evaluation_gate=(
+                lambda _run: demo_governance_evaluation_armed(demo_manifest)
+                if demo_manifest is not None and demo_manifest.scenario == "governance"
+                else True
+            ),
             evaluation_lease_ttl=timedelta(
                 seconds=settings.collaboration_lease_ttl_seconds
             ),

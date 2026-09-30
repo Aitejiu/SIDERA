@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -95,6 +96,7 @@ def test_collaboration_settings_have_bounded_defaults():
     settings = Settings(database_url="postgresql+psycopg://test")
 
     assert settings.collaboration_governance_enabled is False
+    assert settings.collaboration_workspace_id is None
     assert settings.collaboration_batch_size == 20
     assert settings.collaboration_poll_seconds == 1.0
     assert settings.collaboration_lease_ttl_seconds == 60
@@ -122,6 +124,26 @@ def test_collaboration_governance_rollout_switch_can_be_enabled():
     )
 
     assert settings.collaboration_governance_enabled is True
+
+
+def test_collaboration_worker_workspace_scope_comes_from_environment(monkeypatch):
+    workspace_id = UUID("6b75d8d9-6042-40d8-a393-c9969037472f")
+    monkeypatch.setenv("SIDERA_DATABASE_URL", "postgresql+psycopg://test")
+    monkeypatch.setenv("SIDERA_COLLABORATION_WORKSPACE_ID", str(workspace_id))
+
+    settings = Settings()  # pyright: ignore[reportCallIssue]
+
+    assert settings.collaboration_workspace_id == workspace_id
+
+
+def test_gateway_active_session_sync_workspace_comes_from_environment(monkeypatch):
+    workspace_id = UUID("6b75d8d9-6042-40d8-a393-c9969037472f")
+    monkeypatch.setenv("SIDERA_DATABASE_URL", "postgresql+psycopg://test")
+    monkeypatch.setenv("SIDERA_GATEWAY_SYNC_WORKSPACE_ID", str(workspace_id))
+
+    settings = Settings()  # pyright: ignore[reportCallIssue]
+
+    assert settings.gateway_sync_workspace_id == workspace_id
 
 
 def test_notification_settings_have_bounded_defaults_and_validation():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -80,6 +81,24 @@ def test_settings_accept_absolute_socket_and_loopback_tcp_endpoints() -> None:
     assert make_settings(akashic_endpoint="/tmp/akashic/control.sock").akashic_endpoint == (
         "/tmp/akashic/control.sock"
     )
+
+
+def test_demo_adapter_requires_a_manifest_without_akashic_configuration() -> None:
+    with pytest.raises(ValidationError, match="demo_manifest"):
+        Settings(adapter_kind="interview-demo", sidera_workspace_id=WORKSPACE_ID)
+
+    settings = Settings(
+        adapter_kind="interview-demo",
+        demo_manifest=Path("/tmp/interview-demo/manifest.json"),
+        sidera_workspace_id=WORKSPACE_ID,
+    )
+
+    assert settings.akashic_endpoint is None
+
+
+def test_default_akashic_adapter_still_requires_its_endpoint() -> None:
+    with pytest.raises(ValidationError, match="akashic_endpoint"):
+        Settings(sidera_workspace_id=WORKSPACE_ID)
 
 
 def test_settings_keep_workspace_token_secret() -> None:

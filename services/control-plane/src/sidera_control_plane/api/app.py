@@ -1,8 +1,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from sidera_control_plane.api.artifact_content import (
     router as artifact_content_router,
@@ -59,7 +65,11 @@ from sidera_control_plane.api.worker_trace_queries import (
     router as worker_trace_queries_router,
 )
 from sidera_control_plane.config import Settings
+from sidera_control_plane.demo.api import create_demo_status_router
+from sidera_control_plane.demo.manifest import load_manifest, validate_manifest
 from sidera_control_plane.persistence.database import Database
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -71,6 +81,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database = Database(resolved_settings.database_url)
         app.state.database = database
         try:
+            if (
+                resolved_settings.restore_read_only
+                and resolved_settings.restore_schema_validation
+            ):
+                _validate_restore_schema(database)
             yield
         finally:
             database.dispose()
@@ -89,6 +104,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=False,
     )
     app.state.settings = resolved_settings
+
+    @app.middleware("http")
+    async def reject_restore_writes(request: Request, call_next):
+        if resolved_settings.restore_read_only and request.method not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        }:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": {
+                        "code": "restore_read_only",
+                        "message": "restored runtime is read-only",
+                        "details": {"restore_mode": "read_only"},
+                    }
+                },
+            )
+        return await call_next(request)
+
     install_error_handlers(app)
     app.include_router(task_commands_router)
     app.include_router(command_queries_router)
@@ -116,8 +151,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(handoff_queries_router)
     app.include_router(artifact_content_router)
 
+    if resolved_settings.interview_demo_manifest is not None:
+        manifest_path = resolved_settings.interview_demo_manifest.expanduser()
+        manifest = load_manifest(manifest_path)
+        validate_manifest(manifest, _PROJECT_ROOT)
+        app.include_router(create_demo_status_router(manifest))
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok", "service": "sidera-control-plane"}
 
     return app
+
+
+def _validate_restore_schema(database: Database) -> None:
+    config = AlembicConfig(str(_PROJECT_ROOT / "services" / "control-plane" / "alembic.ini"))
+    expected_heads = tuple(sorted(ScriptDirectory.from_config(config).get_heads()))
+    try:
+        with database.engine.connect() as connection:
+            actual_heads = tuple(
+                connection.scalars(
+                    text("SELECT version_num FROM alembic_version ORDER BY version_num")
+                ).all()
+            )
+    except SQLAlchemyError as exc:
+        raise RuntimeError("restore_schema_not_current") from exc
+    if not expected_heads or actual_heads != expected_heads:
+        raise RuntimeError("restore_schema_not_current")

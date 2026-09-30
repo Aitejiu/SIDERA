@@ -38,6 +38,55 @@ def _fake_acp_process(tmp_path: Path) -> Path:
                 elif method == "malformed":
                     sys.stdout.write("not-json\\n")
                     sys.stdout.flush()
+                elif method == "remote-error":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": -32603,
+                        "message": "token=secret-value",
+                        "data": {
+                            "service": "session",
+                            "errorName": "provider.invalid-request",
+                            "authorization": "secret-value",
+                            "details": {"token": "secret-value"},
+                        },
+                    }})
+                elif method == "remote-error-api":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": -32603,
+                        "message": "token=secret-value",
+                        "data": {"service": "session", "errorName": "APIError"},
+                    }})
+                elif method == "remote-error-untrusted":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": -32603,
+                        "message": "token=secret-value",
+                        "data": {
+                            "service": "other-service",
+                            "errorName": "token=secret-value",
+                        },
+                    }})
+                elif method == "remote-error-non-object-data":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": -32603,
+                        "message": "token=secret-value",
+                        "data": ["session", "token=secret-value"],
+                    }})
+                elif method == "remote-error-wrong-types":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": -32603,
+                        "message": "token=secret-value",
+                        "data": {
+                            "service": ["session"],
+                            "errorName": {"token": "secret-value"},
+                        },
+                    }})
+                elif method == "malformed-error":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": "-32603", "message": "internal error",
+                    }})
+                elif method == "boolean-error-code":
+                    write({"jsonrpc": "2.0", "id": request_id, "error": {
+                        "code": True, "message": "internal error",
+                    }})
                 elif method == "stderr":
                     sys.stderr.write("token=secret-value " + "x" * 10000)
                     sys.stderr.flush()
@@ -77,10 +126,66 @@ def test_transport_rejects_malformed_json_and_times_out(tmp_path: Path) -> None:
     try:
         with pytest.raises(ACPProcessProtocolError, match="invalid JSON"):
             transport.request("malformed", {}, timeout=3)
-        with pytest.raises(ACPProcessTimeoutError):
+        with pytest.raises(ACPProcessTimeoutError) as timeout:
             transport.request("hang", {}, timeout=0.05)
+        assert timeout.value.method == "hang"
+        assert timeout.value.timeout_seconds == 0.05
+        assert timeout.value.elapsed_ms is not None
+        assert timeout.value.elapsed_ms >= 40
+        assert timeout.value.process_exited is False
     finally:
         assert transport.terminate(grace_seconds=0.2)
+        transport.close()
+
+
+def test_transport_exposes_safe_metadata_for_remote_json_rpc_errors(
+    tmp_path: Path,
+) -> None:
+    transport = ACPProcessTransport.spawn(
+        str(_fake_acp_process(tmp_path)),
+        cwd=tmp_path,
+    )
+    try:
+        def remote_error(method: str):
+            with pytest.raises(ACPProcessProtocolError) as error:
+                transport.request(method, {}, timeout=3)
+            return error.value
+
+        error = remote_error("remote-error")
+        assert type(error).__name__ == "ACPRemoteError"
+        assert error.method == "remote-error"
+        assert error.code == -32603
+        assert error.service == "session"
+        assert error.error_name == "provider.invalid-request"
+        assert "secret-value" not in str(error)
+        assert "secret-value" not in repr(error.__dict__)
+        assert "authorization" not in repr(error.__dict__)
+
+        api_error = remote_error("remote-error-api")
+        assert api_error.service == "session"
+        assert api_error.error_name == "APIError"
+
+        untrusted = remote_error("remote-error-untrusted")
+        assert untrusted.service is None
+        assert untrusted.error_name is None
+        assert "secret-value" not in repr(untrusted.__dict__)
+
+        non_object_data = remote_error("remote-error-non-object-data")
+        assert non_object_data.service is None
+        assert non_object_data.error_name is None
+        assert "secret-value" not in repr(non_object_data.__dict__)
+
+        wrong_types = remote_error("remote-error-wrong-types")
+        assert wrong_types.service is None
+        assert wrong_types.error_name is None
+        assert "secret-value" not in repr(wrong_types.__dict__)
+
+        with pytest.raises(ACPProcessProtocolError, match="invalid JSON-RPC error"):
+            transport.request("malformed-error", {}, timeout=3)
+        with pytest.raises(ACPProcessProtocolError, match="invalid JSON-RPC error"):
+            transport.request("boolean-error-code", {}, timeout=3)
+    finally:
+        transport.terminate(grace_seconds=0.2)
         transport.close()
 
 

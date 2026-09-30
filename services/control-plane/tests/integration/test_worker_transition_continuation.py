@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from threading import Event, current_thread
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from sidera_control_plane.api.app import create_app
 from sidera_control_plane.application.activation_reconciler import ActivationReconciler
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.plan_transition_coordinator import (
     PlanTransitionCoordinator,
+)
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateDecision,
+    PlanTransitionGateOperation,
 )
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
@@ -46,7 +53,9 @@ from sidera_control_plane.domain.work_context import (
 )
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.persistence.models import (
+    ArtifactModel,
     ContextAssemblyRequestModel,
+    ExecutionEventModel,
     ExecutionModel,
     ExecutionRequestModel,
     WorkerTransitionModel,
@@ -113,7 +122,7 @@ def _seed_terminal_source(
     worker = Worker.register(
         worker_id=worker_id,
         workspace_id=workspace_id,
-        adapter_type="fake",
+        adapter_type="opencode",
         display_name="continuation-source-worker",
         capabilities=frozenset({"python"}),
         capacity=1,
@@ -133,6 +142,7 @@ def _seed_terminal_source(
         capability_requirements=frozenset({"python"}),
         pinned_worker_id=worker_id,
         not_before=NOW,
+        adapter_preferences=("opencode",),
     )
     lease = AssignmentLease.issue(
         lease_id=lease_id,
@@ -409,7 +419,7 @@ def _activate_target(
     return session_id
 
 
-def test_create_transition_materializes_request_and_context_assembly(
+def test_waiting_activation_does_not_deadlock_with_scheduler(
     database, database_url: str, workspace_id: UUID, uow_factory
 ) -> None:
     from fastapi.testclient import TestClient
@@ -484,7 +494,70 @@ def test_create_transition_materializes_request_and_context_assembly(
     ).run_once(limit=10)
     assert package_result.claimed == 1
     assert package_result.ready == 1
-    waiting = coordinator.run_once(limit=10)
+
+    execution_locked = Event()
+    transition_locked = Event()
+
+    def signal_coordinator_transition_lock(
+        connection, cursor, statement, parameters, context, executemany
+    ) -> None:
+        del connection, cursor, parameters, context, executemany
+        normalized = " ".join(statement.lower().split())
+        if (
+            current_thread().name.startswith("transition-coordinator")
+            and "from worker_transitions" in normalized
+            and "where worker_transitions.id =" in normalized
+            and "for update" in normalized
+            and "skip locked" not in normalized
+        ):
+            transition_locked.set()
+
+    def scheduler_holds_execution_then_checks_transition():
+        with uow_factory() as uow:
+            execution = uow.executions.get(
+                execution_id,
+                workspace_id,
+                for_update=True,
+            )
+            assert execution is not None
+            execution_locked.set()
+            assert transition_locked.wait(timeout=10)
+            result = PlanTransitionGate(uow).evaluate(
+                worker_item_id=create_transition.worker_item_id,
+                workspace_id=workspace_id,
+                plan_generation=None,
+                operation=PlanTransitionGateOperation.SCHEDULE,
+                target_id=execution_id,
+            )
+            assert result.decision is PlanTransitionGateDecision.ALLOW
+            return result
+
+    event.listen(database.engine, "after_cursor_execute", signal_coordinator_transition_lock)
+    try:
+        with (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="scheduler-gate")
+            as scheduler_pool,
+            ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="transition-coordinator"
+            ) as coordinator_pool,
+        ):
+            scheduler_future = scheduler_pool.submit(
+                scheduler_holds_execution_then_checks_transition
+            )
+            assert execution_locked.wait(timeout=10)
+            coordinator_future = coordinator_pool.submit(
+                coordinator.run_once,
+                limit=10,
+            )
+            scheduler_future.result(timeout=10)
+            waiting = coordinator_future.result(timeout=10)
+    finally:
+        event.remove(
+            database.engine,
+            "after_cursor_execute",
+            signal_coordinator_transition_lock,
+        )
+
     assert waiting.failed == 0
     assert waiting.converged == 0
     assert waiting.deferred >= 1
@@ -560,6 +633,36 @@ def test_continuation_reuses_worker_item_and_source_lineage(
         source_task_id,
         workspace_id,
     )
+    with database.session() as session:
+        session.add(
+            ExecutionEventModel(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                execution_id=source["execution_id"],
+                session_id=source["session_id"],
+                sequence=1,
+                event_type="artifact.ready",
+                payload={"artifact": "source-trace"},
+                occurred_at=NOW,
+                raw_ref=None,
+            )
+        )
+        session.add(
+            ArtifactModel(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                task_id=source_task_id,
+                execution_id=source["execution_id"],
+                session_id=source["session_id"],
+                artifact_type="report",
+                storage_ref=f"fake://continuation/{source['execution_id']}",
+                content_hash="0" * 64,
+                size_bytes=0,
+                media_type="application/json",
+                provenance={"source": "continuation-test"},
+            )
+        )
+        session.commit()
     _seed_work_context(uow_factory, seed["request"].id, workspace_id)
     with TestClient(
         create_app(Settings(database_url=database_url, local_actor_id="operator"))
@@ -653,3 +756,19 @@ def test_continuation_reuses_worker_item_and_source_lineage(
         assert transition.action == "continue"
         assert transition.status == "converged"
         assert transition.target_execution_id == target_execution_id
+
+        source_trace = session.scalar(
+            select(ExecutionEventModel).where(
+                ExecutionEventModel.execution_id == source["execution_id"],
+                ExecutionEventModel.session_id == source["session_id"],
+                ExecutionEventModel.event_type == "artifact.ready",
+            )
+        )
+        source_artifact = session.scalar(
+            select(ArtifactModel).where(
+                ArtifactModel.execution_id == source["execution_id"],
+                ArtifactModel.session_id == source["session_id"],
+            )
+        )
+        assert source_trace is not None
+        assert source_artifact is not None

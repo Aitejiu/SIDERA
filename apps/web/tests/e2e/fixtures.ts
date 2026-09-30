@@ -83,6 +83,10 @@ export type R6ResultIntegrationSeed = {
   current_candidate_id: string | null;
   phase: string;
 };
+export type R6ResultIntegrationObservation = R6ResultIntegrationSeed & {
+  result_version: number;
+  read_only_counts: Record<string, number>;
+};
 
 const webRoot = resolve(import.meta.dirname, "../..");
 const repositoryRoot = resolve(webRoot, "../..");
@@ -321,6 +325,14 @@ export function advanceResultIntegration(
   return parseResultIntegrationSeed(runResultIntegrationAction(workspaceId, root, "advance", action));
 }
 
+export function observeResultIntegration(workspaceId: string): R6ResultIntegrationObservation {
+  const root = resultIntegrationRoots.get(workspaceId);
+  if (root === undefined) {
+    throw new Error(`R6 result-integration workspace is not registered: ${workspaceId}`);
+  }
+  return parseResultIntegrationObservation(runResultIntegrationAction(workspaceId, root, "observe"));
+}
+
 export function seedKnowledge(workspaceId: string = WORKSPACE_ID): void {
   execFileSync(
     process.env.SIDERA_E2E_KNOWLEDGE_PYTHON ?? knowledgeDefaultPython,
@@ -556,6 +568,26 @@ function parseResultIntegrationSeed(state: Record<string, unknown>): R6ResultInt
   };
 }
 
+function parseResultIntegrationObservation(
+  state: Record<string, unknown>,
+): R6ResultIntegrationObservation {
+  const seed = parseResultIntegrationSeed(state);
+  const resultVersion = state.result_version;
+  if (typeof resultVersion !== "number" || !Number.isInteger(resultVersion) || resultVersion < 1) {
+    throw new Error("R6 result-integration observation is missing result_version");
+  }
+  const counts = requiredStateRecord(state, "read_only_counts");
+  const readOnlyCounts = Object.fromEntries(
+    Object.entries(counts).map(([key, value]) => {
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+        throw new Error(`R6 result-integration observation has invalid count ${key}`);
+      }
+      return [key, value];
+    }),
+  );
+  return { ...seed, result_version: resultVersion, read_only_counts: readOnlyCounts };
+}
+
 function requiredStateString(state: Record<string, unknown>, key: string): string {
   const value = state[key];
   if (typeof value !== "string" || value.length === 0) {
@@ -742,6 +774,7 @@ type Fixtures = {
     workspaceId: string,
     action: R6ResultIntegrationAction,
   ) => R6ResultIntegrationSeed;
+  observeResultIntegration: (workspaceId: string) => R6ResultIntegrationObservation;
   seedKnowledge: (workspaceId?: string) => void;
 };
 
@@ -863,6 +896,12 @@ export const test = base.extend<Fixtures>({
     // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(advanceResultIntegration);
+  },
+  observeResultIntegration: async ({ browserName }, use) => {
+    void browserName;
+    // Playwright fixture callbacks use `use`; the React Hooks rule does not apply here.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    await use(observeResultIntegration);
   },
   seedKnowledge: async ({ browserName }, use) => {
     void browserName;

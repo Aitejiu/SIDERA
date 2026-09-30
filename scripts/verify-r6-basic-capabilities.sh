@@ -20,6 +20,7 @@ STEP_COUNT=0
 LOCAL_FAILED=0
 DATABASE_READY=0
 REAL_MODE=0
+RELEASE_SCOPE=legacy
 mkdir -p "$EVIDENCE_DIR"
 : >"$CHECKS_FILE"
 
@@ -34,6 +35,14 @@ while (($# > 0)); do
       shift
       (($# > 0)) || { printf 'basic capabilities: --record requires a path\n' >&2; exit 2; }
       RECORD_PATH=$1
+      ;;
+    --scope)
+      shift
+      (($# > 0)) || { printf 'basic capabilities: --scope requires a value\n' >&2; exit 2; }
+      case "$1" in
+        legacy|web-local) RELEASE_SCOPE=$1 ;;
+        *) printf 'basic capabilities: unknown scope: %s\n' "$1" >&2; exit 2 ;;
+      esac
       ;;
     *)
       printf 'basic capabilities: unknown argument: %s\n' "$1" >&2
@@ -132,15 +141,16 @@ run_optional_step() {
   local label=$1
   shift
   if [[ "${SIDERA_SKIP_BASIC_OPTIONAL:-0}" == "1" ]]; then
-    printf '%s\t0\tPASS\n' "$label" >>"$CHECKS_FILE"
-    printf 'basic capabilities: %s: SKIPPED BY OPERATOR\n' "$label"
+    LOCAL_FAILED=1
+    printf '%s\t125\tFAIL\n' "$label" >>"$CHECKS_FILE"
+    printf 'basic capabilities: %s: INCOMPLETE (skipped by operator)\n' "$label" >&2
     return
   fi
   run_step "$label" "$@"
 }
 
 validate_database_url() {
-  local value=${SIDERA_TEST_DATABASE_URL:-}
+  local value=${1:-}
   [[ -n "$value" ]] || return 1
   python3 - "$value" <<'PY'
 import re
@@ -153,9 +163,27 @@ if parsed.scheme != "postgresql+psycopg":
 if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
     raise SystemExit(1)
 name = unquote(parsed.path.lstrip("/"))
-if re.fullmatch(r"sidera_test(?:_[A-Za-z0-9]+)*", name) is None:
+if re.fullmatch(r"sidera(?:_knowledge)?_test(?:_[A-Za-z0-9]+)*", name) is None:
     raise SystemExit(1)
 PY
+}
+
+N1_AUDIT_REQUIRED_PATHS=(
+  runtime/source-manifest.json
+  runtime/source-inventory.json
+  source-repository
+  lm-4.3-backup/backup-manifest.json
+  upgrade-target/restore-result.json
+  rollback-target/restore-result.json
+)
+
+validate_n1_audit_root() {
+  local root=${SIDERA_N1_AUDIT_ROOT:-}
+  [[ -n "$root" && -d "$root" ]] || return 1
+  local relative_path
+  for relative_path in "${N1_AUDIT_REQUIRED_PATHS[@]}"; do
+    [[ -e "$root/$relative_path" ]] || return 1
+  done
 }
 
 check_protected_state() {
@@ -177,20 +205,33 @@ if [[ "$DIRTY_SCOPE" == "dirty" || "$DIRTY_SCOPE" == "unknown" ]]; then
   LOCAL_FAILED=1
 fi
 
-if validate_database_url; then
+if validate_database_url "${SIDERA_TEST_DATABASE_URL:-}" \
+  && validate_database_url "${SIDERA_KNOWLEDGE_TEST_DATABASE_URL:-}"; then
   DATABASE_READY=1
   export SIDERA_DATABASE_URL="$SIDERA_TEST_DATABASE_URL"
-  export SIDERA_KNOWLEDGE_DATABASE_URL="${SIDERA_KNOWLEDGE_TEST_DATABASE_URL:-postgresql+psycopg://sidera:sidera@127.0.0.1:55432/sidera_knowledge_test}"
+  export SIDERA_KNOWLEDGE_DATABASE_URL="$SIDERA_KNOWLEDGE_TEST_DATABASE_URL"
   printf 'BASIC_DATABASE_CHECK=PASS\n'
 else
   printf 'BASIC_DATABASE_CHECK=FAIL\n' >&2
   LOCAL_FAILED=1
 fi
 
+if [[ "$RELEASE_SCOPE" == "web-local" ]]; then
+  if validate_n1_audit_root; then
+    printf 'N-1 audit source and rollback evidence\t0\tPASS\n' >>"$CHECKS_FILE"
+    printf 'BASIC_N1_AUDIT_CHECK=PASS\n'
+  else
+    LOCAL_FAILED=1
+    printf 'N-1 audit source and rollback evidence\t125\tFAIL\n' >>"$CHECKS_FILE"
+    printf 'BASIC_N1_AUDIT_CHECK=FAIL\n' >&2
+  fi
+fi
+
 run_step 'shell syntax' bash -n \
   "$REPO_ROOT/scripts/r6-basic-stack.sh" \
-  "$REPO_ROOT/scripts/r6-basic-acceptance.py" \
   "$REPO_ROOT/scripts/verify-r6-basic-capabilities.sh"
+run_step 'python syntax' python3 -m py_compile \
+  "$REPO_ROOT/scripts/r6-basic-acceptance.py"
 if [[ "${SIDERA_BASIC_CAPABILITY_TEST_MODE:-0}" == "1" ]]; then
   printf 'isolated stack stub\t0\tPASS\n' >>"$CHECKS_FILE"
   printf 'basic capabilities: isolated stack stub: PASS (test harness already ran it)\n'
@@ -224,9 +265,15 @@ run_step 'control-plane contract and provider-free E2E' safe_local_env \
   "$CONTROL_PLANE_ROOT/tests/e2e/test_r6_3_4_result_input_loop.py" \
   "$CONTROL_PLANE_ROOT/tests/e2e/test_r6_3_4_result_input_faults.py"
 if (( DATABASE_READY == 1 )); then
+  INTERVIEW_INTEGRATION_IGNORES=()
+  for interview_test in "$CONTROL_PLANE_ROOT"/tests/integration/test_interview_*.py; do
+    [[ -f "$interview_test" ]] || continue
+    INTERVIEW_INTEGRATION_IGNORES+=(--ignore "$interview_test")
+  done
   run_step 'control-plane integration tests' safe_local_env \
     uv run --project "$CONTROL_PLANE_ROOT" pytest -m integration -q \
-    "$CONTROL_PLANE_ROOT/tests/integration"
+    "$CONTROL_PLANE_ROOT/tests/integration" \
+    "${INTERVIEW_INTEGRATION_IGNORES[@]}"
 else
   printf 'control-plane integration tests: NOT RUN (database unavailable)\n' >&2
 fi
@@ -234,6 +281,9 @@ run_step 'control-plane Ruff' safe_local_env uv run --project "$CONTROL_PLANE_RO
   ruff check "$CONTROL_PLANE_ROOT/src" "$CONTROL_PLANE_ROOT/tests" "$CONTROL_PLANE_ROOT/migrations"
 run_step 'control-plane Pyright' safe_local_env uv run --project "$CONTROL_PLANE_ROOT" \
   pyright --project "$CONTROL_PLANE_ROOT/pyproject.toml"
+run_step 'main-agent gateway unit and contract tests' safe_local_env \
+  uv run --project "$REPO_ROOT/services/main-agent-gateway" pytest -q \
+  "$REPO_ROOT/services/main-agent-gateway/tests/unit"
 
 run_step 'knowledge service unit tests' safe_local_env \
   uv run --project "$KNOWLEDGE_ROOT" pytest -q "$KNOWLEDGE_ROOT/tests/unit"
@@ -287,6 +337,21 @@ else
   LOCAL_FAILED=1
 fi
 
+if [[ "$RELEASE_SCOPE" == "web-local" ]]; then
+  run_step 'Web shared provider-free batch E2E' safe_local_env env \
+    -u SIDERA_DATABASE_URL \
+    -u SIDERA_KNOWLEDGE_DATABASE_URL \
+    SIDERA_BASIC_FAKE_SUITE=batch \
+    SIDERA_INTERVIEW_DEMO_ADMIN_DATABASE_URL="${SIDERA_INTERVIEW_DEMO_ADMIN_DATABASE_URL:-}" \
+    npm --prefix "$WEB_ROOT" run test:e2e -- \
+    --config=playwright.basic-fake.config.ts
+  run_step 'Web maintenance read-only three-viewport E2E' safe_local_env env \
+    CI=1 \
+    SIDERA_INTERVIEW_DEMO_ADMIN_DATABASE_URL="${SIDERA_INTERVIEW_DEMO_ADMIN_DATABASE_URL:-}" \
+    npm --prefix "$WEB_ROOT" run test:e2e -- \
+    --config=playwright.basic-maintenance.config.ts
+fi
+
 run_step 'protected worktree state' check_protected_state "$PROTECTED_BEFORE" "$PROTECTED_AFTER"
 run_step 'git diff check' safe_local_env git -C "$REPO_ROOT" diff --check
 
@@ -303,8 +368,12 @@ REAL_SCENARIOS=(
   revision
   recovery
   second-adapter
-  notification
 )
+if [[ "$RELEASE_SCOPE" == "web-local" ]]; then
+  REAL_SCENARIOS+=(web-notification)
+else
+  REAL_SCENARIOS+=(notification)
+fi
 
 real_var() {
   printf 'REAL_%s' "$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
@@ -316,6 +385,47 @@ set_real_status() {
   local variable
   variable=$(real_var "$scenario")
   printf -v "$variable" '%s' "$status"
+}
+
+read_real_evidence_status() {
+  local scenario_output=$1
+  local manifest_path=$2
+  local scenario=$3
+  python3 - "$scenario_output" "$manifest_path" "$scenario" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+status_names = {"PASS", "FAIL", "INCOMPLETE", "NOT_RUN"}
+status = "INCOMPLETE"
+valid = False
+try:
+    lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    lines = []
+    manifest = {}
+
+for line in reversed(lines):
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if not isinstance(value, dict):
+        continue
+    candidate_status = value.get("status")
+    if candidate_status in status_names:
+        status = candidate_status
+        valid = (
+            value.get("run_id") == manifest.get("run_id")
+            and value.get("scenario") == sys.argv[3]
+            and value.get("evidence_kind")
+            in {"contract", "real_worker", "real_user_flow"}
+        )
+        break
+
+print(f"{status}\t{int(valid)}")
+PY
 }
 
 for scenario in "${REAL_SCENARIOS[@]}"; do
@@ -384,61 +494,24 @@ PY
 
     if [[ "$REAL_PROFILE_CONFIG" == "PASS" ]]; then
       for scenario in "${REAL_SCENARIOS[@]}"; do
-        variable=$(real_var "$scenario")
         evidence_file="$EVIDENCE_DIR/${scenario}.json"
         scenario_output="$TEMP_DIR/real-${scenario}.json"
-        if safe_local_env uv run --project "$CONTROL_PLANE_ROOT" \
+        safe_local_env uv run --project "$CONTROL_PLANE_ROOT" \
+          env SIDERA_RUN_REAL_BASIC=1 \
           python "$REPO_ROOT/scripts/r6-basic-acceptance.py" \
           --manifest "$MANIFEST_PATH" --scenario "$scenario" --mode real --json \
-          >"$scenario_output" 2>"$TEMP_DIR/real-${scenario}.log"; then
-          status=$(python3 - "$scenario_output" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-for line in reversed(lines):
-    try:
-        value = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if isinstance(value, dict):
-        print(value.get("status", "INCOMPLETE"))
-        break
-else:
-    print("INCOMPLETE")
-PY
-)
-        else
-          status=$(python3 - "$scenario_output" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-try:
-    lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-except OSError:
-    print("INCOMPLETE")
-else:
-    for line in reversed(lines):
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            print(value.get("status", "INCOMPLETE"))
-            break
-    else:
-        print("INCOMPLETE")
-PY
-)
-        fi
+          >"$scenario_output" 2>"$TEMP_DIR/real-${scenario}.log" || true
+        IFS=$'\t' read -r status evidence_valid < <(
+          read_real_evidence_status "$scenario_output" "$MANIFEST_PATH" "$scenario"
+        )
         case "$status" in
           PASS|FAIL|INCOMPLETE|NOT_RUN) ;;
           *) status=INCOMPLETE ;;
         esac
         set_real_status "$scenario" "$status"
-        cp "$scenario_output" "$evidence_file" 2>/dev/null || true
+        if [[ "$evidence_valid" == "1" ]]; then
+          cp "$scenario_output" "$evidence_file" 2>/dev/null || true
+        fi
       done
     else
       for scenario in "${REAL_SCENARIOS[@]}"; do
@@ -447,7 +520,10 @@ PY
     fi
 
     if [[ "${SIDERA_RUN_REAL_BASIC_BROWSER:-0}" == "1" ]]; then
-      if safe_local_env env SIDERA_RUN_REAL_BASIC=1 \
+      if safe_local_env env \
+        SIDERA_RUN_REAL_BASIC=1 \
+        SIDERA_RUN_REAL_BASIC_BROWSER=1 \
+        SIDERA_BASIC_REAL_MANIFEST="$MANIFEST_PATH" \
         npm --prefix "$WEB_ROOT" run test:e2e -- \
         --config=playwright.real-basic.config.ts --project=basic-real-desktop; then
         REAL_READONLY_BROWSER=PASS
@@ -467,16 +543,19 @@ for scenario in "${REAL_SCENARIOS[@]}"; do
 done
 printf 'REAL_READONLY_BROWSER=%s\n' "$REAL_READONLY_BROWSER"
 printf 'BASIC_LOCAL_CHECK_COUNT=%s\n' "$STEP_COUNT"
+printf 'BASIC_CAPABILITY_SCOPE=%s\n' "$RELEASE_SCOPE"
 
 BASIC_STATUS=PASS
 if (( LOCAL_FAILED != 0 )); then
   BASIC_STATUS=FAIL
-elif [[ "$REAL_PROFILE_CONFIG" != "PASS" || "$REAL_READONLY_BROWSER" == "NOT_RUN" ]]; then
-  BASIC_STATUS=INCOMPLETE
 else
+  required_statuses=("$REAL_PROFILE_CONFIG" "$REAL_READONLY_BROWSER")
   for scenario in "${REAL_SCENARIOS[@]}"; do
     variable=$(real_var "$scenario")
     eval "status=\${$variable}"
+    required_statuses+=("$status")
+  done
+  for status in "${required_statuses[@]}"; do
     if [[ "$status" == "FAIL" ]]; then
       BASIC_STATUS=FAIL
       break
@@ -486,6 +565,14 @@ else
     fi
   done
 fi
+
+WEB_LOCAL_RELEASE_ACCEPTANCE=INCOMPLETE
+if [[ "$RELEASE_SCOPE" == "web-local" && "$BASIC_STATUS" == "PASS" ]]; then
+  WEB_LOCAL_RELEASE_ACCEPTANCE=PASS
+elif [[ "$RELEASE_SCOPE" == "web-local" && "$BASIC_STATUS" == "FAIL" ]]; then
+  WEB_LOCAL_RELEASE_ACCEPTANCE=FAIL
+fi
+printf 'WEB_LOCAL_RELEASE_ACCEPTANCE=%s\n' "$WEB_LOCAL_RELEASE_ACCEPTANCE"
 
 if [[ -n "$RECORD_PATH" ]]; then
   record_status=FAIL

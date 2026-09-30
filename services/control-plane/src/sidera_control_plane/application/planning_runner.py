@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -10,7 +11,13 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import SecretStr
+from sidera_runtime_guard import RuntimeBudgetGuard, RuntimeGuardError
 
+from sidera_control_plane.acceptance_resource_binding import (
+    bind_runtime_resource_chain,
+    derive_runtime_resource_chain,
+    load_planning_resource_facts,
+)
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_materialization import (
     ContextMaterializationError,
@@ -383,6 +390,7 @@ class PlanningRunner:
         context_materializer: ContextMaterializer | None = None,
         context_package_cutover_at: datetime | None = None,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
+        acceptance_guard: RuntimeBudgetGuard | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
@@ -406,6 +414,7 @@ class PlanningRunner:
         self._context_materializer = context_materializer
         self._context_package_cutover_at = context_package_cutover_at
         self._candidate_submission_service = candidate_submission_service
+        self._acceptance_guard = acceptance_guard
 
     def run_once(self, limit: int = 10) -> PlanningBatchResult:
         if limit <= 0:
@@ -830,6 +839,38 @@ class PlanningRunner:
             planning_context=item.planning_context,
             kind=item.kind,
         )
+        if (
+            self._acceptance_guard is not None
+            and self._acceptance_guard.resource_binding_mode == "persisted"
+        ):
+            try:
+                with self._uow_factory() as binding_uow:
+                    facts = load_planning_resource_facts(
+                        binding_uow.session,
+                        planning_request_id=item.request_id,
+                        workspace_id=item.workspace_id,
+                    )
+                chain = derive_runtime_resource_chain(
+                    facts,
+                    requested_scenario=os.environ.get("SIDERA_ACCEPTANCE_SCENARIO"),
+                    requested_group=os.environ.get("SIDERA_ACCEPTANCE_GROUP"),
+                )
+                bind_runtime_resource_chain(self._acceptance_guard, chain)
+                planner_input = replace(
+                    planner_input,
+                    acceptance_resource_chain=chain.keys,
+                )
+            except RuntimeGuardError as exc:
+                return self._persist_failure(
+                    item,
+                    PlannerExplicitFailure(
+                        code=f"acceptance_resource:{exc.code}",
+                        safe_message="planner resource binding is not valid",
+                        retryable=False,
+                        unknown_outcome=False,
+                    ),
+                    blocked=True,
+                )
         deadline = now + timedelta(
             seconds=item.profile_snapshot.budget.max_runtime_seconds
         )

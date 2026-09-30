@@ -23,6 +23,7 @@ SCENARIO_NAMES = (
     "recovery",
     "second-adapter",
     "notification",
+    "web-notification",
 )
 _ROLES = frozenset({"main_agent", "planner", "worker", "second_worker"})
 _SHA1 = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -116,13 +117,28 @@ class ScenarioLimits(BaseModel):
     planner_runs: int = Field(ge=0)
     worker_sessions: int = Field(ge=0)
     adapter_prompts: int = Field(ge=0)
-    max_seconds: int = Field(gt=0, le=900)
+    max_seconds: int = Field(gt=0, le=3600)
+
+
+class AllowedRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_id: str = Field(min_length=1, max_length=128)
+    role: AgentRole
+    runtime: str = Field(min_length=1, max_length=128)
+    provider: str = Field(min_length=1, max_length=128)
+    model_id: str = Field(min_length=1, max_length=255)
+    endpoint_host: str = Field(min_length=1, max_length=255)
+    credential_ref: str = Field(min_length=1, max_length=512)
+    config_version: int = Field(ge=1)
+    fallbacks: tuple[str, ...] = ()
+    costs: dict[str, int]
 
 
 class BasicRunManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     run_id: UUID
     workspace_id: UUID
     local_gate_record: Path
@@ -139,6 +155,16 @@ class BasicRunManifest(BaseModel):
     profiles: tuple[AgentProfile, ...]
     scenarios: dict[str, ScenarioLimits]
     notification_route_ref: str | None = None
+    implementation_fingerprint: str | None = Field(
+        default=None, pattern=_SHA256.pattern
+    )
+    fingerprint_version: int | None = Field(default=None, ge=1)
+    batch_limits: dict[str, int] | None = None
+    allowed_routes: tuple[AllowedRoute, ...] | None = None
+    approval_ref: str | None = None
+    maintenance_inventory_ref: str | None = None
+    restore_mode: Literal["read_only"] | None = None
+    resource_binding_mode: Literal["legacy", "persisted"] = "persisted"
 
     @field_validator("local_gate_record", "run_root", "repository")
     @classmethod
@@ -185,6 +211,19 @@ class BasicRunManifest(BaseModel):
             self.web_url,
         ):
             _validate_loopback_url(value)
+        if self.schema_version == 2:
+            if (
+                self.implementation_fingerprint is None
+                or self.fingerprint_version != 2
+                or self.batch_limits is None
+                or self.allowed_routes is None
+                or self.approval_ref is None
+            ):
+                raise ValueError("schema 2 manifest identity and guard fields are required")
+            if not self.allowed_routes:
+                raise ValueError("schema 2 manifest requires allowed routes")
+            if any(value < 0 for value in self.batch_limits.values()):
+                raise ValueError("schema 2 batch limits must be non-negative")
         return self
 
 
@@ -256,6 +295,7 @@ def load_manifest(path: Path) -> BasicRunManifest:
 __all__ = [
     "SCENARIO_NAMES",
     "AgentProfile",
+    "AllowedRoute",
     "BasicRunManifest",
     "ScenarioLimits",
     "load_manifest",

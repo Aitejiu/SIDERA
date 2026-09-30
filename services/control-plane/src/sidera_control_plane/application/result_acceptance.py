@@ -9,10 +9,14 @@ from re import fullmatch
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.result_finalization import (
+    build_finalization_operation,
+)
 from sidera_control_plane.application.result_gate import (
     ResultGateAction,
     require_result_gate,
 )
+from sidera_control_plane.application.result_ports import ResultOperationAttemptV1
 from sidera_control_plane.application.task_commands import TaskCommandHandler
 from sidera_control_plane.domain.code_results import (
     CodeResultSnapshotV1,
@@ -252,6 +256,7 @@ class ResultAcceptanceService:
             raise ResultError("acceptance_record_conflict", {})
 
         apply_operation: ResultApplyOperationV1 | None = None
+        finalization_operation: ResultOperationAttemptV1 | None = None
         if spec.apply_policy.apply_on_accept:
             apply_operation = _build_apply_operation(
                 uow,
@@ -264,6 +269,22 @@ class ResultAcceptanceService:
             )
             if not isinstance(stored_operation, ResultApplyOperationV1):
                 raise ResultError("acceptance_apply_operation_conflict", {})
+        else:
+            finalization_operation = build_finalization_operation(
+                workspace_id=envelope.workspace_id,
+                root_task_id=head.root_task_id,
+                acceptance_id=stored.id,
+                candidate_id=candidate.id,
+                result_version=head.result_version + 1,
+                now=self._clock(),
+            )
+            stored_operation = uow.results.save_operation(
+                finalization_operation,
+                expected_version=0,
+            )
+            if not isinstance(stored_operation, ResultOperationAttemptV1):
+                raise ResultError("acceptance_finalization_operation_conflict", {})
+            finalization_operation = stored_operation
 
         task_events: list[EventData] = []
         previous_task_status = task.status.value
@@ -325,6 +346,11 @@ class ResultAcceptanceService:
                 "apply_status": (
                     None if apply_operation is None else apply_operation.status.value
                 ),
+                "finalization_operation_id": (
+                    None
+                    if finalization_operation is None
+                    else str(finalization_operation.operation_id)
+                ),
                 "criteria": [item.to_mapping() for item in stored.criteria],
                 "status": task.status.value,
                 "previous_status": previous_task_status,
@@ -364,7 +390,33 @@ class ResultAcceptanceService:
                     correlation_id=envelope.correlation_id,
                 ),
             )
-        for event in (*task_events, acceptance_event, *apply_events):
+        finalization_events: tuple[EventData, ...] = ()
+        if finalization_operation is not None:
+            finalization_events = (
+                EventData(
+                    id=uuid5(
+                        _ACCEPTANCE_NAMESPACE,
+                        f"finalization-requested:{finalization_operation.operation_id}",
+                    ),
+                    workspace_id=envelope.workspace_id,
+                    aggregate_type="result_finalization",
+                    aggregate_id=finalization_operation.operation_id,
+                    aggregate_version=finalization_operation.version,
+                    event_type="ResultFinalizationRequested",
+                    payload={
+                        "operation_id": str(finalization_operation.operation_id),
+                        "root_task_id": str(finalization_operation.root_task_id),
+                        "acceptance_id": str(stored.id),
+                        "candidate_id": str(stored.candidate_id),
+                        "status": finalization_operation.status.value,
+                    },
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    causation_id=envelope.id,
+                    correlation_id=envelope.correlation_id,
+                ),
+            )
+        for event in (*task_events, acceptance_event, *apply_events, *finalization_events):
             uow.events.append_with_outbox(event)
         self._fault("before_intent_commit")
         return CommandResult(
@@ -372,7 +424,8 @@ class ResultAcceptanceService:
             aggregate_id=task.id,
             aggregate_version=task.version,
             event_ids=tuple(
-                event.id for event in (*task_events, acceptance_event, *apply_events)
+                event.id
+                for event in (*task_events, acceptance_event, *apply_events, *finalization_events)
             ),
             data={
                 "status": "accepted",
@@ -385,6 +438,11 @@ class ResultAcceptanceService:
                 ),
                 "apply_status": (
                     None if apply_operation is None else apply_operation.status.value
+                ),
+                "finalization_operation_id": (
+                    None
+                    if finalization_operation is None
+                    else str(finalization_operation.operation_id)
                 ),
                 "result_stage": (
                     "applying" if apply_operation is not None else "finalizing"

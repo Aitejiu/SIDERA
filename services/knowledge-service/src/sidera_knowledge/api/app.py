@@ -42,6 +42,11 @@ def create_app(settings: KnowledgeSettings | None = None) -> FastAPI:
         app.state.query_service = KnowledgeQueryService(query_store)
         app.state.retrieval_adapter = PostgresRetrievalAdapter(database)
         try:
+            if (
+                resolved_settings.restore_read_only
+                and resolved_settings.restore_schema_validation
+            ):
+                _validate_restore_schema(database, resolved_settings.alembic_head)
             yield
         finally:
             database.dispose()
@@ -52,6 +57,22 @@ def create_app(settings: KnowledgeSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+
+    @app.middleware("http")
+    async def reject_restore_writes(request: Request, call_next):
+        if resolved_settings.restore_read_only and request.method not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        }:
+            return api_error_response(
+                "restore_read_only",
+                status_code=409,
+                details={"restore_mode": "read_only"},
+                message="restored runtime is read-only",
+            )
+        return await call_next(request)
+
     app.include_router(command_router)
     app.include_router(query_router)
 
@@ -111,6 +132,20 @@ def create_app(settings: KnowledgeSettings | None = None) -> FastAPI:
 
     app.openapi_schema = customize_openapi(app.openapi())
     return app
+
+
+def _validate_restore_schema(database: Database, expected_head: str) -> None:
+    try:
+        with database.engine.connect() as connection:
+            actual_heads = tuple(
+                connection.scalars(
+                    text("SELECT version_num FROM alembic_version ORDER BY version_num")
+                ).all()
+            )
+    except SQLAlchemyError as exc:
+        raise RuntimeError("restore_schema_not_current") from exc
+    if actual_heads != (expected_head,):
+        raise RuntimeError("restore_schema_not_current")
 
 
 app = create_app()

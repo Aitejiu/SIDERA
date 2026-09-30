@@ -18,6 +18,7 @@ export function AttentionPanel({
   rootTaskTitle,
   items,
   onAcknowledged,
+  onRefresh,
   compact = false,
 }: {
   workspaceId: string;
@@ -26,6 +27,7 @@ export function AttentionPanel({
   rootTaskTitle?: string;
   items: AttentionItem[];
   onAcknowledged?: () => void;
+  onRefresh?: () => Promise<void>;
   compact?: boolean;
 }) {
   const [acknowledgedKeys, setAcknowledgedKeys] = useState<Set<string>>(() => new Set());
@@ -64,7 +66,16 @@ export function AttentionPanel({
       setAcknowledgedKeys((current) => new Set(current).add(item.key));
       onAcknowledged?.();
     } catch (cause) {
-      setError(cause instanceof ApiProblem ? cause.detail : "确认失败，请刷新后重试");
+      if (shouldRefreshAttention(cause) && onRefresh) {
+        try {
+          await onRefresh();
+          setError(null);
+        } catch {
+          setError("待处理事项已变化，请刷新后重试");
+        }
+      } else {
+        setError(cause instanceof ApiProblem ? cause.detail : "确认失败，请刷新后重试");
+      }
     } finally {
       setPendingKey(null);
     }
@@ -131,6 +142,12 @@ export function AttentionPanel({
       )}
     </section>
   );
+}
+
+function shouldRefreshAttention(cause: unknown): boolean {
+  return cause instanceof ApiProblem
+    && (cause.detail === "attention item is no longer current"
+      || cause.detail === "attention item source is stale");
 }
 
 function attentionHref(

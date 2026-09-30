@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sidera_control_plane.domain.collaboration import (
     CollaborationRuntimeBindingSnapshot,
+    CollaborationStrategy,
 )
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
@@ -323,6 +324,10 @@ def _validate_collaboration_binding(
         if not binding.runtime_capability_snapshot.supports_input_groups_v1():
             raise ValidationError(
                 f"proposal schema v{proposal_schema_version} requires runtime input_groups_v1 capability"
+            )
+        if CollaborationStrategy.ALL_REQUIRED.value not in binding.runtime_capability_snapshot.strategy_ids:
+            raise ValidationError(
+                f"proposal schema v{proposal_schema_version} requires runtime all_required strategy"
             )
     if binding is None:
         return

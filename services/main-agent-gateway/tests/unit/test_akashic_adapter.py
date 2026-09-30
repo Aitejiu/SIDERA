@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import pytest
 from akashic_sdk.client import ConnectionClosedError, RemoteError
+from sidera_runtime_guard import RuntimeBudgetGuard, prepare_run
 
 from sidera_main_agent_gateway.adapters.akashic import AkashicAdapter
 from sidera_main_agent_gateway.config import Settings
 from sidera_main_agent_gateway.errors import (
+    AcceptanceGuardRejected,
     ProviderProtocolError,
     ProviderUnavailable,
     ThreadAccessDenied,
@@ -169,6 +173,204 @@ def factory_for(
         return remaining.pop(0)
 
     return factory
+
+
+def acceptance_guard(
+    tmp_path: Path,
+    *,
+    main_agent_turns: int,
+    resource_binding_mode: str | None = None,
+) -> RuntimeBudgetGuard:
+    run_root = tmp_path / "guard-run"
+    approval = run_root / "approval.json"
+    approval.parent.mkdir()
+    run_id = "20000000-0000-0000-0000-000000000101"
+    workspace_id = str(WORKSPACE_ID)
+    fingerprints = {
+        "implementation_fingerprint": "a" * 64,
+        "runtime_fingerprint": "b" * 64,
+    }
+    approval.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "run_id": run_id,
+                "workspace_id": workspace_id,
+                **fingerprints,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "workspace_id": workspace_id,
+        **fingerprints,
+        "run_root": str(run_root),
+        "approval_ref": str(approval),
+        "batch_limits": {
+            "main_agent_turns": main_agent_turns,
+            "planner_runs": 0,
+            "worker_sessions": 0,
+            "adapter_prompts": 0,
+        },
+        "scenarios": {
+            "profile": {
+                "max_seconds": 60,
+                "limits": {
+                    "main_agent_turns": main_agent_turns,
+                    "planner_runs": 0,
+                    "worker_sessions": 0,
+                    "adapter_prompts": 0,
+                },
+            }
+        },
+        "allowed_routes": [
+            {
+                "route_id": "main-local",
+                "role": "main_agent",
+                "runtime": "fake-http",
+                "provider": "fake",
+                "model_id": "fake-main-v1",
+                "endpoint_host": "127.0.0.1:18101",
+                "credential_ref": "none",
+                "config_version": 1,
+                "fallbacks": [],
+                "costs": {"main_agent_turns": 1},
+            }
+        ],
+    }
+    if resource_binding_mode is not None:
+        manifest["resource_binding_mode"] = resource_binding_mode
+    manifest_path = tmp_path / "guard-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    prepare_run(manifest_path)
+    return RuntimeBudgetGuard(manifest_path)
+
+
+@pytest.mark.asyncio
+async def test_budget_rejection_happens_before_the_main_provider_spy(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient([thread_record("allowed")])
+    adapter = AkashicAdapter(
+        settings(),
+        client_factory=factory_for(client),
+        acceptance_guard=acceptance_guard(tmp_path, main_agent_turns=0),
+    )
+
+    with pytest.raises(AcceptanceGuardRejected, match="budget_exhausted"):
+        await adapter.start_turn("allowed", "hello", operation_id="operation-1")
+
+    assert client.thread_read_include_turns == []
+    assert client.turn_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_operation_id_only_reaches_the_main_provider_once(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient([thread_record("allowed")])
+    adapter = AkashicAdapter(
+        settings(),
+        client_factory=factory_for(client),
+        acceptance_guard=acceptance_guard(tmp_path, main_agent_turns=2),
+    )
+
+    await adapter.start_turn("allowed", "hello", operation_id="operation-1")
+    with pytest.raises(AcceptanceGuardRejected, match="operation_already_started"):
+        await adapter.start_turn("allowed", "hello", operation_id="operation-1")
+
+    assert client.turn_inputs == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_persisted_binding_mode_binds_the_provider_thread_before_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient([thread_record("allowed")])
+    adapter = AkashicAdapter(
+        settings(),
+        client_factory=factory_for(client),
+        acceptance_guard=acceptance_guard(
+            tmp_path,
+            main_agent_turns=1,
+            resource_binding_mode="persisted",
+        ),
+    )
+    monkeypatch.setenv(
+        "SIDERA_ACCEPTANCE_ROUTE_FACTS",
+        json.dumps(
+            {
+                "main_agent": {
+                    "route_id": "main-local",
+                    "runtime": "fake-http",
+                    "provider": "fake",
+                    "model_id": "fake-main-v1",
+                    "endpoint_host": "127.0.0.1:18101",
+                    "credential_ref": "none",
+                    "config_version": 1,
+                    "fallbacks": [],
+                }
+            }
+        ),
+    )
+
+    await adapter.start_turn("allowed", "hello", operation_id="operation-1")
+
+    state = json.loads(
+        (tmp_path / "guard-run" / "acceptance-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operation = state["operations"]["operation-1"]
+    assert operation["resource_chain"] == [
+        f"workspace:{WORKSPACE_ID}",
+        "thread:allowed",
+    ]
+    assert state["resource_bindings"]["thread:allowed"]["chain"] == operation[
+        "resource_chain"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_route_identity_mismatch_rejects_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient([thread_record("allowed")])
+    adapter = AkashicAdapter(
+        settings(),
+        client_factory=factory_for(client),
+        acceptance_guard=acceptance_guard(
+            tmp_path,
+            main_agent_turns=1,
+            resource_binding_mode="persisted",
+        ),
+    )
+    monkeypatch.setenv(
+        "SIDERA_ACCEPTANCE_ROUTE_FACTS",
+        json.dumps(
+            {
+                "main_agent": {
+                    "route_id": "main-local",
+                    "runtime": "fake-http",
+                    "provider": "other-provider",
+                    "model_id": "fake-main-v1",
+                    "endpoint_host": "127.0.0.1:18101",
+                    "credential_ref": "env:OTHER_KEY",
+                    "config_version": 1,
+                    "fallbacks": [],
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(AcceptanceGuardRejected, match="route_configuration_mismatch"):
+        await adapter.start_turn("allowed", "hello", operation_id="operation-1")
+
+    assert client.turn_inputs == []
 
 
 @pytest.mark.asyncio

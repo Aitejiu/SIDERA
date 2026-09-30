@@ -6,12 +6,12 @@ import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 import { WorkspaceStreamProvider, useWorkspaceStream } from "./WorkspaceStreamProvider";
 import { semanticTabForLocation, WorkspaceTabs, WorkspaceTabsProvider } from "./WorkspaceTabs";
 import { useWorkspaceReadingPosition } from "./WorkspaceViewState";
+import { DEFAULT_WORKSPACE_ID } from "./runtimeConfig";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
 import { NotificationCenter } from "@/features/attention/NotificationCenter";
 import { getNotificationSummary, notificationSummaryQueryKey } from "@/features/notifications/api";
-
-const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
+import { DemoModeIndicator } from "@/features/demo/DemoModeIndicator";
 
 export function App() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
@@ -44,6 +44,7 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
         <div className="topbar__context">
           <StatusMark kind={streamState.status} />
           <span className="mono-label">LOCAL CONTROL PLANE</span>
+          <DemoModeIndicator workspaceId={workspaceId} />
           <span className="mono-label">{formatEventTime(streamState.lastEventAt)}</span>
         </div>
       </header>

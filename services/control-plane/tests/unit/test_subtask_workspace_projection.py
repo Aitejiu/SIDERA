@@ -384,3 +384,61 @@ def test_subtask_workspace_contains_only_local_worker_items() -> None:
     )
     assert not hasattr(workspace, "trace_events")
     assert not hasattr(workspace, "intervention_composer_uri")
+
+
+def test_completed_root_settles_subtask_workspace_attention() -> None:
+    workspace = SubtaskWorkspaceProjectionService().compose(
+        _plan(),
+        subtask_key="callback-idempotency",
+        tasks={
+            **_tasks(),
+            ROOT_TASK_ID: SubtaskTaskFact(
+                id=ROOT_TASK_ID,
+                title="支付重构",
+                status="succeeded",
+                version=8,
+                updated_at=NOW,
+            ),
+            CALLBACK_TASK_ID: SubtaskTaskFact(
+                id=CALLBACK_TASK_ID,
+                title="回调幂等",
+                status="waiting",
+                version=5,
+                updated_at=NOW,
+            ),
+        },
+        worker_items=_worker_items(),
+        placements=_placements(),
+        executions=(
+            SubtaskExecutionFact(
+                id=EXECUTION_ID,
+                task_id=CALLBACK_TASK_ID,
+                worker_item_id=IMPLEMENTER_ID,
+                status="succeeded",
+                updated_at=NOW,
+            ),
+        ),
+        sessions=(),
+        workers=(),
+        artifacts=(),
+        evidence=(),
+        checkpoints=(),
+        activity=(
+            SubtaskActivityFact(
+                id=UUID("90000000-0000-0000-0000-000000000009"),
+                task_id=CALLBACK_TASK_ID,
+                worker_item_id=IMPLEMENTER_ID,
+                occurred_at=NOW,
+                kind="session.succeeded",
+                summary="session.succeeded",
+                correlation_id=UUID("a0000000-0000-0000-0000-000000000009"),
+            ),
+        ),
+        last_change_cursor=20,
+        as_of=NOW,
+    )
+
+    assert workspace.subtask.state == "succeeded"
+    assert workspace.subtask.current_action is None
+    assert workspace.attention_items == ()
+    assert {item.state for item in workspace.downstream_subtasks} == {"succeeded"}

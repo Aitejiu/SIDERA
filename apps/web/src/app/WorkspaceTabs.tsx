@@ -49,6 +49,7 @@ export function WorkspaceTabsProvider({
   children: ReactNode;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [state, dispatch] = useReducer(
     reduceTabs,
     workspaceId,
@@ -64,9 +65,13 @@ export function WorkspaceTabsProvider({
       return;
     }
     const href = state.navigationHref;
+    const currentHref = `${location.pathname}${location.search}`;
+    if (currentHref !== href) {
+      navigate(href, { replace: true });
+      return;
+    }
     dispatch(clearNavigation());
-    navigate(href, { replace: true });
-  }, [navigate, state.navigationHref]);
+  }, [location.pathname, location.search, navigate, state.navigationHref]);
 
   const open = useCallback((tab: WorkspaceTab) => {
     dispatch(openTab(tab));

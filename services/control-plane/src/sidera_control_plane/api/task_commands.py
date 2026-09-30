@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Response
 from sidera_control_plane.api.dependencies import (
     get_command_service,
     get_settings,
+    require_demo_runtime_binding,
     require_result_integration_enabled,
 )
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
@@ -15,6 +16,7 @@ from sidera_control_plane.application.collaboration_governance_commands import (
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.handoff_commands import HandoffCommandError
 from sidera_control_plane.config import Settings
+from sidera_control_plane.demo.governance import arm_demo_governance_evaluation
 from sidera_control_plane.domain.errors import ValidationError
 
 router = APIRouter(prefix="/api/v1")
@@ -129,6 +131,7 @@ def _execute_command(
     service: CommandService,
     settings: Settings,
 ) -> CommandResponse:
+    require_demo_runtime_binding(request, settings)
     if request.command_type in _GOVERNANCE_COMMAND_TYPES and (
         request.actor.type != settings.local_actor_type
         or request.actor.id != settings.local_actor_id
@@ -176,6 +179,8 @@ def _execute_command(
             details={"actor_type": settings.local_actor_type},
         )
     result = service.handle(request.to_envelope())
+    if request.command_type == "PauseCollaborationRelease":
+        _arm_demo_governance_evaluation(settings)
     is_new_create = (
         request.command_type
         in {
@@ -206,6 +211,13 @@ def _execute_command(
         else 200
     )
     return CommandResponse.from_result(result)
+
+
+def _arm_demo_governance_evaluation(settings: Settings) -> None:
+    manifest_path = settings.interview_demo_manifest
+    if manifest_path is None:
+        return
+    arm_demo_governance_evaluation(manifest_path)
 
 
 def _require_transition_route(

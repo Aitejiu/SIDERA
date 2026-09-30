@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from sys import executable
 from types import SimpleNamespace
@@ -13,6 +14,10 @@ from sidera_control_plane.adapters import opencode_acp
 from sidera_control_plane.adapters.dsh_acp import DshACPAdapter
 from sidera_control_plane.adapters.local_verification import LocalVerificationAdapter
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
+from sidera_control_plane.application.worker_completion import (
+    ExecutionCompletionPolicy,
+    resolve_completion_policy,
+)
 from sidera_control_plane.domain.modules import (
     LOCAL_VERIFICATION_PROVIDER,
     ModuleInstance,
@@ -63,9 +68,14 @@ def test_inventory_and_factories_share_one_registration_source(
         "opencode",
         "opencode-acp",
         LOCAL_VERIFICATION_PROVIDER,
+        "interview-demo-worker",
         "dsh-acp",
     }
     assert all(item.factory_key for item in registrations)
+    registration_by_type = {item.adapter_type: item for item in registrations}
+    assert "turn-completion:v1" in registration_by_type["opencode"].capability_versions
+    assert "turn-completion:v1" in registration_by_type["opencode-acp"].capability_versions
+    assert "turn-completion:v1" not in registration_by_type["dsh-acp"].capability_versions
 
 
 def test_reading_inventory_does_not_construct_or_start_an_adapter(
@@ -81,6 +91,37 @@ def test_reading_inventory_does_not_construct_or_start_an_adapter(
 
     assert registrations
     assert all(item.adapter_type != "fake" or item.is_fake for item in registrations)
+
+
+def test_inventory_keeps_completion_policy_explicit_until_instance_opt_in() -> None:
+    assert resolve_completion_policy(_instance()) is ExecutionCompletionPolicy.EXPLICIT
+    assert resolve_completion_policy(
+        _instance(config={"worker.completion_policy": "initial_turn"})
+    ) is ExecutionCompletionPolicy.INITIAL_TURN
+
+
+def test_adapter_cache_preserves_each_configuration_version(tmp_path: Path) -> None:
+    factories = gateway_worker.build_worker_adapter_factories(
+        _settings(tmp_path),
+        workspace_manager=cast(Any, SimpleNamespace()),
+    )
+    original = _instance(config={"worker.model": "test/model-a"})
+    revised = replace(
+        original,
+        config_version=2,
+        config={"worker.model": "test/model-b"},
+    )
+
+    first = factories["opencode"](original)
+    second = factories["opencode"](revised)
+
+    assert isinstance(first, OpenCodeACPAdapter)
+    assert isinstance(second, OpenCodeACPAdapter)
+    assert second is not first
+    assert first._model == "test/model-a"
+    assert second._model == "test/model-b"
+    assert factories["opencode"](original) is first
+    assert factories["opencode"](revised) is second
 
 
 def test_factory_constructs_real_opencode_with_bound_v3_configuration(

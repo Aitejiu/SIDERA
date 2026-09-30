@@ -144,6 +144,28 @@ def test_legacy_worker_capability_payload_round_trips() -> None:
     assert restored == profile
 
 
+def test_worker_profile_defaults_turn_completion_to_unsupported() -> None:
+    profile = worker_capabilities()
+
+    assert profile.turn_completion_versions == ()
+    assert profile.supports_turn_completion_version(1) is False
+    assert "turn_completion_versions" not in capability_profile_to_payload(profile)
+
+
+def test_worker_profile_round_trips_turn_completion_v1() -> None:
+    profile = replace(worker_capabilities(), turn_completion_versions=(1,))
+
+    payload = capability_profile_to_payload(profile)
+
+    assert payload["turn_completion_versions"] == [1]
+    assert capability_profile_from_payload("worker_adapter", payload) == profile
+
+
+def test_worker_profile_rejects_invalid_turn_completion_versions() -> None:
+    with pytest.raises(ValidationError, match="turn_completion_versions"):
+        replace(worker_capabilities(), turn_completion_versions=(0,))
+
+
 def test_workspace_provider_profile_round_trips() -> None:
     profile = workspace_capabilities()
 

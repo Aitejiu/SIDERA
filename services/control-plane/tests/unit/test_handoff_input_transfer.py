@@ -128,6 +128,13 @@ class GatewayRepository:
         return item if item is not None and item.workspace_id == workspace_id else None
 
 
+class ResultRepository:
+    def get_operation(
+        self, _operation_id: UUID, _workspace_id: UUID, **_kwargs: object
+    ) -> None:
+        return None
+
+
 class TransitionRepository:
     def __init__(self, transition: Any) -> None:
         self.transition = transition
@@ -155,6 +162,7 @@ class UnitOfWork:
         self.execution_inputs = inputs
         self.executions = executions
         self.sessions = sessions
+        self.results = ResultRepository()
         self.gateway_operations = gateway_operations
         self.handoff_transitions = TransitionRepository(transition)
         self.handoff_context_bundles = SimpleNamespace(

@@ -120,6 +120,11 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 if current_candidate is not None
                 else ()
             )
+            current_code_result = (
+                _code_result(session, workspace_id, current_candidate)
+                if current_candidate is not None
+                else None
+            )
             current_verifications = (
                 _verification_results(
                     session,
@@ -168,7 +173,8 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 head,
             )
             artifact_ids = _artifact_ids(
-                current_sources, current_verifications
+                (*current_sources, *(() if current_code_result is None else (current_code_result,))),
+                current_verifications,
             )
             return ResultRootSnapshot(
                 task=ResultTaskFact(
@@ -183,6 +189,7 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 plan=plan,
                 current_candidate=current_candidate,
                 current_sources=current_sources,
+                current_code_result=current_code_result,
                 current_verifications=current_verifications,
                 verification_operation_versions=verification_operation_versions,
                 current_rework=current_rework,
@@ -230,6 +237,7 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
             )
             plan = _plan_for_candidate(session, workspace_id, candidate)
             source_results = _source_results(session, workspace_id, candidate)
+            code_result = _code_result(session, workspace_id, candidate)
             verifications = _verification_page(
                 session,
                 workspace_id,
@@ -259,7 +267,10 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 candidate_id,
                 limit=_MAX_CURRENT_VERIFICATIONS,
             )
-            artifact_ids = _artifact_ids(source_results, all_verifications)
+            artifact_ids = _artifact_ids(
+                (*source_results, *(() if code_result is None else (code_result,))),
+                all_verifications,
+            )
             return ResultDetailSnapshot(
                 task=ResultTaskFact(
                     task_id=task.id,
@@ -273,6 +284,7 @@ class SqlAlchemyResultQueryStore(ResultQueryStore):
                 plan=plan,
                 candidate=candidate,
                 source_results=source_results,
+                code_result=code_result,
                 verifications=verifications,
                 rework=rework,
                 acceptance=acceptance,
@@ -520,6 +532,21 @@ def _source_results(
     ).all()
     by_id = {row.id: _snapshot(row) for row in rows}
     return tuple(by_id[item] for item in ids if item in by_id)
+
+
+def _code_result(
+    session: Session,
+    workspace_id: UUID,
+    candidate: IntegrationCandidateV1,
+) -> CodeResultSnapshotV1 | None:
+    row = session.scalar(
+        select(CodeResultSnapshotModel).where(
+            CodeResultSnapshotModel.workspace_id == workspace_id,
+            CodeResultSnapshotModel.root_task_id == candidate.root_task_id,
+            CodeResultSnapshotModel.id == candidate.code_result_id,
+        )
+    )
+    return None if row is None else _snapshot(row)
 
 
 def _verification_results(

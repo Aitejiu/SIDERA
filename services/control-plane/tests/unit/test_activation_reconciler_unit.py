@@ -20,9 +20,16 @@ from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionStatus
 from sidera_control_plane.domain.execution_requests import (
     ActivationDecision,
+    ActivationGate,
+    DependencyEnforcement,
     ExecutionRequest,
     ExecutionRequestDependency,
     ExecutionRequestStatus,
+    UpstreamActivationFact,
+)
+from sidera_control_plane.domain.input_selections import (
+    CollaborationInputSelectionV1,
+    InputSelectionHardInputV1,
 )
 from sidera_control_plane.domain.planning import PlanningRequestStatus
 from sidera_control_plane.domain.task import TaskStatus
@@ -236,6 +243,258 @@ def test_exact_collaboration_release_allows_activation_after_static_gate() -> No
     uow = FakeUnitOfWork(request)
     uow.collaboration_runs = SimpleNamespace(
         get_current=lambda *_args, **_kwargs: run
+    )
+    uow.plans = SimpleNamespace(get_head=lambda *_args, **_kwargs: head)
+    uow.collaboration_ledger = SimpleNamespace(
+        get_release_for_request=lambda *_args, **_kwargs: release
+    )
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-activation",
+        clock=lambda: NOW,
+    )
+
+    decision = reconciler._decision(
+        cast(ControlPlaneUnitOfWork, uow),
+        request,
+        SimpleNamespace(task=SimpleNamespace(status=TaskStatus.READY)),
+        now=NOW,
+    )
+
+    assert decision.ready
+    assert decision.reason == "ready"
+
+
+def test_input_selection_keeps_pure_hard_dependencies_in_activation_facts() -> None:
+    from .result_input_fixtures import selection_mapping
+
+    selection = CollaborationInputSelectionV1.from_mapping(selection_mapping())
+    request = replace(
+        make_request(),
+        input_selection_id=selection.id,
+        input_selection_hash=selection.selection_hash,
+    )
+    upstream_ids = (
+        UUID("61000000-0000-0000-0000-000000000012"),
+        UUID("61000000-0000-0000-0000-000000000018"),
+    )
+    upstream_requests = {
+        upstream_id: replace(make_request(), id=upstream_id)
+        for upstream_id in upstream_ids
+    }
+    uow = SimpleNamespace(
+        execution_requests=SimpleNamespace(
+            get=lambda request_id, _workspace_id: upstream_requests.get(request_id),
+        )
+    )
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-activation",
+        clock=lambda: NOW,
+    )
+    reconciler._fact_for_upstream = lambda _uow, upstream: UpstreamActivationFact(
+        request_id=upstream.id,
+        execution_status=ExecutionStatus.SUCCEEDED,
+        execution_lineage_id=uuid4(),
+    )  # type: ignore[method-assign]
+    dependencies = tuple(
+        ExecutionRequestDependency(
+            downstream_request_id=request.id,
+            upstream_request_id=upstream_id,
+            enforcement=DependencyEnforcement.HARD,
+        )
+        for upstream_id in upstream_ids
+    )
+
+    facts = reconciler._upstream_facts(
+        cast(ControlPlaneUnitOfWork, uow),
+        request,
+        dependencies,
+        selection=selection,
+    )
+
+    assert set(facts) == set(upstream_ids)
+
+
+def _reworked_hard_input_case(
+    *,
+    dependency_key: str | None = None,
+    include_evidence: bool = True,
+    required_artifact_ref: str = "artifact_type:report",
+):
+    from .result_input_fixtures import selection_mapping
+
+    base = CollaborationInputSelectionV1.from_mapping(selection_mapping())
+    source_a = base.groups[0].sources[0]
+    original_request_id = source_a.effective_request_id
+    effective_request_id = UUID("61000000-0000-0000-0000-000000000112")
+    effective_lineage_id = UUID("61000000-0000-0000-0000-000000000113")
+    reworked_source = replace(
+        source_a,
+        effective_request_id=effective_request_id,
+        allowed_lineage_ids=(effective_lineage_id,),
+        effective_lineage_id=effective_lineage_id,
+        effective_execution_id=UUID("61000000-0000-0000-0000-000000000114"),
+        attempt=2,
+        inheritance_refs=("rework:source-a",),
+        source_basis_hash="9" * 64,
+        evidence=source_a.evidence if include_evidence else (),
+    )
+    hard_input = InputSelectionHardInputV1(
+        dependency_key=dependency_key or f"request:{original_request_id}",
+        rule_hash="f" * 64,
+        source=reworked_source,
+    )
+    draft = replace(
+        base,
+        groups=(
+            replace(
+                base.groups[0],
+                sources=(reworked_source, base.groups[0].sources[1]),
+            ),
+        ),
+        hard_inputs=(hard_input,),
+        selection_hash="0" * 64,
+    )
+    selection = replace(draft, selection_hash=draft.compute_selection_hash())
+    assert CollaborationInputSelectionV1.from_mapping(selection.to_mapping()) == selection
+    dependency = ExecutionRequestDependency(
+        downstream_request_id=selection.target_execution_request_id,
+        upstream_request_id=original_request_id,
+        enforcement=DependencyEnforcement.HARD,
+        required_artifact_refs=(required_artifact_ref,),
+        required_evidence_refs=("acceptance:research-complete",),
+    )
+    return (
+        selection,
+        dependency,
+        original_request_id,
+        effective_lineage_id,
+    )
+
+
+def test_reworked_hard_input_uses_committed_source_for_original_dependency() -> None:
+    selection, dependency, original_id, effective_lineage_id = (
+        _reworked_hard_input_case()
+    )
+
+    facts = ActivationReconciler._selected_hard_input_facts(
+        dependencies=(dependency,), selection=selection
+    )
+    decision = ActivationGate.evaluate(dependencies=(dependency,), upstream_facts=facts)
+
+    assert set(facts) == {original_id}
+    assert facts[original_id].execution_lineage_id == effective_lineage_id
+    assert decision.ready
+
+
+def test_reworked_hard_input_wrong_key_does_not_read_live_upstream() -> None:
+    selection, dependency, original_id, _effective_lineage_id = (
+        _reworked_hard_input_case(
+            dependency_key="request:61000000-0000-0000-0000-000000000999"
+        )
+    )
+    request = replace(
+        make_request(),
+        id=selection.target_execution_request_id,
+        workspace_id=selection.workspace_id,
+        input_selection_id=selection.id,
+        input_selection_hash=selection.selection_hash,
+    )
+
+    def reject_live_read(*_args, **_kwargs):
+        raise AssertionError("selector dependency read live upstream")
+
+    uow = SimpleNamespace(
+        execution_requests=SimpleNamespace(get=reject_live_read)
+    )
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-activation",
+        clock=lambda: NOW,
+    )
+
+    facts = reconciler._upstream_facts(
+        cast(ControlPlaneUnitOfWork, uow),
+        request,
+        (dependency,),
+        selection=selection,
+    )
+    decision = ActivationGate.evaluate(dependencies=(dependency,), upstream_facts=facts)
+
+    assert facts == {}
+    assert decision.missing_upstream_request_ids == (original_id,)
+
+
+def test_reworked_hard_input_still_requires_selected_evidence() -> None:
+    selection, dependency, _original_id, _effective_lineage_id = (
+        _reworked_hard_input_case(include_evidence=False)
+    )
+
+    facts = ActivationReconciler._selected_hard_input_facts(
+        dependencies=(dependency,), selection=selection
+    )
+    decision = ActivationGate.evaluate(dependencies=(dependency,), upstream_facts=facts)
+
+    assert set(facts) == {_original_id}
+    assert not decision.ready
+    assert decision.missing_evidence_refs == ("acceptance:research-complete",)
+
+
+def test_reworked_hard_input_still_requires_selected_artifact() -> None:
+    selection, dependency, _original_id, _effective_lineage_id = (
+        _reworked_hard_input_case(required_artifact_ref="artifact_type:screenshot")
+    )
+
+    facts = ActivationReconciler._selected_hard_input_facts(
+        dependencies=(dependency,), selection=selection
+    )
+    decision = ActivationGate.evaluate(dependencies=(dependency,), upstream_facts=facts)
+
+    assert set(facts) == {_original_id}
+    assert not decision.ready
+    assert "artifact_type:screenshot" in decision.missing_artifact_refs
+
+
+def test_reintegration_release_can_resolve_its_completed_collaboration_run() -> None:
+    request = replace(
+        make_request(),
+        purpose="reintegrate",
+        collaboration_gate_mode=CollaborationGateMode.RELEASE_REQUIRED,
+    )
+    run_id = uuid4()
+    plan_hash = "c" * 64
+    run = SimpleNamespace(
+        id=run_id,
+        workspace_id=request.workspace_id,
+        root_task_id=request.root_task_id,
+        plan_snapshot_id=request.plan_snapshot_id,
+        plan_generation=request.plan_generation,
+        plan_content_hash=plan_hash,
+        status=CollaborationRunStatus.COMPLETED,
+    )
+    head = SimpleNamespace(
+        workspace_id=request.workspace_id,
+        root_task_id=request.root_task_id,
+        active_snapshot_id=request.plan_snapshot_id,
+        active_generation=request.plan_generation,
+        active_snapshot_hash=plan_hash,
+    )
+    release = SimpleNamespace(
+        run_id=run_id,
+        workspace_id=request.workspace_id,
+        plan_snapshot_id=request.plan_snapshot_id,
+        plan_generation=request.plan_generation,
+        plan_content_hash=plan_hash,
+        execution_request_id=request.id,
+        request_version_at_release=request.version,
+        input_selection_id=None,
+        input_selection_hash=None,
+    )
+    uow = FakeUnitOfWork(request)
+    uow.collaboration_runs = SimpleNamespace(
+        get_current=lambda *_args, **_kwargs: None,
+        get=lambda *_args, **_kwargs: run,
     )
     uow.plans = SimpleNamespace(get_head=lambda *_args, **_kwargs: head)
     uow.collaboration_ledger = SimpleNamespace(

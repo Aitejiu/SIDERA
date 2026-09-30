@@ -24,11 +24,19 @@ test.describe("R6.1.4 real request-to-confirmation control room", () => {
     seedR6Revision();
   });
 
-  test("walks Revision review, convergence, Worker recovery, and exact Trace", async ({ page, request }, testInfo) => {
+  test("@closure-revision walks Revision review, convergence, Worker recovery, and exact Trace", async ({ page, request }, testInfo) => {
     const rootTaskId = await findRootTaskId(request);
+    const initialGraph = await getJson(request, `/api/v1/tasks/${rootTaskId}/graph?workspace_id=${WORKSPACE_ID}`);
+    const initialPlanHead = objectField(objectField(initialGraph, "overview"), "plan_head");
+    const initialGeneration = numberField(initialPlanHead, "active_generation");
+    const initialSnapshotId = stringField(initialPlanHead, "active_snapshot_id");
     const planningRequestId = await submitRevision(request, rootTaskId);
 
     expect(runPlanningWorkerOnce().succeeded).toBe(1);
+    const reviewGraph = await getJson(request, `/api/v1/tasks/${rootTaskId}/graph?workspace_id=${WORKSPACE_ID}`);
+    const reviewPlanHead = objectField(objectField(reviewGraph, "overview"), "plan_head");
+    expect(numberField(reviewPlanHead, "active_generation")).toBe(initialGeneration);
+    expect(stringField(reviewPlanHead, "active_snapshot_id")).toBe(initialSnapshotId);
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks/${rootTaskId}`);
     const attention = page.getByRole("region", { name: "计划调整待处理" });
     await expect(attention).toBeVisible();
@@ -56,6 +64,11 @@ test.describe("R6.1.4 real request-to-confirmation control room", () => {
     expect(runActivationWorkerOnce().status).toBe("ok");
     expect(runSchedulerOnce().status).toBe("ok");
     expect(runPlanTransitionWorkerOnce().status).toBe("ok");
+
+    const confirmedGraph = await getJson(request, `/api/v1/tasks/${rootTaskId}/graph?workspace_id=${WORKSPACE_ID}`);
+    const confirmedPlanHead = objectField(objectField(confirmedGraph, "overview"), "plan_head");
+    expect(numberField(confirmedPlanHead, "active_generation")).toBe(initialGeneration + 1);
+    expect(stringField(confirmedPlanHead, "active_snapshot_id")).not.toBe(initialSnapshotId);
 
     await page.goto(`/workspaces/${WORKSPACE_ID}/tasks/${rootTaskId}`);
     const convergence = page.getByRole("region", { name: "计划收敛" });

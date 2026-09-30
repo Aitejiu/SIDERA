@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
+import { getWorkspaceCapabilities, workspaceCapabilitiesQueryKey } from "./api";
 import {
   listTaskOverviews,
   taskOverviewQueryKey,
@@ -52,40 +53,78 @@ export function HistoryPage() {
 }
 
 export function CapabilitiesPage() {
+  const workspaceId =
+    useParams<{ workspaceId: string }>().workspaceId ?? DEFAULT_WORKSPACE_ID;
+  const query = useQuery({
+    queryKey: workspaceCapabilitiesQueryKey(workspaceId),
+    queryFn: ({ signal }) => getWorkspaceCapabilities(workspaceId, signal),
+    enabled: workspaceId.length > 0,
+    staleTime: 15_000,
+  });
+  const snapshot = query.data;
   return (
     <WorkspacePageShell
       eyebrow="MODULES / CAPABILITIES"
       title="能力"
       icon={<Boxes size={18} aria-hidden="true" />}
     >
-      <div className="capability-list">
+      {query.isPending ? <div className="capability-list" aria-label="正在读取能力状态" /> : null}
+      {query.isError ? (
+        <div className="async-state async-state--error" role="alert">
+          <span className="async-state__mark" aria-hidden="true">!</span>
+          <div><strong>无法读取能力状态</strong><p>控制面状态暂时不可用。</p></div>
+          <button className="quiet-button" type="button" onClick={() => void query.refetch()}>重试读取能力</button>
+        </div>
+      ) : null}
+      {snapshot ? <div className="capability-list">
         <CapabilityRow
           icon={<Radio size={15} />}
           title="控制面"
           value="SIDERA Control Plane"
-          status="已连接"
+          status={serviceStatusLabel(snapshot.controlPlane)}
         />
         <CapabilityRow
           icon={<Sparkles size={15} />}
           title="Worker Adapter"
-          value="按工作区配置"
-          status="可配置"
+          value={moduleValue(snapshot.workerAdapters, "按工作区配置")}
+          status={moduleStatusLabel(snapshot.workerAdapters)}
         />
         <CapabilityRow
           icon={<PackageOpen size={15} />}
           title="Workspace Provider"
-          value="Git Worktree"
-          status="可配置"
+          value={moduleValue(snapshot.workspaceProviders, "按工作区配置")}
+          status={moduleStatusLabel(snapshot.workspaceProviders)}
         />
         <CapabilityRow
           icon={<MessageCircle size={15} />}
           title="Main Agent"
-          value="入口预留"
-          status="R5"
+          value={snapshot.mainAgent === "available" ? "已配置" : "配置不可用"}
+          status={serviceStatusLabel(snapshot.mainAgent)}
         />
-      </div>
+      </div> : null}
     </WorkspacePageShell>
   );
+}
+
+function serviceStatusLabel(status: "available" | "unavailable" | "unknown"): string {
+  if (status === "available") return "已连接";
+  if (status === "unavailable") return "不可用";
+  return "状态未知";
+}
+
+function moduleStatusLabel(modules: Array<{ definition_lifecycle: string; instance_lifecycle: string }>): string {
+  if (modules.length === 0) return "未发现";
+  return modules.some((module) => module.definition_lifecycle === "active" && module.instance_lifecycle === "active")
+    ? "可配置"
+    : "不可用";
+}
+
+function moduleValue(
+  modules: Array<{ provider: string }>,
+  fallback: string,
+): string {
+  const providers = [...new Set(modules.map((module) => module.provider).filter(Boolean))];
+  return providers.length > 0 ? providers.join(" / ") : fallback;
 }
 
 function WorkspacePageShell({

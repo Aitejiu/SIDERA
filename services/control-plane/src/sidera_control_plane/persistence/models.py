@@ -1177,7 +1177,7 @@ class ExecutionModel(TimestampMixin, Base):
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
-    purpose: Mapped[str] = mapped_column(String(255), nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     capability_requirements: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     adapter_preferences: Mapped[list[str]] = mapped_column(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ipaddress
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from typing import Literal
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost"})
@@ -13,10 +14,13 @@ _LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SIDERA_MAIN_AGENT_")
 
+    adapter_kind: Literal["akashic", "interview-demo"] = "akashic"
+    restore_read_only: bool = False
     host: str = "127.0.0.1"
     port: int = Field(default=8010, ge=1, le=65535)
-    akashic_endpoint: str
+    akashic_endpoint: str | None = None
     akashic_workspace_token: SecretStr | None = None
+    demo_manifest: Path | None = None
     sidera_workspace_id: UUID
     web_origin: AnyHttpUrl = Field(
         default=AnyHttpUrl("http://127.0.0.1:4174")
@@ -40,7 +44,9 @@ class Settings(BaseSettings):
 
     @field_validator("akashic_endpoint")
     @classmethod
-    def validate_akashic_endpoint(cls, value: str) -> str:
+    def validate_akashic_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if value.startswith("/"):
             if PurePosixPath(value).name in {"", ".", ".."}:
                 raise ValueError("Akashic endpoint must be a socket path")
@@ -67,6 +73,14 @@ class Settings(BaseSettings):
                 "Akashic endpoint must use a loopback host and valid port"
             )
         return value
+
+    @model_validator(mode="after")
+    def validate_adapter_configuration(self) -> Settings:
+        if self.adapter_kind == "akashic" and self.akashic_endpoint is None:
+            raise ValueError("Akashic adapter requires akashic_endpoint")
+        if self.adapter_kind == "interview-demo" and self.demo_manifest is None:
+            raise ValueError("interview-demo adapter requires demo_manifest")
+        return self
 
     @field_validator("web_origin")
     @classmethod

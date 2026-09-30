@@ -109,6 +109,7 @@ class OpenCodeACPAdapter:
         stability=StabilityLevel.EXPERIMENTAL,
         context_package_versions=(1, 2),
         context_patch_versions=(),
+        turn_completion_versions=(1,),
     )
     _HANDOFF_PROFILE = WorkerAdapterCapabilityProfile(
         input=CapabilityInput.QUEUED,
@@ -124,6 +125,7 @@ class OpenCodeACPAdapter:
         handoff_session_context_versions=(1,),
         handoff_writer_gate_versions=(1,),
         handoff_inspection=True,
+        turn_completion_versions=(1,),
     )
 
     def __init__(
@@ -140,6 +142,8 @@ class OpenCodeACPAdapter:
         client_name: str = "sidera-control-plane",
         client_version: str = "0.1.0",
         context_package_versions: tuple[int, ...] = (1, 2),
+        adapter_module_id: UUID | None = None,
+        adapter_config_version: int = 1,
     ) -> None:
         executable = executable.strip()
         if not executable:
@@ -153,6 +157,14 @@ class OpenCodeACPAdapter:
             raise ValueError("OpenCode handoff timeout must be positive")
         if stderr_limit_bytes <= 0:
             raise ValueError("stderr limit must be positive")
+        if adapter_module_id is not None and not isinstance(adapter_module_id, UUID):
+            raise TypeError("adapter_module_id must be a UUID")
+        if (
+            not isinstance(adapter_config_version, int)
+            or isinstance(adapter_config_version, bool)
+            or adapter_config_version < 1
+        ):
+            raise ValueError("adapter_config_version must be positive")
         if not git_executable.strip():
             raise ValueError("Git executable is required")
         declared_context_versions = _declared_context_package_versions(
@@ -174,6 +186,10 @@ class OpenCodeACPAdapter:
         self._stderr_limit_bytes = stderr_limit_bytes
         self._client_name = client_name
         self._client_version = client_version
+        self._adapter_module_id = adapter_module_id or uuid5(
+            NAMESPACE_URL, "sidera.opencode.worker.context-adapter"
+        )
+        self._adapter_config_version = adapter_config_version
         self._sessions: dict[str, _OpenCodeSession] = {}
         self._profile = replace(
             self._PROFILE,
@@ -238,10 +254,8 @@ class OpenCodeACPAdapter:
             consumer_type=metadata.consumer_type,
             consumer_id=metadata.consumer_id,
             context_version=metadata.context_version,
-            adapter_module_id=uuid5(
-                NAMESPACE_URL, "sidera.opencode.worker.context-adapter"
-            ),
-            adapter_config_version=1,
+            adapter_module_id=self._adapter_module_id,
+            adapter_config_version=self._adapter_config_version,
             acknowledged_at=datetime.now(UTC),
             schema_version=materialization.schema_version,
             operation_id=operation_id,
@@ -420,15 +434,44 @@ class OpenCodeACPAdapter:
                     execution_session_id=session.handle.execution_session_id,
                 )
             session.prompt_busy = True
-            try:
-                result = session.transport.request(
-                    "session/prompt",
-                    {
-                        "sessionId": handle.adapter_session_id,
-                        "prompt": _prompt_content(text, attachment_refs),
-                    },
-                    timeout=self._request_timeout_seconds,
-                )
+
+        # The ACP request may wait for a model response.  Keep only the state
+        # transition under the session lock so stop/read paths can run while it
+        # is in flight.
+        try:
+            result = session.transport.request(
+                "session/prompt",
+                {
+                    "sessionId": handle.adapter_session_id,
+                    "prompt": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "SIDERA execution workspace (runtime scope):\n"
+                                f"{session.cwd}\n"
+                                "This directory is the writable root for this execution. "
+                                "Run commands here and create outputs relative to this root. "
+                                "Other absolute repository paths in task/context text are "
+                                "read-only references, not execution destinations. "
+                                "Do not change directory into or write to source repositories "
+                                "or sibling execution workspaces. If required files are missing "
+                                "here, report the blocker rather than writing elsewhere."
+                            ),
+                        },
+                        *_prompt_content(text, attachment_refs),
+                    ],
+                },
+                timeout=self._request_timeout_seconds,
+            )
+            with session.lock:
+                if session.stopped:
+                    return DeliveryResult(
+                        operation_id=operation_id,
+                        outcome=DeliveryOutcome.UNKNOWN,
+                        accepted_sequence=None,
+                        failure_code="prompt_cancelled",
+                        execution_session_id=session.handle.execution_session_id,
+                    )
                 stop_reason = (
                     result.get("stopReason") if isinstance(result, Mapping) else None
                 )
@@ -460,7 +503,22 @@ class OpenCodeACPAdapter:
                         {"text_length": len(text)},
                     )
                 )
-                handle = _with_last_sequence(handle, sequence)
+                completion_sequence = session.next_sequence
+                session.next_sequence += 1
+                session.last_accepted_sequence = completion_sequence
+                session.events.append(
+                    self._event(
+                        session,
+                        "turn.completed",
+                        completion_sequence,
+                        {
+                            "schema_version": 1,
+                            "operation_id": str(operation_id),
+                            "stop_reason": "end_turn",
+                        },
+                    )
+                )
+                handle = _with_last_sequence(handle, completion_sequence)
                 session.handle = handle
                 return DeliveryResult(
                     operation_id=operation_id,
@@ -469,7 +527,8 @@ class OpenCodeACPAdapter:
                     failure_code=None,
                     execution_session_id=session.handle.execution_session_id,
                 )
-            except ACPTimeoutError:
+        except ACPTimeoutError:
+            with session.lock:
                 return DeliveryResult(
                     operation_id=operation_id,
                     outcome=DeliveryOutcome.UNKNOWN,
@@ -477,7 +536,8 @@ class OpenCodeACPAdapter:
                     failure_code="acp_response_timeout",
                     execution_session_id=session.handle.execution_session_id,
                 )
-            except ACPProtocolError as exc:
+        except ACPProtocolError as exc:
+            with session.lock:
                 return DeliveryResult(
                     operation_id=operation_id,
                     outcome=DeliveryOutcome.FAILED,
@@ -485,7 +545,17 @@ class OpenCodeACPAdapter:
                     failure_code=_failure_code(exc),
                     execution_session_id=session.handle.execution_session_id,
                 )
-            finally:
+        except OpenCodeAdapterError as exc:
+            with session.lock:
+                return DeliveryResult(
+                    operation_id=operation_id,
+                    outcome=DeliveryOutcome.UNKNOWN,
+                    accepted_sequence=None,
+                    failure_code=_failure_code(exc),
+                    execution_session_id=session.handle.execution_session_id,
+                )
+        finally:
+            with session.lock:
                 session.prompt_busy = False
 
     def apply_context_patch(
@@ -628,9 +698,14 @@ class OpenCodeACPAdapter:
             )
 
     def collect_knowledge_candidates(
-        self, handle: AdapterSessionHandle, *, operation_id: UUID
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+        worker_item_id: UUID | None = None,
+        source_artifact_ids: tuple[UUID, ...] = (),
     ) -> tuple[KnowledgeCandidateProposalV1, ...]:
-        del handle
+        del handle, worker_item_id, source_artifact_ids
         if not isinstance(operation_id, UUID):
             raise TypeError("operation_id must be a UUID")
         # ACP currently exposes no bounded structured candidate channel. Keeping

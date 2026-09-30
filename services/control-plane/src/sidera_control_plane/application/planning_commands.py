@@ -788,13 +788,6 @@ class PlanningCommandHandler:
             }
         }
         now = self._clock()
-        self._discard_planner_candidates(
-            uow,
-            request,
-            planning_run_ids=(run.id for run in request.runs),
-            envelope=envelope,
-            now=now,
-        )
         request.cancel(now=now)
         uow.planning_requests.save(request, previous_request_version)
         for run in request.runs:
@@ -810,6 +803,13 @@ class PlanningCommandHandler:
                         lease.released_at = now
                         lease.version += 1
                         uow.planning_leases.save(lease, lease.version - 1)
+        self._discard_planner_candidates(
+            uow,
+            request,
+            planning_run_ids=(run.id for run in request.runs),
+            envelope=envelope,
+            now=now,
+        )
         event = _event(
             envelope,
             aggregate_type="planning_request",
@@ -901,13 +901,6 @@ class PlanningCommandHandler:
             actor=envelope.actor_id,
             now=brief.created_at,
         )
-        self._discard_planner_candidates(
-            uow,
-            request,
-            planning_run_ids=(previous_run_id,),
-            envelope=envelope,
-            now=brief.created_at,
-        )
         previous_context_version = work_context.version
         new_decisions = self._work_context_factory.clarification_decisions(
             tuple(pending.values()),
@@ -945,6 +938,13 @@ class PlanningCommandHandler:
             work_context=work_context,
             work_context_revision=context_revision,
             previous_context_version=previous_context_version,
+        )
+        self._discard_planner_candidates(
+            uow,
+            request,
+            planning_run_ids=(previous_run_id,),
+            envelope=envelope,
+            now=brief.created_at,
         )
         context_event = work_context_event(
             envelope,
@@ -992,7 +992,7 @@ class PlanningCommandHandler:
         brief = _next_brief(
             request,
             current_brief=current_brief,
-            user_feedback=_append_feedback(current_brief.user_feedback, feedback),
+            user_feedback=feedback,
             actor=envelope.actor_id,
             correlation_id=envelope.correlation_id,
             now=now,
@@ -1012,18 +1012,18 @@ class PlanningCommandHandler:
             actor=envelope.actor_id,
             now=now,
         )
+        self._persist_appended_revision(
+            uow,
+            request,
+            brief=brief,
+            previous_request_version=previous_request_version,
+        )
         self._discard_planner_candidates(
             uow,
             request,
             planning_run_ids=(previous_run_id,),
             envelope=envelope,
             now=now,
-        )
-        self._persist_appended_revision(
-            uow,
-            request,
-            brief=brief,
-            previous_request_version=previous_request_version,
         )
         event = _event(
             envelope,
@@ -1069,6 +1069,8 @@ class PlanningCommandHandler:
         previous_request_version = request.version
         previous_run_versions = _active_run_versions(request)
         request.reject(now=self._clock())
+        uow.planning_requests.save(request, previous_request_version)
+        self._persist_run_changes(uow, request, previous_run_versions)
         if self._candidate_submission_service is not None:
             self._candidate_submission_service.discard_planner_submissions(
                 uow,
@@ -1080,8 +1082,6 @@ class PlanningCommandHandler:
                 causation_id=envelope.id,
                 actor_type=envelope.actor_type,
             )
-        uow.planning_requests.save(request, previous_request_version)
-        self._persist_run_changes(uow, request, previous_run_versions)
         event = _event(
             envelope,
             aggregate_type="planning_request",
@@ -1115,6 +1115,7 @@ class PlanningCommandHandler:
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
         request = self._request_for_mutation(uow, envelope)
+        pre_confirmation_status = request.status.value
         self._assert_current_proposal(
             uow,
             request,
@@ -1175,6 +1176,8 @@ class PlanningCommandHandler:
                 "proposal_content_hash": proposal.content_hash,
                 "profile_id": str(profile.id),
                 "profile_version": profile.version,
+                "confirmed_by": envelope.actor_id,
+                "pre_confirmation_status": pre_confirmation_status,
                 "root_task_id": str(materialization.root_task_id),
                 "plan_snapshot_id": str(materialization.plan_snapshot_id),
                 "plan_generation": materialization.plan_generation,

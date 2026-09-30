@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.domain.execution import TERMINAL_EXECUTION_STATUSES
 from sidera_control_plane.domain.projections import (
     TraceCategory,
     TraceTimingSummary,
@@ -79,6 +80,12 @@ class RawTraceFact:
 
 
 @dataclass(frozen=True, slots=True)
+class TraceArtifactFact:
+    artifact_id: UUID
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerTraceQueryResult:
     projection: WorkerTraceProjection
     context_branch: WorkerContextBranchProjection | None
@@ -93,30 +100,34 @@ class WorkerTraceProjectionService:
     def normalize_event(self, fact: RawTraceFact) -> WorkerTraceEvent:
         category = _category(fact.event_type, fact.payload)
         usage = _usage(fact.payload)
-        title = _bounded_text(
-            _text_value(
-                fact.payload,
-                "title",
-                "tool",
-                "name",
-                "event_type",
+        if fact.event_type.strip().lower() == "turn.completed":
+            title = "回合已完成"
+            summary = "Agent 已完成本轮执行"
+        else:
+            title = _bounded_text(
+                _text_value(
+                    fact.payload,
+                    "title",
+                    "tool",
+                    "name",
+                    "event_type",
+                )
+                or fact.event_type,
+                MAX_TITLE_LENGTH,
             )
-            or fact.event_type,
-            MAX_TITLE_LENGTH,
-        )
-        summary = _bounded_text(
-            _text_value(
-                fact.payload,
-                "summary",
-                "trace_summary",
-                "text",
-                "message",
-                "tool",
-                "kind",
+            summary = _bounded_text(
+                _text_value(
+                    fact.payload,
+                    "summary",
+                    "trace_summary",
+                    "text",
+                    "message",
+                    "tool",
+                    "kind",
+                )
+                or _category_summary(category, fact.event_type),
+                MAX_SUMMARY_LENGTH,
             )
-            or _category_summary(category, fact.event_type),
-            MAX_SUMMARY_LENGTH,
-        )
         artifact_refs = _uuid_values(
             fact.payload.get("artifact_refs") or fact.payload.get("artifact_ids")
         )
@@ -209,7 +220,57 @@ class WorkerTraceQueryService:
         )
         if snapshot is None:
             raise NotFound("worker trace session not found")
-        events = self._projection.normalize_events(snapshot.events)
+        facts = snapshot.events
+        previous_before_sequence = snapshot.previous_before_sequence
+        if before_sequence is None and snapshot.status in {
+            status.value for status in TERMINAL_EXECUTION_STATUSES
+        }:
+            referenced_artifact_ids = {
+                artifact_id
+                for fact in facts
+                for artifact_id in _uuid_values(
+                    fact.payload.get("artifact_refs")
+                    or fact.payload.get("artifact_ids")
+                )
+            }
+            untraced_artifacts = tuple(
+                artifact
+                for artifact in snapshot.trace_artifacts
+                if artifact.artifact_id not in referenced_artifact_ids
+            )
+            if untraced_artifacts:
+                occurred_at = max(
+                    (
+                        *(fact.occurred_at for fact in facts),
+                        *(artifact.occurred_at for artifact in untraced_artifacts),
+                    )
+                )
+                artifact_fact = RawTraceFact(
+                    schema_version=1,
+                    workspace_id=snapshot.workspace_id,
+                    root_task_id=snapshot.root_task_id,
+                    plan_snapshot_id=snapshot.plan_snapshot_id,
+                    work_item_key=snapshot.work_item_key,
+                    execution_id=snapshot.execution_id,
+                    session_id=snapshot.session_id,
+                    sequence=max((fact.sequence for fact in facts), default=0) + 1,
+                    occurred_at=occurred_at,
+                    event_type="artifact.available",
+                    status=snapshot.status,
+                    payload={
+                        "title": "执行产物已保存",
+                        "summary": f"本次执行生成了 {len(untraced_artifacts)} 个产物",
+                        "artifact_refs": [
+                            str(artifact.artifact_id) for artifact in untraced_artifacts
+                        ],
+                    },
+                )
+                facts = (*facts, artifact_fact)
+                if len(facts) > limit:
+                    facts = facts[-limit:]
+                    previous_before_sequence = min(fact.sequence for fact in facts)
+
+        events = self._projection.normalize_events(facts)
         projection = self._projection.compose_projection(
             events,
             execution_id=snapshot.execution_id,
@@ -218,7 +279,7 @@ class WorkerTraceQueryService:
             status=snapshot.status,
             plan_generation=snapshot.plan_generation,
             last_change_cursor=snapshot.last_change_cursor,
-            previous_before_sequence=snapshot.previous_before_sequence,
+            previous_before_sequence=previous_before_sequence,
         )
         context = None
         if (
@@ -322,7 +383,10 @@ def _safe_extensions(payload: Mapping[str, Any]) -> dict[str, Any]:
         "kind",
         "message",
         "name",
+        "operation_id",
+        "schema_version",
         "sessionUpdate",
+        "stop_reason",
         "summary",
         "text",
         "title",

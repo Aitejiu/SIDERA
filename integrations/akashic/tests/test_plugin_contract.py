@@ -302,6 +302,15 @@ def test_plugin_schema_preserves_list_arguments_as_arrays() -> None:
     assert revision_create["properties"]["acceptance_criteria"]["type"] == "array"
 
 
+def test_submit_brief_description_routes_task_coordination_intent() -> None:
+    description = inspect.getdoc(plugin.SideraTaskBridge.sidera_submit_brief) or ""
+
+    assert "create" in description.lower()
+    assert "coordinate" in description.lower()
+    assert "subtask" in description.lower()
+    assert "worker" in description.lower()
+
+
 def test_plugin_schema_preserves_write_argument_scalar_types() -> None:
     from agent.plugins.registry import MetadataKind, plugin_registry
 

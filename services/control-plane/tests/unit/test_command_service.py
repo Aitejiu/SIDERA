@@ -5,7 +5,7 @@ from typing import Any, Self, cast
 from uuid import uuid4
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from sidera_control_plane.application.command_service import (
     CommandService,
@@ -188,6 +188,41 @@ class MutatingRejectingHandler:
         raise InvalidTransition("mutation rejected")
 
 
+class DeadlockingHandler:
+    command_types = frozenset({"RetryDeadlock"})
+
+    def __init__(self, original: object) -> None:
+        self.calls = 0
+        self._original = original
+
+    def handle(
+        self, _uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        self.calls += 1
+        if self.calls == 1:
+            raise OperationalError("update", {}, self._original)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=uuid4(),
+            aggregate_version=1,
+            event_ids=(),
+        )
+
+
+class AlwaysFailingDatabaseHandler:
+    command_types = frozenset({"FailDatabase"})
+
+    def __init__(self, original: object) -> None:
+        self.calls = 0
+        self._original = original
+
+    def handle(
+        self, _uow: ControlPlaneUnitOfWork, _envelope: CommandEnvelope
+    ) -> CommandResult:
+        self.calls += 1
+        raise OperationalError("update", {}, self._original)
+
+
 def make_envelope(command_type: str, *, idempotency_key: str = "thing-001") -> CommandEnvelope:
     return CommandEnvelope(
         id=uuid4(),
@@ -299,6 +334,36 @@ def test_rejected_handler_rolls_back_mutations_inside_savepoint() -> None:
     assert unit.mutations == 0
     with pytest.raises(ReplayedDomainError, match="mutation rejected"):
         service.handle(replace(envelope, correlation_id=uuid4()))
+
+
+def test_dispatcher_retries_a_postgres_deadlock_in_a_new_transaction() -> None:
+    class Deadlock:
+        sqlstate = "40P01"
+
+    commands = FakeCommandRepository()
+    handler = DeadlockingHandler(Deadlock())
+    service = make_service(commands, (handler,))
+    envelope = make_envelope("RetryDeadlock")
+
+    result = service.handle(envelope)
+
+    assert result.command_id == envelope.id
+    assert handler.calls == 2
+
+
+def test_dispatcher_does_not_retry_other_database_errors() -> None:
+    class SerializationFailure:
+        sqlstate = "40001"
+
+    commands = FakeCommandRepository()
+    handler = AlwaysFailingDatabaseHandler(SerializationFailure())
+    service = make_service(commands, (handler,))
+    envelope = make_envelope("FailDatabase")
+
+    with pytest.raises(OperationalError):
+        service.handle(envelope)
+
+    assert handler.calls == 1
 
 
 def test_replay_with_different_command_id_is_an_idempotency_conflict() -> None:

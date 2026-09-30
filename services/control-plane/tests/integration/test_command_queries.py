@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID, uuid4
@@ -79,12 +81,20 @@ def test_command_status_returns_pending_applied_and_rejected(
         f"/api/v1/workspaces/{workspace_id}/commands/{applied_id}"
     )
     assert applied_status.status_code == 200, applied_status.text
-    assert applied_status.json() == {
-        "command_id": str(applied_id),
-        "status": "applied",
-        "result": applied.json(),
-        "error_code": None,
-    }
+    applied_status_body = applied_status.json()
+    assert applied_status_body["command_id"] == str(applied_id)
+    assert applied_status_body["status"] == "applied"
+    assert applied_status_body["result"] == applied.json()
+    assert applied_status_body["error_code"] is None
+    assert applied_status_body["command_type"] == applied_request["command_type"]
+    assert applied_status_body["target_type"] == applied_request["target_type"]
+    assert applied_status_body["target_id"] == applied_request["target_id"]
+    assert applied_status_body["expected_version"] == applied_request["expected_version"]
+    assert applied_status_body["payload_sha256"] == hashlib.sha256(
+        json.dumps(
+            applied_request["payload"], sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
     assert applied_status.json()["result"]["command_id"] == str(applied_id)
 
     task_id = UUID(applied.json()["aggregate_id"])
@@ -135,6 +145,12 @@ def test_command_status_returns_pending_applied_and_rejected(
         "status": "pending",
         "result": None,
         "error_code": None,
+        "command_type": None,
+        "target_type": None,
+        "target_id": None,
+        "expected_version": None,
+        "payload_sha256": None,
+        "payload": None,
     }
 
     other_workspace = UUID("00000000-0000-0000-0000-000000000099")

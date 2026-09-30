@@ -418,6 +418,7 @@ class WorkerItemProjectionService:
         convergence_facts: PlanConvergenceFacts | None = None,
         active_handoff: ActiveHandoffProjection | None = None,
         collaboration: WorkerItemCollaborationSummaryProjection | None = None,
+        root_task_status: str | None = None,
     ) -> None:
         self.worker_item = worker_item
         self.placements = tuple(placements)
@@ -436,6 +437,7 @@ class WorkerItemProjectionService:
         self.convergence_facts = convergence_facts
         self.active_handoff = active_handoff
         self.collaboration = collaboration
+        self.root_task_status = root_task_status
         self._convergence_service = PlanConvergenceProjectionService()
 
     def compose_workspace(self) -> WorkerWorkspaceProjection:
@@ -508,9 +510,13 @@ class WorkerItemProjectionService:
             if self.convergence_facts is not None
             else None
         )
+        root_completed = self.root_task_status == "succeeded"
         return WorkerWorkspaceProjection(
             workspace_id=self.worker_item.workspace_id,
-            worker_item=_worker_item_projection(self.worker_item),
+            worker_item=_worker_item_projection(
+                self.worker_item,
+                status="succeeded" if root_completed else None,
+            ),
             current_placement=current_placement,
             placement_history=placement_history,
             current_runtime=current_runtime,
@@ -524,8 +530,16 @@ class WorkerItemProjectionService:
                 )
                 for execution in execution_values
             ),
-            current_step=_event_summary(latest_event) if latest_event else None,
-            next_action=_next_action(current_execution, current_session),
+            current_step=(
+                "任务已完成"
+                if root_completed
+                else (_event_summary(latest_event) if latest_event else None)
+            ),
+            next_action=(
+                None
+                if root_completed
+                else _next_action(current_execution, current_session)
+            ),
             latest_checkpoint=latest_checkpoint,
             usage=_usage_summary(self.events),
             artifacts=tuple(
@@ -583,14 +597,16 @@ class WorkerItemProjectionService:
         )
 
 
-def _worker_item_projection(item: WorkerItemFact) -> WorkerItemIdentityProjection:
+def _worker_item_projection(
+    item: WorkerItemFact, *, status: str | None = None
+) -> WorkerItemIdentityProjection:
     return WorkerItemIdentityProjection(
         id=item.id,
         root_task_id=item.root_task_id,
         stable_key=item.stable_key,
         title=item.title,
         responsibility=item.responsibility,
-        status=item.status,
+        status=status or item.status,
         context_version=item.context_version,
         acknowledged_context_version=item.acknowledged_context_version,
         version=item.version,

@@ -4,7 +4,10 @@ from uuid import UUID
 
 import pytest
 
-from sidera_control_plane.domain.result_operations import ResultOperationStatus
+from sidera_control_plane.domain.result_operations import (
+    ResultError,
+    ResultOperationStatus,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -57,6 +60,23 @@ def test_complete_result_flow_is_provider_free_and_does_not_apply_by_default(
         operation.status is not ResultOperationStatus.UNKNOWN
         for operation in result_scenario.result_operations()
     )
+
+
+def test_old_candidate_cannot_be_accepted_after_rework(result_scenario) -> None:
+    result_scenario.seed_plan(apply=False)
+    first = result_scenario.seed_repairable_candidate()
+    second = _repair(result_scenario, first)
+
+    assert result_scenario.current_candidate().id == second.id
+    with pytest.raises(ResultError, match="acceptance_stale"):
+        result_scenario.command(
+            "CompleteTask",
+            result_scenario.accept_payload(first),
+            idempotency_key="accept-old-candidate-after-rework",
+        )
+
+    assert result_scenario.head().current_candidate_id == second.id
+    assert result_scenario.events("TaskCompleted") == ()
 
 
 def test_complete_result_flow_can_opt_in_to_local_fast_forward(

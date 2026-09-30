@@ -32,6 +32,7 @@ class CreateThreadRequest(ApiModel):
 
 class StartTurnRequest(ApiModel):
     input: str = Field(min_length=1, max_length=100_000)
+    operation_id: str | None = Field(default=None, alias="operationId", max_length=128)
 
 
 class TurnItemResponse(ApiModel):

@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -22,7 +23,10 @@ from sidera_control_plane.domain.plan_transitions import (
     WorkerTransitionStatus,
     WriterState,
 )
-from sidera_control_plane.domain.planning_proposals import ProposalRevision
+from sidera_control_plane.domain.planning_proposals import (
+    ExecutionIntent,
+    ProposalRevision,
+)
 from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV5,
 )
@@ -122,6 +126,186 @@ def test_worker_transition_resolves_from_subtask_key_and_keeps_fence_policy() ->
     assert transition.status is WorkerTransitionStatus.PENDING
     assert transition.writer_state is WriterState.FENCED
     assert transition.from_subtask_id == snapshot.subtasks[0].task_id
+
+
+def test_source_execution_uses_latest_session_compatible_with_target_intent() -> None:
+    workspace_id = uuid4()
+    task_id = uuid4()
+    code_worker_id = uuid4()
+    verification_worker_id = uuid4()
+    code_old_id = uuid4()
+    code_latest_id = uuid4()
+    verification_id = uuid4()
+    target_intent = ExecutionIntent(
+        worker_item_key="integration",
+        purpose="Integrate the selected outputs.",
+        context_refs=(),
+        expected_artifact_refs=("artifact://summary",),
+        required_evidence_refs=("evidence://summary",),
+        capability_requirements=("code",),
+        adapter_preferences=("opencode",),
+        budget_class="standard",
+        deadline_seconds=None,
+        not_before_seconds=None,
+        max_attempts=1,
+        activation_dependencies=(),
+    )
+    source_executions = (
+        SimpleNamespace(
+            id=code_old_id,
+            worker_item_id=WORKER_ID,
+            capability_requirements=frozenset({"code"}),
+            adapter_preferences=("opencode",),
+            created_at=NOW,
+        ),
+        SimpleNamespace(
+            id=code_latest_id,
+            worker_item_id=WORKER_ID,
+            capability_requirements=frozenset({"code"}),
+            adapter_preferences=("opencode",),
+            created_at=NOW,
+        ),
+        SimpleNamespace(
+            id=verification_id,
+            worker_item_id=WORKER_ID,
+            capability_requirements=frozenset({"verification"}),
+            adapter_preferences=("local_verification",),
+            created_at=NOW,
+        ),
+    )
+    sessions = {
+        code_old_id: SimpleNamespace(
+            id=uuid4(),
+            execution_id=code_old_id,
+            workspace_id=workspace_id,
+            worker_id=code_worker_id,
+            status="closed",
+            last_activity_at=NOW - timedelta(minutes=2),
+        ),
+        code_latest_id: SimpleNamespace(
+            id=uuid4(),
+            execution_id=code_latest_id,
+            workspace_id=workspace_id,
+            worker_id=code_worker_id,
+            status="closed",
+            last_activity_at=NOW - timedelta(minutes=1),
+        ),
+        verification_id: SimpleNamespace(
+            id=uuid4(),
+            execution_id=verification_id,
+            workspace_id=workspace_id,
+            worker_id=verification_worker_id,
+            status="closed",
+            last_activity_at=NOW,
+        ),
+    }
+
+    class ExecutionRepository:
+        def list_for_tasks(self, task_ids, requested_workspace_id):
+            assert task_ids == (task_id,)
+            assert requested_workspace_id == workspace_id
+            return source_executions
+
+    class SessionRepository:
+        def get_latest_for_execution(self, execution_id, requested_workspace_id):
+            assert requested_workspace_id == workspace_id
+            return sessions.get(execution_id)
+
+    class WorkerRepository:
+        def get(self, worker_id, requested_workspace_id):
+            assert requested_workspace_id == workspace_id
+            capabilities = {"code"} if worker_id == code_worker_id else {"verification"}
+            return SimpleNamespace(id=worker_id, capabilities=capabilities)
+
+    uow = SimpleNamespace(
+        executions=ExecutionRepository(),
+        sessions=SessionRepository(),
+        workers=WorkerRepository(),
+    )
+
+    selected = RevisionMaterializer._source_executions(
+        cast(ControlPlaneUnitOfWork, uow),
+        tasks_by_id={task_id: SimpleNamespace()},
+        workspace_id=workspace_id,
+        target_intents={WORKER_ID: target_intent},
+        retired_worker_item_ids=frozenset(),
+    )
+
+    assert selected[WORKER_ID].id == code_latest_id
+
+    verification_intent = replace(
+        target_intent,
+        purpose="Run the verification checks.",
+        capability_requirements=("verification",),
+        adapter_preferences=("local_verification",),
+    )
+    selected_verification = RevisionMaterializer._source_executions(
+        cast(ControlPlaneUnitOfWork, uow),
+        tasks_by_id={task_id: SimpleNamespace()},
+        workspace_id=workspace_id,
+        target_intents={WORKER_ID: verification_intent},
+        retired_worker_item_ids=frozenset(),
+    )
+
+    assert selected_verification[WORKER_ID].id == verification_id
+
+
+def test_source_execution_is_preserved_for_retired_worker_item() -> None:
+    workspace_id = uuid4()
+    task_id = uuid4()
+    worker_id = uuid4()
+    execution_id = uuid4()
+    session_id = uuid4()
+    source_execution = SimpleNamespace(
+        id=execution_id,
+        worker_item_id=WORKER_ID,
+        capability_requirements=frozenset({"verification"}),
+        adapter_preferences=("local_verification",),
+        created_at=NOW,
+    )
+    source_session = SimpleNamespace(
+        id=session_id,
+        execution_id=execution_id,
+        workspace_id=workspace_id,
+        worker_id=worker_id,
+        status="closed",
+        last_activity_at=NOW,
+    )
+
+    class ExecutionRepository:
+        def list_for_tasks(self, task_ids, requested_workspace_id):
+            assert task_ids == (task_id,)
+            assert requested_workspace_id == workspace_id
+            return (source_execution,)
+
+    class SessionRepository:
+        def get_latest_for_execution(
+            self, requested_execution_id, requested_workspace_id
+        ):
+            assert requested_workspace_id == workspace_id
+            return source_session if requested_execution_id == execution_id else None
+
+    class WorkerRepository:
+        def get(self, requested_worker_id, requested_workspace_id):
+            assert requested_worker_id == worker_id
+            assert requested_workspace_id == workspace_id
+            return SimpleNamespace(id=worker_id, capabilities={"verification"})
+
+    uow = SimpleNamespace(
+        executions=ExecutionRepository(),
+        sessions=SessionRepository(),
+        workers=WorkerRepository(),
+    )
+
+    selected = RevisionMaterializer._source_executions(
+        cast(ControlPlaneUnitOfWork, uow),
+        tasks_by_id={task_id: SimpleNamespace()},
+        workspace_id=workspace_id,
+        target_intents={},
+        retired_worker_item_ids=frozenset({WORKER_ID}),
+    )
+
+    assert selected[WORKER_ID].id == execution_id
 
 
 def test_converged_worker_transition_closes_writer() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from hashlib import sha256
 from uuid import UUID
 
@@ -28,6 +28,102 @@ from sidera_control_plane.domain.result_inputs import (
 _UNKNOWN_HANDOFF_STATUSES = frozenset({"blocked_unknown"})
 
 
+def order_code_result_dependency_closure(
+    *,
+    direct_snapshots: Sequence[CodeResultSnapshotV1],
+    snapshots: Sequence[CodeResultSnapshotV1],
+    workspace_id: UUID,
+    root_task_id: UUID,
+    repository_ref: str,
+) -> tuple[CodeResultSnapshotV1, ...]:
+    """Return exactly the selected snapshots and their dependencies, dependency-first."""
+
+    if not direct_snapshots or not snapshots:
+        raise ValueError("code result dependency closure must not be empty")
+
+    snapshots_by_id: dict[UUID, CodeResultSnapshotV1] = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise TypeError("code result dependency snapshot must be typed")
+        if snapshot.id in snapshots_by_id:
+            raise ValueError("code result dependency snapshot is duplicated")
+        if (
+            snapshot.workspace_id != workspace_id
+            or snapshot.root_task_id != root_task_id
+            or snapshot.repository_ref != repository_ref
+        ):
+            raise ValueError("code result dependency snapshot scope does not match")
+        snapshots_by_id[snapshot.id] = snapshot
+
+    for snapshot in direct_snapshots:
+        if snapshots_by_id.get(snapshot.id) != snapshot:
+            raise ValueError("direct code result snapshot is missing or changed")
+
+    ordered: list[CodeResultSnapshotV1] = []
+    visiting: set[UUID] = set()
+    visited: set[UUID] = set()
+
+    def visit(snapshot: CodeResultSnapshotV1) -> None:
+        if snapshot.id in visiting:
+            raise ValueError("code result dependency graph contains a cycle")
+        if snapshot.id in visited:
+            return
+        visiting.add(snapshot.id)
+        for dependency_id in snapshot.consumed_result_ids:
+            dependency = snapshots_by_id.get(dependency_id)
+            if dependency is None:
+                raise ValueError("code result dependency snapshot is missing")
+            visit(dependency)
+        visiting.remove(snapshot.id)
+        visited.add(snapshot.id)
+        ordered.append(snapshot)
+
+    for snapshot in direct_snapshots:
+        visit(snapshot)
+    if visited != set(snapshots_by_id):
+        raise ValueError("code result dependency closure contains an unrelated snapshot")
+    return tuple(ordered)
+
+
+def load_code_result_dependency_closure(
+    *,
+    direct_snapshots: Sequence[CodeResultSnapshotV1],
+    load_snapshot: Callable[[UUID], object],
+    workspace_id: UUID,
+    root_task_id: UUID,
+    repository_ref: str,
+) -> tuple[CodeResultSnapshotV1, ...]:
+    """Load only the immutable dependencies reachable from selected results."""
+
+    snapshots_by_id = {snapshot.id: snapshot for snapshot in direct_snapshots}
+    if len(snapshots_by_id) != len(direct_snapshots):
+        raise ValueError("direct code result snapshot is duplicated")
+    pending = [
+        dependency_id
+        for snapshot in direct_snapshots
+        for dependency_id in snapshot.consumed_result_ids
+    ]
+    while pending:
+        result_id = pending.pop()
+        if result_id in snapshots_by_id:
+            continue
+        dependency = load_snapshot(result_id)
+        if (
+            not isinstance(dependency, CodeResultSnapshotV1)
+            or dependency.id != result_id
+        ):
+            raise ValueError("code result dependency snapshot is missing")
+        snapshots_by_id[result_id] = dependency
+        pending.extend(dependency.consumed_result_ids)
+    return order_code_result_dependency_closure(
+        direct_snapshots=direct_snapshots,
+        snapshots=tuple(snapshots_by_id.values()),
+        workspace_id=workspace_id,
+        root_task_id=root_task_id,
+        repository_ref=repository_ref,
+    )
+
+
 def build_rework_code_input_manifest(
     *,
     candidate: IntegrationCandidateV1,
@@ -42,17 +138,27 @@ def build_rework_code_input_manifest(
         raise TypeError("rework candidate must be typed")
     if not snapshots:
         raise ValueError("rework code input snapshots must not be empty")
-    snapshots_by_id = {snapshot.id: snapshot for snapshot in snapshots}
-    if set(snapshots_by_id) != set(candidate.source_result_ids):
+    snapshots_by_id: dict[UUID, CodeResultSnapshotV1] = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, CodeResultSnapshotV1):
+            raise TypeError("rework code input snapshots must be typed")
+        if snapshot.id in snapshots_by_id:
+            raise ValueError("rework code input snapshot is duplicated")
+        snapshots_by_id[snapshot.id] = snapshot
+    direct_snapshots = tuple(
+        snapshots_by_id[item]
+        for item in candidate.source_result_ids
+        if item in snapshots_by_id
+    )
+    if len(direct_snapshots) != len(candidate.source_result_ids):
         raise ValueError("rework code input snapshots do not match candidate sources")
-    ordered = tuple(snapshots_by_id[item] for item in candidate.source_result_ids)
-    if any(
-        snapshot.workspace_id != candidate.workspace_id
-        or snapshot.root_task_id != candidate.root_task_id
-        or snapshot.repository_ref != repository_ref
-        for snapshot in ordered
-    ):
-        raise ValueError("rework code input snapshot scope does not match candidate")
+    ordered = order_code_result_dependency_closure(
+        direct_snapshots=direct_snapshots,
+        snapshots=tuple(snapshots_by_id.values()),
+        workspace_id=candidate.workspace_id,
+        root_task_id=candidate.root_task_id,
+        repository_ref=repository_ref,
+    )
 
     sources = tuple(
         CodeInputSourceV1(
@@ -106,26 +212,39 @@ def resolve_result_input_source(
         return _unresolved(worker_item_key, reason_code="input_source_ambiguous")
     placement = placements[0]
 
-    current_requests = tuple(
+    def matches_placement(item: CollaborationRequestFact) -> bool:
+        return (
+            item.worker_item_key == worker_item_key
+            and item.worker_item_id == placement.worker_item_id
+            and item.subtask_task_id == placement.subtask_task_id
+            and item.handoff_transition_id is None
+            and item.result_derivation_kind != "verification"
+        )
+
+    active_requests = tuple(
         item
-        for item in (*facts.requests, *facts.result_source_requests)
-        if item.worker_item_key == worker_item_key
-        and item.worker_item_id == placement.worker_item_id
-        and item.subtask_task_id == placement.subtask_task_id
-        and item.handoff_transition_id is None
-        and item.result_derivation_kind != "verification"
+        for item in facts.requests
+        if matches_placement(item)
     )
+    historical_requests = tuple(
+        item
+        for item in facts.result_source_requests
+        if matches_placement(item)
+    )
+    source_requests = (*active_requests, *historical_requests)
     reintegration_requests = tuple(
-        item for item in current_requests if item.purpose == "reintegrate"
+        item for item in source_requests if item.purpose == "reintegrate"
     )
     if reintegration_requests:
         current_requests = reintegration_requests
     else:
         rework_requests = tuple(
-            item for item in current_requests if item.purpose == "rework"
+            item for item in source_requests if item.purpose == "rework"
         )
         if rework_requests:
             current_requests = rework_requests
+        else:
+            current_requests = active_requests or historical_requests
     if len(current_requests) != 1:
         return _unresolved(
             worker_item_key,

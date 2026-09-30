@@ -89,6 +89,14 @@ def test_second_adapter_missing_snapshot_is_incomplete() -> None:
     assert evidence.failure_code == "second_adapter_snapshot_not_supplied"
 
 
+def test_second_adapter_runner_rejects_snapshot_from_another_run() -> None:
+    manifest = _manifest()
+    evidence = run_second_adapter(manifest, snapshot=_snapshot())
+
+    assert evidence.status == "FAIL"
+    assert evidence.failure_code == "second_adapter_snapshot_run_id_mismatch"
+
+
 def test_second_adapter_cannot_pass_before_writer_enable() -> None:
     manifest = _manifest()
     evidence = build_second_adapter_evidence(

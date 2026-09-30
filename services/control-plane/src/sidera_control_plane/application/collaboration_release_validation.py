@@ -6,12 +6,8 @@ from uuid import UUID
 
 from sidera_control_plane.application.collaboration_projection import CollaborationFacts
 from sidera_control_plane.application.result_input_evaluation import (
-    ResultInputEvaluator,
+    build_hard_input_selections,
 )
-from sidera_control_plane.application.result_input_sources import (
-    resolve_result_input_source,
-)
-from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
     CollaborationRun,
@@ -26,9 +22,7 @@ from sidera_control_plane.domain.collaboration_runtime import (
     canonical_json_bytes,
 )
 from sidera_control_plane.domain.errors import ValidationError
-from sidera_control_plane.domain.execution import ExecutionStatus
 from sidera_control_plane.domain.execution_requests import (
-    DependencyEnforcement,
     ExecutionRequest,
     ExecutionRequestStatus,
 )
@@ -40,12 +34,9 @@ from sidera_control_plane.domain.input_selections import (
 )
 from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
 from sidera_control_plane.domain.result_inputs import (
-    InputGroupCandidateV1,
     InputGroupEvaluation,
     InputGroupMode,
-    InputGroupRequirementsV1,
     InputGroupV1,
-    InputSelectionStrategy,
     ResultInputSource,
 )
 
@@ -396,68 +387,7 @@ def _hard_inputs(
 ) -> tuple[InputSelectionHardInputV1, ...]:
     if facts is None:
         raise ValidationError("current collaboration facts are required for V2 release")
-    requests = {item.id: item for item in facts.requests}
-    evaluator = ResultInputEvaluator()
-    values: list[InputSelectionHardInputV1] = []
-    dependencies = sorted(
-        (
-            item
-            for item in facts.dependencies
-            if item.downstream_request_id == request.id
-            and item.enforcement is DependencyEnforcement.HARD
-        ),
-        key=lambda item: str(item.upstream_request_id),
-    )
-    for dependency in dependencies:
-        upstream = requests.get(dependency.upstream_request_id)
-        if upstream is None:
-            raise ValidationError("hard input source request is missing")
-        requirements = InputGroupRequirementsV1(
-            execution_status=ExecutionStatus.SUCCEEDED,
-            required_artifact_refs=dependency.required_artifact_refs,
-            required_evidence_refs=dependency.required_evidence_refs,
-            evidence_status=EvidenceClaimStatus.CANDIDATE,
-        )
-        group = InputGroupV1(
-            group_key=f"hard:{dependency.upstream_request_id}",
-            title=f"Hard input {upstream.worker_item_key}",
-            consumer_worker_item_key=request.worker_item_key,
-            candidates=(
-                InputGroupCandidateV1(
-                    worker_item_key=upstream.worker_item_key,
-                    priority=1,
-                ),
-            ),
-            requirements=requirements,
-            mode=InputGroupMode.ALL,
-            minimum_count=None,
-            selection_strategy=InputSelectionStrategy.PLAN_ORDER,
-        )
-        evaluation = evaluator.evaluate_group(
-            group=group,
-            sources=(
-                resolve_result_input_source(
-                    worker_item_key=upstream.worker_item_key,
-                    facts=facts,
-                ),
-            ),
-        )
-        selected = _selection_group(group, evaluation).sources[0]
-        dependency_mapping = {
-            "downstream_request_id": str(dependency.downstream_request_id),
-            "upstream_request_id": str(dependency.upstream_request_id),
-            "enforcement": dependency.enforcement.value,
-            "required_artifact_refs": list(dependency.required_artifact_refs),
-            "required_evidence_refs": list(dependency.required_evidence_refs),
-        }
-        values.append(
-            InputSelectionHardInputV1(
-                dependency_key=f"request:{dependency.upstream_request_id}",
-                rule_hash=sha256(canonical_json_bytes(dependency_mapping)).hexdigest(),
-                source=selected,
-            )
-        )
-    return tuple(values)
+    return build_hard_input_selections(request=request, facts=facts)
 
 
 def _selection_source(

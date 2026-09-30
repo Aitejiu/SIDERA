@@ -25,6 +25,18 @@ def test_group_round_trip_and_bool_threshold_rejected() -> None:
         InputGroupV1.from_mapping(raw)
 
 
+def test_group_accepts_evidence_only_but_rejects_empty_requirements() -> None:
+    raw = group_mapping()
+    requirements = cast(dict[str, object], raw["requirements"])
+    requirements["required_artifact_refs"] = []
+
+    assert InputGroupV1.from_mapping(raw).to_mapping() == raw
+
+    requirements["required_evidence_refs"] = []
+    with pytest.raises(ValidationError):
+        InputGroupV1.from_mapping(raw)
+
+
 @pytest.mark.parametrize("minimum_count", [0, 4, 1.5])
 def test_at_least_group_rejects_invalid_threshold(minimum_count: object) -> None:
     raw = group_mapping()

@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sidera_control_plane.adapters import local_verification
 from sidera_control_plane.adapters.local_verification import LocalCheckRunner
 from sidera_control_plane.application.result_ports import (
     CheckRunRequest,
@@ -203,6 +204,32 @@ def test_runner_records_log_read_error(check_case: CheckCase) -> None:
     )
     script = check_case.script("read-error.py", "print('ignored')\n")
     request = check_case.request(argv=(sys.executable, str(script)), runner=runner)
+
+    runner.start(request)
+    observation = check_case.wait_terminal(request.operation_id, runner=runner)
+
+    assert observation.status is CheckRunStatus.ENVIRONMENT_BLOCKED
+    assert observation.failure_code == "log_read_error"
+    assert observation.exit_code is not None
+
+
+def test_runner_finalizes_log_read_error_after_identity_race(
+    check_case: CheckCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_reader(_stream: object, _size: int) -> bytes:
+        raise OSError("synthetic stream read failure")
+
+    runner = LocalCheckRunner(
+        state_root=check_case.runner.state_root,
+        log_limit_bytes=128,
+        stream_reader=broken_reader,
+    )
+    script = check_case.script(
+        "read-error-race.py",
+        "import time\nprint('ignored')\ntime.sleep(0.05)\n",
+    )
+    request = check_case.request(argv=(sys.executable, str(script)), runner=runner)
+    monkeypatch.setattr(local_verification, "_identity_matches", lambda _identity: False)
 
     runner.start(request)
     observation = check_case.wait_terminal(request.operation_id, runner=runner)

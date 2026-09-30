@@ -117,12 +117,19 @@ export function getThread(threadId: string, signal?: AbortSignal): Promise<MainA
   );
 }
 
-export function startTurn(threadId: string, input: string): Promise<MainAgentTurn> {
+export function startTurn(
+  threadId: string,
+  input: string,
+  operationId?: string,
+): Promise<MainAgentTurn> {
   return requestJson<MainAgentTurn>(
     `/threads/${encodeURIComponent(threadId)}/turns`,
     {
       method: "POST",
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({
+        input,
+        ...(operationId === undefined ? {} : { operationId }),
+      }),
     },
   );
 }

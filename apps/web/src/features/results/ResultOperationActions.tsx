@@ -30,6 +30,7 @@ export interface ResultOperationActionsProps {
   isLoading: boolean;
   isError: boolean;
   canIntervene: boolean;
+  canOperateResult?: boolean;
   onRetry: () => void;
   onRefresh: () => Promise<void>;
   onOpenResults: (candidateId: string | undefined) => void;
@@ -43,6 +44,7 @@ export function ResultOperationActions({
   isLoading,
   isError,
   canIntervene,
+  canOperateResult = canIntervene,
   onRetry,
   onRefresh,
   onOpenResults,
@@ -197,7 +199,7 @@ export function ResultOperationActions({
             />
           ) : (
             <div className="result-operation-actions__buttons">
-              {reworkAction && scopeAllowed && canIntervene ? (
+              {reworkAction && scopeAllowed && canOperateResult ? (
                 <button className="quiet-button" type="button" onClick={() => { setMode("rework"); setError(null); }}>
                   <RefreshCcw size={14} aria-hidden="true" />局部返工
                 </button>
@@ -208,17 +210,17 @@ export function ResultOperationActions({
                   <span>当前 WorkerItem 不在可返工范围，需要主 Agent / Revision 调整</span>
                 </div>
               ) : null}
-              {budgetAction && canIntervene ? (
+              {budgetAction && canOperateResult ? (
                 <button className="quiet-button" type="button" onClick={() => { setMode("budget"); setError(null); }}>
                   <GitBranch size={14} aria-hidden="true" />增加返工额度
                 </button>
               ) : null}
-              {retryActions.length > 0 && canIntervene ? (
+              {retryActions.length > 0 && canOperateResult ? (
                 <button className="quiet-button" type="button" onClick={() => { setMode("retry"); setError(null); }}>
                   <RefreshCcw size={14} aria-hidden="true" />重试检查
                 </button>
               ) : null}
-              {reintegrateAction && canIntervene ? (
+              {reintegrateAction && canOperateResult ? (
                 <button className="quiet-button" type="button" onClick={() => { setMode("reintegrate"); setError(null); }}>
                   <GitBranch size={14} aria-hidden="true" />重新集成
                 </button>
@@ -233,7 +235,7 @@ export function ResultOperationActions({
                 </button>
               ) : null}
               {actions.length === 0 ? <span className="muted-copy">当前没有可执行的结果操作</span> : null}
-              {!canIntervene && actions.some((action) => action.command_type !== "InspectResultOperation") ? (
+              {!canOperateResult && actions.some((action) => action.command_type !== "InspectResultOperation") ? (
                 <div className="result-operation-actions__readonly">
                   <AlertTriangle size={14} aria-hidden="true" />当前 WorkerItem 只读，局部修改需主 Agent / Revision
                 </div>

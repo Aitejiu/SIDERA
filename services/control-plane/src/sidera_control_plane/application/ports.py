@@ -6,6 +6,8 @@ from types import TracebackType
 from typing import BinaryIO, Literal, Protocol, Self
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
 from sidera_control_plane.application.collaboration_projection import CollaborationFacts
 from sidera_control_plane.application.knowledge_candidate_submission import (
     KnowledgeCandidateProposalV1,
@@ -234,6 +236,16 @@ class PlanTransitionRepositoryPort(Protocol):
 
     def get(
         self, transition_id: UUID, workspace_id: UUID, *, for_update: bool = False
+    ) -> PlanTransition | None:
+        raise NotImplementedError
+
+    def get_for_target(
+        self,
+        *,
+        workspace_id: UUID,
+        root_task_id: UUID,
+        plan_snapshot_id: UUID,
+        plan_generation: int,
     ) -> PlanTransition | None:
         raise NotImplementedError
 
@@ -1735,6 +1747,9 @@ class LeaseStorePort(Protocol):
 
 
 class SessionRepositoryPort(Protocol):
+    def list_active(self, workspace_id: UUID) -> tuple[ExecutionSession, ...]:
+        raise NotImplementedError
+
     def get(
         self, session_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionSession | None:
@@ -1917,6 +1932,13 @@ class ExecutionEventRepositoryPort(Protocol):
     ) -> ExecutionEvent | None:
         raise NotImplementedError
 
+    def list_for_session(
+        self,
+        session_id: UUID,
+        workspace_id: UUID,
+    ) -> tuple[ExecutionEvent, ...]:
+        raise NotImplementedError
+
 
 class ArtifactRepositoryPort(Protocol):
     def add(self, artifact: Artifact) -> None:
@@ -2078,7 +2100,12 @@ class WorkerAdapter(Protocol):
         raise NotImplementedError
 
     def collect_knowledge_candidates(
-        self, handle: AdapterSessionHandle, *, operation_id: UUID
+        self,
+        handle: AdapterSessionHandle,
+        *,
+        operation_id: UUID,
+        worker_item_id: UUID | None = None,
+        source_artifact_ids: tuple[UUID, ...] = (),
     ) -> tuple[KnowledgeCandidateProposalV1, ...]:
         raise NotImplementedError
 
@@ -2446,6 +2473,7 @@ NotificationLedgerPort = NotificationLedger
 
 
 class ControlPlaneUnitOfWork(Protocol):
+    session: Session
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
     plan_transitions: PlanTransitionRepositoryPort

@@ -9,6 +9,14 @@ class ProviderError(GatewayError):
     """Base class for failures at the configured main-agent provider."""
 
 
+class AcceptanceGuardRejected(GatewayError):
+    """A bounded acceptance operation was rejected before provider I/O."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 class ProviderUnavailable(ProviderError):
     """The provider could not be reached or is temporarily unavailable."""
 

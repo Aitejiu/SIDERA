@@ -1,4 +1,6 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,10 +16,14 @@ from sidera_control_plane.domain.notifications import (
     NotificationTransition,
 )
 from sidera_control_plane.domain.projections import ProjectionChange
+from sidera_control_plane.persistence.notification_observation_store import (
+    SqlAlchemyNotificationObservationStore,
+)
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000001")
 ROOT_TASK_ID = UUID("10000000-0000-0000-0000-000000000001")
+SUBTASK_ID = UUID("10000000-0000-0000-0000-000000000002")
 
 
 def _change(
@@ -106,3 +112,65 @@ def test_equivalent_root_projection_invalidations_share_one_subject_key() -> Non
     graph = _change("task_graph", cursor=8)
 
     assert observation_subject_key(overview) == observation_subject_key(graph)
+
+
+def test_task_overview_resolves_a_placed_subtask_to_its_root_scope() -> None:
+    store = object.__new__(SqlAlchemyNotificationObservationStore)
+    store._session = Mock()
+    store._session.scalar.return_value = SimpleNamespace(root_task_id=ROOT_TASK_ID)
+
+    root_task_id, subtask_id = store._task_scope(
+        _change("task_overview", resource_id=SUBTASK_ID)
+    )
+
+    assert root_task_id == ROOT_TASK_ID
+    assert subtask_id == SUBTASK_ID
+
+
+def test_explicit_worker_input_is_immediate_attention() -> None:
+    store = object.__new__(SqlAlchemyNotificationObservationStore)
+
+    kind, topic, status, transition, requires_operator, automatic_recovery = (
+        store._classify(
+            _change("worker_item_activity"),
+            root_task_status="pending",
+            planning_request_status=None,
+            worker_item_status="active",
+            execution_status="running",
+            scheduling_block=None,
+            result_input_change=False,
+            worker_requires_user_input=True,
+        )
+    )
+
+    assert kind == NotificationKind.EXECUTION_ATTENTION.value
+    assert topic == "execution_attention"
+    assert status == "running"
+    assert transition is None
+    assert requires_operator is True
+    assert automatic_recovery is False
+
+
+def test_completed_worker_session_recovers_the_execution_attention_topic() -> None:
+    store = object.__new__(SqlAlchemyNotificationObservationStore)
+
+    kind, topic, status, transition, requires_operator, automatic_recovery = (
+        store._classify(
+            _change("worker_item_activity", resource_id=uuid4()),
+            root_task_status="waiting",
+            planning_request_status=None,
+            worker_item_status="active",
+            execution_status=None,
+            scheduling_block=None,
+            result_input_change=False,
+            worker_requires_user_input=False,
+            worker_execution_completed=True,
+        )
+    )
+
+    assert kind == NotificationKind.EXECUTION_ATTENTION.value
+    assert topic == "execution_attention"
+    assert status == "active"
+    assert transition is NotificationTransition.RECOVERED
+    assert requires_operator is False
+    assert automatic_recovery is False

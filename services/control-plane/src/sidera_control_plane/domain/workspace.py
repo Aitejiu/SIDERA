@@ -97,6 +97,7 @@ class ExecutionSpec:
     context_package: ContextMaterialization | None = None
     execution_purpose: Literal["code", "verification"] | None = None
     physical_input_ack: Mapping[str, Any] | None = None
+    request_purpose: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version not in (1, 2, 3):
@@ -163,6 +164,8 @@ class ExecutionSpec:
                     )
         if self.fencing_token < 1:
             raise ValidationError("fencing_token must be positive")
+        if self.request_purpose is not None and not self.request_purpose.strip():
+            raise ValidationError("request_purpose cannot be empty")
         if not self.goal.strip():
             raise ValidationError("goal is required")
         if not self.acceptance_criteria or any(

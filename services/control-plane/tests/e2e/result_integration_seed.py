@@ -11,9 +11,17 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.models import (
+    CommandModel,
+    ExecutionEventModel,
+    ExecutionModel,
+    ExecutionRequestModel,
+    ExecutionSessionModel,
+)
 from tests.integration.result_integration_scenario import ResultIntegrationScenario
 from tests.integration.test_r5_1_execution_request_schema import (
     seed_execution_request_facts,
@@ -272,7 +280,35 @@ def _observed_state(
             result.status.value
             for result in scenario.verification_results(head.current_candidate_id)
         ]
+    observed["read_only_counts"] = _read_only_counts(scenario)
     return observed
+
+
+def _read_only_counts(scenario: ResultIntegrationScenario) -> dict[str, int]:
+    models = {
+        "commands": CommandModel,
+        "executions": ExecutionModel,
+        "execution_requests": ExecutionRequestModel,
+        "sessions": ExecutionSessionModel,
+        "events": ExecutionEventModel,
+    }
+    with scenario.database.session() as session:
+        counts = {
+            name: int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.workspace_id == scenario.workspace_id)
+                )
+                or 0
+            )
+            for name, model in models.items()
+        }
+    return {
+        **counts,
+        "fake_transport_calls": 0,
+        "turns": 0,
+    }
 
 
 def _public_state(state: Mapping[str, Any], mode: str) -> dict[str, object]:
@@ -296,7 +332,12 @@ def _public_state(state: Mapping[str, Any], mode: str) -> dict[str, object]:
         **{
             key: value
             for key, value in state.items()
-            if key in {"root_status", "result_version", "verification_statuses"}
+            if key in {
+                "root_status",
+                "result_version",
+                "verification_statuses",
+                "read_only_counts",
+            }
         },
     }
 
@@ -357,7 +398,14 @@ def _database_url() -> str:
     if url.host not in {"127.0.0.1", "localhost", "::1"}:
         raise DriverError("database_must_be_loopback")
     database_name = (url.database or "").lower()
-    if database_name != "sidera_test" and not database_name.startswith("sidera_test_"):
+    is_standard_test_database = database_name == "sidera_test" or database_name.startswith(
+        "sidera_test_"
+    )
+    is_bound_fake_demo_database = (
+        database_name.startswith("sidera_interview_test_")
+        and bool(os.environ.get("SIDERA_BASIC_FAKE_MANIFEST"))
+    )
+    if not is_standard_test_database and not is_bound_fake_demo_database:
         raise DriverError("database_must_be_test_database")
     return raw
 

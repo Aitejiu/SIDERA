@@ -31,6 +31,7 @@ from sidera_control_plane.domain.notifications import (
 from sidera_control_plane.domain.projections import ProjectionChange
 from sidera_control_plane.persistence.models import (
     EventModel,
+    ExecutionEventModel,
     ExecutionModel,
     ExecutionRequestModel,
     IntegrationCandidateModel,
@@ -428,10 +429,13 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         execution_request = None
         scheduling_block = None
         result_input_change = False
+        worker_requires_user_input = False
         planning_request = None
         source_resource_version = change.resource_version or 1
         subtask_id = None
         root_task_id: UUID | None = None
+        worker_execution_completed = False
+        latest_worker_event: ExecutionEventModel | None = None
 
         if change.projection_type in {
             "worker_item_workspace",
@@ -536,21 +540,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                 return None
             root_task_id = planning_request.root_task_id
             source_resource_version = planning_request.version
-        elif change.projection_type == "subtask_workspace":
-            placement = self._session.scalar(
-                select(WorkerItemPlacementModel)
-                .where(
-                    WorkerItemPlacementModel.workspace_id == change.workspace_id,
-                    WorkerItemPlacementModel.subtask_task_id == change.resource_id,
-                )
-                .order_by(WorkerItemPlacementModel.plan_generation.desc())
-                .limit(1)
-            )
-            if placement is not None:
-                root_task_id = placement.root_task_id
-                subtask_id = change.resource_id
-            else:
-                root_task_id = change.resource_id
+        elif change.projection_type in {"subtask_workspace", "task_overview"}:
+            root_task_id, subtask_id = self._task_scope(change)
         else:
             root_task_id = change.resource_id
 
@@ -562,6 +553,44 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         )
         if root_task is None:
             return None
+        if worker_item is not None:
+            latest_worker_event = self._session.scalars(
+                select(ExecutionEventModel)
+                .join(
+                    ExecutionModel,
+                    (ExecutionModel.id == ExecutionEventModel.execution_id)
+                    & (
+                        ExecutionModel.workspace_id
+                        == ExecutionEventModel.workspace_id
+                    ),
+                )
+                .where(
+                    ExecutionEventModel.workspace_id == change.workspace_id,
+                    ExecutionModel.worker_item_id == worker_item.id,
+                )
+                .order_by(
+                    ExecutionEventModel.occurred_at.desc(),
+                    ExecutionEventModel.sequence.desc(),
+                    ExecutionEventModel.id.desc(),
+                )
+                .limit(1)
+            ).first()
+            latest_payload = (
+                latest_worker_event.payload
+                if latest_worker_event is not None
+                else None
+            )
+            worker_execution_completed = (
+                latest_worker_event is not None
+                and latest_worker_event.event_type in {
+                    "session.completed",
+                    "session.succeeded",
+                }
+            )
+            worker_requires_user_input = (
+                isinstance(latest_payload, Mapping)
+                and latest_payload.get("requires_user_input") is True
+            )
         if change.projection_type == "result_overview":
             source_type, origin_route_active = self._origin_source(
                 workspace_id=change.workspace_id,
@@ -624,6 +653,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             execution_status=execution.status if execution is not None else None,
             scheduling_block=scheduling_block,
             result_input_change=result_input_change,
+            worker_requires_user_input=worker_requires_user_input,
+            worker_execution_completed=worker_execution_completed,
         )
 
         source_type, origin_route_active = self._origin_source(
@@ -661,6 +692,14 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             )
         if worker_item is not None:
             authoritative_fields["worker_item_version"] = worker_item.version
+            if worker_execution_completed and latest_worker_event is not None:
+                authoritative_fields.update(
+                    {
+                        "worker_execution_completed": True,
+                        "worker_execution_event_id": str(latest_worker_event.id),
+                        "worker_execution_event_sequence": latest_worker_event.sequence,
+                    }
+                )
         if planning_request is not None:
             authoritative_fields["planning_request_version"] = planning_request.version
 
@@ -713,6 +752,22 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
             authoritative_fields=authoritative_fields,
             source_resource_version=source_resource_version,
         )
+
+    def _task_scope(self, change: ProjectionChange) -> tuple[UUID, UUID | None]:
+        if change.resource_id is None:
+            raise ValueError("task projection requires a resource id")
+        placement = self._session.scalar(
+            select(WorkerItemPlacementModel)
+            .where(
+                WorkerItemPlacementModel.workspace_id == change.workspace_id,
+                WorkerItemPlacementModel.subtask_task_id == change.resource_id,
+            )
+            .order_by(WorkerItemPlacementModel.plan_generation.desc())
+            .limit(1)
+        )
+        if placement is None:
+            return change.resource_id, None
+        return placement.root_task_id, change.resource_id
 
     def _result_notification_overview(
         self,
@@ -917,6 +972,8 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
         execution_status: str | None,
         scheduling_block: SchedulingBlockModel | None,
         result_input_change: bool,
+        worker_requires_user_input: bool = False,
+        worker_execution_completed: bool = False,
     ) -> tuple[
         str,
         str,
@@ -1045,6 +1102,27 @@ class SqlAlchemyNotificationObservationStore(NotificationObservationSource):
                 status,
                 NotificationTransition.COMPLETED,
                 False,
+                False,
+            )
+        if worker_execution_completed and change.projection_type in {
+            "worker_item_workspace",
+            "worker_item_activity",
+        }:
+            return (
+                NotificationKind.EXECUTION_ATTENTION.value,
+                "execution_attention",
+                status,
+                NotificationTransition.RECOVERED,
+                False,
+                False,
+            )
+        if worker_requires_user_input:
+            return (
+                NotificationKind.EXECUTION_ATTENTION.value,
+                "execution_attention",
+                status,
+                None,
+                True,
                 False,
             )
         if execution_status is not None:

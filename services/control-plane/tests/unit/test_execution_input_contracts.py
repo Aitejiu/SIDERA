@@ -58,6 +58,18 @@ def test_blocked_input_requires_explicit_retry_before_delivery() -> None:
     assert item.status is ExecutionInputStatus.DELIVERED
 
 
+def test_delivered_input_retains_dispatch_operation_receipt() -> None:
+    item = make_input()
+    item.queue()
+    operation_id = uuid4()
+    item.begin_dispatch(operation_id=operation_id)
+
+    item.deliver()
+
+    assert item.status is ExecutionInputStatus.DELIVERED
+    assert item.operation_id == operation_id
+
+
 def test_accepted_or_queued_input_can_be_superseded_without_replay() -> None:
     accepted = make_input()
     accepted.supersede(now=NOW + timedelta(seconds=1), reason="plan_generation_changed")

@@ -28,6 +28,7 @@ from sidera_control_plane.domain.planning_revision_proposals import (
     PlanningRevisionProposalPayloadV3,
     PlanningRevisionProposalPayloadV4,
     PlanningRevisionProposalPayloadV5,
+    PlanningRevisionProposalPayloadV6,
 )
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.revision_diff import (
@@ -109,13 +110,17 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                 canonical_payload.get("proposal"), "proposal canonical payload"
             )
             payload = (
-                PlanningRevisionProposalPayloadV5.from_mapping(payload_mapping)
-                if proposal.proposal_schema_version == 5
+                PlanningRevisionProposalPayloadV6.from_mapping(payload_mapping)
+                if proposal.proposal_schema_version == 6
                 else (
-                    PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
-                    if proposal.proposal_schema_version == 4
-                    else PlanningRevisionProposalPayloadV3.from_mapping(
-                        payload_mapping
+                    PlanningRevisionProposalPayloadV5.from_mapping(payload_mapping)
+                    if proposal.proposal_schema_version == 5
+                    else (
+                        PlanningRevisionProposalPayloadV4.from_mapping(payload_mapping)
+                        if proposal.proposal_schema_version == 4
+                        else PlanningRevisionProposalPayloadV3.from_mapping(
+                            payload_mapping
+                        )
                     )
                 )
             )
@@ -124,7 +129,11 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                 payload.collaboration_policy_request.to_mapping()
                 if isinstance(
                     payload,
-                    (PlanningRevisionProposalPayloadV4, PlanningRevisionProposalPayloadV5),
+                    (
+                        PlanningRevisionProposalPayloadV4,
+                        PlanningRevisionProposalPayloadV5,
+                        PlanningRevisionProposalPayloadV6,
+                    ),
                 )
                 else None
             )
@@ -141,6 +150,7 @@ class SqlAlchemyPlanRevisionQueryStore(PlanRevisionQueryStore):
                             (
                                 PlanningRevisionProposalPayloadV4,
                                 PlanningRevisionProposalPayloadV5,
+                                PlanningRevisionProposalPayloadV6,
                             ),
                         )
                         and payload.collaboration_policy_request.mode.value == "enabled"
@@ -276,6 +286,7 @@ def _revision_diff_view(
         PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
         | PlanningRevisionProposalPayloadV5
+        | PlanningRevisionProposalPayloadV6
     ),
     diff: NormalizedRevisionDiff,
     freshness: RevisionFreshnessView,
@@ -384,6 +395,7 @@ def _path_maps(
         PlanningRevisionProposalPayloadV3
         | PlanningRevisionProposalPayloadV4
         | PlanningRevisionProposalPayloadV5
+        | PlanningRevisionProposalPayloadV6
     ),
 ) -> tuple[dict[str, str], dict[str, str]]:
     subtask_titles = {item.key: item.title for item in base_snapshot.subtasks}

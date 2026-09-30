@@ -131,6 +131,9 @@ describe("app shell", () => {
       );
       expect(router.state.location.search).toBe("?view=dag");
     });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "关闭implementation" })).not.toBeInTheDocument();
+    });
 
     await user.click(screen.getByRole("button", { name: /关闭任务 30000000/ }));
     await waitFor(() => {

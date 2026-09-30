@@ -19,7 +19,12 @@ import {
 import { subtaskWorkspaceQueryKey } from "../subtasks/api";
 import { collaborationDecisionsQueryKey, collaborationDetailQueryKey } from "../collaboration/api";
 import { planningRequestsQueryKey } from "../planning/api";
-import { getTaskResults, taskResultsQueryKey, type TaskResultOverview } from "../results/api";
+import {
+  getTaskResults,
+  resultRefreshInterval,
+  taskResultsQueryKey,
+  type TaskResultOverview,
+} from "../results/api";
 import { executionQueryKey, getExecution } from "../trace/api";
 import {
   executeResultInputAction,
@@ -83,6 +88,8 @@ export function WorkerItemPage() {
     queryFn: ({ signal }) => getTaskResults(workspaceId, rootTaskId, { signal }),
     enabled: rootTaskId.length > 0,
     retry: false,
+    refetchInterval: (query) => resultRefreshInterval(query.state.data),
+    refetchIntervalInBackground: false,
   });
   const activityQuery = useInfiniteQuery({
     queryKey: workerActivityQueryKey(workspaceId, workerItemId),

@@ -149,7 +149,15 @@ class CollaborationGateFact:
             return cls.run_pending()
         if run.status is CollaborationRunStatus.BLOCKED:
             return cls.run_blocked(run_id=run.id)
-        if run.status is not CollaborationRunStatus.ACTIVE:
+        # Re-integration is an explicit result operation. Its command creates
+        # a new request and a fully bound release after the original
+        # collaboration run has completed, so it must not wait for that run to
+        # become active again. The release still has to pass the exact
+        # workspace, plan, request, and Selection checks below.
+        if run.status is not CollaborationRunStatus.ACTIVE and not (
+            request.purpose == "reintegrate"
+            and run.status is CollaborationRunStatus.COMPLETED
+        ):
             return cls.run_pending(run_id=run.id)
         if not _release_matches(
             request,
@@ -599,16 +607,6 @@ class CollaborationDecisionService:
                 self._emit_input_selection_recorded(uow, selection, run=run)
             for proposal in proposals:
                 self._emit_proposal_created(uow, proposal, run=run)
-            if stale_reason is not None:
-                uow.projection_changes.changed(
-                    workspace_id=run.workspace_id,
-                    projection_type="collaboration_runtime",
-                    resource_id=run.root_task_id,
-                    change_type="collaboration_decision_stale",
-                    resource_version=run.resource_version,
-                    correlation_id=decision.id,
-                )
-
             final_cursor = max(
                 prepared.projection.fact_cursor,
                 uow.projection_changes.latest_target_cursor(
@@ -624,6 +622,17 @@ class CollaborationDecisionService:
                 now=now,
             )
             uow.collaboration_runs.save(run, previous_run_version)
+            if stale_reason is not None:
+                # Leave the stale wakeup after the decision cursor so the next
+                # collaboration pass is forced to rebuild the current projection.
+                uow.projection_changes.changed(
+                    workspace_id=run.workspace_id,
+                    projection_type="collaboration_runtime",
+                    resource_id=run.root_task_id,
+                    change_type="collaboration_decision_stale",
+                    resource_version=run.resource_version,
+                    correlation_id=decision.id,
+                )
             uow.flush()
 
             return CollaborationDecisionApplicationResult(

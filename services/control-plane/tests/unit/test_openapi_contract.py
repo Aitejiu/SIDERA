@@ -368,6 +368,14 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         "applied",
         "rejected",
     ]
+    assert {
+        "command_type",
+        "target_type",
+        "target_id",
+        "expected_version",
+        "payload_sha256",
+        "payload",
+    } <= command_status["properties"].keys()
     planning_request = schemas["PlanningRequestSummaryResponse"]
     assert {"source_type", "source_ref"} <= planning_request["properties"].keys()
     assert "source_type" in planning_request["required"]

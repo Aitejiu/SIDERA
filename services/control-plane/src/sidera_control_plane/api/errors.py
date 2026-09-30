@@ -62,6 +62,7 @@ def install_error_handlers(app: FastAPI) -> None:
             in {
                 ValidationError.code,
                 "adapter_workflow_requires_loopback",
+                "demo_runtime_binding_forbidden",
                 "result_inputs_disabled",
                 "result_cursor_invalid",
             }

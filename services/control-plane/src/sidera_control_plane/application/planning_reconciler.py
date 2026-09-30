@@ -65,6 +65,7 @@ class PlanningReconciler:
             expired_leases = uow.planning_leases.claim_expired(
                 now=now, limit=limit
             )
+            expired_run_ids = {lease.planning_run_id for lease in expired_leases}
             expired = len(expired_leases)
             for lease in expired_leases:
                 outcome = self._reconcile_expired(uow, lease, now)
@@ -73,6 +74,8 @@ class PlanningReconciler:
                 failed += outcome[2]
 
             for run in uow.planning_runs.claim_failed(now=now, limit=limit):
+                if run.id in expired_run_ids:
+                    continue
                 outcome = self._reconcile_failed(uow, run, now)
                 retried += outcome[0]
                 blocked += outcome[1]
@@ -122,6 +125,8 @@ class PlanningReconciler:
         new_run = None
         if should_retry:
             new_run = self._retry_request(uow, request, previous_request_version, now)
+        else:
+            uow.planning_requests.save(request, previous_request_version)
         self._record_event(
             uow,
             request=request,
@@ -230,10 +235,18 @@ class PlanningReconciler:
         self, run: PlanningRun, request: PlanningRequest, now: datetime
     ) -> bool:
         policy = request.profile_snapshot.retry_policy
-        if run.attempt > policy.max_retries:
+        retries_used = max(
+            sum(
+                candidate.brief_revision == run.brief_revision
+                for candidate in request.runs
+            )
+            - 1,
+            0,
+        )
+        if retries_used >= policy.max_retries:
             return False
         if run.error_code != "lease_expired" and run.finished_at is not None:
-            backoff_index = min(run.attempt - 1, len(policy.backoff_seconds) - 1)
+            backoff_index = min(retries_used, len(policy.backoff_seconds) - 1)
             retry_at = run.finished_at + timedelta(
                 seconds=policy.backoff_seconds[backoff_index]
             )
@@ -251,7 +264,6 @@ class PlanningReconciler:
             "rate_limited",
             "lease_expired",
             "planning_lease_unavailable",
-            "planner_exception",
         }
 
     def _expire_lease(

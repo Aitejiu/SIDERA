@@ -487,7 +487,7 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                         self._finalize_locked(run, forced_failure=issue)
                         return
                     if not _identity_matches(run.identity):
-                        if run.process.poll() is not None:
+                        if self._wait_for_process_exit(run.process):
                             self._finalize_locked(run, forced_failure=issue)
                         else:
                             self._mark_unknown_locked(run, "process_state_unknown")
@@ -495,7 +495,7 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                         run.process,
                         run.identity,
                         self._termination_grace_seconds,
-                    ) or run.process.poll() is not None:
+                    ) or self._wait_for_process_exit(run.process):
                         self._finalize_locked(run, forced_failure=issue)
                     else:
                         self._mark_unknown_locked(run, "process_state_unknown")
@@ -524,16 +524,14 @@ class LocalCheckRunner(LocalCheckRunnerPort):
             if run.process.poll() is not None:
                 return self._finalize_locked(run, forced_failure=issue)
             if not _identity_matches(run.identity):
-                if run.process.poll() is not None:
+                if self._wait_for_process_exit(run.process):
                     return self._finalize_locked(run, forced_failure=issue)
                 return self._mark_unknown_locked(run, "process_state_unknown")
             if not _terminate_process_group(
                 run.process,
                 run.identity,
                 self._termination_grace_seconds,
-            ):
-                if run.process.poll() is not None:
-                    return self._finalize_locked(run, forced_failure=issue)
+            ) and not self._wait_for_process_exit(run.process):
                 return self._mark_unknown_locked(run, "process_state_unknown")
             return self._finalize_locked(run, forced_failure=issue)
         if self._now() >= run.request.deadline:
@@ -796,6 +794,15 @@ class LocalCheckRunner(LocalCheckRunnerPort):
                 capture.close_stream()
                 capture.join(timeout=0.1)
 
+    def _wait_for_process_exit(self, process: Any) -> bool:
+        if process.poll() is not None:
+            return True
+        try:
+            process.wait(timeout=self._termination_grace_seconds)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return process.poll() is not None
+
     def _persist(
         self,
         request: CheckRunRequest,
@@ -929,6 +936,7 @@ class LocalVerificationAdapter:
         adapter_module_id: UUID | None = None,
         adapter_config_version: int = 1,
         clock: Callable[[], datetime] | None = None,
+        start_interruption: Callable[[UUID], bool] | None = None,
     ) -> None:
         if not all(
             callable(getattr(runner, name, None))
@@ -955,6 +963,7 @@ class LocalVerificationAdapter:
         )
         self._adapter_config_version = adapter_config_version
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._start_interruption = start_interruption
         self._context_acknowledgements: dict[UUID, ContextAcknowledgement] = {}
         self._context_fingerprints: dict[UUID, tuple[object, ...]] = {}
         self._sessions_by_operation: dict[UUID, _VerificationSession] = {}
@@ -1060,6 +1069,37 @@ class LocalVerificationAdapter:
                 raise LocalVerificationAdapterError(
                     "verification_runner_candidate_mismatch"
                 )
+            if self._start_interruption is not None:
+                try:
+                    should_interrupt = self._start_interruption(operation_id)
+                except Exception as exc:
+                    raise LocalVerificationAdapterError(
+                        "verification_start_interruption_failed"
+                    ) from exc
+                if not isinstance(should_interrupt, bool):
+                    raise LocalVerificationAdapterError(
+                        "verification_start_interruption_invalid"
+                    )
+                if should_interrupt:
+                    try:
+                        stopped_observation = self._runner.stop(operation_id)
+                    except Exception as exc:
+                        raise LocalVerificationAdapterError(
+                            "verification_start_interruption_stop_failed"
+                        ) from exc
+                    if not isinstance(stopped_observation, CheckRunObservation):
+                        raise LocalVerificationAdapterError(
+                            "verification_start_interruption_observation_unavailable"
+                        )
+                    if stopped_observation.operation_id != operation_id:
+                        raise LocalVerificationAdapterError(
+                            "verification_start_interruption_operation_mismatch"
+                        )
+                    if stopped_observation.status is CheckRunStatus.RUNNING:
+                        raise LocalVerificationAdapterError(
+                            "verification_start_interruption_observation_running"
+                        )
+                    observation = stopped_observation
             execution_session_id = uuid5(
                 NAMESPACE_URL,
                 f"sidera.local-verification.session:{spec.execution_id}:{operation_id}",
@@ -1246,8 +1286,10 @@ class LocalVerificationAdapter:
         handle: AdapterSessionHandle,
         *,
         operation_id: UUID,
+        worker_item_id: UUID | None = None,
+        source_artifact_ids: tuple[UUID, ...] = (),
     ) -> tuple[KnowledgeCandidateProposalV1, ...]:
-        del operation_id
+        del operation_id, worker_item_id, source_artifact_ids
         self._session(handle)
         return ()
 

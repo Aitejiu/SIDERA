@@ -79,6 +79,21 @@ export type AcceptanceBasisResponse = {
   acceptance_basis_hash: string;
 };
 
+const RESULT_REFRESH_INTERVAL_MS = 1_000;
+
+export function resultRefreshInterval(
+  view: TaskResultOverview | undefined,
+): number | false {
+  if (view === undefined) return false;
+  if (["applying", "finalizing", "integrating", "reworking", "verifying"].includes(view.result_stage)) {
+    return RESULT_REFRESH_INTERVAL_MS;
+  }
+  if (view.current_candidate === null && view.result_stage !== "completed") {
+    return RESULT_REFRESH_INTERVAL_MS;
+  }
+  return false;
+}
+
 export function taskResultsQueryKey(workspaceId: string, rootId: string) {
   return ["task-results", workspaceId, rootId] as const;
 }

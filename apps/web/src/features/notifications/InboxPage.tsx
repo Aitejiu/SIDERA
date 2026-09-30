@@ -32,6 +32,7 @@ export function InboxPage() {
   const [category, setCategory] = useState<NotificationThreadCategory>("action");
   const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
   const [commandLabel, setCommandLabel] = useState<string | null>(null);
+  const [lastCommandLabel, setLastCommandLabel] = useState<string | null>(null);
   const summaryQuery = useQuery({
     queryKey: notificationSummaryQueryKey(workspaceId),
     queryFn: ({ signal }) => getNotificationSummary(workspaceId, signal),
@@ -89,6 +90,7 @@ export function InboxPage() {
 
   const runCommand = (label: string, command: Parameters<typeof executeNotificationCommand>[0]) => {
     setCommandLabel(label);
+    setLastCommandLabel(label);
     commandMutation.mutate(command);
   };
 
@@ -263,7 +265,7 @@ export function InboxPage() {
       {commandMutation.isSuccess ? (
         <div className="notification-inbox__command-success" role="status">
           <CheckCircle2 size={15} aria-hidden="true" />
-          <span>{commandLabel ?? "操作"}已提交</span>
+          <span>{lastCommandLabel ?? commandLabel ?? "操作"}已提交</span>
         </div>
       ) : null}
     </section>

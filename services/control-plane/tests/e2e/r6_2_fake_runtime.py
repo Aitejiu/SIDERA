@@ -428,6 +428,7 @@ class FakeHandoffRuntime:
         now: datetime,
         fault: FaultPoint | str | None = None,
         distinct_adapter_definitions: bool = False,
+        prime_source_session: bool = True,
     ) -> None:
         self.database = database
         self.workspace_id = workspace_id
@@ -527,7 +528,8 @@ class FakeHandoffRuntime:
                 ),
             ),
         )
-        self._prime_source_session()
+        if prime_source_session:
+            self._prime_source_session()
 
     def prepare_handoff(self, target_worker_id: UUID | None = None) -> Any:
         target_worker_id = target_worker_id or self.fixture.target_worker_ids[0]
@@ -867,9 +869,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--until-unknown", action="store_true")
     parser.add_argument("--until-converged", action="store_true")
+    parser.add_argument(
+        "--after-restart",
+        action="store_true",
+        help="rehydrate a blocked transition after a controlled process restart",
+    )
     args = parser.parse_args(argv)
     selected_modes = sum(
-        bool(value) for value in (args.once, args.until_unknown, args.until_converged)
+        bool(value)
+        for value in (
+            args.once,
+            args.until_unknown,
+            args.until_converged,
+            args.after_restart,
+        )
     )
     if selected_modes > 1:
         parser.error("--once, --until-unknown and --until-converged are mutually exclusive")
@@ -898,6 +911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace_id,
             fixture,
             now=datetime.now(UTC),
+            prime_source_session=not args.after_restart,
         )
         with runtime.uow_factory() as uow:
             transition = uow.handoff_transitions.get_active_for_worker_item(
@@ -906,7 +920,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if transition is None:
             raise RuntimeError("G4 workspace has no active handoff transition")
-        if args.until_unknown:
+        if args.after_restart:
+            runtime.run_once()
+            transition = runtime._transition(transition.id)
+            if transition.status.value != "blocked_unknown":
+                raise RuntimeError(
+                    "controlled restart must leave the handoff blocked_unknown"
+                )
+            external_calls = [
+                {"operation": operation, "target": str(target)}
+                for operation, target in runtime.adapter.calls
+            ]
+        elif args.until_unknown:
             transition = runtime.run_until_unknown(transition.id)
             inspection = runtime.recovery.inspect_unknown(
                 transition=transition,
@@ -929,6 +954,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "transition_status": transition.status.value,
                     "phase": transition.phase.value,
                     "logical_attempt": transition.logical_attempt,
+                    "blocked_operation_id": (
+                        str(transition.blocked_operation_id)
+                        if transition.blocked_operation_id is not None
+                        else None
+                    ),
+                    "external_handoff_calls": external_calls
+                    if args.after_restart
+                    else None,
                 },
                 sort_keys=True,
                 separators=(",", ":"),

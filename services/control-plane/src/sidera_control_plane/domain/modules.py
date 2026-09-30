@@ -121,6 +121,7 @@ class WorkerAdapterCapabilityProfile:
     handoff_inspection: bool = False
     code_result_versions: tuple[int, ...] = ()
     verification_versions: tuple[int, ...] = ()
+    turn_completion_versions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -212,6 +213,13 @@ class WorkerAdapterCapabilityProfile:
             "verification_versions",
             _positive_version_tuple(self.verification_versions, "verification_versions"),
         )
+        object.__setattr__(
+            self,
+            "turn_completion_versions",
+            _positive_version_tuple(
+                self.turn_completion_versions, "turn_completion_versions"
+            ),
+        )
 
     def supports_context_package_version(self, version: int) -> bool:
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
@@ -222,6 +230,11 @@ class WorkerAdapterCapabilityProfile:
         if version == 1 and not self.context_package_versions:
             return True
         return version in self.context_package_versions
+
+    def supports_turn_completion_version(self, version: int) -> bool:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValidationError("turn completion version must be positive")
+        return version in self.turn_completion_versions
 
     def context_versions_compatible_with(
         self, observed: "WorkerAdapterCapabilityProfile"

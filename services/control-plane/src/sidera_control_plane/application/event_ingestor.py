@@ -15,6 +15,9 @@ from sidera_control_plane.application.result_source_fence import (
 from sidera_control_plane.application.result_verification import (
     record_verification_observation,
 )
+from sidera_control_plane.application.worker_completion import (
+    trusted_terminal_outcome,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -356,24 +359,10 @@ class ArtifactRegistry:
         return ArtifactRegistrationReport(tuple(artifacts), tuple(claims))
 
 
-_TERMINAL_EVENT_OUTCOMES = {
-    "execution.succeeded": "succeeded",
-    "execution.completed": "succeeded",
-    "execution.failed": "failed",
-    "execution.canceled": "canceled",
-    "execution.cancelled": "canceled",
-    "session.succeeded": "succeeded",
-    "session.completed": "succeeded",
-    "session.failed": "failed",
-    "session.canceled": "canceled",
-    "session.cancelled": "canceled",
-}
-
-
 def _terminal_observation(
     event: AdapterEvent,
 ) -> TerminalEventObservation | None:
-    outcome = _TERMINAL_EVENT_OUTCOMES.get(event.event_type.strip().lower())
+    outcome = trusted_terminal_outcome(event.event_type)
     if outcome is None:
         return None
     return TerminalEventObservation(

@@ -6,6 +6,9 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from sidera_control_plane.application.result_input_sources import (
+    order_code_result_dependency_closure,
+)
 from sidera_control_plane.domain.artifacts import EvidenceClaimStatus
 from sidera_control_plane.domain.code_results import (
     CodeInputManifestV1,
@@ -77,16 +80,22 @@ def build_code_input_manifest(
         ):
             raise ValidationError("code input snapshot scope does not match selection")
         snapshots_by_execution[snapshot.execution_id] = snapshot
-    if set(snapshots_by_execution) != selected_execution_ids:
-        raise ValidationError("code input snapshots do not exactly match selection")
-
-    ordered_snapshots: list[CodeResultSnapshotV1] = []
-    seen_execution_ids: set[UUID] = set()
-    for source in selected_sources:
-        if source.effective_execution_id in seen_execution_ids:
-            continue
-        seen_execution_ids.add(source.effective_execution_id)
-        ordered_snapshots.append(snapshots_by_execution[source.effective_execution_id])
+    if not selected_execution_ids.issubset(snapshots_by_execution):
+        raise ValidationError("code input snapshots are missing a selected source")
+    direct_snapshots = tuple(
+        snapshots_by_execution[source.effective_execution_id]
+        for source in selected_sources
+    )
+    try:
+        ordered_snapshots = order_code_result_dependency_closure(
+            direct_snapshots=direct_snapshots,
+            snapshots=tuple(snapshots),
+            workspace_id=selection.workspace_id,
+            root_task_id=selection.root_task_id,
+            repository_ref=repository_ref,
+        )
+    except ValueError as exc:
+        raise ValidationError("code input snapshots do not match dependency closure") from exc
 
     sources = tuple(
         CodeInputSourceV1(
@@ -315,6 +324,11 @@ def build_hard_input_selections(
         key=lambda item: str(item.upstream_request_id),
     )
     for dependency in dependencies:
+        if not (
+            dependency.required_artifact_refs
+            or dependency.required_evidence_refs
+        ):
+            continue
         upstream = requests.get(dependency.upstream_request_id)
         if upstream is None:
             raise ValueError("hard input source request is missing")

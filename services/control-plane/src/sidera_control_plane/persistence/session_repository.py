@@ -25,6 +25,20 @@ class SessionRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def list_active(self, workspace_id: UUID) -> tuple[ExecutionSession, ...]:
+        rows = self._session.scalars(
+            select(ExecutionSessionModel)
+            .where(
+                ExecutionSessionModel.workspace_id == workspace_id,
+                ExecutionSessionModel.status == ExecutionSessionStatus.ACTIVE.value,
+            )
+            .order_by(
+                ExecutionSessionModel.last_activity_at.asc(),
+                ExecutionSessionModel.id.asc(),
+            )
+        ).all()
+        return tuple(_to_domain_session(row) for row in rows)
+
     def get_active_for_execution(
         self, execution_id: UUID, *, for_update: bool = False
     ) -> ExecutionSession | None:
