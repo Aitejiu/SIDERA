@@ -66,6 +66,24 @@ def make_credential(**overrides: object) -> CredentialMetadata:
     return CredentialMetadata(**values)  # type: ignore[arg-type]
 
 
+def make_connection_summary(**overrides: object) -> ConnectionSummary:
+    values: dict[str, object] = {
+        "workspace_id": WORKSPACE_ID,
+        "connection_id": CONNECTION_ID,
+        "revision": 1,
+        "name": "Primary",
+        "provider_id": "example_provider-1",
+        "protocol": "openai_compatible",
+        "base_url": "https://api.example.test/v1",
+        "network_scope": "public",
+        "allowed_roles": frozenset({"main_agent"}),
+        "credential_id": CREDENTIAL_ID,
+        "availability": "configured",
+    }
+    values.update(overrides)
+    return ConnectionSummary(**values)  # type: ignore[arg-type]
+
+
 def test_connection_revision_is_immutable() -> None:
     connection = make_connection()
 
@@ -324,6 +342,16 @@ def test_public_summaries_are_distinct_secret_free_contracts() -> None:
     assert "secret" not in {item.name for item in fields(CredentialSummary)}
     assert ConnectionSummary is not ResolvedConnection
     assert CredentialSummary is not CredentialMetadata
+
+
+@pytest.mark.parametrize("availability", ["connected", "", None, []])
+def test_connection_summary_rejects_availability_outside_fixed_vocabulary(
+    availability: object,
+) -> None:
+    with pytest.raises(ConfigurationError) as rejected:
+        make_connection_summary(availability=availability)
+
+    assert rejected.value.code == "invalid_configuration"
 
 
 def test_credential_summary_cannot_replace_itself() -> None:

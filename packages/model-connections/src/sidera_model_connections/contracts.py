@@ -18,6 +18,9 @@ CredentialStatus = Literal["pending", "active", "revoked", "failed"]
 CredentialWriteStatus = Literal["pending", "completed", "failed", "unknown"]
 ProtocolName = Literal["openai_compatible"]
 NetworkScope = Literal["public", "loopback"]
+ConnectionAvailability = Literal[
+    "configured", "credential_unresolved", "credential_revoked"
+]
 
 _ROLES = frozenset(Role.__args__)
 _CREDENTIAL_SOURCES = frozenset(CredentialSource.__args__)
@@ -25,6 +28,7 @@ _CREDENTIAL_STATUSES = frozenset(CredentialStatus.__args__)
 _CREDENTIAL_WRITE_STATUSES = frozenset(CredentialWriteStatus.__args__)
 _PROTOCOLS = frozenset(ProtocolName.__args__)
 _NETWORK_SCOPES = frozenset(NetworkScope.__args__)
+_CONNECTION_AVAILABILITIES = frozenset(ConnectionAvailability.__args__)
 _PROVIDER_ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 
@@ -255,7 +259,7 @@ class ConnectionSummary:
     network_scope: NetworkScope
     allowed_roles: frozenset[Role]
     credential_id: UUID
-    availability: str
+    availability: ConnectionAvailability
 
     def __post_init__(self) -> None:
         _require_uuid(self.workspace_id)
@@ -276,7 +280,11 @@ class ConnectionSummary:
         _require_text(self.base_url)
         _require_role_set(self.allowed_roles)
         _require_uuid(self.credential_id)
-        _require_text(self.availability)
+        if (
+            not isinstance(self.availability, str)
+            or self.availability not in _CONNECTION_AVAILABILITIES
+        ):
+            _invalid()
 
 
 @dataclass(frozen=True, slots=True)
