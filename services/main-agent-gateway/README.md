@@ -6,7 +6,33 @@ operations under `/main-agent/v1` and keeps provider credentials server-side.
 
 ## Local configuration
 
-Required settings use the `SIDERA_MAIN_AGENT_` environment prefix:
+Control Plane-only use does not require starting this Gateway; see the
+[Control Plane README](../control-plane/README.md). The base Gateway project
+install contains no optional adapter SDKs. If running the Gateway without an
+adapter, select the explicit unconfigured mode and provide its required
+workspace ID:
+
+```bash
+SIDERA_MAIN_AGENT_ADAPTER_KIND=unconfigured \
+SIDERA_MAIN_AGENT_SIDERA_WORKSPACE_ID=20000000-0000-0000-0000-000000000002 \
+  uv run --project services/main-agent-gateway uvicorn \
+  sidera_main_agent_gateway.api.app:create_app --factory \
+  --host 127.0.0.1 --port 8010
+```
+
+The complete product install includes both optional adapters. Stack startup,
+release checks, and capability verification select them explicitly:
+
+```bash
+uv run --project services/main-agent-gateway --extra akashic --extra demo \
+  uvicorn sidera_main_agent_gateway.api.app:create_app --factory \
+  --host 127.0.0.1 --port 8010
+```
+
+The extras make the Akashic and demo adapters available; they do not configure
+provider credentials or change the selected adapter profile.
+
+Akashic adapter settings use the `SIDERA_MAIN_AGENT_` environment prefix:
 
 ```text
 SIDERA_MAIN_AGENT_AKASHIC_ENDPOINT=/tmp/akashic/control.sock
@@ -18,11 +44,12 @@ The service defaults to `127.0.0.1:8010`. The Web application should call the
 same-origin `/main-agent/v1` paths through the local development proxy. The
 browser must not receive the provider endpoint or workspace token.
 
-Run locally with:
+Run the complete product locally with:
 
 ```bash
-uv run --project services/main-agent-gateway uvicorn \
-  sidera_main_agent_gateway.api.app:create_app --factory
+uv run --project services/main-agent-gateway --extra akashic --extra demo uvicorn \
+  sidera_main_agent_gateway.api.app:create_app --factory \
+  --host 127.0.0.1 --port 8010
 ```
 
 ## Real vertical gate
@@ -46,7 +73,7 @@ SIDERA_REAL_GATE_HELPER=/absolute/path/to/identity-checked-gate-helper
 Run the collection gate with:
 
 ```bash
-uv run --project services/main-agent-gateway pytest \
+uv run --project services/main-agent-gateway --extra akashic --extra demo pytest \
   services/main-agent-gateway/tests/integration/test_real_vertical_loop.py -q
 ```
 

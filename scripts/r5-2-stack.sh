@@ -373,7 +373,8 @@ start_stack() {
     SIDERA_MAIN_AGENT_AKASHIC_WORKSPACE_TOKEN="$SIDERA_AKASHIC_WORKSPACE_TOKEN" \
     SIDERA_MAIN_AGENT_SIDERA_WORKSPACE_ID="$SIDERA_WORKSPACE_ID" \
     SIDERA_MAIN_AGENT_WEB_ORIGIN="$SIDERA_WEB_URL" \
-    "$uv" run --project "$REPO_ROOT/services/main-agent-gateway" uvicorn \
+    "$uv" run --project "$REPO_ROOT/services/main-agent-gateway" \
+    --extra akashic --extra demo uvicorn \
     sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 --port "$gateway_port"
   if ! wait_for_health "$GATEWAY_COMPONENT"; then
     stop_started_components

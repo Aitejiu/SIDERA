@@ -185,10 +185,13 @@ run_step 'Akashic plugin pyright' uv run --project "$REPO_ROOT/integrations/akas
   pyright -p "$REPO_ROOT/integrations/akashic"
 
 run_step 'Gateway tests' uv run --project "$REPO_ROOT/services/main-agent-gateway" \
+  --extra akashic --extra demo \
   pytest "$REPO_ROOT/services/main-agent-gateway/tests" -q
 run_step 'Gateway ruff' uv run --project "$REPO_ROOT/services/main-agent-gateway" \
+  --extra akashic --extra demo \
   ruff check "$REPO_ROOT/services/main-agent-gateway"
 run_step 'Gateway pyright' uv run --project "$REPO_ROOT/services/main-agent-gateway" \
+  --extra akashic --extra demo \
   pyright "$REPO_ROOT/services/main-agent-gateway"
 
 run_step 'Web unit' npm --prefix "$REPO_ROOT/apps/web" test
@@ -204,6 +207,7 @@ run_step 'Web deterministic E2E' env \
   npm --prefix "$REPO_ROOT/apps/web" run test:e2e
 
 run_step 'real Gateway loop' uv run --project "$REPO_ROOT/services/main-agent-gateway" \
+  --extra akashic --extra demo \
   pytest "$REPO_ROOT/services/main-agent-gateway/tests/integration/test_real_vertical_loop.py" -q
 run_step 'real Web journey' env \
   SIDERA_E2E_CONTROL_PLANE_PORT=8000 \

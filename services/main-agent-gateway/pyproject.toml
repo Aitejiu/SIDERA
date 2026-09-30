@@ -7,14 +7,16 @@ name = "sidera-main-agent-gateway"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "akashic-agent-sdk",
     "fastapi>=0.134,<1",
     "pydantic>=2.11,<3",
     "pydantic-settings>=2.10,<3",
-    "sidera-akashic-task-bridge",
     "sidera-runtime-guard",
     "uvicorn>=0.41,<1",
 ]
+
+[project.optional-dependencies]
+akashic = ["akashic-agent-sdk"]
+demo = ["sidera-akashic-task-bridge"]
 
 [dependency-groups]
 dev = [

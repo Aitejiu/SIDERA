@@ -282,7 +282,8 @@ run_step 'control-plane Ruff' safe_local_env uv run --project "$CONTROL_PLANE_RO
 run_step 'control-plane Pyright' safe_local_env uv run --project "$CONTROL_PLANE_ROOT" \
   pyright --project "$CONTROL_PLANE_ROOT/pyproject.toml"
 run_step 'main-agent gateway unit and contract tests' safe_local_env \
-  uv run --project "$REPO_ROOT/services/main-agent-gateway" pytest -q \
+  uv run --project "$REPO_ROOT/services/main-agent-gateway" \
+  --extra akashic --extra demo pytest -q \
   "$REPO_ROOT/services/main-agent-gateway/tests/unit"
 
 run_step 'knowledge service unit tests' safe_local_env \

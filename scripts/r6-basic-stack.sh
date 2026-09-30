@@ -1114,7 +1114,12 @@ start_command() {
       module=$(printf '%s' "$component" | tr '-' '_')
       run_component "$component" "$UV_BIN" run --project "$CP_ROOT" python -u -m "sidera_control_plane.$module"
       ;;
-    main-agent-gateway) run_component "$component" "$UV_BIN" run --project "$MG_ROOT" uvicorn sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 --port "$(url_port "$GATEWAY_URL")" ;;
+    main-agent-gateway)
+      run_component "$component" "$UV_BIN" run --project "$MG_ROOT" \
+        --extra akashic --extra demo uvicorn \
+        sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 \
+        --port "$(url_port "$GATEWAY_URL")"
+      ;;
     web)
       web_port=$(url_port "$WEB_URL")
       run_component "$component" /bin/sh -c \

@@ -14,7 +14,7 @@ _LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SIDERA_MAIN_AGENT_")
 
-    adapter_kind: Literal["akashic", "interview-demo"] = "akashic"
+    adapter_kind: Literal["akashic", "interview-demo", "unconfigured"] = "akashic"
     restore_read_only: bool = False
     host: str = "127.0.0.1"
     port: int = Field(default=8010, ge=1, le=65535)

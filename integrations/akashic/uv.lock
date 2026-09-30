@@ -450,6 +450,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "sidera-control-plane-client" },
 ]
 
 [package.dev-dependencies]
@@ -467,6 +468,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "sidera-control-plane-client", editable = "../../packages/control-plane-client" },
 ]
 
 [package.metadata.requires-dev]
@@ -476,6 +478,27 @@ dev = [
     { name = "json-repair", specifier = ">=0.58,<1" },
     { name = "openai", specifier = ">=2,<3" },
     { name = "pyright", specifier = ">=1.1.403,<2" },
+    { name = "pytest", specifier = ">=9,<10" },
+    { name = "ruff", specifier = ">=0.12,<1" },
+]
+
+[[package]]
+name = "sidera-control-plane-client"
+version = "0.1.0"
+source = { editable = "../../packages/control-plane-client" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "pydantic", specifier = ">=2.11,<3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
     { name = "pytest", specifier = ">=9,<10" },
     { name = "ruff", specifier = ">=0.12,<1" },
 ]

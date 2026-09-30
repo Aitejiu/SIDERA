@@ -414,12 +414,14 @@ source = { editable = "../../integrations/akashic" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "sidera-control-plane-client" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "sidera-control-plane-client", editable = "../../packages/control-plane-client" },
 ]
 
 [package.metadata.requires-dev]
@@ -434,17 +436,44 @@ dev = [
 ]
 
 [[package]]
+name = "sidera-control-plane-client"
+version = "0.1.0"
+source = { editable = "../../packages/control-plane-client" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "pydantic", specifier = ">=2.11,<3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9,<10" },
+    { name = "ruff", specifier = ">=0.12,<1" },
+]
+
+[[package]]
 name = "sidera-main-agent-gateway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "akashic-agent-sdk" },
     { name = "fastapi" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "sidera-akashic-task-bridge" },
     { name = "sidera-runtime-guard" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+akashic = [
+    { name = "akashic-agent-sdk" },
+]
+demo = [
+    { name = "sidera-akashic-task-bridge" },
 ]
 
 [package.dev-dependencies]
@@ -459,14 +488,15 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "akashic-agent-sdk", editable = "../../akashic-agent/sdk/python" },
+    { name = "akashic-agent-sdk", marker = "extra == 'akashic'", editable = "../../akashic-agent/sdk/python" },
     { name = "fastapi", specifier = ">=0.134,<1" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
-    { name = "sidera-akashic-task-bridge", editable = "../../integrations/akashic" },
+    { name = "sidera-akashic-task-bridge", marker = "extra == 'demo'", editable = "../../integrations/akashic" },
     { name = "sidera-runtime-guard", editable = "../../packages/runtime-guard" },
     { name = "uvicorn", specifier = ">=0.41,<1" },
 ]
+provides-extras = ["akashic", "demo"]
 
 [package.metadata.requires-dev]
 dev = [

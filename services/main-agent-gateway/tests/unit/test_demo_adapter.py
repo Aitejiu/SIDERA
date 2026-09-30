@@ -219,13 +219,13 @@ def test_demo_gateway_does_not_construct_the_akashic_adapter(
 ) -> None:
     from fastapi.testclient import TestClient
 
-    import sidera_main_agent_gateway.api.app as app_module
+    from sidera_main_agent_gateway import composition
     from sidera_main_agent_gateway.api.app import create_app
 
     manifest = _manifest(tmp_path)
     monkeypatch.setattr(
-        app_module,
-        "AkashicAdapter",
+        composition,
+        "_build_akashic",
         lambda *_args, **_kwargs: pytest.fail("demo gateway constructed Akashic"),
     )
 

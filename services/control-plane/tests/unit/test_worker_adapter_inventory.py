@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
+from inspect import Parameter, signature
 from pathlib import Path
 from sys import executable
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -71,6 +73,14 @@ def test_inventory_and_factories_share_one_registration_source(
         "interview-demo-worker",
         "dsh-acp",
     }
+    assert tuple(item.adapter_type for item in registrations) == (
+        "fake",
+        "opencode",
+        "opencode-acp",
+        "local_verification",
+        "interview-demo-worker",
+        "dsh-acp",
+    )
     assert all(item.factory_key for item in registrations)
     registration_by_type = {item.adapter_type: item for item in registrations}
     assert "turn-completion:v1" in registration_by_type["opencode"].capability_versions
@@ -78,11 +88,67 @@ def test_inventory_and_factories_share_one_registration_source(
     assert "turn-completion:v1" not in registration_by_type["dsh-acp"].capability_versions
 
 
+def test_gateway_exports_are_the_composition_inventory() -> None:
+    from sidera_control_plane.composition import worker_adapters
+
+    assert gateway_worker.WorkerAdapterRegistration is (
+        worker_adapters.WorkerAdapterRegistration
+    )
+    assert gateway_worker.worker_adapter_inventory is (
+        worker_adapters.worker_adapter_inventory
+    )
+    assert gateway_worker.registered_worker_adapter_types is (
+        worker_adapters.registered_worker_adapter_types
+    )
+    assert gateway_worker.build_worker_adapter_factories is (
+        worker_adapters.build_worker_adapter_factories
+    )
+    assert gateway_worker.worker_adapter_inventory() is (
+        worker_adapters.worker_adapter_inventory()
+    )
+
+
+def test_worker_factory_keeps_its_compatibility_signature() -> None:
+    from sidera_control_plane.adapters.git_workspace import (
+        GitWorktreeWorkspaceManager,
+    )
+    from sidera_control_plane.application.ports import WorkerAdapter
+    from sidera_control_plane.application.result_ports import LocalCheckRunnerPort
+    from sidera_control_plane.composition import worker_adapters
+    from sidera_control_plane.config import Settings
+    from sidera_control_plane.domain.modules import ModuleInstance
+
+    factory = worker_adapters.build_worker_adapter_factories
+    parameters = signature(factory).parameters
+
+    assert tuple(parameters) == (
+        "settings",
+        "workspace_manager",
+        "check_runner",
+        "adapter_cache",
+    )
+    assert parameters["settings"].annotation is Settings
+    assert parameters["settings"].default is Parameter.empty
+    assert parameters["workspace_manager"].annotation is GitWorktreeWorkspaceManager
+    assert parameters["workspace_manager"].kind is Parameter.KEYWORD_ONLY
+    assert parameters["check_runner"].annotation == LocalCheckRunnerPort | None
+    assert parameters["check_runner"].default is None
+    assert parameters["adapter_cache"].annotation == (
+        dict[tuple[UUID, int], WorkerAdapter] | None
+    )
+    assert parameters["adapter_cache"].default is None
+    assert signature(factory).return_annotation == dict[
+        str, Callable[[ModuleInstance], WorkerAdapter]
+    ]
+
+
 def test_reading_inventory_does_not_construct_or_start_an_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from sidera_control_plane.composition import worker_adapters
+
     monkeypatch.setattr(
-        gateway_worker,
+        worker_adapters,
         "OpenCodeACPAdapter",
         lambda **_: pytest.fail("inventory must not construct OpenCode"),
     )
@@ -91,6 +157,72 @@ def test_reading_inventory_does_not_construct_or_start_an_adapter(
 
     assert registrations
     assert all(item.adapter_type != "fake" or item.is_fake for item in registrations)
+
+
+def test_adapter_cache_is_owned_and_keyed_by_instance_and_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from sidera_control_plane.adapters.acp_process import ACPProcessTransport
+    from sidera_control_plane.application.ports import WorkerAdapter
+    from sidera_control_plane.composition import worker_adapters
+
+    def fail_if_started(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("constructing an adapter must not start ACP")
+
+    monkeypatch.setattr(ACPProcessTransport, "spawn", staticmethod(fail_if_started))
+    settings = _settings(tmp_path)
+    workspace_manager = cast(Any, SimpleNamespace())
+    first_owner_cache: dict[tuple[UUID, int], WorkerAdapter] = {}
+    second_owner_cache: dict[tuple[UUID, int], WorkerAdapter] = {}
+    first_owner_factories = worker_adapters.build_worker_adapter_factories(
+        settings,
+        workspace_manager=workspace_manager,
+        adapter_cache=first_owner_cache,
+    )
+    second_owner_factories = worker_adapters.build_worker_adapter_factories(
+        settings,
+        workspace_manager=workspace_manager,
+        adapter_cache=second_owner_cache,
+    )
+    instance = _instance()
+
+    first = first_owner_factories["opencode"](instance)
+
+    assert first_owner_factories["opencode"](instance) is first
+    assert first_owner_factories["opencode-acp"](instance) is first
+    assert second_owner_factories["opencode"](instance) is not first
+    assert first_owner_factories["opencode"](replace(instance, id=uuid4())) is not first
+    assert first_owner_factories["opencode"](
+        replace(instance, config_version=instance.config_version + 1)
+    ) is not first
+
+
+def test_worker_composition_validates_demo_manifest_from_repository_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from sidera_control_plane.composition import worker_adapters
+
+    manifest = SimpleNamespace(scenario="other")
+    roots: list[Path] = []
+    monkeypatch.setattr(worker_adapters, "load_manifest", lambda _path: manifest)
+    monkeypatch.setattr(
+        worker_adapters,
+        "validate_manifest",
+        lambda _manifest, root: roots.append(root),
+    )
+    settings = _settings(tmp_path)
+    settings.interview_demo_manifest = tmp_path / "manifest.json"
+
+    worker_adapters.build_worker_adapter_factories(
+        settings,
+        workspace_manager=cast(Any, SimpleNamespace()),
+    )
+
+    repository_root = Path(__file__).resolve().parents[4]
+    assert (repository_root / "services/control-plane/pyproject.toml").is_file()
+    assert roots == [repository_root]
 
 
 def test_inventory_keeps_completion_policy_explicit_until_instance_opt_in() -> None:
@@ -121,6 +253,7 @@ def test_adapter_cache_preserves_each_configuration_version(tmp_path: Path) -> N
     assert first._model == "test/model-a"
     assert second._model == "test/model-b"
     assert factories["opencode"](original) is first
+    assert factories["opencode-acp"](original) is first
     assert factories["opencode"](revised) is second
 
 

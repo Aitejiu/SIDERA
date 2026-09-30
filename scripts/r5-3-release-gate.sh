@@ -296,7 +296,8 @@ run_real_vertical_loop() {
     "$CONTROL_PLANE_ROOT/tests/integration/test_r5_1_real_planning_loop.py" -q || return 1
   run_safe SIDERA_DATABASE_URL="$CP_TEST_DATABASE" \
     SIDERA_RUN_REAL_MAIN_AGENT=1 \
-    "$UV_COMMAND" run --project "$GATEWAY_ROOT" pytest -m integration \
+    "$UV_COMMAND" run --project "$GATEWAY_ROOT" \
+    --extra akashic --extra demo pytest -m integration \
     "$GATEWAY_ROOT/tests/integration/test_real_vertical_loop.py" -q
 }
 
@@ -411,12 +412,14 @@ run_step 'Akashic tool contract' \
   "$AKASHIC_ROOT/tests/test_tools.py" -q
 
 run_step 'Gateway tests' \
-  "$UV_COMMAND" run --project "$GATEWAY_ROOT" pytest \
+  "$UV_COMMAND" run --project "$GATEWAY_ROOT" --extra akashic --extra demo pytest \
   "$GATEWAY_ROOT/tests/unit" "$GATEWAY_ROOT/tests/integration" -q
 run_step 'Gateway ruff' \
-  "$UV_COMMAND" run --project "$GATEWAY_ROOT" ruff check "$GATEWAY_ROOT"
+  "$UV_COMMAND" run --project "$GATEWAY_ROOT" \
+  --extra akashic --extra demo ruff check "$GATEWAY_ROOT"
 run_step 'Gateway pyright' \
-  "$UV_COMMAND" run --project "$GATEWAY_ROOT" pyright "$GATEWAY_ROOT"
+  "$UV_COMMAND" run --project "$GATEWAY_ROOT" \
+  --extra akashic --extra demo pyright "$GATEWAY_ROOT"
 
 run_step 'Web unit' "$NPM_COMMAND" --prefix "$WEB_ROOT" test
 run_step 'Web lint' "$NPM_COMMAND" --prefix "$WEB_ROOT" run lint

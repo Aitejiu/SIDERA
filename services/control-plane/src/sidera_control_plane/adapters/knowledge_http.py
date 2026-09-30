@@ -8,6 +8,9 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
+from sidera_control_plane.application.knowledge_errors import (
+    KnowledgeAdapterError as KnowledgeAdapterError,  # noqa: PLC0414
+)
 from sidera_control_plane.application.ports import (
     ExactRevisionManifest,
     ExactRevisionSection,
@@ -19,23 +22,6 @@ from sidera_control_plane.application.ports import (
     KnowledgeSourceMetadata,
     SearchHit,
 )
-
-
-class KnowledgeAdapterError(RuntimeError):
-    """A safe, typed failure while calling the Knowledge Service."""
-
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        *,
-        temporary: bool,
-        status_code: int | None = None,
-    ) -> None:
-        self.code = code
-        self.temporary = temporary
-        self.status_code = status_code
-        super().__init__(message)
 
 
 class _StrictModel(BaseModel):

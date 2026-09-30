@@ -250,9 +250,12 @@ def test_app_selects_interview_demo_adapter_from_explicit_settings(
             super().__init__()
             constructed.append(settings)
 
+    def build_demo(settings: Settings, _acceptance_guard: object) -> DemoAdapter:
+        return DemoAdapter(settings)
+
     monkeypatch.setattr(
-        "sidera_main_agent_gateway.api.app.DemoMainAgentAdapter",
-        DemoAdapter,
+        "sidera_main_agent_gateway.composition._build_demo",
+        build_demo,
     )
     settings = Settings(
         adapter_kind="interview-demo",

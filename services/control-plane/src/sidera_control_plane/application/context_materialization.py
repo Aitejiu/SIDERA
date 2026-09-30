@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sidera_control_plane.adapters.knowledge_http import KnowledgeAdapterError
+from sidera_control_plane.application.knowledge_errors import KnowledgeAdapterError
 from sidera_control_plane.application.ports import (
     ExactSectionBody,
     ExactSectionRef,

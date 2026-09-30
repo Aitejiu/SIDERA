@@ -564,6 +564,366 @@ def test_client_uses_governance_principal_only_for_allowlisted_commands() -> Non
     }
 
 
+def test_governance_command_requires_an_explicit_host_principal() -> None:
+    client = ControlPlaneClient(make_config())
+    governance = CommandIntent(
+        command_type="PauseCollaborationRelease",
+        target_type="worker_item",
+        target_id=UUID("00000000-0000-0000-0000-000000000023"),
+        expected_version=7,
+        payload={},
+    )
+    ordinary = CommandIntent(
+        command_type="SubmitPlanningRequest",
+        target_type="workspace",
+        target_id=None,
+        expected_version=None,
+        payload={"objective": "Build an API"},
+    )
+    with pytest.raises(ControlPlaneRejected) as error:
+        client.build_intent_request_json(governance)
+    planning_body = client.build_intent_request_json(ordinary)
+    asyncio.run(client.close())
+
+    assert error.value.code == "governance_principal_unavailable"
+    assert planning_body["actor"] == {
+        "type": "integration",
+        "id": "akashic-task-bridge",
+    }
+
+
+def test_public_contracts_and_errors_are_direct_bridge_aliases() -> None:
+    from sidera_control_plane_client import (
+        CommandEnvelope as PublicEnvelope,
+    )
+    from sidera_control_plane_client import (
+        CommandExecution as PublicExecution,
+    )
+    from sidera_control_plane_client import (
+        CommandIntent as PublicIntent,
+    )
+    from sidera_control_plane_client import (
+        CommandResponse as PublicResponse,
+    )
+    from sidera_control_plane_client import (
+        CommandResultUnknown as PublicUnknown,
+    )
+    from sidera_control_plane_client import (
+        CommandStatus as PublicStatus,
+    )
+    from sidera_control_plane_client import (
+        ControlPlaneRejected as PublicRejected,
+    )
+    from sidera_control_plane_client import (
+        JsonValue as PublicJsonValue,
+    )
+    from sidera_control_plane_client import (
+        MalformedNotificationDelivery as PublicMalformedDelivery,
+    )
+    from sidera_control_plane_client import (
+        NotificationCategory as PublicNotificationCategory,
+    )
+    from sidera_control_plane_client import (
+        NotificationDeliveryEnvelope as PublicDeliveryEnvelope,
+    )
+    from sidera_control_plane_client import (
+        NotificationDeliveryErrorCode as PublicDeliveryErrorCode,
+    )
+    from sidera_control_plane_client import (
+        NotificationDeliverySettlement as PublicDeliverySettlement,
+    )
+    from sidera_control_plane_client import (
+        NotificationModuleSummary as PublicModuleSummary,
+    )
+    from sidera_control_plane_client import (
+        NotificationReadiness as PublicReadiness,
+    )
+    from sidera_control_plane_client import (
+        NotificationReadinessCheck as PublicReadinessCheck,
+    )
+    from sidera_control_plane_client import (
+        NotificationSummary as PublicNotificationSummaryFromClient,
+    )
+    from sidera_control_plane_client import (
+        NotificationThreadDetail as PublicThreadDetailFromClient,
+    )
+    from sidera_control_plane_client import (
+        NotificationThreadPage as PublicThreadPageFromClient,
+    )
+    from sidera_control_plane_client import (
+        ProjectionResyncRequired as PublicResync,
+    )
+    from sidera_control_plane_client import (
+        ProjectionStreamDisconnected as PublicDisconnected,
+    )
+    from sidera_control_plane_client import (
+        TransportUnavailable as PublicUnavailable,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationBusinessStatus as PublicNotificationBusinessStatus,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationCommandName as PublicNotificationCommandName,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationDelivery as PublicNotificationDelivery,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationFact as PublicNotificationFact,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationFactPage as PublicNotificationFactPage,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationOrganizationStatus as PublicNotificationOrganizationStatus,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationSummary as PublicNotificationSummary,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationThread as PublicNotificationThread,
+    )
+    from sidera_control_plane_client.contracts import (
+        NotificationThreadPage as PublicNotificationThreadPage,
+    )
+    from sidera_control_plane_client.contracts import (
+        ProjectionChange as PublicProjectionChange,
+    )
+    from sidera_control_plane_client.contracts import (
+        TaskResultOverviewView as PublicTaskResultOverviewView,
+    )
+
+    from sidera_task_bridge.client import (
+        CommandEnvelope as BridgeEnvelope,
+    )
+    from sidera_task_bridge.client import (
+        CommandExecution as BridgeExecution,
+    )
+    from sidera_task_bridge.client import (
+        CommandIntent as BridgeIntent,
+    )
+    from sidera_task_bridge.client import (
+        CommandResponse as BridgeResponse,
+    )
+    from sidera_task_bridge.client import (
+        CommandResultUnknown as BridgeUnknown,
+    )
+    from sidera_task_bridge.client import (
+        CommandStatus as BridgeStatus,
+    )
+    from sidera_task_bridge.client import (
+        ControlPlaneRejected as BridgeRejected,
+    )
+    from sidera_task_bridge.client import (
+        JsonValue as BridgeJsonValue,
+    )
+    from sidera_task_bridge.client import (
+        MalformedNotificationDelivery as BridgeMalformedDelivery,
+    )
+    from sidera_task_bridge.client import (
+        NotificationCategory as BridgeNotificationCategory,
+    )
+    from sidera_task_bridge.client import (
+        NotificationDeliveryEnvelope as BridgeDeliveryEnvelope,
+    )
+    from sidera_task_bridge.client import (
+        NotificationDeliveryErrorCode as BridgeDeliveryErrorCode,
+    )
+    from sidera_task_bridge.client import (
+        NotificationDeliverySettlement as BridgeDeliverySettlement,
+    )
+    from sidera_task_bridge.client import (
+        NotificationModuleSummary as BridgeModuleSummary,
+    )
+    from sidera_task_bridge.client import (
+        NotificationReadiness as BridgeReadiness,
+    )
+    from sidera_task_bridge.client import (
+        NotificationReadinessCheck as BridgeReadinessCheck,
+    )
+    from sidera_task_bridge.client import (
+        NotificationSummary as BridgeNotificationSummaryFromClient,
+    )
+    from sidera_task_bridge.client import (
+        NotificationThreadDetail as BridgeThreadDetailFromClient,
+    )
+    from sidera_task_bridge.client import (
+        NotificationThreadPage as BridgeThreadPageFromClient,
+    )
+    from sidera_task_bridge.client import (
+        ProjectionResyncRequired as BridgeResync,
+    )
+    from sidera_task_bridge.client import (
+        ProjectionStreamDisconnected as BridgeDisconnected,
+    )
+    from sidera_task_bridge.client import (
+        TransportUnavailable as BridgeUnavailable,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationBusinessStatus as BridgeNotificationBusinessStatus,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationCommandName as BridgeNotificationCommandName,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationDelivery as BridgeNotificationDelivery,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationFact as BridgeNotificationFact,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationFactPage as BridgeNotificationFactPage,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationOrganizationStatus as BridgeNotificationOrganizationStatus,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationSummary as BridgeNotificationSummary,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationThread as BridgeNotificationThread,
+    )
+    from sidera_task_bridge.contracts import (
+        NotificationThreadPage as BridgeNotificationThreadPage,
+    )
+    from sidera_task_bridge.contracts import (
+        ProjectionChange as BridgeProjectionChange,
+    )
+    from sidera_task_bridge.contracts import (
+        TaskResultOverviewView as BridgeTaskResultOverviewView,
+    )
+
+    assert PublicEnvelope is BridgeEnvelope
+    assert PublicIntent is BridgeIntent
+    assert PublicResponse is BridgeResponse
+    assert PublicExecution is BridgeExecution
+    assert PublicStatus is BridgeStatus
+    assert PublicUnknown is BridgeUnknown
+    assert PublicUnavailable is BridgeUnavailable
+    assert PublicResync is BridgeResync
+    assert PublicDisconnected is BridgeDisconnected
+    assert PublicRejected is BridgeRejected
+    assert PublicJsonValue is BridgeJsonValue
+    assert PublicMalformedDelivery is BridgeMalformedDelivery
+    assert PublicNotificationCategory is BridgeNotificationCategory
+    assert PublicDeliveryEnvelope is BridgeDeliveryEnvelope
+    assert PublicDeliveryErrorCode is BridgeDeliveryErrorCode
+    assert PublicDeliverySettlement is BridgeDeliverySettlement
+    assert PublicModuleSummary is BridgeModuleSummary
+    assert PublicReadiness is BridgeReadiness
+    assert PublicReadinessCheck is BridgeReadinessCheck
+    assert PublicNotificationSummaryFromClient is BridgeNotificationSummaryFromClient
+    assert PublicThreadDetailFromClient is BridgeThreadDetailFromClient
+    assert PublicThreadPageFromClient is BridgeThreadPageFromClient
+    assert PublicProjectionChange is BridgeProjectionChange
+    assert PublicTaskResultOverviewView is BridgeTaskResultOverviewView
+    assert PublicNotificationSummary is BridgeNotificationSummary
+    assert PublicNotificationBusinessStatus is BridgeNotificationBusinessStatus
+    assert PublicNotificationCommandName is BridgeNotificationCommandName
+    assert PublicNotificationDelivery is BridgeNotificationDelivery
+    assert PublicNotificationFact is BridgeNotificationFact
+    assert PublicNotificationFactPage is BridgeNotificationFactPage
+    assert PublicNotificationOrganizationStatus is BridgeNotificationOrganizationStatus
+    assert PublicNotificationThread is BridgeNotificationThread
+    assert PublicNotificationThreadPage is BridgeNotificationThreadPage
+
+
+def test_bridge_config_owns_host_claim_defaults_and_projection_limit() -> None:
+    from sidera_control_plane_client import ControlPlaneClientConfig
+
+    config = make_config(
+        notification_mode="gateway",
+        notification_channel_module_instance_id=UUID(
+            "00000000-0000-0000-0000-000000000034"
+        ),
+        notification_gateway_contract_versions=(2,),
+        notification_gateway_batch_size=7,
+        notification_gateway_lease_seconds=12,
+        notification_event_limit_bytes=8_192,
+    )
+    client = ControlPlaneClient(config)
+    try:
+        assert client._bridge_config is config
+        assert isinstance(client._config, ControlPlaneClientConfig)
+        assert client._config is not config
+        assert set(type(client._config).model_fields) == {
+            "control_plane_url",
+            "workspace_id",
+            "actor",
+            "connect_timeout_seconds",
+            "request_timeout_seconds",
+        }
+        assert client._projection_event_limit_bytes == 8_192
+    finally:
+        asyncio.run(client.close())
+
+
+def test_bridge_claim_defaults_use_host_values_and_explicit_values_win() -> None:
+    module_id = UUID("00000000-0000-0000-0000-000000000034")
+    override_module_id = UUID("00000000-0000-0000-0000-000000000035")
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(httpx.Response(200, content=request.content).json())
+        return httpx.Response(200, json={"deliveries": []})
+
+    config = make_config(
+        notification_mode="gateway",
+        notification_channel_module_instance_id=module_id,
+        notification_gateway_contract_versions=(2,),
+        notification_gateway_batch_size=7,
+        notification_gateway_lease_seconds=12,
+    )
+
+    async def scenario() -> None:
+        client = ControlPlaneClient(config, transport=httpx.MockTransport(handler))
+        await client.claim_notification_deliveries()
+        await client.claim_notification_deliveries(
+            module_instance_id=override_module_id,
+            supported_contract_versions=(1,),
+            batch_size=5,
+            lease_seconds=20,
+        )
+        await client.close()
+
+    asyncio.run(scenario())
+
+    assert bodies == [
+        {
+            "module_instance_id": str(module_id),
+            "supported_contract_versions": [2],
+            "batch_size": 7,
+            "lease_seconds": 12,
+        },
+        {
+            "module_instance_id": str(override_module_id),
+            "supported_contract_versions": [1],
+            "batch_size": 5,
+            "lease_seconds": 20,
+        },
+    ]
+
+
+def test_bridge_projection_stream_uses_host_event_limit() -> None:
+    from sidera_task_bridge.client import ProjectionResyncRequired
+
+    config = make_config(notification_event_limit_bytes=4_096)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data: " + b"x" * 8_192)
+
+    async def scenario() -> None:
+        client = ControlPlaneClient(config, transport=httpx.MockTransport(handler))
+        with pytest.raises(ProjectionResyncRequired) as error:
+            async for _change in client.iter_projection_changes(after=0):
+                pass
+        await client.close()
+        assert error.value.reason == "event_too_large"
+        assert error.value.last_confirmed_cursor == 0
+
+    asyncio.run(scenario())
+
+
 def test_client_maps_safe_conflict_details_without_raw_body() -> None:
     async def scenario() -> None:
         def handler(_request: httpx.Request) -> httpx.Response:

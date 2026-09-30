@@ -3,7 +3,16 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/sidera-r5-2-test.XXXXXX")
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+cleanup() {
+  if [ -f "${ENV_FILE:-}" ]; then
+    PATH="${FAKE_BIN:-/usr/bin:/bin}" \
+      SIDERA_R5_2_ENV_FILE="$ENV_FILE" \
+      SIDERA_R5_2_RUNTIME_DIR="${RUNTIME_DIR:-$TMP/runtime}" \
+      /bin/bash "$ROOT/scripts/r5-2-stack.sh" stop >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT HUP INT TERM
 
 FAKE_BIN="$TMP/bin"
 ENV_FILE="$TMP/r5-2.local.env"
@@ -12,7 +21,7 @@ mkdir -p "$FAKE_BIN" "$TMP/akashic"
 touch "$TMP/akashic/config.toml"
 
 make_fake_commands() {
-  printf '%s\n' '#!/bin/sh' 'if [ -n "${R5_2_GATE_LOG:-}" ]; then printf "uv %s\\n" "$*" >> "$R5_2_GATE_LOG"; fi' 'if [ "${R5_2_GATE_FAIL:-0}" = "1" ]; then' '  case "$*" in *services/control-plane/tests/unit*) exit 42 ;; esac' 'fi' 'case "${1:-}" in' '  --version) printf "uv 0.6.0\\n"; exit 0 ;;' 'esac' 'case "$*" in' '  *alembic*heads*) printf "0015_r5_1_1_worker_runtime_binding (head)\\n" ;;' '  *uvicorn*|*sidera_control_plane.planning_worker*) while :; do sleep 1; done ;;' 'esac' > "$FAKE_BIN/uv"
+  printf '%s\n' '#!/bin/sh' 'if [ -n "${R5_2_GATE_LOG:-}" ]; then printf "uv %s\\n" "$*" >> "$R5_2_GATE_LOG"; fi' 'if [ -n "${R5_2_UV_LOG:-}" ]; then printf "uv %s:adapter_kind=%s\\n" "$*" "${SIDERA_MAIN_AGENT_ADAPTER_KIND:-<unset>}" >> "$R5_2_UV_LOG"; fi' 'if [ "${R5_2_GATE_FAIL:-0}" = "1" ]; then' '  case "$*" in *services/control-plane/tests/unit*) exit 42 ;; esac' 'fi' 'case "${1:-}" in' '  --version) printf "uv 0.6.0\\n"; exit 0 ;;' 'esac' 'case "$*" in' '  *alembic*heads*) printf "0015_r5_1_1_worker_runtime_binding (head)\\n" ;;' '  *uvicorn*|*sidera_control_plane.planning_worker*) while :; do sleep 1; done ;;' 'esac' > "$FAKE_BIN/uv"
   printf '%s\n' '#!/bin/sh' 'if [ -n "${R5_2_GATE_LOG:-}" ]; then printf "npm %s\\n" "$*" >> "$R5_2_GATE_LOG"; fi' 'if [ "${1:-}" = "--version" ]; then printf "11.17.0\\n"; exit 0; fi' 'case "$*" in *run*dev*) while :; do sleep 1; done ;; esac' > "$FAKE_BIN/npm"
   cat > "$FAKE_BIN/curl" <<'EOF'
 #!/bin/sh
@@ -69,6 +78,7 @@ fail() {
 }
 
 make_fake_commands
+export R5_2_UV_LOG="$TMP/uv.log"
 write_env
 
 if gate_output=$(
@@ -153,6 +163,14 @@ for component in $components; do
   [ -f "$RUNTIME_DIR/pids/$component.pid" ] || fail "missing PID file for $component"
   [ -f "$RUNTIME_DIR/identity/$component.identity" ] || fail "missing identity for $component"
 done
+gateway_argv=$(grep -F "services/main-agent-gateway" "$R5_2_UV_LOG" | tail -n 1)
+case "$gateway_argv" in
+  *'--extra akashic --extra demo uvicorn sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 --port 8010:adapter_kind=<unset>'*) ;;
+  *) fail "gateway start must select Akashic and Demo extras without forcing an adapter kind" ;;
+esac
+if grep -F 'services/control-plane' "$R5_2_UV_LOG" | grep -F -- '--extra' >/dev/null 2>&1; then
+  fail "control-plane commands must not receive Gateway extras"
+fi
 
 if ! gate_output=$(
   SIDERA_RUN_REAL_MAIN_AGENT=1 \

@@ -5,6 +5,25 @@ class GatewayError(Exception):
     """Base class for errors that can be mapped to the Gateway API."""
 
 
+class AdapterConfigurationUnavailable(GatewayError):
+    """The selected adapter is not configured, registered, or installed."""
+
+    _CODES = frozenset(
+        {
+            "main_agent_not_configured",
+            "adapter_not_installed",
+            "adapter_not_registered",
+            "adapter_registration_mismatch",
+        }
+    )
+
+    def __init__(self, code: str) -> None:
+        if code not in self._CODES:
+            raise ValueError("unsupported adapter unavailability code")
+        self.code = code
+        super().__init__("main agent adapter is unavailable")
+
+
 class ProviderError(GatewayError):
     """Base class for failures at the configured main-agent provider."""
 

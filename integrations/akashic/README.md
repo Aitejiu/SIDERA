@@ -17,6 +17,18 @@ semantics. The sections below cover this adapter's configuration and installatio
 - A configured SIDERA Workspace and selectable Planning Profile.
 - SIDERA Web reachable on a loopback origin for deep links.
 
+## Public API client dependency
+
+The bridge uses the neutral `sidera-control-plane-client` package to call the
+Control Plane's public HTTP API. In this monorepo, `integrations/akashic/pyproject.toml`
+pins the client version and `tool.uv.sources` resolves it from
+`../../packages/control-plane-client` for local development.
+
+A wheel or subtree split of `integrations/akashic/` does not contain the client
+package. A distributed bridge artifact must therefore include the matching
+client wheel or depend on its fixed published version. An older remote split
+plugin must not be assumed to include this new dependency.
+
 The bridge does not implement remote authentication. Do not expose the
 configured Control Plane or Web origins outside the local machine.
 
@@ -182,6 +194,18 @@ PYTHONPATH="$PWD/integrations/akashic:$PWD/akashic-agent" \
 PYTHONPATH="$PWD/integrations/akashic:$PWD/akashic-agent" \
   uv run --project integrations/akashic pyright integrations/akashic/plugin.py integrations/akashic/sidera_task_bridge
 ```
+
+### Existing Pinned Distribution Workflow
+
+The steps below describe the existing/pinned Bridge distribution workflow;
+they are not a verified installer path for the new client-dependent source.
+This change does not update the currently pinned source, global plugin, or
+runtime. A new distribution needs the matching client wheel or a fixed
+published client version available to the installer, included in the
+dependency closure. Verify that closure through the official installer before
+using a new split. The subtree split shown below excludes
+`packages/control-plane-client/`, and this dependency closure has not been
+verified for an installed plugin.
 
 The installed artifact must have `plugin.py` at its checkout root. Generate a
 versioned subtree ref from a committed SIDERA revision:

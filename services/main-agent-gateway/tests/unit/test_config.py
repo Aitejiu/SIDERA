@@ -23,6 +23,7 @@ def make_settings(**overrides: object) -> Settings:
 def test_settings_use_loopback_defaults_and_constrained_runtime_limits() -> None:
     settings = make_settings()
 
+    assert settings.adapter_kind == "akashic"
     assert settings.host == "127.0.0.1"
     assert settings.port == 8010
     assert str(settings.web_origin) == "http://127.0.0.1:4174/"
@@ -94,6 +95,17 @@ def test_demo_adapter_requires_a_manifest_without_akashic_configuration() -> Non
     )
 
     assert settings.akashic_endpoint is None
+
+
+def test_unconfigured_adapter_does_not_require_provider_configuration() -> None:
+    settings = Settings(
+        adapter_kind="unconfigured",
+        sidera_workspace_id=WORKSPACE_ID,
+    )
+
+    assert settings.adapter_kind == "unconfigured"
+    assert settings.akashic_endpoint is None
+    assert settings.demo_manifest is None
 
 
 def test_default_akashic_adapter_still_requires_its_endpoint() -> None:

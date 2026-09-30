@@ -9,14 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sidera_runtime_guard import RuntimeBudgetGuard
 
+from sidera_main_agent_gateway import composition
 from sidera_main_agent_gateway.acceptance_guard import load_acceptance_guard
-from sidera_main_agent_gateway.adapters.akashic import AkashicAdapter
-from sidera_main_agent_gateway.adapters.demo import DemoMainAgentAdapter
 from sidera_main_agent_gateway.api.routes import router
 from sidera_main_agent_gateway.config import Settings
 from sidera_main_agent_gateway.contracts import MainAgentAdapter
 from sidera_main_agent_gateway.errors import (
     AcceptanceGuardRejected,
+    AdapterConfigurationUnavailable,
     GatewayError,
     ProviderProtocolError,
     ProviderUnavailable,
@@ -55,6 +55,8 @@ def _gateway_error(exc: GatewayError) -> tuple[int, str, str, bool]:
         if exc.code in {"budget_exhausted", "deadline_exceeded"}:
             return 429, exc.code, "acceptance budget is unavailable", False
         return 409, exc.code, "acceptance operation was not sent", False
+    if isinstance(exc, AdapterConfigurationUnavailable):
+        return 503, exc.code, "main agent adapter is unavailable", False
     if isinstance(exc, (ThreadNotFound, ThreadAccessDenied)):
         return 404, "thread_not_found", "thread was not found", False
     if isinstance(exc, TurnNotFound):
@@ -88,22 +90,11 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if adapter is not None:
             resolved_adapter = adapter
-        elif resolved_settings.adapter_kind == "interview-demo":
-            if resolved_guard is None:
-                resolved_adapter = DemoMainAgentAdapter(resolved_settings)
-            else:
-                resolved_adapter = DemoMainAgentAdapter(
-                    resolved_settings,
-                    acceptance_guard=resolved_guard,
-                )
         else:
-            if resolved_guard is None:
-                resolved_adapter = AkashicAdapter(resolved_settings)
-            else:
-                resolved_adapter = AkashicAdapter(
-                    resolved_settings,
-                    acceptance_guard=resolved_guard,
-                )
+            resolved_adapter = composition.build_main_agent_adapter(
+                resolved_settings,
+                acceptance_guard=resolved_guard,
+            )
         resolved_relays = relay_registry or TurnRelayRegistry(
             event_limit=resolved_settings.relay_event_limit
         )

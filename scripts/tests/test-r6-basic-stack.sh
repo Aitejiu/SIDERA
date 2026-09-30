@@ -27,6 +27,13 @@ UNREADY_STUB="$FAKE_BIN/r6-unready-stub"
 FAKE_AKASHIC_PID=
 
 cleanup() {
+  if [ -n "${ARGV_RUNTIME:-}" ] && [ -f "${ARGV_MANIFEST:-}" ]; then
+    env -u SIDERA_R6_BASIC_TEST_MODE -u SIDERA_R6_BASIC_STUB_COMMAND \
+      SIDERA_R6_BASIC_MODE=interactive \
+      SIDERA_R6_BASIC_RUNTIME_DIR="$ARGV_RUNTIME" \
+      "$ROOT/scripts/r6-basic-stack.sh" stop --manifest "$ARGV_MANIFEST" \
+      >/dev/null 2>&1 || true
+  fi
   SIDERA_R6_BASIC_RUNTIME_DIR="$RUNTIME" \
     SIDERA_R6_BASIC_TEST_MODE=1 \
     "$ROOT/scripts/r6-basic-stack.sh" stop --manifest "$MANIFEST" >/dev/null 2>&1 || true
@@ -1109,5 +1116,79 @@ fi
 SIDERA_R6_BASIC_MODE=interactive \
   SIDERA_R6_BASIC_RUNTIME_DIR="$INTERACTIVE_RUNTIME" \
   "$ROOT/scripts/r6-basic-stack.sh" stop --manifest "$GUARD_MANIFEST" >/dev/null
+
+ARGV_MANIFEST="$TMP/argv-manifest.json"
+ARGV_RUNTIME="$TMP/argv-runtime"
+ARGV_LOG="$FAKE_BIN/argv-uv.log"
+ARGV_UV="$FAKE_BIN/argv-uv"
+ARGV_CURL="$FAKE_BIN/argv-curl"
+ARGV_PORTS="$TMP/argv-ports"
+python3 - "$MANIFEST" "$ARGV_MANIFEST" "$ARGV_PORTS" <<'PY'
+import json
+import socket
+import sys
+from pathlib import Path
+
+source, target, ports_path = sys.argv[1:]
+reservations = []
+for _ in range(2):
+    reservation = socket.socket()
+    reservation.bind(("127.0.0.1", 0))
+    reservations.append(reservation)
+ports = [reservation.getsockname()[1] for reservation in reservations]
+manifest = json.loads(Path(source).read_text(encoding="utf-8"))
+manifest["control_plane_url"] = f"http://127.0.0.1:{ports[0]}"
+manifest["main_agent_gateway_url"] = f"http://127.0.0.1:{ports[1]}"
+Path(target).write_text(json.dumps(manifest), encoding="utf-8")
+Path(ports_path).write_text("\n".join(str(port) for port in ports), encoding="utf-8")
+for reservation in reservations:
+    reservation.close()
+PY
+ARGV_CONTROL_PORT=$(sed -n '1p' "$ARGV_PORTS")
+ARGV_GATEWAY_PORT=$(sed -n '2p' "$ARGV_PORTS")
+cat > "$ARGV_UV" <<'EOF'
+#!/bin/sh
+fake_bin=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+printf '%s:adapter_kind=%s\n' "$*" "${SIDERA_MAIN_AGENT_ADAPTER_KIND:-<unset>}" >> "$fake_bin/argv-uv.log"
+trap 'exit 0' TERM INT HUP
+while :; do sleep 1; done
+EOF
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$ARGV_CURL"
+chmod +x "$ARGV_UV" "$ARGV_CURL"
+
+run_argv_stack_component() {
+  component=$1
+  env -u SIDERA_R6_BASIC_TEST_MODE -u SIDERA_R6_BASIC_STUB_COMMAND \
+    SIDERA_R6_BASIC_MODE=interactive \
+    SIDERA_R6_BASIC_RUNTIME_DIR="$ARGV_RUNTIME" \
+    SIDERA_UV_BIN="$ARGV_UV" \
+    SIDERA_CURL_BIN="$ARGV_CURL" \
+    "$ROOT/scripts/r6-basic-stack.sh" start \
+    --manifest "$ARGV_MANIFEST" --component "$component" \
+    > "$TMP/argv-$component.out"
+}
+
+run_argv_stack_component control-plane
+run_argv_stack_component main-agent-gateway
+ARGV_CONTENT=$(cat "$ARGV_LOG")
+assert_contains 'run --project '"$ROOT"'/services/main-agent-gateway --extra akashic --extra demo uvicorn sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 --port '"$ARGV_GATEWAY_PORT"':adapter_kind=<unset>' \
+  "$ARGV_CONTENT" 'complete-product Gateway command must include both extras and retain its HTTP arguments'
+assert_contains 'run --project '"$ROOT"'/services/control-plane uvicorn sidera_control_plane.api.app:create_app --factory --host 127.0.0.1 --port '"$ARGV_CONTROL_PORT"':adapter_kind=<unset>' \
+  "$ARGV_CONTENT" 'Control Plane launch must retain its original argv without Gateway extras'
+CONTROL_ARGV=$(printf '%s\n' "$ARGV_CONTENT" | grep -F 'services/control-plane')
+assert_not_contains '--extra' "$CONTROL_ARGV" \
+  'Control Plane must not receive Gateway extras'
+assert_not_contains 'adapter_kind=unconfigured' "$ARGV_CONTENT" \
+  'complete-product startup must not silently force an unconfigured Gateway'
+env -u SIDERA_R6_BASIC_TEST_MODE -u SIDERA_R6_BASIC_STUB_COMMAND \
+  SIDERA_R6_BASIC_MODE=interactive \
+  SIDERA_R6_BASIC_RUNTIME_DIR="$ARGV_RUNTIME" \
+  "$ROOT/scripts/r6-basic-stack.sh" stop --manifest "$ARGV_MANIFEST" \
+  --component main-agent-gateway >/dev/null
+env -u SIDERA_R6_BASIC_TEST_MODE -u SIDERA_R6_BASIC_STUB_COMMAND \
+  SIDERA_R6_BASIC_MODE=interactive \
+  SIDERA_R6_BASIC_RUNTIME_DIR="$ARGV_RUNTIME" \
+  "$ROOT/scripts/r6-basic-stack.sh" stop --manifest "$ARGV_MANIFEST" \
+  --component control-plane >/dev/null
 
 printf 'PASS: r6 basic stack lifecycle, ownership, env isolation, and rollback\n'

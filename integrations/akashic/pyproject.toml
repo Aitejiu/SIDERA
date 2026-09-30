@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27,<1",
     "pydantic>=2.10,<3",
+    "sidera-control-plane-client==0.1.0",
 ]
 
 [dependency-groups]
@@ -24,6 +25,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sidera_task_bridge"]
+
+[tool.uv.sources]
+sidera-control-plane-client = { path = "../../packages/control-plane-client", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

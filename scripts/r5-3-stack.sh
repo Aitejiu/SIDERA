@@ -429,7 +429,8 @@ component_command() {
       ;;
     "$MAIN_AGENT_COMPONENT")
       launch_component "$component" 'main-agent-gateway uvicorn' \
-        uv run --project "$REPO_ROOT/services/main-agent-gateway" uvicorn \
+        uv run --project "$REPO_ROOT/services/main-agent-gateway" \
+        --extra akashic --extra demo uvicorn \
         sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 --port "$gateway_port"
       ;;
     "$WEB_COMPONENT")

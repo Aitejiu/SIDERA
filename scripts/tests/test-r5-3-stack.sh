@@ -230,6 +230,7 @@ write_fake_commands() {
     '  *sidera_main_agent_gateway.api.app:create_app*) component=main-agent-gateway ;;' \
     'esac' \
     '[ -n "$component" ] || exit 0' \
+    'printf "%s:adapter_kind=%s\\n" "$*" "${SIDERA_MAIN_AGENT_ADAPTER_KIND:-<unset>}" >> "$fake_root/capture/uv.argv.log"' \
     'if [ -f "$fake_root/fail-component" ] && [ "$(sed -n "1p" "$fake_root/fail-component")" = "$component" ]; then' \
     '  exit 42' \
     'fi' \
@@ -292,6 +293,13 @@ for component in knowledge-service control-plane context-package-worker knowledg
   assert_contains 'status":"ready' "$RUNTIME_DIR/logs/$component.log" "$component readiness"
   assert_pid_alive "$(pid_for "$component")" "$component"
 done
+assert_contains 'run --project '"$ROOT"'/services/main-agent-gateway --extra akashic --extra demo uvicorn sidera_main_agent_gateway.api.app:create_app --factory --host 127.0.0.1 --port 8010:adapter_kind=<unset>' \
+  "$TMP/capture/uv.argv.log" 'gateway must launch with the full-product extras and unchanged host/port'
+if grep -Fv 'services/main-agent-gateway' "$TMP/capture/uv.argv.log" | grep -F -- '--extra' >/dev/null 2>&1; then
+  fail 'non-Gateway service commands must not receive Gateway extras'
+fi
+assert_not_contains 'adapter_kind=unconfigured' "$TMP/capture/uv.argv.log" \
+  'full-product startup must not silently force an unconfigured Gateway'
 
 for private_dir in "$RUNTIME_DIR" "$RUNTIME_DIR/pids" "$RUNTIME_DIR/logs" "$RUNTIME_DIR/identity" "$RUNTIME_DIR/launch-env"; do
   mode=$(stat -f '%Lp' "$private_dir" 2>/dev/null || stat -c '%a' "$private_dir")
