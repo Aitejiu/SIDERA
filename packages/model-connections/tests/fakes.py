@@ -25,6 +25,7 @@ class MemoryCatalog:
         self.connections: dict[ConnectionRef, ModelConnectionRevision] = {}
         self.credentials: dict[CredentialRef, CredentialMetadata] = {}
         self.credential_writes: dict[tuple[UUID, UUID], CredentialWrite] = {}
+        self.events: list[tuple[str, CredentialRef, UUID | None]] = []
 
     def get_connection(self, ref: ConnectionRef) -> ModelConnectionRevision:
         try:
@@ -39,11 +40,14 @@ class MemoryCatalog:
             raise ConfigurationError("credential_not_found") from None
 
     def list_connections(self, workspace_id: UUID) -> tuple[ModelConnectionRevision, ...]:
-        return tuple(
-            connection
-            for connection in self.connections.values()
-            if connection.ref.workspace_id == workspace_id
-        )
+        heads: dict[UUID, ModelConnectionRevision] = {}
+        for connection in self.connections.values():
+            if connection.ref.workspace_id != workspace_id:
+                continue
+            current = heads.get(connection.ref.connection_id)
+            if current is None or connection.ref.revision > current.ref.revision:
+                heads[connection.ref.connection_id] = connection
+        return tuple(heads.values())
 
     def create_connection(self, connection: ModelConnectionRevision) -> None:
         if connection.ref in self.connections:
@@ -74,8 +78,29 @@ class MemoryCatalog:
 
     def reserve_credential_write(self, write: CredentialWrite) -> CredentialWrite:
         key = (write.workspace_id, write.operation_id)
-        if key in self.credential_writes:
-            raise ConfigurationError("credential_operation_conflict")
+        existing = self.credential_writes.get(key)
+        if existing is not None:
+            stored = existing.credential
+            requested = write.credential
+            if (
+                stored.alias != requested.alias
+                or stored.source != requested.source
+                or stored.env_name != requested.env_name
+                or stored.replaces_ref != requested.replaces_ref
+            ):
+                raise ConfigurationError("credential_operation_conflict")
+            return self._hydrate_credential_write(existing)
+
+        credential = write.credential
+        if (
+            write.status == "pending"
+            and write.failure_code is None
+            and credential.source == "macos_keychain"
+            and credential.status == "pending"
+        ):
+            if credential.ref in self.credentials:
+                raise ConfigurationError("credential_already_exists")
+            self.credentials[credential.ref] = credential
         self.credential_writes[key] = write
         return write
 
@@ -85,9 +110,10 @@ class MemoryCatalog:
         operation_id: UUID,
     ) -> CredentialWrite:
         try:
-            return self.credential_writes[(workspace_id, operation_id)]
+            write = self.credential_writes[(workspace_id, operation_id)]
         except KeyError:
             raise ConfigurationError("credential_write_unknown") from None
+        return self._hydrate_credential_write(write)
 
     def finish_credential_write(
         self,
@@ -98,16 +124,49 @@ class MemoryCatalog:
     ) -> CredentialWrite:
         key = (workspace_id, operation_id)
         try:
-            updated = replace(self.credential_writes[key], status=status)
+            current = self._hydrate_credential_write(self.credential_writes[key])
         except KeyError:
             raise ConfigurationError("credential_write_unknown") from None
+
+        if status not in {"completed", "failed", "unknown"}:
+            raise ConfigurationError("invalid_configuration")
+        if current.status == status:
+            return current
+        if current.status not in {"pending", "unknown"}:
+            raise ConfigurationError("credential_operation_conflict")
+
+        credential = current.credential
+        if status in {"completed", "failed"}:
+            stored = self.credentials.get(credential.ref, credential)
+            if stored.status != "pending":
+                raise ConfigurationError("credential_operation_conflict")
+            credential = replace(
+                stored,
+                status="active" if status == "completed" else "failed",
+                version=stored.version + 1,
+            )
+            self.credentials[credential.ref] = credential
+        updated = replace(current, credential=credential, status=status)
         self.credential_writes[key] = updated
+        event_type = {
+            "completed": "rotated" if credential.replaces_ref else "created",
+            "failed": "write_failed",
+            "unknown": "write_unknown",
+        }[status]
+        self.events.append((event_type, credential.ref, operation_id))
         return updated
+
+    def _hydrate_credential_write(self, write: CredentialWrite) -> CredentialWrite:
+        credential = self.credentials.get(write.credential.ref)
+        if credential is None or credential == write.credential:
+            return write
+        return replace(write, credential=credential)
 
     def create_env_credential(self, metadata: CredentialMetadata) -> None:
         if metadata.ref in self.credentials:
             raise ConfigurationError("credential_already_exists")
         self.credentials[metadata.ref] = metadata
+        self.events.append(("created", metadata.ref, None))
 
     def revoke_credential(
         self,
@@ -119,10 +178,11 @@ class MemoryCatalog:
             current = self.credentials[ref]
         except KeyError:
             raise ConfigurationError("credential_not_found") from None
-        if current.version != expected_version:
+        if current.version != expected_version or current.status != "active":
             raise ConfigurationError("configuration_version_conflict")
         updated = replace(current, status="revoked", version=current.version + 1)
         self.credentials[ref] = updated
+        self.events.append(("revoked", ref, None))
         return updated
 
 
