@@ -16,6 +16,10 @@ from sidera_model_connections.contracts import (
 from sidera_model_connections.errors import ConfigurationError
 
 
+def fake_ref() -> CredentialRef:
+    return CredentialRef(UUID(int=1), UUID(int=2))
+
+
 class MemoryCatalog:
     def __init__(self) -> None:
         self.connections: dict[ConnectionRef, ModelConnectionRevision] = {}
