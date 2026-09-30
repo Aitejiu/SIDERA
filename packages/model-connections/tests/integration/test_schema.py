@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+import os
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,12 @@ from sidera_model_connections.postgres.models import SCHEMA_NAME, Base
 def _alembic_config() -> Config:
     package_root = Path(__file__).resolve().parents[2]
     return Config(str(package_root / "alembic.ini"))
+
+
+def _serialized_url_is_preserved(name: str, url: URL) -> bool:
+    actual = os.environ.get(name, "")
+    expected = url.render_as_string(hide_password=False)
+    return hmac.compare_digest(actual, expected)
 
 
 def test_metadata_has_five_secret_free_postgres_tables() -> None:
@@ -77,8 +85,14 @@ def test_migration_refuses_conflicting_database_urls_before_connect(
     database_target: tuple[URL, str],
 ) -> None:
     owned_url, owned_name = database_target
-    production_url = owned_url.set(database=f"{owned_name}_production_probe")
-    test_url = owned_url.set(database=f"{owned_name}_test_probe")
+    production_url = owned_url.set(
+        database=f"{owned_name}_production_probe",
+        password="cfg2-synthetic-production-password",
+    )
+    test_url = owned_url.set(
+        database=f"{owned_name}_test_probe",
+        password="cfg2-synthetic-test-password",
+    )
     engine_calls: list[URL] = []
 
     class EngineConstructionObserved(RuntimeError):
@@ -89,8 +103,21 @@ def test_migration_refuses_conflicting_database_urls_before_connect(
         raise EngineConstructionObserved("engine spy stopped before connect")
 
     monkeypatch.setattr(sqlalchemy, "create_engine", engine_spy)
-    monkeypatch.setenv("SIDERA_CONFIGURATION_DATABASE_URL", str(production_url))
-    monkeypatch.setenv("SIDERA_CONFIGURATION_TEST_DATABASE_URL", str(test_url))
+    monkeypatch.setenv(
+        "SIDERA_CONFIGURATION_DATABASE_URL",
+        production_url.render_as_string(hide_password=False),
+    )
+    monkeypatch.setenv(
+        "SIDERA_CONFIGURATION_TEST_DATABASE_URL",
+        test_url.render_as_string(hide_password=False),
+    )
+
+    assert _serialized_url_is_preserved(
+        "SIDERA_CONFIGURATION_DATABASE_URL", production_url
+    )
+    assert _serialized_url_is_preserved(
+        "SIDERA_CONFIGURATION_TEST_DATABASE_URL", test_url
+    )
 
     with pytest.raises(RuntimeError) as conflict:
         command.upgrade(_alembic_config(), "head")
@@ -111,6 +138,7 @@ def test_migration_accepts_single_or_identical_database_url(
     test_selected: bool,
 ) -> None:
     owned_url, _owned_name = database_target
+    synthetic_url = owned_url.set(password="cfg2-synthetic-identical-password")
     engine_calls: list[URL] = []
 
     class EngineConstructionObserved(RuntimeError):
@@ -122,15 +150,30 @@ def test_migration_accepts_single_or_identical_database_url(
 
     monkeypatch.setattr(sqlalchemy, "create_engine", engine_spy)
     if production_selected:
-        monkeypatch.setenv("SIDERA_CONFIGURATION_DATABASE_URL", str(owned_url))
+        monkeypatch.setenv(
+            "SIDERA_CONFIGURATION_DATABASE_URL",
+            synthetic_url.render_as_string(hide_password=False),
+        )
     else:
         monkeypatch.delenv("SIDERA_CONFIGURATION_DATABASE_URL", raising=False)
     if test_selected:
-        monkeypatch.setenv("SIDERA_CONFIGURATION_TEST_DATABASE_URL", str(owned_url))
+        monkeypatch.setenv(
+            "SIDERA_CONFIGURATION_TEST_DATABASE_URL",
+            synthetic_url.render_as_string(hide_password=False),
+        )
     else:
         monkeypatch.delenv("SIDERA_CONFIGURATION_TEST_DATABASE_URL", raising=False)
+
+    if production_selected:
+        assert _serialized_url_is_preserved(
+            "SIDERA_CONFIGURATION_DATABASE_URL", synthetic_url
+        )
+    if test_selected:
+        assert _serialized_url_is_preserved(
+            "SIDERA_CONFIGURATION_TEST_DATABASE_URL", synthetic_url
+        )
 
     with pytest.raises(EngineConstructionObserved):
         command.upgrade(_alembic_config(), "head")
 
-    assert engine_calls == [owned_url]
+    assert len(engine_calls) == 1 and engine_calls[0] == synthetic_url
