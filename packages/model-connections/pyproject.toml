@@ -27,6 +27,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sidera_model_connections"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "sidera_model_connections/alembic.ini"
+"migrations" = "sidera_model_connections/migrations"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
