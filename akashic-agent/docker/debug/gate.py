@@ -36,6 +36,8 @@ REQUIREMENT_PATTERN = re.compile(r"\b[A-Z]{2,5}-[0-9]{3}\b")
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_BUILD_TIMEOUT_SECONDS = 600
+MAX_IMAGE_BUILD_TIMEOUT_SECONDS = 3600
+IMAGE_BUILD_TIMEOUT_ENV = "AKASHIC_CHANGE_GATE_IMAGE_BUILD_TIMEOUT_SECONDS"
 GATE_TMPDIR_ENV = "AKASHIC_CHANGE_GATE_TMPDIR"
 PROTECTED_CONTRACT_PATHS = (
     "docs/projectneed.md",
@@ -51,6 +53,18 @@ PROTECTED_CONTRACT_PATHS = (
 
 class GateError(RuntimeError):
     """表示 Gate 无法安全继续的显式失败。"""
+
+
+def _image_build_timeout_seconds() -> int:
+    raw = os.environ.get(IMAGE_BUILD_TIMEOUT_ENV)
+    if raw is None:
+        return IMAGE_BUILD_TIMEOUT_SECONDS
+    if not raw.isascii() or not raw.isdecimal():
+        raise GateError(f"{IMAGE_BUILD_TIMEOUT_ENV} 必须是 1..3600 的十进制整数")
+    value = int(raw)
+    if not 1 <= value <= MAX_IMAGE_BUILD_TIMEOUT_SECONDS:
+        raise GateError(f"{IMAGE_BUILD_TIMEOUT_ENV} 必须在 1..3600 秒范围内")
+    return value
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1087,8 @@ def _prepare_sandbox(run_id: str, scenario_id: str) -> Path:
 def _build_change_gate_image(run_id: str, report_dir: Path) -> dict[str, object]:
     """构建一次 Gate 镜像，并把构建失败作为可审计结果返回。"""
 
+    timeout_seconds = _image_build_timeout_seconds()
+
     # 1. Compose 解析配置需要隔离路径，但构建阶段不会挂载或运行它。
     with tempfile.TemporaryDirectory(
         prefix=f"akashic-change-gate-{run_id}-image-build-",
@@ -1092,10 +1108,10 @@ def _build_change_gate_image(run_id: str, report_dir: Path) -> dict[str, object]
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=IMAGE_BUILD_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired:
-            timeout_error = f"Gate 镜像构建超过 {IMAGE_BUILD_TIMEOUT_SECONDS}s"
+            timeout_error = f"Gate 镜像构建超过 {timeout_seconds}s"
 
     status = "passed"
     if timeout_error or result is None or result.returncode != 0:
@@ -1106,6 +1122,7 @@ def _build_change_gate_image(run_id: str, report_dir: Path) -> dict[str, object]
         "exitCode": None if result is None else result.returncode,
         "stdout": "" if result is None else result.stdout,
         "stderr": timeout_error if result is None else result.stderr,
+        "timeoutSeconds": timeout_seconds,
     }
     _atomic_json(report_dir / "image-build.json", record)
     return record

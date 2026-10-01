@@ -10,6 +10,13 @@ python docker/debug/gate.py run --base origin/main
 
 Gate 先用 `tests_scenarios/contracts/impact.toml` 解释 Git diff，再运行所选公开语义场景。每个场景都使用新的 `/tmp/akashic-change-gate-*` sandbox，容器只读挂载候选源码，只允许写本次 `/sandbox` 与 tmpfs `/tmp`。`workspace`、`plugin-home`、`HOME` 和 config 都从空目录建立；Gate 不接收正式运行路径。
 
+镜像构建超时默认为 600 秒。可通过 `AKASHIC_CHANGE_GATE_IMAGE_BUILD_TIMEOUT_SECONDS` 覆盖为 1–3600 秒；该设置只影响镜像构建，场景的 `timeout_seconds` 保持不变。
+
+```bash
+AKASHIC_CHANGE_GATE_IMAGE_BUILD_TIMEOUT_SECONDS=3600 \
+  python docker/debug/gate.py run --base origin/main
+```
+
 ```text
 Git diff
    │
