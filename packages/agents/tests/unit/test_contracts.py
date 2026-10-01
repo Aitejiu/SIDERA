@@ -18,6 +18,7 @@ from sidera_agents.contracts import (
     ContextItem,
     ContractModel,
     CredentialRef,
+    EffectiveConfig,
     ExecutionWorkspace,
     NativeCancelOutcome,
     NativeCloseOutcome,
@@ -198,6 +199,30 @@ def test_nested_json_inputs_are_copied_and_canonicalized() -> None:
     assert draft.settings["alpha"]["beta"] == "value"
 
 
+@pytest.mark.parametrize("receipts", [(), ({"source": "x"},)])
+def test_effective_config_context_receipts_accept_tuple_and_round_trip(
+    receipts: tuple[dict[str, str], ...],
+) -> None:
+    config = EffectiveConfig(
+        profile_ref=ProfileRef(workspace_id=uuid4(), profile_id=uuid4(), revision=1),
+        config_hash="config-hash",
+        runtime_ref=RuntimeRef(workspace_id=uuid4(), runtime_id=uuid4()),
+        actual_runtime_version="1.0.0",
+        selected_model=None,
+        observed_model=None,
+        inherited_fields=(),
+        applied_fields=(),
+        resource_refs=(),
+        context_receipts=receipts,
+    )
+
+    assert config.context_receipts == receipts
+    assert isinstance(config.context_receipts, tuple)
+    restored = EffectiveConfig.model_validate(config.model_dump(mode="python"))
+    assert restored.context_receipts == receipts
+    assert isinstance(restored.context_receipts, tuple)
+
+
 def test_tool_connection_redacts_secret_values_from_repr_and_serialization() -> None:
     marker = "do-not-print-this-token"
     connection = ToolConnection(
@@ -208,9 +233,19 @@ def test_tool_connection_redacts_secret_values_from_repr_and_serialization() -> 
         environment={"TASK_TOKEN": SecretStr(marker)},
     )
 
-    assert marker not in repr(connection)
-    assert marker not in str(connection.model_dump())
-    assert marker not in connection.model_dump_json()
+    connection_repr = repr(connection)
+    assert marker not in connection_repr
+    assert "headers" not in connection_repr
+    assert "environment" not in connection_repr
+    connection_dump = connection.model_dump(mode="python")
+    assert "headers" not in connection_dump
+    assert "environment" not in connection_dump
+    assert connection.headers["Authorization"].get_secret_value() == marker
+    assert connection.environment["TASK_TOKEN"].get_secret_value() == marker
+    connection_json = connection.model_dump_json()
+    assert "headers" not in connection_json
+    assert "environment" not in connection_json
+    assert marker not in connection_json
 
 
 def test_public_contract_exports_are_frozen_and_forbid_extra_fields() -> None:
@@ -516,9 +551,24 @@ def test_native_open_request_hides_secret_projection_from_repr_and_dump() -> Non
         environment={"API_TOKEN": SecretStr(marker)},
     )
 
-    assert marker not in repr(request)
-    assert marker not in repr(request.model_dump())
-    assert marker not in request.model_dump_json()
+    request_dump = request.model_dump(mode="python")
+    assert "projected_config" not in request_dump
+    assert "tools" not in request_dump
+    assert "environment" not in request_dump
+    assert request.projected_config["credential"].get_secret_value() == marker
+    assert request.tools[0].headers["Authorization"].get_secret_value() == marker
+    assert request.tools[0].environment["TOOL_TOKEN"].get_secret_value() == marker
+    assert request.environment["API_TOKEN"].get_secret_value() == marker
+    request_repr = repr(request)
+    assert marker not in request_repr
+    assert "projected_config" not in request_repr
+    assert "tools" not in request_repr
+    assert "environment" not in request_repr
+    request_json = request.model_dump_json()
+    assert "projected_config" not in request_json
+    assert "tools" not in request_json
+    assert "environment" not in request_json
+    assert marker not in request_json
 
 
 def test_run_start_rejects_unexpected_role_field() -> None:

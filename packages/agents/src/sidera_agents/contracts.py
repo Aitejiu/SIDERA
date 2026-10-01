@@ -32,7 +32,7 @@ def _canonical_json_copy(value: object) -> object:
         if not math.isfinite(value):
             raise ValueError("JSON numbers must be finite")
         return value
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_canonical_json_copy(item) for item in value]
     if isinstance(value, dict):
         if any(type(key) is not str for key in value):
@@ -356,8 +356,8 @@ class ToolConnection(ContractModel):
     name: str
     transport: str
     endpoint_or_argv: str | tuple[str, ...]
-    headers: dict[str, SecretStr]
-    environment: dict[str, SecretStr]
+    headers: dict[str, SecretStr] = Field(exclude=True, repr=False)
+    environment: dict[str, SecretStr] = Field(exclude=True, repr=False)
 
     from pydantic import field_validator as _field_validator
 
@@ -634,10 +634,10 @@ class AssembledInput(ContractModel):
 class NativeOpenRequest(ContractModel):
     run_id: UUID
     runtime: RuntimeSnapshot
-    projected_config: dict[str, _ProjectedJsonValue] = Field(repr=False)
+    projected_config: dict[str, _ProjectedJsonValue] = Field(exclude=True, repr=False)
     workspace: ExecutionWorkspace
-    tools: tuple[ToolConnection, ...] = Field(repr=False)
-    environment: dict[str, _ProjectedJsonValue] = Field(repr=False)
+    tools: tuple[ToolConnection, ...] = Field(exclude=True, repr=False)
+    environment: dict[str, _ProjectedJsonValue] = Field(exclude=True, repr=False)
 
     from pydantic import field_validator as _field_validator
 
