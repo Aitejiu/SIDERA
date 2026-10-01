@@ -76,8 +76,15 @@ class ContextAssembler:
                 receipts.append(_omission_receipt(item, "context_version_mismatch"))
                 continue
 
-            digest = _content_hash(content.text)
-            if content.content_hash != digest or item.content_hash != digest:
+            try:
+                digest = _content_hash(content.text)
+            except UnicodeEncodeError:
+                digest = None
+            if (
+                digest is None
+                or content.content_hash != digest
+                or item.content_hash != digest
+            ):
                 if item.required:
                     raise AgentError(
                         "context_hash_mismatch",

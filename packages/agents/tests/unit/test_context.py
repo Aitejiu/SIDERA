@@ -360,6 +360,61 @@ def test_required_context_rejects_a_false_source_hash() -> None:
     assert rejected.value.code == "context_hash_mismatch"
 
 
+@pytest.mark.parametrize("required", (True, False))
+@pytest.mark.parametrize("source_backed", (True, False))
+def test_unpaired_surrogate_is_a_safe_context_failure(
+    required: bool, source_backed: bool
+) -> None:
+    marker = "SYNTHETIC_SECRET"
+    body = marker + chr(0xD800)
+    profile = _profile(uuid4())
+    request = _start(profile, RunPolicy.BOUNDED, uuid4())
+    original = request.context[0]
+    item = original.model_copy(
+        update={
+            "required": required,
+            "content_hash": "sha256:" + "0" * 64,
+            "text": None if source_backed else body,
+            "source_ref": original.source_ref if source_backed else None,
+        }
+    )
+    request = request.model_copy(update={"context": (item,)})
+    reader = FixedSourceReader(
+        SourceContent(
+            text=body,
+            actual_version="v3",
+            content_hash="sha256:" + "0" * 64,
+        )
+    )
+
+    if required:
+        with pytest.raises(AgentError) as failure:
+            ContextAssembler().assemble(profile, request, reader)
+        error = failure.value
+        trace = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        )
+        assert error.code == "context_hash_mismatch"
+        assert str(error) == "Context source content could not be verified."
+        assert error.__cause__ is None and error.__suppress_context__ is True
+        assert marker not in "\n".join((str(error), repr(error), trace))
+    else:
+        result = ContextAssembler().assemble(profile, request, reader)
+        assert result.input.context == ()
+        assert result.context_receipts == (
+            {
+                "item_id": item.item_id,
+                "origin": item.origin,
+                "requested_version": "v3",
+                "actual_version": None,
+                "content_hash": None,
+                "status": "omitted",
+                "reason_code": "context_hash_mismatch",
+            },
+        )
+        assert marker not in repr(result.context_receipts)
+
+
 def test_optional_version_mismatch_has_an_omission_receipt() -> None:
     workspace_id = uuid4()
     grant_id = uuid4()
