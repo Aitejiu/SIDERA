@@ -188,6 +188,8 @@ class RunExecution:
         with self._pending_lock:
             self._admissions_in_progress.add(run_id)
         created = False
+        conflict_error: AgentError | None = None
+        stored_operation = None
         try:
             try:
                 receipt, created = self._store.admit_start(
@@ -207,6 +209,8 @@ class RunExecution:
                 stored_operation = self._store.get_start_operation(
                     request.profile_ref.workspace_id, request.operation_id
                 )
+                conflict_error = error
+            if conflict_error is not None:
                 if (
                     stored_operation is not None
                     and stored_operation.profile_ref != request.profile_ref
@@ -214,7 +218,7 @@ class RunExecution:
                     self._authorizer.require(
                         request.grant_id, "run.start", stored_operation.profile_ref
                     )
-                raise
+                raise conflict_error
         finally:
             with self._pending_lock:
                 if created:

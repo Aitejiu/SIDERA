@@ -1,3 +1,4 @@
+import traceback
 from hashlib import sha256
 from threading import Event, Thread
 from uuid import uuid4
@@ -368,6 +369,28 @@ def test_operation_conflict_race_authorizes_stored_profile(
     assert str(stored_profile.ref) not in str(result[0])
     if expected_code == "permission_denied":
         assert str(stored_receipt.run_id) not in str(result[0])
+        exception_chain = []
+        pending = [result[0]]
+        seen = set()
+        while pending:
+            error = pending.pop()
+            if error is None or id(error) in seen:
+                continue
+            seen.add(id(error))
+            exception_chain.append(error)
+            pending.extend((error.__context__, error.__cause__))
+        formatted = "".join(traceback.format_exception(result[0]))
+        assert all(
+            error.code != "operation_conflict" for error in exception_chain
+        ) and all(
+            detail not in formatted
+            for detail in (
+                "Operation ID was used with a different request.",
+                str(operation_id),
+                str(stored_profile.ref),
+                str(stored_receipt.run_id),
+            )
+        ), (exception_chain, formatted)
     assert stored_receipt.status.value == "accepted"
     lab.pump()
     assert len(lab.native.open_calls) == 1
