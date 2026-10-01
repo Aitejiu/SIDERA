@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from threading import Lock
+from threading import Condition
 from uuid import UUID, uuid4
 
 from pydantic import SecretStr
@@ -38,6 +38,25 @@ from .ports import (
     SecretReader,
     ToolConnectionReader,
 )
+
+# Only these stable identifiers may cross the native boundary into run state.
+_SAFE_NATIVE_REASON_CODES = frozenset(
+    {
+        "native_spawn_failed",
+        "native_start_failed",
+        "native_start_unknown",
+        "native_identity_unverified",
+        "native_response_failed",
+        "native_response_unknown",
+        "native_response_unverified",
+        "native_close_unknown",
+        "native_process_gone",
+    }
+)
+
+
+def _safe_native_reason(reason_code: str | None, fallback: str) -> str:
+    return reason_code if reason_code in _SAFE_NATIVE_REASON_CODES else fallback
 
 
 class VerifiedNativeOpenFailure(Exception):
@@ -80,7 +99,9 @@ class RunExecution:
         self._tool_connections = tool_connections
         self._context = ContextAssembler()
         self._pending: dict[UUID, _PendingStart] = {}
-        self._pending_lock = Lock()
+        # Store admission stays concurrent; poll waits until each result is published.
+        self._pending_lock = Condition()
+        self._admissions_in_progress: set[UUID] = set()
 
     def start(self, request: RunStart) -> StartReceipt:
         self._authorizer.require(request.grant_id, "run.start", request.profile_ref)
@@ -156,27 +177,50 @@ class RunExecution:
             capabilities=runtime.capabilities,
             reason_code=None,
         )
-        receipt, created = self._store.admit_start(
-            owner_id=self._owner_id,
-            profile_ref=request.profile_ref,
-            runtime_ref=profile.draft.runtime_ref,
-            installation_key=runtime_entry.record.installation_key,
-            operation_id=request.operation_id,
-            profile_config_hash=profile.config_hash,
-            fingerprint=fingerprint,
-            run_id=run_id,
+        pending = _PendingStart(
+            request=request,
+            profile=profile,
+            runtime=runtime,
             snapshot=snapshot,
+            assembled_input=assembled.input,
+            response_id=response_id,
         )
-        if created:
-            with self._pending_lock:
-                self._pending[run_id] = _PendingStart(
-                    request=request,
-                    profile=profile,
-                    runtime=runtime,
+        with self._pending_lock:
+            self._admissions_in_progress.add(run_id)
+        created = False
+        try:
+            try:
+                receipt, created = self._store.admit_start(
+                    owner_id=self._owner_id,
+                    profile_ref=request.profile_ref,
+                    runtime_ref=profile.draft.runtime_ref,
+                    installation_key=runtime_entry.record.installation_key,
+                    operation_id=request.operation_id,
+                    profile_config_hash=profile.config_hash,
+                    fingerprint=fingerprint,
+                    run_id=run_id,
                     snapshot=snapshot,
-                    assembled_input=assembled.input,
-                    response_id=response_id,
                 )
+            except AgentError as error:
+                if error.code != "operation_conflict":
+                    raise
+                stored_operation = self._store.get_start_operation(
+                    request.profile_ref.workspace_id, request.operation_id
+                )
+                if (
+                    stored_operation is not None
+                    and stored_operation.profile_ref != request.profile_ref
+                ):
+                    self._authorizer.require(
+                        request.grant_id, "run.start", stored_operation.profile_ref
+                    )
+                raise
+        finally:
+            with self._pending_lock:
+                if created:
+                    self._pending[run_id] = pending
+                self._admissions_in_progress.discard(run_id)
+                self._pending_lock.notify_all()
         return receipt
 
     def get_start(
@@ -196,31 +240,39 @@ class RunExecution:
         self._require_owner()
         processed = 0
         with self._pending_lock:
+            while self._admissions_in_progress:
+                self._pending_lock.wait()
             pending_ids = set(self._pending)
-        for snapshot in self._store.list_starting_runs():
-            if snapshot.run_id not in pending_ids:
-                unknown = snapshot.model_copy(
-                    update={
-                        "state": RunState.UNKNOWN,
-                        "input_open": False,
-                        "reason_code": "native_start_unknown",
-                    }
-                )
-                self._transition_run(
-                    snapshot.run_id,
-                    unknown,
-                    receipt_status=StartStatus.UNKNOWN,
-                )
-                processed += 1
-        with self._pending_lock:
+            for snapshot in self._store.list_starting_runs():
+                if snapshot.run_id not in pending_ids:
+                    unknown = snapshot.model_copy(
+                        update={
+                            "state": RunState.UNKNOWN,
+                            "input_open": False,
+                            "reason_code": "native_start_unknown",
+                        }
+                    )
+                    self._transition_run(
+                        snapshot.run_id,
+                        unknown,
+                        receipt_status=StartStatus.UNKNOWN,
+                    )
+                    processed += 1
             pending = tuple(
                 self._pending.pop(run_id) for run_id in sorted(self._pending, key=str)
             )
         for item in pending:
             self._process_pending(item)
             processed += 1
-        for snapshot, handle, terminal_state in self._store.list_unresolved_runs():
-            self._inspect_unresolved(snapshot, handle, terminal_state)
+        for (
+            snapshot,
+            handle,
+            terminal_state,
+            terminal_reason_code,
+        ) in self._store.list_unresolved_runs():
+            self._inspect_unresolved(
+                snapshot, handle, terminal_state, terminal_reason_code
+            )
         return processed
 
     def _process_pending(self, item: _PendingStart) -> None:
@@ -229,17 +281,25 @@ class RunExecution:
             open_request = self._build_open_request(item)
             harness = self._registry.get(item.runtime.harness_id)
         except AgentError as error:
+            self._require_owner()
             self._reject_projection(snapshot, error.code)
             return
         except Exception:  # noqa: BLE001 - projection errors reject only this admitted run
+            self._require_owner()
             self._reject_projection(snapshot, "run_projection_failed")
             return
 
+        self._require_owner()
         try:
             handle = harness.open(open_request)
         except VerifiedNativeOpenFailure as error:
             failed = snapshot.model_copy(
-                update={"state": RunState.FAILED, "reason_code": error.reason_code}
+                update={
+                    "state": RunState.FAILED,
+                    "reason_code": _safe_native_reason(
+                        error.reason_code, "native_start_failed"
+                    ),
+                }
             )
             self._transition_run(
                 snapshot.run_id,
@@ -271,7 +331,9 @@ class RunExecution:
             self._mark_run_unknown(snapshot, handle, "native_response_unverified")
         elif outcome.status is NativeOutcomeStatus.UNKNOWN:
             self._mark_run_unknown(
-                snapshot, handle, outcome.reason_code or "native_response_unknown"
+                snapshot,
+                handle,
+                _safe_native_reason(outcome.reason_code, "native_response_unknown"),
             )
         elif outcome.status is NativeOutcomeStatus.COMPLETED:
             if snapshot.policy is RunPolicy.CONVERSATION:
@@ -299,7 +361,7 @@ class RunExecution:
                 item,
                 handle,
                 RunState.FAILED,
-                outcome.reason_code or "native_response_failed",
+                _safe_native_reason(outcome.reason_code, "native_response_failed"),
             )
 
     def _close_terminal(
@@ -309,6 +371,8 @@ class RunExecution:
         state: RunState,
         reason_code: str | None,
     ) -> None:
+        if reason_code is not None:
+            reason_code = _safe_native_reason(reason_code, "native_response_failed")
         snapshot = item.snapshot.model_copy(
             update={
                 "state": state,
@@ -328,7 +392,9 @@ class RunExecution:
                 session_reserved = False
                 close_reason = None
             else:
-                close_reason = close_result.reason_code or "native_close_unknown"
+                close_reason = _safe_native_reason(
+                    close_result.reason_code, "native_close_unknown"
+                )
         terminal_state = None if not session_reserved else state
         if session_reserved:
             snapshot = snapshot.model_copy(
@@ -347,6 +413,7 @@ class RunExecution:
             active_reserved=False,
             session_reserved=session_reserved,
             terminal_state=terminal_state,
+            terminal_reason_code=reason_code if terminal_state is not None else None,
         )
 
     def _inspect_unresolved(
@@ -354,7 +421,17 @@ class RunExecution:
         snapshot: RunSnapshot,
         handle: NativeHandle,
         terminal_state: RunState | None,
+        terminal_reason_code: str | None,
     ) -> None:
+        if snapshot.state is RunState.RUNNING:
+            snapshot = snapshot.model_copy(
+                update={
+                    "state": RunState.UNKNOWN,
+                    "input_open": False,
+                    "reason_code": "native_response_unknown",
+                }
+            )
+            self._transition_run(snapshot.run_id, snapshot)
         try:
             runtime_entry = self._store.get_runtime_entry(
                 snapshot.effective_config.runtime_ref
@@ -373,14 +450,21 @@ class RunExecution:
                         "state": terminal_state,
                         "input_open": False,
                         "active_response_id": None,
-                        "reason_code": None,
+                        "reason_code": terminal_reason_code,
                     }
                 )
             else:
+                inspection_reason = (
+                    None
+                    if inspection.reason_code is None
+                    else _safe_native_reason(
+                        inspection.reason_code, "native_process_gone"
+                    )
+                )
                 reconciled = snapshot.model_copy(
                     update={
                         "active_response_id": None,
-                        "reason_code": inspection.reason_code
+                        "reason_code": inspection_reason
                         or snapshot.reason_code
                         or "native_process_gone",
                     }

@@ -57,6 +57,7 @@ class _StoredRun:
     operation_id: UUID
     native_handle: NativeHandle | None = None
     terminal_state: RunState | None = None
+    terminal_reason_code: str | None = None
 
 
 def _profile_copy(value: ProfileRevision) -> ProfileRevision:
@@ -713,12 +714,18 @@ class MemoryAgentStore:
 
     def list_unresolved_runs(
         self,
-    ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None], ...]:
+    ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None, str | None], ...]:
         with self._lock:
             return tuple(
-                (_run_copy(run.snapshot), run.native_handle, run.terminal_state)
+                (
+                    _run_copy(run.snapshot),
+                    run.native_handle,
+                    run.terminal_state,
+                    run.terminal_reason_code,
+                )
                 for run in self._runs.values()
-                if run.snapshot.state in (RunState.UNKNOWN, RunState.CLOSING)
+                if run.snapshot.state
+                in (RunState.RUNNING, RunState.UNKNOWN, RunState.CLOSING)
                 and run.native_handle is not None
             )
 
@@ -734,6 +741,7 @@ class MemoryAgentStore:
         active_reserved: bool | None = None,
         session_reserved: bool | None = None,
         terminal_state: RunState | None = None,
+        terminal_reason_code: str | None = None,
     ) -> None:
         """Persist a run outcome and release only evidence-backed reservations."""
         with self._lock:
@@ -777,6 +785,7 @@ class MemoryAgentStore:
             run.snapshot = _run_copy(snapshot)
             if terminal_state is not None:
                 run.terminal_state = terminal_state
+                run.terminal_reason_code = terminal_reason_code
             if replace_native_handle:
                 run.native_handle = native_handle
             if receipt_status is not None:

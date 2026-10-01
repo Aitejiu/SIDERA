@@ -55,6 +55,178 @@ class _CountingToolConnectionReader:
         )
 
 
+@pytest.mark.parametrize(
+    ("reason_path", "expected_state", "expected_reason"),
+    (
+        ("open_failure", "failed", "native_start_failed"),
+        ("response_failure", "failed", "native_response_failed"),
+        ("response_unknown", "unknown", "native_response_unknown"),
+        ("close_unknown", "closing", "native_close_unknown"),
+        ("inspection_gone", "unknown", "native_process_gone"),
+    ),
+)
+def test_postgres_native_reason_codes_do_not_persist_resolved_secret(
+    owned_agents_pg,
+    admission_lab_factory,
+    reason_path,
+    expected_state,
+    expected_reason,
+):
+    from sqlalchemy import select
+
+    from sidera_agents.contracts import (
+        CredentialRef,
+        NativeCloseOutcome,
+        NativeCloseState,
+        NativeInspection,
+        NativeOutcomeStatus,
+        NativeProcessState,
+        NativeResponseState,
+        SecretBinding,
+    )
+    from sidera_agents.postgres.models import AgentRunRow, RunOperationRow
+    from sidera_agents.runs import VerifiedNativeOpenFailure
+
+    lab = _postgres_lab(owned_agents_pg, admission_lab_factory)
+    profile = lab.catalog.revise_profile(
+        lab.profile.ref,
+        lab.profile.draft.model_copy(
+            update={
+                "secret_refs": (
+                    SecretBinding(
+                        credential_ref=CredentialRef(
+                            workspace_id=lab.workspace_id,
+                            credential_id=uuid4(),
+                        ),
+                        destination="SYNTHETIC_TOKEN",
+                    ),
+                )
+            }
+        ),
+        grant_id=lab.grant_id,
+    )
+    marker = "SYNTHETIC_SECRET_MARKER_DO_NOT_PERSIST"
+    secret_reads = []
+
+    class MarkerSecretReader:
+        def read(self, grant_id, binding):
+            del grant_id
+            secret_reads.append(binding.destination)
+            return SecretStr(marker)
+
+    lab.execution._secrets = MarkerSecretReader()
+    accepted = lab.execution.start(lab.request(profile_ref=profile.ref))
+
+    if reason_path == "open_failure":
+
+        def fail_open(open_request):
+            assert (
+                open_request.environment["SYNTHETIC_TOKEN"].get_secret_value() == marker
+            )
+            raise VerifiedNativeOpenFailure(marker)
+
+        lab.native.open = fail_open
+    else:
+        original_prompt = lab.native.prompt
+
+        def prompt_with_marker(handle, assembled_input, response_id):
+            outcome = original_prompt(handle, assembled_input, response_id)
+            if reason_path == "response_failure":
+                return outcome.model_copy(
+                    update={
+                        "status": NativeOutcomeStatus.FAILED,
+                        "reason_code": marker,
+                    }
+                )
+            if reason_path == "response_unknown":
+                return outcome.model_copy(
+                    update={
+                        "status": NativeOutcomeStatus.UNKNOWN,
+                        "reason_code": marker,
+                    }
+                )
+            if reason_path == "close_unknown":
+                return outcome.model_copy(
+                    update={
+                        "status": NativeOutcomeStatus.FAILED,
+                        "reason_code": "native_response_failed",
+                    }
+                )
+            return outcome.model_copy(
+                update={
+                    "status": NativeOutcomeStatus.UNKNOWN,
+                    "reason_code": "native_response_unknown",
+                }
+            )
+
+        lab.native.prompt = prompt_with_marker
+
+        if reason_path == "close_unknown":
+
+            def close_with_marker(handle):
+                lab.native.inspections[handle.run_id] = NativeInspection(
+                    process_state=NativeProcessState.ALIVE,
+                    response_state=NativeResponseState.ACTIVE,
+                    reason_code=None,
+                )
+                return NativeCloseOutcome(
+                    status=NativeCloseState.UNKNOWN,
+                    reason_code=marker,
+                )
+
+            lab.native.close = close_with_marker
+        elif reason_path == "inspection_gone":
+            lab.native.inspect = lambda handle: NativeInspection(
+                process_state=NativeProcessState.GONE,
+                response_state=NativeResponseState.IDLE,
+                reason_code=marker,
+            )
+
+    lab.pump()
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+    )
+    receipt = lab.execution.get_start(
+        lab.workspace_id, accepted.operation_id, grant_id=lab.grant_id
+    ).receipt
+    assert snapshot.state.value == expected_state
+    assert snapshot.reason_code == expected_reason
+    assert receipt.reason_code == (
+        expected_reason if reason_path == "open_failure" else None
+    )
+    assert secret_reads == ["SYNTHETIC_TOKEN"]
+    if reason_path != "open_failure":
+        assert (
+            lab.native.open_calls[0].environment["SYNTHETIC_TOKEN"].get_secret_value()
+            == marker
+        )
+    assert marker not in repr(snapshot)
+    assert marker not in repr(receipt)
+
+    run_table = AgentRunRow.__table__
+    operation_table = RunOperationRow.__table__
+    with owned_agents_pg.engine.connect() as connection:
+        run_row = (
+            connection.execute(
+                select(run_table).where(run_table.c.run_id == accepted.run_id)
+            )
+            .mappings()
+            .one()
+        )
+        operation_row = (
+            connection.execute(
+                select(operation_table).where(
+                    operation_table.c.workspace_id == lab.workspace_id,
+                    operation_table.c.operation_id == accepted.operation_id,
+                )
+            )
+            .mappings()
+            .one()
+        )
+    persisted = repr(dict(run_row)) + repr(dict(operation_row))
+    assert marker not in persisted
+
+
 def test_postgres_accepted_replay_survives_profile_disable_and_source_loss(
     owned_agents_pg, admission_lab_factory
 ):
@@ -507,6 +679,182 @@ def test_postgres_fresh_store_recovers_unknown_operation_without_reopening(
     finally:
         fresh.close()
         fresh_store.close()
+
+
+@pytest.mark.parametrize(
+    ("process_state", "response_state", "expected_active", "expected_sessions"),
+    (("gone", "idle", 0, 0), ("alive", "active", 1, 1)),
+)
+def test_postgres_fresh_store_reconciles_running_handle_without_replay(
+    owned_agents_pg,
+    admission_lab_factory,
+    process_state,
+    response_state,
+    expected_active,
+    expected_sessions,
+):
+    from threading import Event, Thread
+
+    from sqlalchemy import select
+
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.contracts import (
+        NativeInspection,
+        NativeProcessState,
+        NativeResponseState,
+    )
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+    from sidera_agents.postgres.models import AgentRunRow
+    from sidera_agents.postgres.store import PostgresAgentStore
+
+    lab = _postgres_lab(owned_agents_pg, admission_lab_factory)
+    prompt_entered = Event()
+    resume_prompt = Event()
+    prompt_attempts = []
+    poll_errors = []
+    original_prompt = lab.native.prompt
+
+    def blocked_prompt(handle, assembled_input, response_id):
+        prompt_attempts.append(handle.run_id)
+        prompt_entered.set()
+        assert resume_prompt.wait(timeout=2)
+        return original_prompt(handle, assembled_input, response_id)
+
+    lab.native.prompt = blocked_prompt
+    accepted = lab.execution.start(lab.request())
+
+    def original_poll():
+        try:
+            lab.service.poll_once()
+        except AgentError as error:
+            poll_errors.append(error)
+
+    old_poll = Thread(target=original_poll)
+    old_poll.start()
+    assert prompt_entered.wait(timeout=1)
+
+    with owned_agents_pg.engine.connect() as connection:
+        persisted = (
+            connection.execute(
+                select(AgentRunRow.__table__).where(
+                    AgentRunRow.run_id == accepted.run_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert persisted["state"] == "running"
+    assert persisted["native_handle"] is not None
+
+    lab.store.release_execution_owner(lab.service._owner_id)
+    inspected_handles = []
+    evidence = NativeInspection(
+        process_state=NativeProcessState(process_state),
+        response_state=NativeResponseState(response_state),
+        reason_code=None,
+    )
+
+    def inspect(handle):
+        inspected_handles.append(handle)
+        return evidence
+
+    lab.native.inspect = inspect
+    fresh_store = PostgresAgentStore(owned_agents_pg.engine)
+    fresh = create_agent_service(
+        fresh_store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        fresh.poll_once()
+        snapshot = fresh.execution.get_run(
+            lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+        )
+        installation = fresh_store.get_runtime_entry(lab.runtime.ref).installation
+        assert snapshot.state.value == "unknown"
+        assert installation.active_count == expected_active
+        assert installation.session_count == expected_sessions
+        assert len(inspected_handles) == 1
+        assert inspected_handles[0].run_id == accepted.run_id
+        assert len(lab.native.open_calls) == 1
+        assert prompt_attempts == [accepted.run_id]
+    finally:
+        resume_prompt.set()
+        old_poll.join(timeout=1)
+        fresh.close()
+        fresh_store.close()
+        lab.service.close()
+
+    assert not old_poll.is_alive()
+    assert poll_errors and poll_errors[0].code == "execution_owner_unavailable"
+
+
+def test_postgres_terminal_failure_reason_survives_uncertain_close(
+    owned_agents_pg, admission_lab_factory
+):
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.contracts import (
+        NativeCloseOutcome,
+        NativeCloseState,
+        NativeInspection,
+        NativeOutcomeStatus,
+        NativeProcessState,
+        NativeResponseState,
+    )
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+
+    lab = _postgres_lab(owned_agents_pg, admission_lab_factory)
+    receipt = lab.execution.start(lab.request())
+    lab.native.outcomes[receipt.run_id] = NativeOutcomeStatus.FAILED
+    original_prompt = lab.native.prompt
+
+    def fail_response(handle, assembled_input, response_id):
+        return original_prompt(handle, assembled_input, response_id).model_copy(
+            update={"reason_code": "native_response_failed"}
+        )
+
+    lab.native.prompt = fail_response
+    lab.native.close = lambda handle: NativeCloseOutcome(
+        status=NativeCloseState.UNKNOWN,
+        reason_code="native_close_unknown",
+    )
+    lab.pump()
+
+    closing = lab.execution.get_run(
+        lab.workspace_id, receipt.run_id, grant_id=lab.grant_id
+    )
+    assert closing.state.value == "closing"
+    assert closing.reason_code == "native_close_unknown"
+    lab.service.close()
+
+    lab.native.inspections[receipt.run_id] = NativeInspection(
+        process_state=NativeProcessState.GONE,
+        response_state=NativeResponseState.IDLE,
+        reason_code=None,
+    )
+    fresh = create_agent_service(
+        lab.store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        fresh.poll_once()
+        failed = fresh.execution.get_run(
+            lab.workspace_id, receipt.run_id, grant_id=lab.grant_id
+        )
+    finally:
+        fresh.close()
+
+    assert failed.state.value == "failed"
+    assert failed.reason_code == "native_response_failed"
+    assert len(lab.native.open_calls) == 1
+    assert len(lab.native.prompt_calls) == 1
 
 
 def test_postgres_owner_lock_loss_blocks_admission(

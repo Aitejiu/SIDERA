@@ -35,6 +35,7 @@ def upgrade() -> None:
         Column("snapshot", JSON, nullable=False),
         Column("native_handle", JSON, nullable=True),
         Column("terminal_state", String(24), nullable=True),
+        Column("terminal_reason_code", String(120), nullable=True),
         UniqueConstraint("workspace_id", "operation_id"),
         schema="agents",
     )

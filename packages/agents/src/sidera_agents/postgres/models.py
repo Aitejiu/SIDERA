@@ -149,6 +149,7 @@ class AgentRunRow(Base):
         JSON(none_as_null=True), nullable=True
     )
     terminal_state: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    terminal_reason_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class RunReservationRow(Base):

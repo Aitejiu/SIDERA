@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -52,6 +53,13 @@ from .models import (
 
 _OWNER_LOCK_CLASS = 1397310533
 _OWNER_LOCK_ID = 3
+
+
+def _resolve_alembic_config_path(package_root: Path, source_root: Path) -> Path:
+    packaged_config = package_root / "alembic.ini"
+    if packaged_config.is_file():
+        return packaged_config
+    return source_root / "alembic.ini"
 
 
 def _not_found(kind: str) -> AgentError:
@@ -155,8 +163,10 @@ class PostgresAgentStore:
         from alembic import command
         from alembic.config import Config
 
-        package_root = Path(__file__).resolve().parents[3]
-        config = Config(str(package_root / "alembic.ini"))
+        package_root = Path(str(files("sidera_agents")))
+        source_root = Path(__file__).resolve().parents[3]
+        config_path = _resolve_alembic_config_path(package_root, source_root)
+        config = Config(str(config_path))
         with self._engine.connect() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
@@ -1254,17 +1264,24 @@ class PostgresAgentStore:
 
     def list_unresolved_runs(
         self,
-    ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None], ...]:
+    ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None, str | None], ...]:
         table = AgentRunRow.__table__
         with self._engine.connect() as connection:
             rows = (
                 connection.execute(
                     select(
-                        table.c.snapshot, table.c.native_handle, table.c.terminal_state
+                        table.c.snapshot,
+                        table.c.native_handle,
+                        table.c.terminal_state,
+                        table.c.terminal_reason_code,
                     )
                     .where(
                         table.c.state.in_(
-                            (RunState.UNKNOWN.value, RunState.CLOSING.value)
+                            (
+                                RunState.RUNNING.value,
+                                RunState.UNKNOWN.value,
+                                RunState.CLOSING.value,
+                            )
                         ),
                         table.c.native_handle.is_not(None),
                     )
@@ -1280,6 +1297,7 @@ class PostgresAgentStore:
                 None
                 if row["terminal_state"] is None
                 else RunState(row["terminal_state"]),
+                row["terminal_reason_code"],
             )
             for row in rows
             if row["native_handle"] is not None
@@ -1297,6 +1315,7 @@ class PostgresAgentStore:
         active_reserved: bool | None = None,
         session_reserved: bool | None = None,
         terminal_state: RunState | None = None,
+        terminal_reason_code: str | None = None,
     ) -> None:
         runs = AgentRunRow.__table__
         reservations = RunReservationRow.__table__
@@ -1389,6 +1408,7 @@ class PostgresAgentStore:
                 )
             if terminal_state is not None:
                 run_values["terminal_state"] = terminal_state.value
+                run_values["terminal_reason_code"] = terminal_reason_code
             connection.execute(
                 update(runs).where(runs.c.run_id == run_id).values(**run_values)
             )

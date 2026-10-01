@@ -290,6 +290,89 @@ def test_operation_profile_mismatch_requires_authority_before_conflict(admission
     assert len(lab.native.open_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("authorize_stored_profile", "expected_code"),
+    ((False, "permission_denied"), (True, "operation_conflict")),
+)
+def test_operation_conflict_race_authorizes_stored_profile(
+    admission_lab, authorize_stored_profile, expected_code
+):
+    from threading import Thread
+
+    from sidera_agents.contracts import ProfileDraft
+
+    lab = admission_lab
+    stored_profile = lab.catalog.create_profile(
+        lab.workspace_id,
+        ProfileDraft.model_validate(
+            lab.profile.draft.model_copy(update={"name": "stored profile"}).model_dump()
+        ),
+        grant_id=lab.grant_id,
+    )
+    submitted_profile = lab.profile
+    operation_id = uuid4()
+    allowed_stored_profile = False
+
+    class RaceAuthorizer:
+        def require(self, grant_id, action, target):
+            if (
+                action == "run.start"
+                and target == stored_profile.ref
+                and not allowed_stored_profile
+            ):
+                raise AgentError("permission_denied", "Access denied.")
+
+    lab.execution._authorizer = RaceAuthorizer()
+    lookup_finished = Event()
+    resume_submitted = Event()
+    original_lookup = lab.store.get_start_operation
+    paused = False
+
+    def lookup_then_pause(workspace_id, candidate_operation_id):
+        nonlocal paused
+        operation = original_lookup(workspace_id, candidate_operation_id)
+        if candidate_operation_id == operation_id and operation is None and not paused:
+            paused = True
+            lookup_finished.set()
+            assert resume_submitted.wait(timeout=2)
+        return operation
+
+    lab.store.get_start_operation = lookup_then_pause
+    submitted_request = lab.request(
+        operation_id=operation_id, profile_ref=submitted_profile.ref
+    )
+    stored_request = lab.request(
+        operation_id=operation_id, profile_ref=stored_profile.ref
+    )
+    result = []
+
+    def submit_b():
+        try:
+            result.append(lab.execution.start(submitted_request))
+        except AgentError as error:
+            result.append(error)
+
+    thread = Thread(target=submit_b)
+    thread.start()
+    assert lookup_finished.wait(timeout=1)
+    allowed_stored_profile = True
+    stored_receipt = lab.execution.start(stored_request)
+    allowed_stored_profile = authorize_stored_profile
+    resume_submitted.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert len(result) == 1
+    assert isinstance(result[0], AgentError)
+    assert result[0].code == expected_code
+    assert str(stored_profile.ref) not in str(result[0])
+    if expected_code == "permission_denied":
+        assert str(stored_receipt.run_id) not in str(result[0])
+    assert stored_receipt.status.value == "accepted"
+    lab.pump()
+    assert len(lab.native.open_calls) == 1
+
+
 def _profile_with_secret(lab):
     binding = SecretBinding(
         credential_ref=CredentialRef(
@@ -302,6 +385,124 @@ def _profile_with_secret(lab):
         lab.profile.draft.model_copy(update={"secret_refs": (binding,)}),
         grant_id=lab.grant_id,
     )
+
+
+@pytest.mark.parametrize(
+    ("reason_path", "expected_state", "expected_reason"),
+    (
+        ("open_failure", "failed", "native_start_failed"),
+        ("response_failure", "failed", "native_response_failed"),
+        ("response_unknown", "unknown", "native_response_unknown"),
+        ("close_unknown", "closing", "native_close_unknown"),
+        ("inspection_gone", "unknown", "native_process_gone"),
+    ),
+)
+def test_native_reason_codes_never_expose_resolved_secret(
+    admission_lab, reason_path, expected_state, expected_reason
+):
+    from sidera_agents.runs import VerifiedNativeOpenFailure
+
+    lab = admission_lab
+    profile = _profile_with_secret(lab)
+    marker = "synthetic-secret-value"
+    secret_reads = []
+
+    class MarkerSecretReader:
+        def read(self, grant_id, binding):
+            del grant_id
+            secret_reads.append(binding.destination)
+            return SecretStr(marker)
+
+    lab.execution._secrets = MarkerSecretReader()
+    request = lab.request(profile_ref=profile.ref)
+    accepted = lab.execution.start(request)
+
+    if reason_path == "open_failure":
+
+        def fail_open(open_request):
+            assert (
+                open_request.environment["SYNTHETIC_TOKEN"].get_secret_value() == marker
+            )
+            raise VerifiedNativeOpenFailure(marker)
+
+        lab.native.open = fail_open
+    else:
+        original_prompt = lab.native.prompt
+
+        def prompt_with_marker(handle, assembled_input, response_id):
+            outcome = original_prompt(handle, assembled_input, response_id)
+            if reason_path == "response_failure":
+                return outcome.model_copy(
+                    update={
+                        "status": NativeOutcomeStatus.FAILED,
+                        "reason_code": marker,
+                    }
+                )
+            if reason_path == "response_unknown":
+                return outcome.model_copy(
+                    update={
+                        "status": NativeOutcomeStatus.UNKNOWN,
+                        "reason_code": marker,
+                    }
+                )
+            if reason_path == "close_unknown":
+                return outcome.model_copy(
+                    update={
+                        "status": NativeOutcomeStatus.FAILED,
+                        "reason_code": "native_response_failed",
+                    }
+                )
+            return outcome.model_copy(
+                update={
+                    "status": NativeOutcomeStatus.UNKNOWN,
+                    "reason_code": "native_response_unknown",
+                }
+            )
+
+        lab.native.prompt = prompt_with_marker
+
+        if reason_path == "close_unknown":
+
+            def close_with_marker(handle):
+                lab.native.inspections[handle.run_id] = NativeInspection(
+                    process_state=NativeProcessState.ALIVE,
+                    response_state=NativeResponseState.ACTIVE,
+                    reason_code=None,
+                )
+                return NativeCloseOutcome(
+                    status=NativeCloseState.UNKNOWN,
+                    reason_code=marker,
+                )
+
+            lab.native.close = close_with_marker
+        elif reason_path == "inspection_gone":
+            lab.native.inspect = lambda handle: NativeInspection(
+                process_state=NativeProcessState.GONE,
+                response_state=NativeResponseState.IDLE,
+                reason_code=marker,
+            )
+
+    lab.pump()
+
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+    )
+    receipt = lab.execution.get_start(
+        lab.workspace_id, accepted.operation_id, grant_id=lab.grant_id
+    ).receipt
+    assert snapshot.state.value == expected_state
+    assert snapshot.reason_code == expected_reason
+    assert receipt.reason_code == (
+        expected_reason if reason_path == "open_failure" else None
+    )
+    assert secret_reads == ["SYNTHETIC_TOKEN"]
+    if reason_path != "open_failure":
+        assert (
+            lab.native.open_calls[0].environment["SYNTHETIC_TOKEN"].get_secret_value()
+            == marker
+        )
+    assert marker not in repr(snapshot)
+    assert marker not in repr(receipt)
 
 
 def test_busy_and_duplicate_starts_do_not_resolve_sensitive_projections(admission_lab):
@@ -458,6 +659,61 @@ def test_uncertain_close_retains_session_until_process_gone(admission_lab):
     assert installation.session_count == 0
 
 
+def test_terminal_failure_reason_survives_uncertain_close(admission_lab):
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+
+    lab = admission_lab
+    receipt = lab.execution.start(lab.request())
+    lab.native.outcomes[receipt.run_id] = NativeOutcomeStatus.FAILED
+    original_prompt = lab.native.prompt
+
+    def fail_response(handle, assembled_input, response_id):
+        return original_prompt(handle, assembled_input, response_id).model_copy(
+            update={"reason_code": "native_response_failed"}
+        )
+
+    lab.native.prompt = fail_response
+    lab.native.close = lambda handle: NativeCloseOutcome(
+        status=NativeCloseState.UNKNOWN,
+        reason_code="native_close_unknown",
+    )
+    lab.pump()
+
+    closing = lab.execution.get_run(
+        lab.workspace_id, receipt.run_id, grant_id=lab.grant_id
+    )
+    assert closing.state.value == "closing"
+    assert closing.reason_code == "native_close_unknown"
+    lab.service.close()
+
+    lab.native.inspections[receipt.run_id] = NativeInspection(
+        process_state=NativeProcessState.GONE,
+        response_state=NativeResponseState.IDLE,
+        reason_code=None,
+    )
+    fresh = create_agent_service(
+        lab.store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        fresh.poll_once()
+        failed = fresh.execution.get_run(
+            lab.workspace_id, receipt.run_id, grant_id=lab.grant_id
+        )
+    finally:
+        fresh.close()
+
+    assert failed.state.value == "failed"
+    assert failed.reason_code == "native_response_failed"
+    assert len(lab.native.open_calls) == 1
+    assert len(lab.native.prompt_calls) == 1
+
+
 def test_close_retains_owner_while_native_boundary_is_blocked(admission_lab):
     lab = admission_lab
     entered = Event()
@@ -540,6 +796,102 @@ def test_operation_conflict_does_not_start_an_altered_request(admission_lab):
     assert len(lab.native.open_calls) == 1
 
 
+def test_admission_publication_is_atomic_with_orphan_scan(admission_lab):
+    from threading import current_thread
+
+    lab = admission_lab
+    admission_finished = Event()
+    resume_admission = Event()
+    orphan_scan_entered = Event()
+    resume_orphan_scan = Event()
+    first_poll_gate = Event()
+    poll_finished = Event()
+    poll_errors = []
+    unknown_transitions = []
+    original_admit = lab.store.admit_start
+    original_list_starting = lab.store.list_starting_runs
+    original_transition = lab.store.transition_run
+
+    def pause_after_acceptance(**kwargs):
+        result = original_admit(**kwargs)
+        admission_finished.set()
+        assert resume_admission.wait(timeout=2)
+        return result
+
+    def pause_orphan_scan():
+        orphan_scan_entered.set()
+        first_poll_gate.set()
+        assert resume_orphan_scan.wait(timeout=2)
+        return original_list_starting()
+
+    def record_unknown_transition(run_id, snapshot, **kwargs):
+        if snapshot.state.value == "unknown":
+            unknown_transitions.append(run_id)
+        return original_transition(run_id, snapshot, **kwargs)
+
+    pending_condition = lab.execution._pending_lock
+    original_wait = pending_condition.wait
+
+    def observe_poll_wait(timeout=None):
+        if current_thread().name == "orphan-race-poller":
+            first_poll_gate.set()
+        return original_wait(timeout)
+
+    pending_condition.wait = observe_poll_wait
+    lab.store.admit_start = pause_after_acceptance
+    lab.store.list_starting_runs = pause_orphan_scan
+    lab.store.transition_run = record_unknown_transition
+    request = lab.request()
+    submit_results = []
+
+    def submit_start():
+        submit_results.append(lab.execution.start(request))
+
+    def poll():
+        try:
+            lab.service.poll_once()
+        except Exception as error:  # noqa: BLE001 - surface poll thread failures
+            poll_errors.append(error)
+        finally:
+            poll_finished.set()
+
+    submit_thread = Thread(target=submit_start, name="orphan-race-submitter")
+    poll_thread = Thread(target=poll, name="orphan-race-poller")
+    submit_thread.start()
+    assert admission_finished.wait(timeout=1)
+    poll_thread.start()
+    assert first_poll_gate.wait(timeout=1)
+
+    if orphan_scan_entered.is_set():
+        resume_orphan_scan.set()
+        assert poll_finished.wait(timeout=1)
+    else:
+        resume_orphan_scan.set()
+    resume_admission.set()
+    submit_thread.join(timeout=2)
+    poll_thread.join(timeout=2)
+    assert not submit_thread.is_alive()
+    assert not poll_thread.is_alive()
+    assert poll_errors == []
+    assert len(submit_results) == 1
+
+    accepted = submit_results[0]
+    if not orphan_scan_entered.is_set():
+        assert poll_finished.is_set()
+    lab.pump()
+
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+    )
+    receipt = lab.execution.get_start(
+        lab.workspace_id, accepted.operation_id, grant_id=lab.grant_id
+    ).receipt
+    assert snapshot.state.value == "completed"
+    assert receipt.status.value == "accepted"
+    assert unknown_transitions == []
+    assert len(lab.native.open_calls) == 1
+
+
 def test_uncertain_open_is_not_replayed_after_fresh_service(admission_lab):
     from sidera_agents.bootstrap import create_agent_service
     from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
@@ -613,9 +965,16 @@ def test_verified_open_failure_releases_only_its_reservations(admission_lab_fact
     installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
 
     assert failed_snapshot.state.value == "failed"
+    assert failed_snapshot.reason_code == "native_spawn_failed"
     assert retained_snapshot.state.value == "idle"
     assert installation.active_count == 0
     assert installation.session_count == 1
+    failed_receipt = lab.execution.get_start(
+        lab.workspace_id,
+        failed.operation_id,
+        grant_id=lab.grant_id,
+    )
+    assert failed_receipt.receipt.reason_code == "native_spawn_failed"
     assert len(lab.native.open_calls) == 1
 
 
@@ -649,6 +1008,168 @@ def test_revoked_grant_and_lost_owner_block_new_start(admission_lab):
     with pytest.raises(AgentError) as owner_lost:
         lab.execution.start(lab.request())
     assert owner_lost.value.code == "execution_owner_unavailable"
+
+
+@pytest.mark.parametrize("projection_fails_after_owner_loss", (False, True))
+def test_owner_loss_during_projection_prevents_native_open(
+    admission_lab, projection_fails_after_owner_loss
+):
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+
+    lab = admission_lab
+    profile = _profile_with_secret(lab)
+
+    class OwnerReleasingSecretReader:
+        def read(self, grant_id, binding):
+            del grant_id, binding
+            lab.store.release_execution_owner(lab.service._owner_id)
+            if projection_fails_after_owner_loss:
+                raise AgentError("secret_unavailable", "Authorized secret unavailable.")
+            return SecretStr("synthetic-secret-value")
+
+    lab.execution._secrets = OwnerReleasingSecretReader()
+    accepted = lab.execution.start(lab.request(profile_ref=profile.ref))
+    transition_attempts = []
+    original_transition = lab.store.transition_run
+
+    def record_transition(run_id, snapshot, **kwargs):
+        transition_attempts.append(snapshot.state.value)
+        return original_transition(run_id, snapshot, **kwargs)
+
+    lab.store.transition_run = record_transition
+
+    try:
+        lab.pump()
+    except AgentError as error:
+        assert error.code == "execution_owner_unavailable"
+
+    starting = lab.store.get_run_snapshot(lab.workspace_id, accepted.run_id)
+    receipt = lab.store.get_start_receipt(lab.workspace_id, accepted.operation_id)
+    assert starting.state.value == "starting"
+    assert receipt.status.value == "accepted"
+    assert lab.native.open_calls == []
+    assert transition_attempts == []
+
+    lab.service.close()
+    recovered = create_agent_service(
+        lab.store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        recovered.poll_once()
+        unknown = recovered.execution.get_run(
+            lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+        )
+        lookup = recovered.execution.get_start(
+            lab.workspace_id, accepted.operation_id, grant_id=lab.grant_id
+        )
+    finally:
+        recovered.close()
+
+    assert unknown.state.value == "unknown"
+    assert lookup.receipt.status.value == "unknown"
+    assert lab.native.open_calls == []
+
+
+@pytest.mark.parametrize(
+    ("process_state", "response_state", "expected_active", "expected_sessions"),
+    (
+        ("gone", "idle", 0, 0),
+        ("alive", "idle", 0, 1),
+        ("unknown", "unknown", 1, 1),
+    ),
+)
+def test_fresh_owner_reconciles_running_handle_without_replay(
+    admission_lab,
+    process_state,
+    response_state,
+    expected_active,
+    expected_sessions,
+):
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.contracts import (
+        NativeInspection,
+        NativeProcessState,
+        NativeResponseState,
+    )
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+
+    lab = admission_lab
+    prompt_entered = Event()
+    resume_prompt = Event()
+    prompt_attempts = []
+    poll_errors = []
+    original_prompt = lab.native.prompt
+
+    def blocked_prompt(handle, assembled_input, response_id):
+        prompt_attempts.append(handle.run_id)
+        prompt_entered.set()
+        assert resume_prompt.wait(timeout=2)
+        return original_prompt(handle, assembled_input, response_id)
+
+    lab.native.prompt = blocked_prompt
+    accepted = lab.execution.start(lab.request())
+
+    def original_poll():
+        try:
+            lab.service.poll_once()
+        except AgentError as error:
+            poll_errors.append(error)
+
+    old_poll = Thread(target=original_poll)
+    old_poll.start()
+    assert prompt_entered.wait(timeout=1)
+    running = lab.store.get_run_snapshot(lab.workspace_id, accepted.run_id)
+    assert running.state.value == "running"
+    assert lab.store._runs[accepted.run_id].native_handle is not None
+
+    lab.store.release_execution_owner(lab.service._owner_id)
+    inspected_handles = []
+    evidence = NativeInspection(
+        process_state=NativeProcessState(process_state),
+        response_state=NativeResponseState(response_state),
+        reason_code=None,
+    )
+
+    def inspect(handle):
+        inspected_handles.append(handle)
+        return evidence
+
+    lab.native.inspect = inspect
+    recovered = create_agent_service(
+        lab.store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        recovered.poll_once()
+        snapshot = recovered.execution.get_run(
+            lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+        )
+        installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+        assert snapshot.state.value == "unknown"
+        assert snapshot.reason_code == "native_response_unknown"
+        assert installation.active_count == expected_active
+        assert installation.session_count == expected_sessions
+        assert len(inspected_handles) == 1
+        assert len(lab.native.open_calls) == 1
+        assert prompt_attempts == [accepted.run_id]
+    finally:
+        resume_prompt.set()
+        old_poll.join(timeout=1)
+        recovered.close()
+        lab.service.close()
+
+    assert not old_poll.is_alive()
+    assert poll_errors and poll_errors[0].code == "execution_owner_unavailable"
 
 
 def test_service_factory_is_thread_free_until_background_start(admission_lab):
