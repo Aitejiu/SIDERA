@@ -109,3 +109,55 @@ class RuntimeReferenceRow(Base):
         DateTime(timezone=True), nullable=False
     )
     file_identity: Mapped[str | None] = mapped_column(String(160), nullable=True)
+
+
+class RunOperationRow(Base):
+    __tablename__ = "run_operations"
+    __table_args__ = ({"schema": "agents"},)
+
+    workspace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    profile_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    profile_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_config_hash: Mapped[str] = mapped_column(String(71), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(71), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    run_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
+class AgentRunRow(Base):
+    __tablename__ = "runs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "operation_id"),
+        {"schema": "agents"},
+    )
+
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    profile_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    profile_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    runtime_workspace_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False
+    )
+    runtime_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    installation_key: Mapped[str] = mapped_column(String(71), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    native_handle: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    terminal_state: Mapped[str | None] = mapped_column(String(24), nullable=True)
+
+
+class RunReservationRow(Base):
+    __tablename__ = "run_reservations"
+    __table_args__ = ({"schema": "agents"},)
+
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    profile_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    installation_key: Mapped[str] = mapped_column(String(71), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    session: Mapped[bool] = mapped_column(Boolean, nullable=False)

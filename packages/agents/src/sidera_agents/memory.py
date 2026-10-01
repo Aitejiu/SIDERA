@@ -5,8 +5,10 @@ from datetime import datetime
 from threading import RLock
 from uuid import UUID
 
+from .admission import OperationRecord
 from .contracts import (
     CapabilityResourceDraft,
+    NativeHandle,
     ProfileDraft,
     ProfileRef,
     ProfileRevision,
@@ -14,8 +16,12 @@ from .contracts import (
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RunSnapshot,
+    RunState,
     RuntimeProbe,
     RuntimeRef,
+    StartReceipt,
+    StartStatus,
 )
 from .errors import AgentError
 from .ports import RuntimeEntry, RuntimeInstallation, RuntimeObservation, RuntimeRecord
@@ -26,6 +32,31 @@ class _Head:
     revision: int
     enabled: bool = True
     status_version: int = 1
+
+
+@dataclass
+class _StoredOperation:
+    profile_ref: ProfileRef
+    profile_config_hash: str
+    fingerprint: str
+    receipt: StartReceipt
+
+
+@dataclass
+class _RunReservation:
+    workspace_id: UUID
+    profile_id: UUID
+    installation_key: str
+    active: bool = True
+    session: bool = True
+
+
+@dataclass
+class _StoredRun:
+    snapshot: RunSnapshot
+    operation_id: UUID
+    native_handle: NativeHandle | None = None
+    terminal_state: RunState | None = None
 
 
 def _profile_copy(value: ProfileRevision) -> ProfileRevision:
@@ -56,6 +87,14 @@ def _runtime_entry_copy(value: RuntimeEntry) -> RuntimeEntry:
     return RuntimeEntry(record=record, installation=value.installation)
 
 
+def _run_copy(value: RunSnapshot) -> RunSnapshot:
+    return RunSnapshot.model_validate(value.model_dump(mode="python", warnings=False))
+
+
+def _receipt_copy(value: StartReceipt) -> StartReceipt:
+    return StartReceipt.model_validate(value.model_dump(mode="python", warnings=False))
+
+
 def _not_found(kind: str) -> AgentError:
     return AgentError("not_found", f"{kind.capitalize()} not found.")
 
@@ -76,6 +115,10 @@ class MemoryAgentStore:
         self._runtime_installations: dict[str, RuntimeInstallation] = {}
         self._runtime_records: dict[tuple[UUID, UUID], RuntimeRecord] = {}
         self._runtime_index: dict[tuple[UUID, str, str], UUID] = {}
+        self._execution_owner: UUID | None = None
+        self._run_operations: dict[tuple[UUID, UUID], _StoredOperation] = {}
+        self._runs: dict[UUID, _StoredRun] = {}
+        self._run_reservations: dict[UUID, _RunReservation] = {}
 
     def find_runtime(
         self, workspace_id: UUID, harness_id: str, executable: str
@@ -487,4 +530,262 @@ class MemoryAgentStore:
             if not head.enabled:
                 raise AgentError(
                     "configuration_invalid", "Disabled resources cannot be newly bound."
+                )
+
+    def acquire_execution_owner(self, owner_id: UUID) -> bool:
+        with self._lock:
+            if self._execution_owner not in (None, owner_id):
+                return False
+            self._execution_owner = owner_id
+            return True
+
+    def execution_owner_is_held(self, owner_id: UUID) -> bool:
+        with self._lock:
+            return self._execution_owner == owner_id
+
+    def release_execution_owner(self, owner_id: UUID) -> None:
+        with self._lock:
+            if self._execution_owner == owner_id:
+                self._execution_owner = None
+
+    def admit_start(
+        self,
+        *,
+        owner_id: UUID,
+        profile_ref: ProfileRef,
+        runtime_ref: RuntimeRef,
+        installation_key: str,
+        operation_id: UUID,
+        profile_config_hash: str,
+        fingerprint: str,
+        run_id: UUID,
+        snapshot: RunSnapshot,
+    ) -> tuple[StartReceipt, bool]:
+        """Atomically deduplicate a start and reserve memory-backed capacity."""
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            operation_key = (profile_ref.workspace_id, operation_id)
+            operation = self._run_operations.get(operation_key)
+            if operation is not None:
+                if (
+                    operation.profile_ref != profile_ref
+                    or operation.profile_config_hash != profile_config_hash
+                    or operation.fingerprint != fingerprint
+                ):
+                    raise AgentError(
+                        "operation_conflict",
+                        "Operation ID was used with a different request.",
+                    )
+                if operation.receipt.status is not StartStatus.BUSY:
+                    return _receipt_copy(operation.receipt), False
+
+            revision = self._profile_revisions.get(
+                (profile_ref.workspace_id, profile_ref.profile_id, profile_ref.revision)
+            )
+            profile_head = self._profile_heads.get(
+                (profile_ref.workspace_id, profile_ref.profile_id)
+            )
+            current_revision = (
+                None
+                if profile_head is None
+                else self._profile_revisions.get(
+                    (
+                        profile_ref.workspace_id,
+                        profile_ref.profile_id,
+                        profile_head.revision,
+                    )
+                )
+            )
+            record = self._runtime_records.get(
+                (runtime_ref.workspace_id, runtime_ref.runtime_id)
+            )
+            installation = self._runtime_installations.get(installation_key)
+            if (
+                revision is None
+                or profile_head is None
+                or current_revision is None
+                or record is None
+                or record.installation_key != installation_key
+                or installation is None
+            ):
+                raise AgentError(
+                    "configuration_invalid", "Run configuration is unavailable."
+                )
+            if not profile_head.enabled or not installation.enabled:
+                raise AgentError(
+                    "configuration_invalid", "Run configuration is disabled."
+                )
+
+            profile_active = sum(
+                reservation.active
+                for reservation in self._run_reservations.values()
+                if reservation.workspace_id == profile_ref.workspace_id
+                and reservation.profile_id == profile_ref.profile_id
+            )
+            busy = (
+                profile_active >= current_revision.draft.max_active
+                or installation.active_count >= installation.max_active
+                or installation.session_count >= installation.max_sessions
+            )
+            if busy:
+                receipt = StartReceipt(
+                    operation_id=operation_id,
+                    status=StartStatus.BUSY,
+                    run_id=None,
+                    reason_code="resource_busy",
+                )
+                self._run_operations[operation_key] = _StoredOperation(
+                    profile_ref=profile_ref,
+                    profile_config_hash=profile_config_hash,
+                    fingerprint=fingerprint,
+                    receipt=receipt,
+                )
+                return _receipt_copy(receipt), False
+
+            if snapshot.run_id in self._runs:
+                raise AgentError("operation_conflict", "Run ID is already in use.")
+            receipt = StartReceipt(
+                operation_id=operation_id,
+                status=StartStatus.ACCEPTED,
+                run_id=run_id,
+                reason_code=None,
+            )
+            self._run_operations[operation_key] = _StoredOperation(
+                profile_ref=profile_ref,
+                profile_config_hash=profile_config_hash,
+                fingerprint=fingerprint,
+                receipt=receipt,
+            )
+            self._runs[run_id] = _StoredRun(
+                snapshot=_run_copy(snapshot), operation_id=operation_id
+            )
+            self._run_reservations[run_id] = _RunReservation(
+                workspace_id=profile_ref.workspace_id,
+                profile_id=profile_ref.profile_id,
+                installation_key=installation_key,
+            )
+            self._runtime_installations[installation_key] = replace(
+                installation,
+                active_count=installation.active_count + 1,
+                session_count=installation.session_count + 1,
+            )
+            return _receipt_copy(receipt), True
+
+    def get_start_receipt(
+        self, workspace_id: UUID, operation_id: UUID
+    ) -> StartReceipt | None:
+        with self._lock:
+            operation = self._run_operations.get((workspace_id, operation_id))
+            return None if operation is None else _receipt_copy(operation.receipt)
+
+    def get_start_operation(
+        self, workspace_id: UUID, operation_id: UUID
+    ) -> OperationRecord | None:
+        with self._lock:
+            operation = self._run_operations.get((workspace_id, operation_id))
+            if operation is None:
+                return None
+            return OperationRecord(
+                profile_ref=operation.profile_ref,
+                profile_config_hash=operation.profile_config_hash,
+                fingerprint=operation.fingerprint,
+                receipt=_receipt_copy(operation.receipt),
+            )
+
+    def get_run_snapshot(self, workspace_id: UUID, run_id: UUID) -> RunSnapshot:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            return _run_copy(run.snapshot)
+
+    def list_starting_runs(self) -> tuple[RunSnapshot, ...]:
+        with self._lock:
+            return tuple(
+                _run_copy(run.snapshot)
+                for run in self._runs.values()
+                if run.snapshot.state.value == "starting"
+            )
+
+    def list_unresolved_runs(
+        self,
+    ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None], ...]:
+        with self._lock:
+            return tuple(
+                (_run_copy(run.snapshot), run.native_handle, run.terminal_state)
+                for run in self._runs.values()
+                if run.snapshot.state in (RunState.UNKNOWN, RunState.CLOSING)
+                and run.native_handle is not None
+            )
+
+    def transition_run(
+        self,
+        run_id: UUID,
+        snapshot: RunSnapshot,
+        *,
+        owner_id: UUID,
+        native_handle: NativeHandle | None = None,
+        replace_native_handle: bool = False,
+        receipt_status: StartStatus | None = None,
+        active_reserved: bool | None = None,
+        session_reserved: bool | None = None,
+        terminal_state: RunState | None = None,
+    ) -> None:
+        """Persist a run outcome and release only evidence-backed reservations."""
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(run_id)
+            reservation = self._run_reservations.get(run_id)
+            if run is None or reservation is None or snapshot.run_id != run_id:
+                raise _not_found("run")
+            installation = self._runtime_installations.get(reservation.installation_key)
+            if installation is None:
+                raise AgentError("catalog_corrupt", "Runtime installation is missing.")
+
+            active_delta = (
+                int(active_reserved) - int(reservation.active)
+                if active_reserved is not None
+                else 0
+            )
+            session_delta = (
+                int(session_reserved) - int(reservation.session)
+                if session_reserved is not None
+                else 0
+            )
+            if (
+                installation.active_count + active_delta < 0
+                or installation.session_count + session_delta < 0
+            ):
+                raise AgentError("catalog_corrupt", "Run reservation count is invalid.")
+            self._runtime_installations[reservation.installation_key] = replace(
+                installation,
+                active_count=installation.active_count + active_delta,
+                session_count=installation.session_count + session_delta,
+            )
+            if active_reserved is not None:
+                reservation.active = active_reserved
+            if session_reserved is not None:
+                reservation.session = session_reserved
+            run.snapshot = _run_copy(snapshot)
+            if terminal_state is not None:
+                run.terminal_state = terminal_state
+            if replace_native_handle:
+                run.native_handle = native_handle
+            if receipt_status is not None:
+                operation = self._run_operations[
+                    (snapshot.workspace_id, run.operation_id)
+                ]
+                operation.receipt = StartReceipt(
+                    operation_id=run.operation_id,
+                    status=receipt_status,
+                    run_id=run_id,
+                    reason_code=snapshot.reason_code,
                 )

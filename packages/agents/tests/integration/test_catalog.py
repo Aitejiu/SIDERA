@@ -26,6 +26,9 @@ def test_postgres_catalog_cas_persistence_and_owned_schema_migrations(
         "resource_revisions",
         "runtime_installations",
         "runtime_references",
+        "run_operations",
+        "runs",
+        "run_reservations",
     }
     assert set(inspect(engine).get_table_names(schema="agents")) == expected_tables
 

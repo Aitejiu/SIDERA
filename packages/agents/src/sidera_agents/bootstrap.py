@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+from threading import Event, Lock, Thread, current_thread
+from time import monotonic
+from typing import Any
+from uuid import UUID, uuid4
+
+from .catalog import ProfileCatalog
+from .errors import AgentError
+from .ports import (
+    ContextSourceReader,
+    ExecutionAuthorizer,
+    SecretReader,
+    ToolConnectionReader,
+)
+from .runs import RunExecution
+from .runtimes import RuntimeCatalog
+
+
+class AgentService:
+    def __init__(
+        self,
+        store: Any,
+        registry: Any,
+        authorizer: ExecutionAuthorizer,
+        sources: ContextSourceReader,
+        secrets: SecretReader,
+        clock,
+        tool_connections: ToolConnectionReader | None,
+    ) -> None:
+        self._store = store
+        self._owner_id: UUID = uuid4()
+        self._owner_claimed = False
+        self._lifecycle_lock = Lock()
+        self._poll_lock = Lock()
+        self._closing = False
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self.catalog = ProfileCatalog(store, authorizer, clock)
+        self.runtimes = RuntimeCatalog(
+            store, authorizer, registry=registry, clock=clock
+        )
+        self.execution = RunExecution(
+            store,
+            registry,
+            authorizer,
+            sources,
+            secrets,
+            self.runtimes,
+            self._owner_id,
+            tool_connections,
+        )
+        self.observations = None
+
+    def migrate(self) -> None:
+        migrate = getattr(self._store, "migrate", None)
+        if migrate is not None:
+            migrate()
+
+    def readiness(self) -> bool:
+        readiness = getattr(self._store, "readiness", None)
+        return True if readiness is None else bool(readiness())
+
+    def poll_once(self) -> int:
+        with self._poll_lock:
+            with self._lifecycle_lock:
+                if self._closing:
+                    raise AgentError(
+                        "shutdown_pending",
+                        "The execution service is closing.",
+                    )
+                if not self._owner_claimed:
+                    if not self._store.acquire_execution_owner(self._owner_id):
+                        raise AgentError(
+                            "execution_owner_unavailable",
+                            "The execution owner lock is unavailable.",
+                        )
+                    self._owner_claimed = True
+                elif not self._store.execution_owner_is_held(self._owner_id):
+                    raise AgentError(
+                        "execution_owner_unavailable",
+                        "The execution owner lock is not held.",
+                    )
+            return self.execution.poll_once()
+
+    def start_background(self, *, interval_seconds: float = 0.25) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        with self._lifecycle_lock:
+            if self._closing:
+                raise AgentError(
+                    "shutdown_pending", "The execution service is closing."
+                )
+            if self._thread is not None and self._thread.is_alive():
+                return
+            if self._owner_claimed:
+                if not self._store.execution_owner_is_held(self._owner_id):
+                    raise AgentError(
+                        "execution_owner_unavailable",
+                        "The execution owner lock is not held.",
+                    )
+            elif not self._store.acquire_execution_owner(self._owner_id):
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is unavailable.",
+                )
+            self._owner_claimed = True
+            self._stop.clear()
+            self._thread = Thread(
+                target=self._background_loop,
+                args=(interval_seconds,),
+                name="sidera-agent-execution",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _background_loop(self, interval_seconds: float) -> None:
+        while not self._stop.is_set():
+            try:
+                self.poll_once()
+            except AgentError as error:
+                if error.code in {"execution_owner_unavailable", "shutdown_pending"}:
+                    return
+            self._stop.wait(interval_seconds)
+
+    def close(self, *, timeout: float = 5.0) -> None:
+        if timeout < 0:
+            raise ValueError("timeout must be non-negative")
+        deadline = monotonic() + timeout
+        with self._lifecycle_lock:
+            self._closing = True
+            self._stop.set()
+            thread = self._thread
+        if thread is current_thread():
+            raise AgentError(
+                "shutdown_pending",
+                "The execution worker cannot release its own owner lock.",
+            )
+        if thread is not None:
+            thread.join(timeout=max(0.0, deadline - monotonic()))
+            if thread.is_alive():
+                raise AgentError(
+                    "shutdown_pending",
+                    "The execution worker has not stopped; owner lock retained.",
+                )
+        if not self._poll_lock.acquire(timeout=max(0.0, deadline - monotonic())):
+            raise AgentError(
+                "shutdown_pending",
+                "A service poll has not stopped; owner lock retained.",
+            )
+        try:
+            with self._lifecycle_lock:
+                if self._owner_claimed:
+                    try:
+                        self._store.release_execution_owner(self._owner_id)
+                    except Exception as error:
+                        raise AgentError(
+                            "shutdown_pending",
+                            "The execution owner lock release is unconfirmed.",
+                        ) from error
+                    self._owner_claimed = False
+        finally:
+            self._poll_lock.release()
+
+
+def create_agent_service(
+    store: Any,
+    registry: Any,
+    authorizer: ExecutionAuthorizer,
+    sources: ContextSourceReader,
+    secrets: SecretReader,
+    clock,
+    tool_connections: ToolConnectionReader | None = None,
+) -> AgentService:
+    return AgentService(
+        store,
+        registry,
+        authorizer,
+        sources,
+        secrets,
+        clock,
+        tool_connections,
+    )
+
+
+def open_postgres_store(database_url: str):
+    from sqlalchemy import create_engine
+
+    from .postgres.store import PostgresAgentStore
+
+    engine = create_engine(
+        database_url,
+        pool_pre_ping=True,
+        echo=False,
+        hide_parameters=True,
+    )
+    return PostgresAgentStore(engine, owns_engine=True)

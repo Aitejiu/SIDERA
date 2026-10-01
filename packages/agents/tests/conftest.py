@@ -1,7 +1,7 @@
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from pathlib import Path
@@ -12,9 +12,29 @@ from uuid import UUID, uuid4
 import pytest
 
 from sidera_agents.contracts import (
+    AssembledInput,
     CapabilityResourceDraft,
+    CapabilitySupport,
+    NativeCancelOutcome,
+    NativeCancelState,
+    NativeCloseOutcome,
+    NativeCloseState,
+    NativeEvent,
+    NativeHandle,
+    NativeInspection,
+    NativeOpenRequest,
+    NativeOutcome,
+    NativeOutcomeStatus,
+    NativeProcessState,
+    NativeResponseState,
+    ProcessIdentity,
     ProfileDraft,
+    ProtocolState,
+    RuntimeCandidate,
+    RuntimeDescriptor,
+    RuntimeProbe,
     RuntimeRef,
+    SupportStatus,
 )
 from sidera_agents.errors import AgentError
 
@@ -33,6 +53,9 @@ _OWNED_TABLES = {
     "resource_revisions",
     "runtime_installations",
     "runtime_references",
+    "run_operations",
+    "runs",
+    "run_reservations",
 }
 
 
@@ -50,9 +73,9 @@ class _ScratchTargetCleanupFailed(Exception):
 
 @dataclass(frozen=True)
 class _OwnedAgentsPostgres:
-    engine: Any
-    url: Any
-    lock_connection: Any
+    engine: Any = field(repr=False)
+    url: Any = field(repr=False)
+    lock_connection: Any = field(repr=False)
     configured_name: str
 
     def migrate(self, revision: str | None = None) -> None:
@@ -532,3 +555,257 @@ def runtime_lab(tmp_path):
         executable=executable,
         clock=clock,
     )
+
+
+class ControlledHarness:
+    harness_id = "controlled"
+    executable_name = "controlled"
+
+    def __init__(self) -> None:
+        self.open_calls: list[NativeOpenRequest] = []
+        self.prompt_calls: list[tuple[NativeHandle, AssembledInput, UUID]] = []
+        self.outcomes: dict[UUID, NativeOutcomeStatus] = {}
+        self.inspections: dict[UUID, NativeInspection] = {}
+        self.handles: dict[UUID, NativeHandle] = {}
+
+    def describe(self) -> RuntimeDescriptor:
+        return RuntimeDescriptor(
+            harness_id=self.harness_id,
+            display_name="Controlled test harness",
+            fields=(),
+            model_options=(),
+            thinking_options=(),
+        )
+
+    def probe(self, candidate: RuntimeCandidate, checked_at=None) -> RuntimeProbe:
+        del candidate
+        checked_at = checked_at or datetime.now(UTC)
+        return RuntimeProbe(
+            actual_version="1.0",
+            protocol_state=ProtocolState.READY,
+            capabilities={
+                "prompt": CapabilitySupport(
+                    status=SupportStatus.SUPPORTED,
+                    reason_code="supported",
+                    constraints={},
+                )
+            },
+            checked_at=checked_at,
+        )
+
+    def validate(self, profile, runtime) -> tuple:
+        del profile, runtime
+        return ()
+
+    def open(self, request: NativeOpenRequest) -> NativeHandle:
+        self.open_calls.append(request)
+        handle = NativeHandle(
+            run_id=request.run_id,
+            session_id=f"session-{request.run_id}",
+            process_identity=ProcessIdentity(
+                pid=1,
+                start_identity="controlled-process-start",
+                owned_nonce=uuid4(),
+            ),
+            capabilities=("prompt",),
+        )
+        self.handles[request.run_id] = handle
+        self.inspections[request.run_id] = NativeInspection(
+            process_state=NativeProcessState.ALIVE,
+            response_state=NativeResponseState.ACTIVE,
+            reason_code=None,
+        )
+        return handle
+
+    def prompt(
+        self, handle: NativeHandle, input: AssembledInput, response_id: UUID
+    ) -> NativeOutcome:
+        self.prompt_calls.append((handle, input, response_id))
+        status = self.outcomes.get(handle.run_id, NativeOutcomeStatus.COMPLETED)
+        if status is NativeOutcomeStatus.COMPLETED:
+            self.inspections[handle.run_id] = NativeInspection(
+                process_state=NativeProcessState.ALIVE,
+                response_state=NativeResponseState.IDLE,
+                reason_code=None,
+            )
+        return NativeOutcome(
+            response_id=response_id,
+            status=status,
+            reason_code=None,
+            observed_model=None,
+            usage=None,
+        )
+
+    def read_events(
+        self, handle: NativeHandle, after_cursor: int, limit: int = 100
+    ) -> tuple[NativeEvent, ...]:
+        del handle, after_cursor, limit
+        return ()
+
+    def cancel(self, handle: NativeHandle, response_id: UUID) -> NativeCancelOutcome:
+        del handle
+        return NativeCancelOutcome(
+            response_id=response_id,
+            status=NativeCancelState.UNSUPPORTED,
+            reason_code="unsupported",
+        )
+
+    def inspect(self, handle: NativeHandle) -> NativeInspection:
+        return self.inspections[handle.run_id]
+
+    def close(self, handle: NativeHandle) -> NativeCloseOutcome:
+        self.inspections[handle.run_id] = NativeInspection(
+            process_state=NativeProcessState.GONE,
+            response_state=NativeResponseState.IDLE,
+            reason_code=None,
+        )
+        return NativeCloseOutcome(
+            status=NativeCloseState.CLOSED,
+            reason_code=None,
+        )
+
+    def finish(self, run_id: UUID) -> None:
+        self.inspections[run_id] = NativeInspection(
+            process_state=NativeProcessState.ALIVE,
+            response_state=NativeResponseState.IDLE,
+            reason_code=None,
+        )
+
+
+@pytest.fixture
+def admission_lab_factory(tmp_path):
+    services = []
+
+    def build(
+        store,
+        *,
+        runtime_max_active=1,
+        runtime_max_sessions=2,
+        profile_max_active=1,
+    ):
+        try:
+            from sidera_agents.bootstrap import create_agent_service
+        except ModuleNotFoundError as error:
+            raise AssertionError(
+                f"Agent service bootstrap is not implemented ({error.name})."
+            ) from None
+        from sidera_agents.catalog import ProfileCatalog
+        from sidera_agents.harnesses.registry import HarnessRegistry
+        from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+        from sidera_agents.runtimes import RuntimeCatalog
+
+        workspace_id = uuid4()
+        grant_id = uuid4()
+        admin_grant_id = uuid4()
+        authorizer = RuntimeLabAuthorizer()
+        authorizer.grant_workspace(workspace_id, grant_id)
+        authorizer.grant_workspace(
+            workspace_id, admin_grant_id, local_configuration=True
+        )
+        clock = lambda: datetime(2026, 10, 2, tzinfo=UTC)
+        native = ControlledHarness()
+        registry = HarnessRegistry((native,))
+        catalog = ProfileCatalog(store, authorizer, clock)
+        runtimes = RuntimeCatalog(store, authorizer, registry=registry, clock=clock)
+        executable = tmp_path / f"controlled-{uuid4().hex}"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        runtime = runtimes.register(
+            workspace_id,
+            native.harness_id,
+            str(executable),
+            max_active=runtime_max_active,
+            max_sessions=runtime_max_sessions,
+            grant_id=grant_id,
+        )
+        profile = catalog.create_profile(
+            workspace_id,
+            ProfileDraft(
+                name="admission test",
+                description="Synthetic admission profile",
+                runtime_ref=runtime.ref,
+                instructions="Follow the test request.",
+                resource_refs=(),
+                model_id=None,
+                thinking=None,
+                max_active=profile_max_active,
+                environment={},
+                secret_refs=(),
+                native_settings={},
+            ),
+            grant_id=grant_id,
+        )
+        service = create_agent_service(
+            store,
+            registry,
+            authorizer,
+            DenyContextSourceReader(),
+            DenySecretReader(),
+            clock,
+        )
+        services.append(service)
+        service.poll_once()
+
+        def request(*, operation_id=None, policy="bounded", **changes):
+            from sidera_agents.contracts import (
+                ExecutionWorkspace,
+                RunPolicy,
+                RunStart,
+            )
+
+            values = {
+                "contract_version": 1,
+                "operation_id": operation_id or uuid4(),
+                "profile_ref": profile.ref,
+                "grant_id": grant_id,
+                "policy": RunPolicy(policy),
+                "instructions": (),
+                "text": "Review the synthetic change.",
+                "context": (),
+                "tools": (),
+                "workspace": ExecutionWorkspace(
+                    directory=str(tmp_path),
+                    writable=True,
+                    artifact_directory=None,
+                ),
+                "required_capabilities": ("prompt",),
+            }
+            values.update(changes)
+            return RunStart(**values)
+
+        return SimpleNamespace(
+            store=store,
+            service=service,
+            execution=service.execution,
+            native=native,
+            registry=registry,
+            authorizer=authorizer,
+            catalog=catalog,
+            runtimes=runtimes,
+            executable=executable,
+            workspace_id=workspace_id,
+            grant_id=grant_id,
+            admin_grant_id=admin_grant_id,
+            runtime=runtime,
+            profile=profile,
+            clock=clock,
+            request=request,
+            pump=service.poll_once,
+        )
+
+    yield build
+    close_failed = False
+    for service in services:
+        try:
+            service.close()
+        except Exception:  # noqa: BLE001 - continue closing all services, then fail closed
+            close_failed = True
+    if close_failed:
+        pytest.fail("An admission service did not close safely.", pytrace=False)
+
+
+@pytest.fixture
+def admission_lab(admission_lab_factory):
+    from sidera_agents.memory import MemoryAgentStore
+
+    return admission_lab_factory(MemoryAgentStore())

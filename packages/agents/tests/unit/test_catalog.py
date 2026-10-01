@@ -481,15 +481,18 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sidera_agents.postgres.models import Base
 
-expected = {
+base_expected = {
     "profile_heads",
     "profile_revisions",
     "resource_heads",
     "resource_revisions",
+}
+runtime_expected = {
     "runtime_installations",
     "runtime_references",
 }
-base_expected = expected - {"runtime_installations", "runtime_references"}
+run_expected = {"run_operations", "runs", "run_reservations"}
+expected = base_expected | runtime_expected | run_expected
 tables = Base.metadata.tables
 assert {table.name for table in tables.values()} == expected
 assert all(table.schema == "agents" for table in tables.values())
@@ -498,6 +501,7 @@ assert not any(
     for table in tables.values()
     for foreign_key in table.foreign_keys
 )
+assert all(not tables[f"agents.{name}"].foreign_keys for name in run_expected)
 
 path = Path("migrations/versions/0001_agent_catalog.py")
 spec = spec_from_file_location("migration_0001_agent_catalog", path)
@@ -539,7 +543,7 @@ with Operations.context(context):
 upgrade_sql = buffer.getvalue().lower()
 assert all(
     f"create table agents.{name}" in upgrade_sql
-    for name in expected - base_expected
+    for name in runtime_expected
 )
 assert "auth_state" in upgrade_sql
 
@@ -552,8 +556,34 @@ with Operations.context(context):
 downgrade_sql = buffer.getvalue().lower()
 assert all(
     f"drop table agents.{name}" in downgrade_sql
-    for name in expected - base_expected
+    for name in runtime_expected
 )
+
+path = Path("migrations/versions/0003_agent_runs_operations.py")
+spec = spec_from_file_location("migration_0003_agent_runs_operations", path)
+module = module_from_spec(spec)
+spec.loader.exec_module(module)
+buffer = StringIO()
+context = MigrationContext.configure(
+    dialect_name="postgresql",
+    opts={"as_sql": True, "output_buffer": buffer, "version_table_schema": "agents"},
+)
+with Operations.context(context):
+    module.upgrade()
+upgrade_sql = buffer.getvalue().lower()
+assert all(f"create table agents.{name}" in upgrade_sql for name in run_expected)
+assert upgrade_sql.count("create table ") == len(run_expected)
+assert "foreign key" not in upgrade_sql
+
+buffer = StringIO()
+context = MigrationContext.configure(
+    dialect_name="postgresql", opts={"as_sql": True, "output_buffer": buffer}
+)
+with Operations.context(context):
+    module.downgrade()
+downgrade_sql = buffer.getvalue().lower()
+assert all(f"drop table agents.{name}" in downgrade_sql for name in run_expected)
+assert downgrade_sql.count("drop table ") == len(run_expected)
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
+from threading import Lock
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
+from ..admission import OperationRecord
 from ..contracts import (
     AuthenticationState,
     CapabilityResourceDraft,
+    NativeHandle,
     ProfileDraft,
     ProfileRef,
     ProfileRevision,
@@ -20,8 +24,12 @@ from ..contracts import (
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RunSnapshot,
+    RunState,
     RuntimeProbe,
     RuntimeRef,
+    StartReceipt,
+    StartStatus,
 )
 from ..errors import AgentError
 from ..ports import (
@@ -31,13 +39,19 @@ from ..ports import (
     RuntimeRecord,
 )
 from .models import (
+    AgentRunRow,
     ProfileHead,
     ProfileRevisionRow,
     ResourceHead,
     ResourceRevisionRow,
+    RunOperationRow,
+    RunReservationRow,
     RuntimeInstallationRow,
     RuntimeReferenceRow,
 )
+
+_OWNER_LOCK_CLASS = 1397310533
+_OWNER_LOCK_ID = 3
 
 
 def _not_found(kind: str) -> AgentError:
@@ -118,11 +132,160 @@ def _runtime_entry_from_rows(
     return RuntimeEntry(record=record, installation=installation)
 
 
+def _start_receipt_from_row(row: Mapping[str, Any]) -> StartReceipt:
+    return StartReceipt(
+        operation_id=row["operation_id"],
+        status=StartStatus(row["status"]),
+        run_id=row["run_id"],
+        reason_code=row["reason_code"],
+    )
+
+
 class PostgresAgentStore:
     """Synchronous catalog persistence over a caller-owned SQLAlchemy engine."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, owns_engine: bool = False) -> None:
         self._engine = engine
+        self._owns_engine = owns_engine
+        self._owner_state_lock = Lock()
+        self._owner_connection: Connection | None = None
+        self._owner_id: UUID | None = None
+
+    def migrate(self) -> None:
+        from alembic import command
+        from alembic.config import Config
+
+        package_root = Path(__file__).resolve().parents[3]
+        config = Config(str(package_root / "alembic.ini"))
+        with self._engine.connect() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+
+    def readiness(self) -> bool:
+        with self._engine.connect() as connection:
+            return connection.execute(text("SELECT 1")).scalar_one() == 1
+
+    def close(self) -> None:
+        with self._owner_state_lock:
+            owner_id = self._owner_id
+        if owner_id is not None:
+            self.release_execution_owner(owner_id)
+        if self._owns_engine:
+            self._engine.dispose()
+
+    def acquire_execution_owner(self, owner_id: UUID) -> bool:
+        with self._owner_state_lock:
+            if self._owner_connection is not None:
+                return self._owner_id == owner_id and self._owner_is_held_locked()
+            connection = self._engine.connect()
+            try:
+                acquired = connection.execute(
+                    text("SELECT pg_try_advisory_lock(:lock_class, :lock_id)"),
+                    {"lock_class": _OWNER_LOCK_CLASS, "lock_id": _OWNER_LOCK_ID},
+                ).scalar_one()
+                connection.commit()
+            except Exception:  # noqa: BLE001 - owner acquisition fails closed on driver errors
+                connection.close()
+                return False
+            if acquired is not True:
+                connection.close()
+                return False
+            self._owner_connection = connection
+            self._owner_id = owner_id
+            return True
+
+    def execution_owner_is_held(self, owner_id: UUID) -> bool:
+        with self._owner_state_lock:
+            return self._owner_id == owner_id and self._owner_is_held_locked()
+
+    def release_execution_owner(self, owner_id: UUID) -> None:
+        with self._owner_state_lock:
+            if self._owner_id != owner_id:
+                return
+            connection = self._owner_connection
+            if connection is not None:
+                try:
+                    released = connection.execute(
+                        text("SELECT pg_advisory_unlock(:lock_class, :lock_id)"),
+                        {
+                            "lock_class": _OWNER_LOCK_CLASS,
+                            "lock_id": _OWNER_LOCK_ID,
+                        },
+                    ).scalar_one()
+                    if released is not True:
+                        raise RuntimeError("The execution owner lock was not released.")
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                connection.close()
+                self._owner_connection = None
+                self._owner_id = None
+
+    def _owner_is_held_locked(self) -> bool:
+        connection = self._owner_connection
+        if connection is None:
+            return False
+        try:
+            backend_pid = connection.execute(
+                text("SELECT pg_backend_pid()")
+            ).scalar_one()
+            held = connection.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND pid = :pid "
+                    "AND classid = CAST(:lock_class AS oid) "
+                    "AND objid = CAST(:lock_id AS oid) "
+                    "AND objsubid = 2 AND granted)"
+                ),
+                {
+                    "pid": backend_pid,
+                    "lock_class": _OWNER_LOCK_CLASS,
+                    "lock_id": _OWNER_LOCK_ID,
+                },
+            ).scalar_one()
+            connection.rollback()
+            return held is True
+        except Exception:  # noqa: BLE001 - an unverified owner lock is never treated as held
+            connection.rollback()
+            return False
+
+    def _assert_owner(self, connection: Connection, owner_id: UUID) -> None:
+        with self._owner_state_lock:
+            if self._owner_id != owner_id or not self._owner_is_held_locked():
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            owner_connection = self._owner_connection
+            if owner_connection is None:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            owner_pid = owner_connection.execute(
+                text("SELECT pg_backend_pid()")
+            ).scalar_one()
+            owner_connection.rollback()
+        held = connection.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE locktype = 'advisory' AND pid = :pid "
+                "AND classid = CAST(:lock_class AS oid) "
+                "AND objid = CAST(:lock_id AS oid) "
+                "AND objsubid = 2 AND granted)"
+            ),
+            {
+                "pid": owner_pid,
+                "lock_class": _OWNER_LOCK_CLASS,
+                "lock_id": _OWNER_LOCK_ID,
+            },
+        ).scalar_one()
+        if held is not True:
+            raise AgentError(
+                "execution_owner_unavailable",
+                "The execution owner lock is not held.",
+            )
 
     def find_runtime(
         self, workspace_id: UUID, harness_id: str, executable: str
@@ -787,6 +950,461 @@ class PostgresAgentStore:
         return ResourceStatus(
             resource_id=resource_id, enabled=enabled, version=expected_version + 1
         )
+
+    def admit_start(
+        self,
+        *,
+        owner_id: UUID,
+        profile_ref: ProfileRef,
+        runtime_ref: RuntimeRef,
+        installation_key: str,
+        operation_id: UUID,
+        profile_config_hash: str,
+        fingerprint: str,
+        run_id: UUID,
+        snapshot: RunSnapshot,
+    ) -> tuple[StartReceipt, bool]:
+        operations = RunOperationRow.__table__
+        runs = AgentRunRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        references = RuntimeReferenceRow.__table__
+        profile_heads = ProfileHead.__table__
+        profile_revisions = ProfileRevisionRow.__table__
+
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            connection.execute(
+                pg_insert(operations)
+                .values(
+                    workspace_id=profile_ref.workspace_id,
+                    operation_id=operation_id,
+                    profile_id=profile_ref.profile_id,
+                    profile_revision=profile_ref.revision,
+                    profile_config_hash=profile_config_hash,
+                    fingerprint=fingerprint,
+                    status=StartStatus.BUSY.value,
+                    run_id=None,
+                    reason_code=None,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        operations.c.workspace_id,
+                        operations.c.operation_id,
+                    ]
+                )
+            )
+            operation = (
+                connection.execute(
+                    select(operations)
+                    .where(
+                        operations.c.workspace_id == profile_ref.workspace_id,
+                        operations.c.operation_id == operation_id,
+                    )
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            if (
+                operation["profile_id"] != profile_ref.profile_id
+                or operation["profile_revision"] != profile_ref.revision
+                or operation["profile_config_hash"] != profile_config_hash
+                or operation["fingerprint"] != fingerprint
+            ):
+                raise AgentError(
+                    "operation_conflict",
+                    "Operation ID was used with a different request.",
+                )
+            if operation["status"] != StartStatus.BUSY.value:
+                return _start_receipt_from_row(operation), False
+
+            installation = (
+                connection.execute(
+                    select(installations)
+                    .where(installations.c.installation_key == installation_key)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            profile_head = (
+                connection.execute(
+                    select(profile_heads)
+                    .where(
+                        profile_heads.c.workspace_id == profile_ref.workspace_id,
+                        profile_heads.c.profile_id == profile_ref.profile_id,
+                    )
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            pinned_revision = connection.execute(
+                select(profile_revisions.c.revision).where(
+                    profile_revisions.c.workspace_id == profile_ref.workspace_id,
+                    profile_revisions.c.profile_id == profile_ref.profile_id,
+                    profile_revisions.c.revision == profile_ref.revision,
+                )
+            ).first()
+            runtime_reference = connection.execute(
+                select(references.c.installation_key).where(
+                    references.c.workspace_id == runtime_ref.workspace_id,
+                    references.c.runtime_id == runtime_ref.runtime_id,
+                )
+            ).scalar_one_or_none()
+            if (
+                installation is None
+                or profile_head is None
+                or pinned_revision is None
+                or runtime_reference != installation_key
+            ):
+                raise AgentError(
+                    "configuration_invalid", "Run configuration is unavailable."
+                )
+            if not profile_head["enabled"] or not installation["enabled"]:
+                raise AgentError(
+                    "configuration_invalid", "Run configuration is disabled."
+                )
+            current_revision = (
+                connection.execute(
+                    select(profile_revisions.c.draft).where(
+                        profile_revisions.c.workspace_id == profile_ref.workspace_id,
+                        profile_revisions.c.profile_id == profile_ref.profile_id,
+                        profile_revisions.c.revision == profile_head["revision"],
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if current_revision is None:
+                raise AgentError("catalog_corrupt", "Profile head revision is missing.")
+            profile_limit = ProfileDraft.model_validate(
+                current_revision["draft"]
+            ).max_active
+            profile_active = connection.execute(
+                select(func.count())
+                .select_from(reservations)
+                .where(
+                    reservations.c.workspace_id == profile_ref.workspace_id,
+                    reservations.c.profile_id == profile_ref.profile_id,
+                    reservations.c.active.is_(True),
+                )
+            ).scalar_one()
+            busy = (
+                profile_active >= profile_limit
+                or installation["active_count"] >= installation["max_active"]
+                or installation["session_count"] >= installation["max_sessions"]
+            )
+            self._assert_owner(connection, owner_id)
+            if busy:
+                connection.execute(
+                    update(operations)
+                    .where(
+                        operations.c.workspace_id == profile_ref.workspace_id,
+                        operations.c.operation_id == operation_id,
+                    )
+                    .values(
+                        status=StartStatus.BUSY.value,
+                        run_id=None,
+                        reason_code="resource_busy",
+                    )
+                )
+                return (
+                    StartReceipt(
+                        operation_id=operation_id,
+                        status=StartStatus.BUSY,
+                        run_id=None,
+                        reason_code="resource_busy",
+                    ),
+                    False,
+                )
+
+            connection.execute(
+                runs.insert().values(
+                    run_id=run_id,
+                    workspace_id=profile_ref.workspace_id,
+                    operation_id=operation_id,
+                    profile_id=profile_ref.profile_id,
+                    profile_revision=profile_ref.revision,
+                    runtime_workspace_id=runtime_ref.workspace_id,
+                    runtime_id=runtime_ref.runtime_id,
+                    installation_key=installation_key,
+                    state=snapshot.state.value,
+                    snapshot=snapshot.model_dump(mode="json", warnings=False),
+                    native_handle=None,
+                    terminal_state=None,
+                )
+            )
+            connection.execute(
+                reservations.insert().values(
+                    run_id=run_id,
+                    workspace_id=profile_ref.workspace_id,
+                    profile_id=profile_ref.profile_id,
+                    installation_key=installation_key,
+                    active=True,
+                    session=True,
+                )
+            )
+            connection.execute(
+                update(installations)
+                .where(installations.c.installation_key == installation_key)
+                .values(
+                    active_count=installation["active_count"] + 1,
+                    session_count=installation["session_count"] + 1,
+                )
+            )
+            connection.execute(
+                update(operations)
+                .where(
+                    operations.c.workspace_id == profile_ref.workspace_id,
+                    operations.c.operation_id == operation_id,
+                )
+                .values(
+                    status=StartStatus.ACCEPTED.value,
+                    run_id=run_id,
+                    reason_code=None,
+                )
+            )
+        return (
+            StartReceipt(
+                operation_id=operation_id,
+                status=StartStatus.ACCEPTED,
+                run_id=run_id,
+                reason_code=None,
+            ),
+            True,
+        )
+
+    def get_start_receipt(
+        self, workspace_id: UUID, operation_id: UUID
+    ) -> StartReceipt | None:
+        table = RunOperationRow.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(table).where(
+                        table.c.workspace_id == workspace_id,
+                        table.c.operation_id == operation_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return None if row is None else _start_receipt_from_row(row)
+
+    def get_start_operation(
+        self, workspace_id: UUID, operation_id: UUID
+    ) -> OperationRecord | None:
+        table = RunOperationRow.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(table).where(
+                        table.c.workspace_id == workspace_id,
+                        table.c.operation_id == operation_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            return None
+        return OperationRecord(
+            profile_ref=ProfileRef(
+                workspace_id=workspace_id,
+                profile_id=row["profile_id"],
+                revision=row["profile_revision"],
+            ),
+            profile_config_hash=row["profile_config_hash"],
+            fingerprint=row["fingerprint"],
+            receipt=_start_receipt_from_row(row),
+        )
+
+    def get_run_snapshot(self, workspace_id: UUID, run_id: UUID) -> RunSnapshot:
+        table = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(table.c.snapshot).where(
+                        table.c.workspace_id == workspace_id,
+                        table.c.run_id == run_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise _not_found("run")
+        return RunSnapshot.model_validate(row["snapshot"])
+
+    def list_starting_runs(self) -> tuple[RunSnapshot, ...]:
+        table = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(table.c.snapshot)
+                    .where(table.c.state == RunState.STARTING.value)
+                    .order_by(table.c.run_id)
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(RunSnapshot.model_validate(row["snapshot"]) for row in rows)
+
+    def list_unresolved_runs(
+        self,
+    ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None], ...]:
+        table = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(
+                        table.c.snapshot, table.c.native_handle, table.c.terminal_state
+                    )
+                    .where(
+                        table.c.state.in_(
+                            (RunState.UNKNOWN.value, RunState.CLOSING.value)
+                        ),
+                        table.c.native_handle.is_not(None),
+                    )
+                    .order_by(table.c.run_id)
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(
+            (
+                RunSnapshot.model_validate(row["snapshot"]),
+                NativeHandle.model_validate(row["native_handle"]),
+                None
+                if row["terminal_state"] is None
+                else RunState(row["terminal_state"]),
+            )
+            for row in rows
+            if row["native_handle"] is not None
+        )
+
+    def transition_run(
+        self,
+        run_id: UUID,
+        snapshot: RunSnapshot,
+        *,
+        owner_id: UUID,
+        native_handle: NativeHandle | None = None,
+        replace_native_handle: bool = False,
+        receipt_status: StartStatus | None = None,
+        active_reserved: bool | None = None,
+        session_reserved: bool | None = None,
+        terminal_state: RunState | None = None,
+    ) -> None:
+        runs = AgentRunRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        operations = RunOperationRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            reservation_key = connection.execute(
+                select(reservations.c.installation_key).where(
+                    reservations.c.run_id == run_id
+                )
+            ).scalar_one_or_none()
+            if reservation_key is None:
+                raise _not_found("run")
+            installation = (
+                connection.execute(
+                    select(installations)
+                    .where(installations.c.installation_key == reservation_key)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            reservation = (
+                connection.execute(
+                    select(reservations)
+                    .where(reservations.c.run_id == run_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            run = (
+                connection.execute(
+                    select(runs).where(runs.c.run_id == run_id).with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if installation is None or reservation is None or run is None:
+                raise _not_found("run")
+            if (
+                snapshot.run_id != run_id
+                or snapshot.workspace_id != run["workspace_id"]
+            ):
+                raise AgentError("catalog_corrupt", "Run identity is invalid.")
+            active_delta = (
+                int(active_reserved) - int(reservation["active"])
+                if active_reserved is not None
+                else 0
+            )
+            session_delta = (
+                int(session_reserved) - int(reservation["session"])
+                if session_reserved is not None
+                else 0
+            )
+            if (
+                installation["active_count"] + active_delta < 0
+                or installation["session_count"] + session_delta < 0
+            ):
+                raise AgentError("catalog_corrupt", "Run reservation count is invalid.")
+            connection.execute(
+                update(installations)
+                .where(installations.c.installation_key == reservation_key)
+                .values(
+                    active_count=installation["active_count"] + active_delta,
+                    session_count=installation["session_count"] + session_delta,
+                )
+            )
+            reservation_values: dict[str, object] = {}
+            if active_reserved is not None:
+                reservation_values["active"] = active_reserved
+            if session_reserved is not None:
+                reservation_values["session"] = session_reserved
+            if reservation_values:
+                connection.execute(
+                    update(reservations)
+                    .where(reservations.c.run_id == run_id)
+                    .values(**reservation_values)
+                )
+            run_values: dict[str, object] = {
+                "state": snapshot.state.value,
+                "snapshot": snapshot.model_dump(mode="json", warnings=False),
+            }
+            if replace_native_handle:
+                run_values["native_handle"] = (
+                    None
+                    if native_handle is None
+                    else native_handle.model_dump(mode="json", warnings=False)
+                )
+            if terminal_state is not None:
+                run_values["terminal_state"] = terminal_state.value
+            connection.execute(
+                update(runs).where(runs.c.run_id == run_id).values(**run_values)
+            )
+            if receipt_status is not None:
+                connection.execute(
+                    update(operations)
+                    .where(
+                        operations.c.workspace_id == run["workspace_id"],
+                        operations.c.operation_id == run["operation_id"],
+                    )
+                    .values(
+                        status=receipt_status.value,
+                        run_id=run_id,
+                        reason_code=snapshot.reason_code,
+                    )
+                )
 
     def _require_enabled_resources(
         self, connection: Connection, workspace_id: UUID, refs: tuple[ResourceRef, ...]
