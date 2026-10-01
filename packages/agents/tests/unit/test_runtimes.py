@@ -1,4 +1,6 @@
+import os
 import sys
+import time
 from uuid import uuid4
 
 import pytest
@@ -15,6 +17,74 @@ def _executable_script(tmp_path, body):
     executable.write_text(f"#!{sys.executable}\n{body}\n", encoding="utf-8")
     executable.chmod(0o755)
     return executable
+
+
+def _pipe_inheriting_descendant_probe(tmp_path, *, overflow=False):
+    started = tmp_path / "descendant-started-marker"
+    release = tmp_path / "descendant-release-marker"
+    late = tmp_path / "descendant-late-marker"
+    body = (
+        "import os, time\n"
+        "ready_read, ready_write = os.pipe()\n"
+        "child_pid = os.fork()\n"
+        "if child_pid == 0:\n"
+        "    os.close(ready_read)\n"
+        f"    with open({str(started)!r}, 'w', encoding='utf-8') as output:\n"
+        "        output.write(str(os.getpid()))\n"
+        "    os.write(ready_write, b'ready')\n"
+        "    os.close(ready_write)\n"
+        f"    while not os.path.exists({str(release)!r}):\n"
+        "        time.sleep(0.01)\n"
+        f"    with open({str(late)!r}, 'w', encoding='utf-8') as output:\n"
+        "        output.write('late')\n"
+        "    raise SystemExit(0)\n"
+        "os.close(ready_write)\n"
+        "assert os.read(ready_read, 5) == b'ready'\n"
+        "os.close(ready_read)\n"
+    )
+    if overflow:
+        body += f"os.write(2, b'x' * {opencode_descriptor._MAX_OUTPUT_BYTES + 1})\n"
+    body += "os._exit(0)\n"
+    return _executable_script(tmp_path, body), started, release, late
+
+
+def _wait_for_marker(marker, timeout):
+    deadline = time.monotonic() + timeout
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return marker.exists()
+
+
+def _wait_for_process_exit(pid, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _assert_probe_abort_kills_descendant(
+    executable, started, release, late, expected_code
+):
+    try:
+        with pytest.raises(AgentError) as error:
+            opencode_descriptor.read_version(str(executable))
+
+        assert error.value.code == expected_code
+        assert started.exists(), "synthetic descendant did not start"
+        assert not late.exists(), "descendant wrote before the release marker"
+        release.touch()
+        assert not _wait_for_marker(late, 1.0), (
+            "aborted probe descendant wrote after read_version returned"
+        )
+    finally:
+        release.touch()
+        if started.exists():
+            child_pid = int(started.read_text(encoding="utf-8"))
+            assert _wait_for_process_exit(child_pid, 2.0)
 
 
 def test_version_probe_uses_fixed_argv_and_minimal_environment(tmp_path, monkeypatch):
@@ -58,6 +128,37 @@ def test_version_probe_timeout_is_bounded_and_safe(tmp_path, monkeypatch):
 
     assert error.value.code == "runtime_probe_timeout"
     assert "synthetic" not in str(error.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX fork semantics")
+def test_version_probe_timeout_kills_inherited_pipe_descendant(tmp_path, monkeypatch):
+    monkeypatch.setattr(opencode_descriptor, "_PROBE_TIMEOUT_SECONDS", 1.5)
+    executable, started, release, late = _pipe_inheriting_descendant_probe(tmp_path)
+
+    _assert_probe_abort_kills_descendant(
+        executable,
+        started,
+        release,
+        late,
+        "runtime_probe_timeout",
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX fork semantics")
+def test_version_probe_output_overflow_kills_inherited_pipe_descendant(
+    tmp_path, monkeypatch
+):
+    executable, started, release, late = _pipe_inheriting_descendant_probe(
+        tmp_path, overflow=True
+    )
+
+    _assert_probe_abort_kills_descendant(
+        executable,
+        started,
+        release,
+        late,
+        "runtime_probe_output_too_large",
+    )
 
 
 def test_discovery_register_and_refresh_use_the_selected_target_without_prompting(

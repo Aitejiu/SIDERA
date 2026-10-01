@@ -2,6 +2,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
 from sidera_agents.catalog import ProfileCatalog
 from sidera_agents.contracts import (
     AuthenticationState,
@@ -117,3 +119,68 @@ def test_runtime_references_and_shared_installation_persist(
     assert entry_a.installation.active_count == entry_b.installation.active_count == 0
     assert entry_a.installation.session_count == entry_b.installation.session_count == 0
     assert installation_count == 1
+
+    def reopened_runtimes():
+        return RuntimeCatalog(PostgresAgentStore(engine), authorizer, clock=clock)
+
+    changed_limits = reopened_runtimes().set_runtime_limits(
+        runtime_a.ref,
+        max_active=5,
+        max_sessions=7,
+        expected_version=1,
+        grant_id=grant_a,
+    )
+    assert changed_limits.version == 2
+    assert changed_limits.limits == {"max_active": 5, "max_sessions": 7}
+
+    limits_from_workspace_b = reopened_runtimes().get_runtime(
+        runtime_b.ref, grant_id=grant_b
+    )
+    assert limits_from_workspace_b.version == 2
+    assert limits_from_workspace_b.limits == changed_limits.limits
+
+    with pytest.raises(AgentError) as stale_limits_error:
+        reopened_runtimes().set_runtime_limits(
+            runtime_b.ref,
+            max_active=8,
+            max_sessions=9,
+            expected_version=1,
+            grant_id=grant_b,
+        )
+    assert stale_limits_error.value.code == "revision_conflict"
+    limits_after_stale_update = reopened_runtimes().get_runtime(
+        runtime_a.ref, grant_id=grant_a
+    )
+    assert limits_after_stale_update.version == 2
+    assert limits_after_stale_update.limits == changed_limits.limits
+
+    disabled = reopened_runtimes().set_runtime_enabled(
+        runtime_a.ref,
+        False,
+        expected_version=2,
+        grant_id=grant_a,
+    )
+    assert disabled.version == 3
+    assert disabled.enabled is False
+
+    disabled_from_workspace_b = reopened_runtimes().get_runtime(
+        runtime_b.ref, grant_id=grant_b
+    )
+    assert disabled_from_workspace_b.version == 3
+    assert disabled_from_workspace_b.enabled is False
+    assert disabled_from_workspace_b.limits == changed_limits.limits
+
+    with pytest.raises(AgentError) as stale_enabled_error:
+        reopened_runtimes().set_runtime_enabled(
+            runtime_b.ref,
+            True,
+            expected_version=2,
+            grant_id=grant_b,
+        )
+    assert stale_enabled_error.value.code == "revision_conflict"
+    disabled_after_stale_update = reopened_runtimes().get_runtime(
+        runtime_a.ref, grant_id=grant_a
+    )
+    assert disabled_after_stale_update.version == 3
+    assert disabled_after_stale_update.enabled is False
+    assert disabled_after_stale_update.limits == changed_limits.limits

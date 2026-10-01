@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import selectors
+import signal
 import subprocess
 import time
 from datetime import datetime
@@ -46,7 +47,12 @@ def _support(status: SupportStatus, reason_code: str) -> CapabilitySupport:
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
         process.kill()
     process.wait()
 
@@ -62,6 +68,7 @@ def read_version(executable: str) -> str:
             shell=False,
             close_fds=True,
             env={"PATH": os.environ.get("PATH", os.defpath), "LANG": "C"},
+            start_new_session=os.name == "posix",
         )
     except OSError:
         raise AgentError(
