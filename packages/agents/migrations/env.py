@@ -11,6 +11,33 @@ config = context.config
 target_metadata = Base.metadata
 
 
+def _include_name(name: str | None, type_: str, parent_names: dict[str, str]) -> bool:
+    if type_ == "schema":
+        return name == "agents"
+    if type_ == "table":
+        return (
+            parent_names.get("schema_name") == "agents"
+            and parent_names.get("schema_qualified_table_name")
+            in target_metadata.tables
+        )
+    return parent_names.get("schema_name") == "agents"
+
+
+def _include_object(
+    obj: object,
+    name: str,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    table = obj if type_ == "table" else getattr(obj, "table", None)
+    return (
+        table is not None
+        and table.schema == "agents"
+        and table.key in target_metadata.tables
+    )
+
+
 def _run_migrations(connection: Connection) -> None:
     if connection.in_transaction():
         connection.execute(CreateSchema("agents", if_not_exists=True))
@@ -23,6 +50,8 @@ def _run_migrations(connection: Connection) -> None:
         include_schemas=True,
         version_table_schema="agents",
         compare_type=True,
+        include_name=_include_name,
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

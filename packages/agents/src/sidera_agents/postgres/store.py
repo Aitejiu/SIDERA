@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +31,12 @@ def _revision_conflict(message: str) -> AgentError:
     return AgentError("revision_conflict", message)
 
 
+def _utc_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Stored timestamp must be timezone-aware.")
+    return value.astimezone(UTC)
+
+
 def _profile_from_row(row: Mapping[str, Any]) -> ProfileRevision:
     return ProfileRevision(
         ref=ProfileRef(
@@ -40,7 +46,7 @@ def _profile_from_row(row: Mapping[str, Any]) -> ProfileRevision:
         ),
         draft=ProfileDraft.model_validate(row["draft"]),
         config_hash=row["config_hash"],
-        created_at=row["created_at"],
+        created_at=_utc_timestamp(row["created_at"]),
     )
 
 
@@ -53,7 +59,7 @@ def _resource_from_row(row: Mapping[str, Any]) -> ResourceRevision:
         ),
         draft=CapabilityResourceDraft.model_validate(row["draft"]),
         content_hash=row["content_hash"],
-        created_at=row["created_at"],
+        created_at=_utc_timestamp(row["created_at"]),
     )
 
 
@@ -459,12 +465,15 @@ class PostgresAgentStore:
     ) -> None:
         heads = ResourceHead.__table__
         revisions = ResourceRevisionRow.__table__
-        for ref in refs:
-            if ref.workspace_id != workspace_id:
-                raise AgentError(
-                    "configuration_invalid",
-                    "Resource reference belongs to another workspace.",
-                )
+        if any(ref.workspace_id != workspace_id for ref in refs):
+            raise AgentError(
+                "configuration_invalid",
+                "Resource reference belongs to another workspace.",
+            )
+        ordered_refs = sorted(
+            refs, key=lambda ref: (ref.workspace_id.int, ref.resource_id.int)
+        )
+        for ref in ordered_refs:
             head = (
                 connection.execute(
                     select(heads.c.enabled)
