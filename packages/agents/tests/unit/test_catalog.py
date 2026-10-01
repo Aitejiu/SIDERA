@@ -486,7 +486,10 @@ expected = {
     "profile_revisions",
     "resource_heads",
     "resource_revisions",
+    "runtime_installations",
+    "runtime_references",
 }
+base_expected = expected - {"runtime_installations", "runtime_references"}
 tables = Base.metadata.tables
 assert {table.name for table in tables.values()} == expected
 assert all(table.schema == "agents" for table in tables.values())
@@ -510,7 +513,8 @@ with Operations.context(context):
     module.upgrade()
 upgrade_sql = buffer.getvalue().lower()
 assert "create schema if not exists agents" in upgrade_sql
-assert all(f"create table agents.{name}" in upgrade_sql for name in expected)
+assert all(f"create table agents.{name}" in upgrade_sql for name in base_expected)
+assert not any(f"create table agents.{name}" in upgrade_sql for name in expected - base_expected)
 
 buffer = StringIO()
 context = MigrationContext.configure(
@@ -519,7 +523,37 @@ context = MigrationContext.configure(
 with Operations.context(context):
     module.downgrade()
 downgrade_sql = buffer.getvalue().lower()
-assert all(f"drop table agents.{name}" in downgrade_sql for name in expected)
+assert all(f"drop table agents.{name}" in downgrade_sql for name in base_expected)
+
+path = Path("migrations/versions/0002_runtime_catalog.py")
+spec = spec_from_file_location("migration_0002_runtime_catalog", path)
+module = module_from_spec(spec)
+spec.loader.exec_module(module)
+buffer = StringIO()
+context = MigrationContext.configure(
+    dialect_name="postgresql",
+    opts={"as_sql": True, "output_buffer": buffer, "version_table_schema": "agents"},
+)
+with Operations.context(context):
+    module.upgrade()
+upgrade_sql = buffer.getvalue().lower()
+assert all(
+    f"create table agents.{name}" in upgrade_sql
+    for name in expected - base_expected
+)
+assert "auth_state" in upgrade_sql
+
+buffer = StringIO()
+context = MigrationContext.configure(
+    dialect_name="postgresql", opts={"as_sql": True, "output_buffer": buffer}
+)
+with Operations.context(context):
+    module.downgrade()
+downgrade_sql = buffer.getvalue().lower()
+assert all(
+    f"drop table agents.{name}" in downgrade_sql
+    for name in expected - base_expected
+)
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

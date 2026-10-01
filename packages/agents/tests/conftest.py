@@ -31,6 +31,8 @@ _OWNED_TABLES = {
     "profile_revisions",
     "resource_heads",
     "resource_revisions",
+    "runtime_installations",
+    "runtime_references",
 }
 
 
@@ -334,6 +336,7 @@ def _cleanup_owned_agents_pg(
             or final_facts["objects"]
         ):
             raise _ScratchTargetCleanupFailed
+        target.lock_connection.commit()
     except _ScratchTargetCleanupFailed:
         raise
     except Exception:  # noqa: BLE001 - expose only the owned-target cleanup status
@@ -416,6 +419,33 @@ class OwnedWorkspaceAuthorizer:
             raise AgentError("permission_denied", "Access denied.")
 
 
+class RuntimeLabAuthorizer:
+    def __init__(self) -> None:
+        self.workspace_grants: dict[UUID, UUID] = {}
+        self.local_configuration_grants: set[UUID] = set()
+        self.calls: list[tuple[UUID, str, object]] = []
+
+    def grant_workspace(
+        self, workspace_id: UUID, grant_id: UUID, *, local_configuration: bool = False
+    ) -> None:
+        self.workspace_grants[grant_id] = workspace_id
+        if local_configuration:
+            self.local_configuration_grants.add(grant_id)
+
+    def require(self, grant_id: UUID, action: str, target: object) -> None:
+        self.calls.append((grant_id, action, target))
+        if action == "runtime.configure":
+            if grant_id in self.local_configuration_grants:
+                return
+            raise AgentError("permission_denied", "Access denied.")
+        workspace_id = self.workspace_grants.get(grant_id)
+        target_workspace = getattr(target, "workspace_id", target)
+        if workspace_id is None or (
+            isinstance(target_workspace, UUID) and target_workspace != workspace_id
+        ):
+            raise AgentError("permission_denied", "Access denied.")
+
+
 @pytest.fixture
 def catalog_lab():
     from sidera_agents.catalog import ProfileCatalog
@@ -458,5 +488,47 @@ def catalog_lab():
         grant_id=grant_id,
         skill_draft=skill_draft,
         authorizer=authorizer,
+        clock=clock,
+    )
+
+
+@pytest.fixture
+def runtime_lab(tmp_path):
+    from sidera_agents.catalog import ProfileCatalog
+    from sidera_agents.harnesses.registry import default_harness_registry
+    from sidera_agents.memory import MemoryAgentStore
+    from sidera_agents.runtimes import RuntimeCatalog
+
+    workspace_id = uuid4()
+    grant_id = uuid4()
+    admin_grant_id = uuid4()
+    authorizer = RuntimeLabAuthorizer()
+    authorizer.grant_workspace(workspace_id, grant_id)
+    authorizer.grant_workspace(workspace_id, admin_grant_id, local_configuration=True)
+    store = MemoryAgentStore()
+    clock = lambda: datetime(2026, 10, 1, tzinfo=UTC)
+    registry = default_harness_registry()
+    catalog = ProfileCatalog(store, authorizer, clock)
+    runtimes = RuntimeCatalog(store, authorizer, registry=registry, clock=clock)
+    skill_draft = CapabilityResourceDraft(
+        name="review",
+        kind="skill",
+        settings={"body": "Check tests"},
+        secret_refs=(),
+    )
+    executable = tmp_path / "opencode"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    return SimpleNamespace(
+        store=store,
+        authorizer=authorizer,
+        workspace_id=workspace_id,
+        grant_id=grant_id,
+        admin_grant_id=admin_grant_id,
+        registry=registry,
+        catalog=catalog,
+        runtimes=runtimes,
+        skill_draft=skill_draft,
+        executable=executable,
         clock=clock,
     )

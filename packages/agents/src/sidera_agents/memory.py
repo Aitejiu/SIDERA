@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from threading import RLock
 from uuid import UUID
@@ -14,8 +14,11 @@ from .contracts import (
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RuntimeProbe,
+    RuntimeRef,
 )
 from .errors import AgentError
+from .ports import RuntimeEntry, RuntimeInstallation, RuntimeObservation, RuntimeRecord
 
 
 @dataclass
@@ -37,6 +40,22 @@ def _resource_copy(value: ResourceRevision) -> ResourceRevision:
     )
 
 
+def _runtime_entry_copy(value: RuntimeEntry) -> RuntimeEntry:
+    observation = value.record.observation
+    record = replace(
+        value.record,
+        observation=RuntimeObservation(
+            probe=RuntimeProbe.model_validate(
+                observation.probe.model_dump(mode="python", warnings=False)
+            ),
+            installed=observation.installed,
+            file_identity=observation.file_identity,
+            auth_state=observation.auth_state,
+        ),
+    )
+    return RuntimeEntry(record=record, installation=value.installation)
+
+
 def _not_found(kind: str) -> AgentError:
     return AgentError("not_found", f"{kind.capitalize()} not found.")
 
@@ -54,6 +73,136 @@ class MemoryAgentStore:
         self._profile_revisions: dict[tuple[UUID, UUID, int], ProfileRevision] = {}
         self._resource_heads: dict[tuple[UUID, UUID], _Head] = {}
         self._resource_revisions: dict[tuple[UUID, UUID, int], ResourceRevision] = {}
+        self._runtime_installations: dict[str, RuntimeInstallation] = {}
+        self._runtime_records: dict[tuple[UUID, UUID], RuntimeRecord] = {}
+        self._runtime_index: dict[tuple[UUID, str, str], UUID] = {}
+
+    def find_runtime(
+        self, workspace_id: UUID, harness_id: str, executable: str
+    ) -> RuntimeEntry | None:
+        with self._lock:
+            runtime_id = self._runtime_index.get((workspace_id, harness_id, executable))
+            if runtime_id is None:
+                return None
+            return self._runtime_entry(
+                self._runtime_records[(workspace_id, runtime_id)]
+            )
+
+    def register_runtime(
+        self,
+        workspace_id: UUID,
+        runtime_id: UUID,
+        harness_id: str,
+        executable: str,
+        installation_key: str,
+        observation: RuntimeObservation,
+        max_active: int,
+        max_sessions: int,
+    ) -> RuntimeEntry:
+        with self._lock:
+            unique_key = (workspace_id, harness_id, executable)
+            existing_id = self._runtime_index.get(unique_key)
+            if existing_id is not None:
+                return self._runtime_entry(
+                    self._runtime_records[(workspace_id, existing_id)]
+                )
+
+            installation = self._runtime_installations.get(installation_key)
+            if installation is None:
+                installation = RuntimeInstallation(
+                    installation_key=installation_key,
+                    harness_id=harness_id,
+                    executable=executable,
+                    max_active=max_active,
+                    max_sessions=max_sessions,
+                    enabled=True,
+                    version=1,
+                )
+                self._runtime_installations[installation_key] = installation
+            elif (installation.harness_id, installation.executable) != (
+                harness_id,
+                executable,
+            ):
+                raise AgentError("catalog_corrupt", "Runtime installation is invalid.")
+
+            ref = RuntimeRef(workspace_id=workspace_id, runtime_id=runtime_id)
+            record = RuntimeRecord(
+                ref=ref,
+                installation_key=installation_key,
+                harness_id=harness_id,
+                executable=executable,
+                observation=observation,
+            )
+            self._runtime_records[(workspace_id, runtime_id)] = record
+            self._runtime_index[unique_key] = runtime_id
+            return self._runtime_entry(record)
+
+    def get_runtime_entry(self, ref: RuntimeRef) -> RuntimeEntry:
+        with self._lock:
+            record = self._runtime_records.get((ref.workspace_id, ref.runtime_id))
+            if record is None:
+                raise _not_found("runtime")
+            return self._runtime_entry(record)
+
+    def list_runtime_entries(self, workspace_id: UUID) -> tuple[RuntimeEntry, ...]:
+        with self._lock:
+            records = sorted(
+                (
+                    record
+                    for record in self._runtime_records.values()
+                    if record.ref.workspace_id == workspace_id
+                ),
+                key=lambda record: (record.harness_id, record.executable),
+            )
+            return tuple(self._runtime_entry(record) for record in records)
+
+    def update_runtime_observation(
+        self, ref: RuntimeRef, observation: RuntimeObservation
+    ) -> RuntimeEntry:
+        with self._lock:
+            key = (ref.workspace_id, ref.runtime_id)
+            record = self._runtime_records.get(key)
+            if record is None:
+                raise _not_found("runtime")
+            updated = replace(record, observation=observation)
+            self._runtime_records[key] = updated
+            return self._runtime_entry(updated)
+
+    def set_runtime_configuration(
+        self,
+        ref: RuntimeRef,
+        *,
+        expected_version: int,
+        max_active: int | None = None,
+        max_sessions: int | None = None,
+        enabled: bool | None = None,
+    ) -> RuntimeEntry:
+        with self._lock:
+            record = self._runtime_records.get((ref.workspace_id, ref.runtime_id))
+            if record is None:
+                raise _not_found("runtime")
+            installation = self._runtime_installations[record.installation_key]
+            if installation.version != expected_version:
+                raise _revision_conflict("Runtime configuration version is stale.")
+            updated = replace(
+                installation,
+                max_active=(
+                    installation.max_active if max_active is None else max_active
+                ),
+                max_sessions=(
+                    installation.max_sessions if max_sessions is None else max_sessions
+                ),
+                enabled=installation.enabled if enabled is None else enabled,
+                version=installation.version + 1,
+            )
+            self._runtime_installations[record.installation_key] = updated
+            return self._runtime_entry(record)
+
+    def _runtime_entry(self, record: RuntimeRecord) -> RuntimeEntry:
+        installation = self._runtime_installations.get(record.installation_key)
+        if installation is None:
+            raise AgentError("catalog_corrupt", "Runtime installation is missing.")
+        return _runtime_entry_copy(RuntimeEntry(record, installation))
 
     def create_profile(
         self,
@@ -172,6 +321,17 @@ class MemoryAgentStore:
             head.status_version += 1
             return ProfileStatus(
                 profile_id=profile_id, enabled=head.enabled, version=head.status_version
+            )
+
+    def get_profile_status(self, workspace_id: UUID, profile_id: UUID) -> ProfileStatus:
+        with self._lock:
+            head = self._profile_heads.get((workspace_id, profile_id))
+            if head is None:
+                raise _not_found("profile")
+            return ProfileStatus(
+                profile_id=profile_id,
+                enabled=head.enabled,
+                version=head.status_version,
             )
 
     def create_resource(

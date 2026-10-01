@@ -6,10 +6,12 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from ..contracts import (
+    AuthenticationState,
     CapabilityResourceDraft,
     ProfileDraft,
     ProfileRef,
@@ -18,9 +20,24 @@ from ..contracts import (
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RuntimeProbe,
+    RuntimeRef,
 )
 from ..errors import AgentError
-from .models import ProfileHead, ProfileRevisionRow, ResourceHead, ResourceRevisionRow
+from ..ports import (
+    RuntimeEntry,
+    RuntimeInstallation,
+    RuntimeObservation,
+    RuntimeRecord,
+)
+from .models import (
+    ProfileHead,
+    ProfileRevisionRow,
+    ResourceHead,
+    ResourceRevisionRow,
+    RuntimeInstallationRow,
+    RuntimeReferenceRow,
+)
 
 
 def _not_found(kind: str) -> AgentError:
@@ -63,11 +80,322 @@ def _resource_from_row(row: Mapping[str, Any]) -> ResourceRevision:
     )
 
 
+def _runtime_entry_from_rows(
+    runtime_row: Mapping[str, Any], installation_row: Mapping[str, Any]
+) -> RuntimeEntry:
+    probe = RuntimeProbe(
+        actual_version=runtime_row["actual_version"],
+        protocol_state=runtime_row["protocol_state"],
+        capabilities=runtime_row["capabilities"],
+        checked_at=_utc_timestamp(runtime_row["checked_at"]),
+    )
+    record = RuntimeRecord(
+        ref=RuntimeRef(
+            workspace_id=runtime_row["workspace_id"],
+            runtime_id=runtime_row["runtime_id"],
+        ),
+        installation_key=runtime_row["installation_key"],
+        harness_id=runtime_row["harness_id"],
+        executable=runtime_row["executable"],
+        observation=RuntimeObservation(
+            probe=probe,
+            installed=runtime_row["installed"],
+            file_identity=runtime_row["file_identity"],
+            auth_state=AuthenticationState(runtime_row["auth_state"]),
+        ),
+    )
+    installation = RuntimeInstallation(
+        installation_key=installation_row["installation_key"],
+        harness_id=installation_row["harness_id"],
+        executable=installation_row["executable"],
+        max_active=installation_row["max_active"],
+        max_sessions=installation_row["max_sessions"],
+        enabled=installation_row["enabled"],
+        version=installation_row["config_version"],
+        active_count=installation_row["active_count"],
+        session_count=installation_row["session_count"],
+    )
+    return RuntimeEntry(record=record, installation=installation)
+
+
 class PostgresAgentStore:
     """Synchronous catalog persistence over a caller-owned SQLAlchemy engine."""
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def find_runtime(
+        self, workspace_id: UUID, harness_id: str, executable: str
+    ) -> RuntimeEntry | None:
+        references = RuntimeReferenceRow.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(references).where(
+                        references.c.workspace_id == workspace_id,
+                        references.c.harness_id == harness_id,
+                        references.c.executable == executable,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            return self._runtime_entry_for_row(connection, row)
+
+    def register_runtime(
+        self,
+        workspace_id: UUID,
+        runtime_id: UUID,
+        harness_id: str,
+        executable: str,
+        installation_key: str,
+        observation: RuntimeObservation,
+        max_active: int,
+        max_sessions: int,
+    ) -> RuntimeEntry:
+        installations = RuntimeInstallationRow.__table__
+        references = RuntimeReferenceRow.__table__
+        probe = observation.probe
+        with self._engine.begin() as connection:
+            connection.execute(
+                pg_insert(installations)
+                .values(
+                    installation_key=installation_key,
+                    harness_id=harness_id,
+                    executable=executable,
+                    max_active=max_active,
+                    max_sessions=max_sessions,
+                    enabled=True,
+                    config_version=1,
+                    active_count=0,
+                    session_count=0,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[installations.c.installation_key]
+                )
+            )
+            installation = (
+                connection.execute(
+                    select(installations)
+                    .where(installations.c.installation_key == installation_key)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if installation is None or (
+                installation["harness_id"],
+                installation["executable"],
+            ) != (harness_id, executable):
+                raise AgentError("catalog_corrupt", "Runtime installation is invalid.")
+
+            connection.execute(
+                pg_insert(references)
+                .values(
+                    workspace_id=workspace_id,
+                    runtime_id=runtime_id,
+                    installation_key=installation_key,
+                    harness_id=harness_id,
+                    executable=executable,
+                    actual_version=probe.actual_version,
+                    installed=observation.installed,
+                    protocol_state=probe.protocol_state.value,
+                    auth_state=observation.auth_state.value,
+                    capabilities=probe.model_dump(mode="json")["capabilities"],
+                    checked_at=probe.checked_at,
+                    file_identity=observation.file_identity,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        references.c.workspace_id,
+                        references.c.harness_id,
+                        references.c.executable,
+                    ]
+                )
+            )
+            runtime_row = (
+                connection.execute(
+                    select(references).where(
+                        references.c.workspace_id == workspace_id,
+                        references.c.harness_id == harness_id,
+                        references.c.executable == executable,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if runtime_row is None:
+                raise AgentError("catalog_corrupt", "Runtime reference is missing.")
+            return _runtime_entry_from_rows(runtime_row, installation)
+
+    def get_runtime_entry(self, ref: RuntimeRef) -> RuntimeEntry:
+        references = RuntimeReferenceRow.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(references).where(
+                        references.c.workspace_id == ref.workspace_id,
+                        references.c.runtime_id == ref.runtime_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise _not_found("runtime")
+            return self._runtime_entry_for_row(connection, row)
+
+    def list_runtime_entries(self, workspace_id: UUID) -> tuple[RuntimeEntry, ...]:
+        references = RuntimeReferenceRow.__table__
+        with self._engine.connect() as connection:
+            rows = tuple(
+                connection.execute(
+                    select(references)
+                    .where(references.c.workspace_id == workspace_id)
+                    .order_by(references.c.harness_id, references.c.executable)
+                ).mappings()
+            )
+            return tuple(self._runtime_entry_for_row(connection, row) for row in rows)
+
+    def update_runtime_observation(
+        self, ref: RuntimeRef, observation: RuntimeObservation
+    ) -> RuntimeEntry:
+        table = RuntimeReferenceRow.__table__
+        probe = observation.probe
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(
+                    table.c.workspace_id == ref.workspace_id,
+                    table.c.runtime_id == ref.runtime_id,
+                )
+                .values(
+                    actual_version=probe.actual_version,
+                    installed=observation.installed,
+                    protocol_state=probe.protocol_state.value,
+                    auth_state=observation.auth_state.value,
+                    capabilities=probe.model_dump(mode="json")["capabilities"],
+                    checked_at=probe.checked_at,
+                    file_identity=observation.file_identity,
+                )
+            )
+            if result.rowcount != 1:
+                raise _not_found("runtime")
+            row = (
+                connection.execute(
+                    select(table).where(
+                        table.c.workspace_id == ref.workspace_id,
+                        table.c.runtime_id == ref.runtime_id,
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return self._runtime_entry_for_row(connection, row)
+
+    def set_runtime_configuration(
+        self,
+        ref: RuntimeRef,
+        *,
+        expected_version: int,
+        max_active: int | None = None,
+        max_sessions: int | None = None,
+        enabled: bool | None = None,
+    ) -> RuntimeEntry:
+        references = RuntimeReferenceRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        with self._engine.begin() as connection:
+            runtime_row = (
+                connection.execute(
+                    select(references.c.installation_key).where(
+                        references.c.workspace_id == ref.workspace_id,
+                        references.c.runtime_id == ref.runtime_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if runtime_row is None:
+                raise _not_found("runtime")
+            values: dict[str, object] = {
+                "config_version": installations.c.config_version + 1
+            }
+            if max_active is not None:
+                values["max_active"] = max_active
+            if max_sessions is not None:
+                values["max_sessions"] = max_sessions
+            if enabled is not None:
+                values["enabled"] = enabled
+            result = connection.execute(
+                update(installations)
+                .where(
+                    installations.c.installation_key == runtime_row["installation_key"],
+                    installations.c.config_version == expected_version,
+                )
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                current = connection.execute(
+                    select(installations.c.installation_key).where(
+                        installations.c.installation_key
+                        == runtime_row["installation_key"]
+                    )
+                ).first()
+                if current is None:
+                    raise AgentError(
+                        "catalog_corrupt", "Runtime installation is missing."
+                    )
+                raise _revision_conflict("Runtime configuration version is stale.")
+            row = (
+                connection.execute(
+                    select(references).where(
+                        references.c.workspace_id == ref.workspace_id,
+                        references.c.runtime_id == ref.runtime_id,
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return self._runtime_entry_for_row(connection, row)
+
+    def get_profile_status(self, workspace_id: UUID, profile_id: UUID) -> ProfileStatus:
+        table = ProfileHead.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(table.c.enabled, table.c.status_version).where(
+                        table.c.workspace_id == workspace_id,
+                        table.c.profile_id == profile_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise _not_found("profile")
+        return ProfileStatus(
+            profile_id=profile_id,
+            enabled=row["enabled"],
+            version=row["status_version"],
+        )
+
+    @staticmethod
+    def _runtime_entry_for_row(connection: Connection, runtime_row) -> RuntimeEntry:
+        installations = RuntimeInstallationRow.__table__
+        installation_row = (
+            connection.execute(
+                select(installations).where(
+                    installations.c.installation_key == runtime_row["installation_key"]
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if installation_row is None:
+            raise AgentError("catalog_corrupt", "Runtime installation is missing.")
+        return _runtime_entry_from_rows(runtime_row, installation_row)
 
     def create_profile(
         self,
