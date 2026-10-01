@@ -1,6 +1,5 @@
 import traceback
 from collections.abc import Iterator, Mapping
-from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -35,6 +34,36 @@ class FakePermissionReader:
         if permission is None or permission.request != request:
             raise ConfigurationError("runtime_binding_denied")
         return permission
+
+
+class ReturningPermissionReader:
+    def __init__(self, permission: NativeCredentialAccessPermission) -> None:
+        self.permission = permission
+        self.calls: list[NativeCredentialAccessRequest] = []
+
+    def authorize(
+        self, request: NativeCredentialAccessRequest
+    ) -> NativeCredentialAccessPermission:
+        self.calls.append(request)
+        return self.permission
+
+
+class CountingCatalog:
+    def __init__(self, catalog: MemoryCatalog) -> None:
+        self._catalog = catalog
+        self.get_calls = 0
+        self.lease_calls = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self._catalog, name)
+
+    def get_credential(self, ref: CredentialRef) -> CredentialMetadata:
+        self.get_calls += 1
+        return self._catalog.get_credential(ref)
+
+    def credential_read_lease(self, ref: CredentialRef):
+        self.lease_calls += 1
+        return self._catalog.credential_read_lease(ref)
 
 
 def _credential(
@@ -103,10 +132,11 @@ def test_authorized_role_neutral_request_reads_exact_credential() -> None:
 
 
 def test_denied_scope_never_reads_credential_storage() -> None:
-    catalog = MemoryCatalog()
+    memory_catalog = MemoryCatalog()
     store = FakeSecretStore()
     ref = CredentialRef(WORKSPACE_ID, uuid4())
-    catalog.credentials[ref] = _credential(ref)
+    memory_catalog.credentials[ref] = _credential(ref)
+    catalog = CountingCatalog(memory_catalog)
     store.put_new(ref, SecretStr("fixture-denied-credential"))
     store.calls.clear()
     request = _request(ref)
@@ -118,6 +148,8 @@ def test_denied_scope_never_reads_credential_storage() -> None:
 
     assert denied.value.code == "runtime_binding_denied"
     assert permissions.calls == [request]
+    assert catalog.get_calls == 0
+    assert catalog.lease_calls == 0
     assert store.calls == []
 
 
@@ -133,7 +165,7 @@ def test_credential_revocation_is_rechecked_on_every_read() -> None:
     reader, permissions = _authorized_reader(catalog, store, request)
 
     assert reader.read(request).get_secret_value() == "fixture-revocable-credential"
-    catalog.credentials[ref] = replace(credential, status="revoked", version=2)
+    catalog.revoke_credential(ref, expected_version=credential.version)
 
     with pytest.raises(ConfigurationError) as revoked:
         reader.read(request)
@@ -144,10 +176,11 @@ def test_credential_revocation_is_rechecked_on_every_read() -> None:
 
 
 def test_mismatched_permission_destination_cannot_authorize_read() -> None:
-    catalog = MemoryCatalog()
+    memory_catalog = MemoryCatalog()
     store = FakeSecretStore()
     ref = CredentialRef(WORKSPACE_ID, uuid4())
-    catalog.credentials[ref] = _credential(ref)
+    memory_catalog.credentials[ref] = _credential(ref)
+    catalog = CountingCatalog(memory_catalog)
     store.put_new(ref, SecretStr("fixture-wrong-destination"))
     store.calls.clear()
     request = _request(ref, destination="SERVICE_API_KEY")
@@ -156,8 +189,8 @@ def test_mismatched_permission_destination_cannot_authorize_read() -> None:
         scope_id=request.scope_id,
         destination="SERVICE_ACCESS_TOKEN",
     )
-    permissions = FakePermissionReader(
-        (NativeCredentialAccessPermission(request=permission_request),)
+    permissions = ReturningPermissionReader(
+        NativeCredentialAccessPermission(request=permission_request)
     )
     reader = NativeCredentialReader(catalog, permissions, store, {})
 
@@ -166,20 +199,23 @@ def test_mismatched_permission_destination_cannot_authorize_read() -> None:
 
     assert denied.value.code == "runtime_binding_denied"
     assert permissions.calls == [request]
+    assert catalog.get_calls == 0
+    assert catalog.lease_calls == 0
     assert store.calls == []
 
 
 def test_mismatched_permission_scope_cannot_authorize_read() -> None:
-    catalog = MemoryCatalog()
+    memory_catalog = MemoryCatalog()
     store = FakeSecretStore()
     ref = CredentialRef(WORKSPACE_ID, uuid4())
-    catalog.credentials[ref] = _credential(ref)
+    memory_catalog.credentials[ref] = _credential(ref)
+    catalog = CountingCatalog(memory_catalog)
     store.put_new(ref, SecretStr("fixture-wrong-scope"))
     store.calls.clear()
     request = _request(ref)
     permission_request = _request(ref, destination=request.destination)
-    permissions = FakePermissionReader(
-        (NativeCredentialAccessPermission(request=permission_request),)
+    permissions = ReturningPermissionReader(
+        NativeCredentialAccessPermission(request=permission_request)
     )
     reader = NativeCredentialReader(catalog, permissions, store, {})
 
@@ -188,6 +224,8 @@ def test_mismatched_permission_scope_cannot_authorize_read() -> None:
 
     assert denied.value.code == "runtime_binding_denied"
     assert permissions.calls == [request]
+    assert catalog.get_calls == 0
+    assert catalog.lease_calls == 0
     assert store.calls == []
 
 

@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from typing import Protocol
 from uuid import UUID
 
@@ -39,6 +40,10 @@ class ConnectionCatalog(Protocol):
     def get_connection(self, ref: ConnectionRef) -> ModelConnectionRevision: ...
 
     def get_credential(self, ref: CredentialRef) -> CredentialMetadata: ...
+
+    def credential_read_lease(
+        self, ref: CredentialRef
+    ) -> AbstractContextManager[CredentialMetadata]: ...
 
     def list_connections(self, workspace_id: UUID) -> tuple[ModelConnectionRevision, ...]: ...
 

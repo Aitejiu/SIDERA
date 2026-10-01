@@ -90,22 +90,26 @@ class NativeCredentialReader:
         ):
             raise ConfigurationError("runtime_binding_denied")
 
-        credential = self._credential_metadata(request)
-        if credential.status == "revoked":
-            raise ConfigurationError("credential_revoked")
-        if credential.status != "active":
-            raise ConfigurationError("credential_unresolved")
-        return self._read_selected_source(credential)
-
-    def _credential_metadata(
-        self, request: NativeCredentialAccessRequest
-    ) -> CredentialMetadata:
         try:
-            credential = self._catalog.get_credential(request.credential_ref)
+            with self._catalog.credential_read_lease(
+                request.credential_ref
+            ) as credential:
+                credential = self._validate_credential(credential, request)
+                if credential.status == "revoked":
+                    raise ConfigurationError("credential_revoked")
+                if credential.status != "active":
+                    raise ConfigurationError("credential_unresolved")
+                return self._read_selected_source(credential)
         except ConfigurationError as exc:
             raise ConfigurationError(exc.code) from None
         except Exception:  # noqa: BLE001
             raise ConfigurationError("credential_not_found") from None
+
+    def _validate_credential(
+        self,
+        credential: object,
+        request: NativeCredentialAccessRequest,
+    ) -> CredentialMetadata:
         if (
             not isinstance(credential, CredentialMetadata)
             or credential.ref != request.credential_ref
