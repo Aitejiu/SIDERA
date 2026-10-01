@@ -16,3 +16,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sidera_agents"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "sidera_agents/alembic.ini"
+migrations = "sidera_agents/migrations"
