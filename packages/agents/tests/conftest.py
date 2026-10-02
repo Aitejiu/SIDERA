@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -540,7 +541,16 @@ def runtime_lab(tmp_path):
         secret_refs=(),
     )
     executable = tmp_path / "opencode"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "for raw in sys.stdin:\n"
+        "    request = json.loads(raw)\n"
+        "    if request.get('method') == 'initialize':\n"
+        "        sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{'mcpCapabilities':{}}}}) + '\\n')\n"
+        "        sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
     executable.chmod(0o755)
     return SimpleNamespace(
         store=store,
@@ -708,7 +718,16 @@ def admission_lab_factory(tmp_path):
         catalog = ProfileCatalog(store, authorizer, clock)
         runtimes = RuntimeCatalog(store, authorizer, registry=registry, clock=clock)
         executable = tmp_path / f"controlled-{uuid4().hex}"
-        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "for raw in sys.stdin:\n"
+            "    request = json.loads(raw)\n"
+            "    if request.get('method') == 'initialize':\n"
+            "        sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{'mcpCapabilities':{}}}}) + '\\n')\n"
+            "        sys.stdout.flush()\n",
+            encoding="utf-8",
+        )
         executable.chmod(0o755)
         runtime = runtimes.register(
             workspace_id,

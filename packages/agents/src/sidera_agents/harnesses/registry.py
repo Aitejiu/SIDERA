@@ -51,6 +51,6 @@ class HarnessRegistry:
 
 
 def default_harness_registry() -> HarnessRegistry:
-    from .opencode_descriptor import OpenCodeDescriptor
+    from .opencode import OpenCodeHarness
 
-    return HarnessRegistry((OpenCodeDescriptor(),))
+    return HarnessRegistry((OpenCodeHarness(),))

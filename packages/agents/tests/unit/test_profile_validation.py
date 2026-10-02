@@ -6,12 +6,15 @@ import pytest
 from sidera_agents.contracts import (
     AuthenticationState,
     CapabilityResourceDraft,
+    CapabilitySupport,
     ProfileDraft,
     ProfileRef,
     RuntimeRef,
+    SupportStatus,
 )
 from sidera_agents.errors import AgentError
 from sidera_agents.harnesses import opencode_descriptor
+from sidera_agents.ports import RuntimeObservation
 
 
 def _register_runtime(runtime_lab, monkeypatch):
@@ -105,13 +108,10 @@ def test_inherited_model_and_thinking_remain_none_and_auth_is_unconfirmed(
         for issue in validation.issues
         if issue.code == "authentication_unconfirmed"
     )
-    protocol_issue = next(
-        issue
-        for issue in validation.issues
-        if issue.code == "runtime_protocol_unconfirmed"
-    )
     assert auth_issue.support.status == "unconfirmed"
-    assert protocol_issue.support.status == "unconfirmed"
+    assert not any(
+        issue.code.startswith("runtime_protocol_") for issue in validation.issues
+    )
 
 
 def test_unsupported_native_options_remain_saveable_but_not_executable(
@@ -179,17 +179,17 @@ def test_reserved_environment_fields_are_reported_for_saved_legacy_profile(
         (
             "mcp",
             {"connection_id": "20000000-0000-0000-0000-000000000001"},
-            "unconfirmed",
+            "supported",
         ),
         (
             "mcp",
             {"transport": "stdio", "command": ["/opt/tools/review-mcp"]},
-            "unconfirmed",
+            "supported",
         ),
         (
             "mcp",
             {"transport": "http", "url": "https://mcp.example.invalid/v1"},
-            "unconfirmed",
+            "unsupported",
         ),
         (
             "integration",
@@ -218,10 +218,19 @@ def test_pinned_resource_revisions_have_explicit_runtime_support(
         profile.ref, grant_id=runtime_lab.grant_id
     )
 
-    resource_issue = next(
-        issue for issue in validation.issues if issue.field.endswith(f".{kind}")
+    issue_suffix = (
+        ".mcp_http"
+        if kind == "mcp" and settings.get("transport") == "http"
+        else f".{kind}"
     )
-    assert resource_issue.support.status == expected_status
+    resource_issues = tuple(
+        issue for issue in validation.issues if issue.field.endswith(issue_suffix)
+    )
+    if expected_status == "supported":
+        assert resource_issues == ()
+    else:
+        assert len(resource_issues) == 1
+        assert resource_issues[0].support.status == expected_status
     if expected_status == "unsupported":
         assert validation.valid is False
     assert resource.ref in validation.effective_preview.resource_refs
@@ -270,6 +279,63 @@ def test_disabled_profile_resource_and_runtime_are_each_reported(
         "resource_disabled",
         "runtime_disabled",
     }
+
+
+def test_http_mcp_requires_its_own_negotiated_capability(runtime_lab, monkeypatch):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    entry = runtime_lab.store.get_runtime_entry(runtime.ref)
+    probe = entry.record.observation.probe.model_copy(
+        update={
+            "protocol_state": "ready",
+            "capabilities": {
+                "acp": CapabilitySupport(
+                    status=SupportStatus.SUPPORTED,
+                    reason_code="acp_v1_initialized",
+                    constraints={},
+                ),
+                "mcp": CapabilitySupport(
+                    status=SupportStatus.SUPPORTED,
+                    reason_code="acp_v1_stdio",
+                    constraints={},
+                ),
+                "mcp_http": CapabilitySupport(
+                    status=SupportStatus.UNSUPPORTED,
+                    reason_code="http_not_advertised",
+                    constraints={},
+                ),
+            },
+        }
+    )
+    runtime_lab.store.update_runtime_observation(
+        runtime.ref,
+        RuntimeObservation(
+            probe=probe,
+            installed=entry.record.observation.installed,
+            file_identity=entry.record.observation.file_identity,
+        ),
+    )
+    resource = runtime_lab.catalog.create_resource(
+        runtime_lab.workspace_id,
+        CapabilityResourceDraft(
+            name="remote-tools",
+            kind="mcp",
+            settings={"transport": "http", "url": "https://mcp.example.invalid/v1"},
+            secret_refs=(),
+        ),
+        grant_id=runtime_lab.grant_id,
+    )
+    profile = _create_profile(runtime_lab, runtime.ref, resource_refs=(resource.ref,))
+
+    validation = runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    )
+
+    issue = next(
+        issue for issue in validation.issues if issue.field.endswith(".mcp_http")
+    )
+    assert issue.support.status is SupportStatus.UNSUPPORTED
+    assert issue.support.reason_code == "http_not_advertised"
+    assert validation.valid is False
 
 
 def test_missing_runtime_and_cross_workspace_profile_reads_are_safe(

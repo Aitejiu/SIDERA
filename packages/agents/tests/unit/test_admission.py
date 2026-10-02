@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from sidera_agents.admission import request_fingerprint
 from sidera_agents.contracts import (
+    CapabilityResourceDraft,
     ContextItem,
     CredentialRef,
     ExecutionWorkspace,
@@ -18,6 +19,7 @@ from sidera_agents.contracts import (
     NativeProcessState,
     NativeResponseState,
     ProfileRef,
+    ResourceKind,
     RunPolicy,
     RunStart,
     SecretBinding,
@@ -1207,3 +1209,90 @@ def test_service_factory_is_thread_free_until_background_start(admission_lab):
 
     assert not thread.is_alive()
     assert not lab.store.execution_owner_is_held(lab.service._owner_id)
+
+
+def test_profile_skill_projection_preserves_inline_body_and_safe_hash(admission_lab):
+    lab = admission_lab
+    body = "  Preserve this authorized skill exactly.  \n"
+    resource = lab.catalog.create_resource(
+        lab.workspace_id,
+        CapabilityResourceDraft(
+            name="review",
+            kind=ResourceKind.SKILL,
+            settings={"body": body},
+            secret_refs=(),
+        ),
+        grant_id=lab.grant_id,
+    )
+    profile = lab.catalog.revise_profile(
+        lab.profile.ref,
+        lab.profile.draft.model_copy(update={"resource_refs": (resource.ref,)}),
+        grant_id=lab.grant_id,
+    )
+
+    skills = lab.execution._resolve_skills(
+        lab.request(profile_ref=profile.ref), profile
+    )
+
+    assert len(skills) == 1
+    assert skills[0].resource_ref == resource.ref
+    assert skills[0].name == "review"
+    assert skills[0].content == body
+    assert skills[0].content_hash == "sha256:" + sha256(body.encode()).hexdigest()
+    assert (lab.grant_id, "resource.read", resource.ref) in lab.authorizer.calls
+
+
+def test_profile_skill_source_requires_matching_version_and_hash(admission_lab):
+    lab = admission_lab
+    body = "SYNTHETIC_SKILL_SOURCE"
+    digest = "sha256:" + sha256(body.encode()).hexdigest()
+    ref = SourceRef(provider="trusted-skills", key="review/v1", version="v1")
+    resource = lab.catalog.create_resource(
+        lab.workspace_id,
+        CapabilityResourceDraft(
+            name="review",
+            kind=ResourceKind.SKILL,
+            settings={
+                "source_ref": {
+                    "provider": ref.provider,
+                    "key": ref.key,
+                    "version": ref.version,
+                },
+                "content_hash": digest,
+            },
+            secret_refs=(),
+        ),
+        grant_id=lab.grant_id,
+    )
+    profile = lab.catalog.revise_profile(
+        lab.profile.ref,
+        lab.profile.draft.model_copy(update={"resource_refs": (resource.ref,)}),
+        grant_id=lab.grant_id,
+    )
+
+    class SourceReader:
+        def __init__(self, content):
+            self.content = content
+            self.calls = []
+
+        def read(self, grant_id, source_ref):
+            self.calls.append((grant_id, source_ref))
+            return self.content
+
+    reader = SourceReader(
+        SourceContent(text=body, actual_version="v1", content_hash=digest)
+    )
+    lab.execution._sources = reader
+    request = lab.request(profile_ref=profile.ref)
+
+    skills = lab.execution._resolve_skills(request, profile)
+
+    assert skills[0].content == body
+    assert skills[0].content_hash == digest
+    assert reader.calls == [(lab.grant_id, ref)]
+
+    reader.content = SourceContent(text=body, actual_version="v2", content_hash=digest)
+    with pytest.raises(AgentError) as error:
+        lab.execution._resolve_skills(request, profile)
+    assert error.value.code == "configuration_invalid"
+    assert body not in str(error.value)

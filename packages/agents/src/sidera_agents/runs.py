@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from threading import Condition
 from uuid import UUID, uuid4
 
@@ -18,6 +19,7 @@ from .contracts import (
     NativeOutcomeStatus,
     NativeProcessState,
     NativeResponseState,
+    NativeSkill,
     ProfileRevision,
     ResourceKind,
     RunPolicy,
@@ -25,6 +27,8 @@ from .contracts import (
     RunStart,
     RunState,
     RuntimeSnapshot,
+    SourceContent,
+    SourceRef,
     StartLookup,
     StartReceipt,
     StartStatus,
@@ -542,6 +546,7 @@ class RunExecution:
             projected_config=projected_config,
             workspace=item.request.workspace,
             tools=self._resolve_tools(item.request, item.profile),
+            skills=self._resolve_skills(item.request, item.profile),
             environment=environment,
         )
 
@@ -633,6 +638,82 @@ class RunExecution:
                     )
                 )
         return tuple(resolved)
+
+    def _resolve_skills(
+        self, request: RunStart, profile: ProfileRevision
+    ) -> tuple[NativeSkill, ...]:
+        skills: list[NativeSkill] = []
+        for ref in profile.draft.resource_refs:
+            if ref.workspace_id != profile.ref.workspace_id:
+                raise AgentError("permission_denied", "Access denied.")
+            self._authorizer.require(request.grant_id, "resource.read", ref)
+            resource = self._store.get_resource(ref)
+            status = self._store.get_resource_status(ref.workspace_id, ref.resource_id)
+            if resource.draft.kind is not ResourceKind.SKILL:
+                continue
+            if not status.enabled:
+                raise AgentError(
+                    "configuration_invalid",
+                    "Pinned skill resource is disabled.",
+                    "resource_refs",
+                )
+            if resource.draft.secret_refs:
+                raise AgentError(
+                    "configuration_invalid",
+                    "Skill resources cannot bind native secrets.",
+                    "resource_refs",
+                )
+            settings = resource.draft.settings
+            if set(settings) == {"body"} and isinstance(settings.get("body"), str):
+                content = settings["body"]
+                digest = "sha256:" + sha256(content.encode("utf-8")).hexdigest()
+            elif set(settings) == {"source_ref", "content_hash"}:
+                try:
+                    source_ref = SourceRef.model_validate(settings["source_ref"])
+                    source = self._sources.read(request.grant_id, source_ref)
+                except Exception:  # noqa: BLE001 - source diagnostics may contain private data
+                    raise AgentError(
+                        "configuration_invalid",
+                        "Pinned skill content is unavailable.",
+                        "resource_refs",
+                    ) from None
+                expected_hash = settings["content_hash"]
+                if (
+                    not isinstance(source, SourceContent)
+                    or source.actual_version != source_ref.version
+                    or source.content_hash != expected_hash
+                ):
+                    raise AgentError(
+                        "configuration_invalid",
+                        "Pinned skill content could not be verified.",
+                        "resource_refs",
+                    )
+                try:
+                    digest = "sha256:" + sha256(source.text.encode("utf-8")).hexdigest()
+                except UnicodeEncodeError:
+                    digest = ""
+                if digest != expected_hash:
+                    raise AgentError(
+                        "configuration_invalid",
+                        "Pinned skill content could not be verified.",
+                        "resource_refs",
+                    )
+                content = source.text
+            else:
+                raise AgentError(
+                    "configuration_invalid",
+                    "Pinned skill settings are invalid.",
+                    "resource_refs",
+                )
+            skills.append(
+                NativeSkill(
+                    resource_ref=ref,
+                    name=resource.draft.name,
+                    content=content,
+                    content_hash=digest,
+                )
+            )
+        return tuple(skills)
 
     @staticmethod
     def _check_required_capabilities(

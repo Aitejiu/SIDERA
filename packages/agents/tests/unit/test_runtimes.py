@@ -205,8 +205,9 @@ def test_discovery_register_and_refresh_use_the_selected_target_without_promptin
     assert registered.ref == refreshed.ref
     assert refreshed.executable == str(selected)
     assert refreshed.actual_version == "1.4.2"
-    assert refreshed.protocol_state == "unconfirmed"
+    assert refreshed.protocol_state == "ready"
     assert refreshed.auth_state == "unconfirmed"
+    assert refreshed.capabilities["mcp"].status == "supported"
     assert refreshed.limits == {"max_active": 2, "max_sessions": 4}
     assert which_calls == ["opencode"]
     assert probe_io.version_calls == [str(selected), str(selected)]

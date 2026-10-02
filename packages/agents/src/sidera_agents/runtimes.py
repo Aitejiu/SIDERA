@@ -527,7 +527,13 @@ class RuntimeCatalog:
                 continue
             if runtime is None:
                 continue
-            support = runtime.capabilities.get(resource.draft.kind.value)
+            capability_name = resource.draft.kind.value
+            if (
+                resource.draft.kind.value == "mcp"
+                and resource.draft.settings.get("transport") == "http"
+            ):
+                capability_name = "mcp_http"
+            support = runtime.capabilities.get(capability_name)
             if support is None:
                 support = _support(
                     SupportStatus.UNCONFIRMED, "resource_capability_unconfirmed"
@@ -535,7 +541,7 @@ class RuntimeCatalog:
             if support.status != SupportStatus.SUPPORTED:
                 issues.append(
                     ConfigIssue(
-                        field=f"{field}.{resource.draft.kind.value}",
+                        field=f"{field}.{capability_name}",
                         code="unsupported_capability",
                         message="This resource capability is not confirmed for the runtime.",
                         support=support,

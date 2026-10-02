@@ -365,6 +365,39 @@ class ToolConnection(ContractModel):
     _copy_environment = _field_validator("environment", mode="before")(_copy_string_map)
 
 
+class NativeSkill(ContractModel):
+    resource_ref: ResourceRef
+    name: StrictStr
+    content: StrictStr = Field(repr=False)
+    content_hash: StrictStr
+
+    from pydantic import field_validator as _field_validator
+
+    @_field_validator("content_hash")
+    @classmethod
+    def _validate_content_hash(cls, value: str) -> str:
+        if len(value) != 71 or not value.startswith("sha256:"):
+            raise ValueError("content_hash must be a SHA-256 digest")
+        try:
+            bytes.fromhex(value[7:])
+        except ValueError as error:
+            raise ValueError("content_hash must be a SHA-256 digest") from error
+        return value
+
+    from pydantic import model_validator as _model_validator
+
+    @_model_validator(mode="after")
+    def _verify_content_hash(self) -> NativeSkill:
+        import hashlib
+
+        expected = "sha256:" + hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        if self.content_hash != expected:
+            raise ValueError("content_hash does not match skill content")
+        if not self.name.strip() or "\x00" in self.name:
+            raise ValueError("skill name must be non-empty text")
+        return self
+
+
 class ExecutionWorkspace(ContractModel):
     directory: str
     writable: StrictBool
@@ -637,6 +670,7 @@ class NativeOpenRequest(ContractModel):
     projected_config: dict[str, _ProjectedJsonValue] = Field(exclude=True, repr=False)
     workspace: ExecutionWorkspace
     tools: tuple[ToolConnection, ...] = Field(exclude=True, repr=False)
+    skills: tuple[NativeSkill, ...] = Field(default=(), exclude=True, repr=False)
     environment: dict[str, _ProjectedJsonValue] = Field(exclude=True, repr=False)
 
     from pydantic import field_validator as _field_validator
@@ -701,7 +735,7 @@ class HarnessAdapter(Protocol):
 
     def validate(
         self, profile: ProfileRevision, runtime: RuntimeSnapshot
-    ) -> ConfigValidation: ...
+    ) -> tuple[ConfigIssue, ...]: ...
 
     def open(self, request: NativeOpenRequest) -> NativeHandle: ...
 
