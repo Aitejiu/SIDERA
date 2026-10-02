@@ -20,6 +20,7 @@ from sidera_agents.contracts import (
     NativeOpenRequest,
     NativeOutcomeStatus,
     NativeProcessState,
+    NativeResponseState,
     NativeSkill,
     ProtocolState,
     ResourceRef,
@@ -30,6 +31,9 @@ from sidera_agents.contracts import (
     ToolConnection,
 )
 from sidera_agents.errors import AgentError
+from sidera_agents.harnesses import acp_transport, opencode_config
+from sidera_agents.harnesses import opencode as opencode_module
+from sidera_agents.harnesses.acp_transport import ACPProcessTransport
 from sidera_agents.harnesses.opencode import OpenCodeHarness
 from sidera_agents.harnesses.registry import default_harness_registry
 
@@ -138,6 +142,18 @@ def _request_record(capture: Path, method: str) -> dict[str, object]:
     )
 
 
+def _shorten_prompt_timeout(adapter, handle, monkeypatch, seconds=0.05):
+    transport = adapter._sessions[handle.process_identity.owned_nonce].transport
+    request = transport.request
+
+    def bounded_request(method, params, *, timeout):
+        if method in {"session/prompt", "session/close"}:
+            timeout = min(timeout, seconds)
+        return request(method, params, timeout=timeout)
+
+    monkeypatch.setattr(transport, "request", bounded_request)
+
+
 def test_owned_stdio_acp_peer_receives_authorized_mcp_and_dispatches_tools(
     tmp_path, monkeypatch
 ):
@@ -232,6 +248,331 @@ def test_owned_stdio_acp_peer_receives_authorized_mcp_and_dispatches_tools(
 
     assert closed.status is NativeCloseState.CLOSED
     assert (global_config.read_bytes(), global_auth.read_bytes()) == original_files
+
+
+@pytest.mark.parametrize(
+    ("source_path", "is_directory"),
+    [
+        ("opencode.json", False),
+        (".opencode/opencode.jsonc", False),
+        (".opencode/plugins", True),
+    ],
+)
+def test_open_rejects_unapproved_workspace_config_before_session_new(
+    tmp_path, monkeypatch, source_path, is_directory
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture)
+    repository = tmp_path / "repository"
+    workspace = repository / "nested"
+    workspace.mkdir(parents=True)
+    source = repository / source_path
+    if is_directory:
+        source.mkdir(parents=True)
+        (source / "untrusted.js").write_text("export default () => {};\n")
+    else:
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text('{"mcp":{"unapproved":{"enabled":true}}}\n')
+    monkeypatch.setattr(
+        opencode_config, "managed_opencode_config_sources", lambda: (), raising=False
+    )
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+
+    try:
+        handle = adapter.open(_request(opencode, workspace))
+    except AgentError as error:
+        assert error.code in {"configuration_invalid", "unsupported_capability"}
+    else:
+        adapter.close(handle)
+        pytest.fail("unapproved workspace config was accepted")
+
+    assert not any(row.get("method") == "session/new" for row in _records(capture))
+
+
+@pytest.mark.parametrize(
+    "managed_relative_path",
+    [
+        "Library/Application Support/opencode/opencode.json",
+        "etc/opencode/opencode.jsonc",
+        "Library/Managed Preferences/test-user/ai.opencode.managed.plist",
+        "Library/Managed Preferences/ai.opencode.managed.plist",
+    ],
+)
+def test_open_rejects_managed_opencode_policy_before_session_new(
+    tmp_path, monkeypatch, managed_relative_path
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    managed_source = tmp_path / "system" / managed_relative_path
+    managed_source.parent.mkdir(parents=True)
+    original = b"synthetic managed policy\n"
+    managed_source.write_bytes(original)
+    monkeypatch.setattr(
+        opencode_config,
+        "managed_opencode_config_sources",
+        lambda: (managed_source,),
+        raising=False,
+    )
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+
+    try:
+        handle = adapter.open(_request(opencode, workspace))
+    except AgentError as error:
+        assert error.code in {"configuration_invalid", "unsupported_capability"}
+    else:
+        adapter.close(handle)
+        pytest.fail("managed OpenCode policy was accepted")
+
+    assert managed_source.read_bytes() == original
+    assert not any(row.get("method") == "session/new" for row in _records(capture))
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["missing_protocol_version", "protocol_version_zero", "protocol_version_two"],
+)
+def test_open_rejects_wrong_acp_protocol_version_before_session_new(tmp_path, mode):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, mode=mode)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+
+    try:
+        handle = adapter.open(_request(opencode, workspace))
+    except AgentError as error:
+        assert error.code in {"native_start_failed", "unsupported_capability"}
+    else:
+        adapter.close(handle)
+        pytest.fail("an unsupported ACP protocol version was accepted")
+
+    records = _records(capture)
+    assert any(row.get("method") == "initialize" for row in records)
+    assert not any(row.get("method") == "session/new" for row in records)
+    assert adapter._sessions == {}
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_outcome"),
+    [
+        (
+            "permission_options",
+            {"outcome": "selected", "optionId": "reject-once"},
+        ),
+        ("permission_no_reject", {"outcome": "cancelled"}),
+    ],
+)
+def test_permission_request_uses_valid_reject_outcome(tmp_path, mode, expected_outcome):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, mode=mode)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+
+    try:
+        adapter.prompt(
+            handle,
+            AssembledInput(instructions=(), text="Run.", context=()),
+            uuid4(),
+        )
+        reply = next(
+            row["reply"]
+            for row in _records(capture)
+            if row.get("kind") == "server_reply"
+        )
+        assert reply["result"]["outcome"] == expected_outcome
+    finally:
+        adapter.close(handle)
+
+
+def test_unknown_update_type_is_not_copied_to_public_event(tmp_path):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(
+        tmp_path, "opencode", capture=capture, mode="unknown_update_type"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+
+    try:
+        adapter.prompt(
+            handle,
+            AssembledInput(instructions=(), text="Run.", context=()),
+            uuid4(),
+        )
+        events = adapter.read_events(handle, 0)
+        serialized = json.dumps([event.model_dump(mode="json") for event in events])
+        assert len(events) == 1
+        assert events[0].data["update_type"] == "unknown"
+        assert "credential_N06_UNKNOWN_UPDATE_SENTINEL" not in serialized
+    finally:
+        adapter.close(handle)
+
+
+def test_prompt_timeout_keeps_response_unknown_until_terminal_evidence(
+    tmp_path, monkeypatch
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, mode="withhold_prompt")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=5, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+    _shorten_prompt_timeout(adapter, handle, monkeypatch)
+
+    try:
+        outcome = adapter.prompt(
+            handle,
+            AssembledInput(instructions=(), text="Run.", context=()),
+            uuid4(),
+        )
+
+        assert outcome.status is NativeOutcomeStatus.UNKNOWN
+        assert adapter.inspect(handle).response_state is NativeResponseState.UNKNOWN
+    finally:
+        adapter.close(handle)
+
+
+def test_late_prompt_terminal_response_clears_unknown_response_state(
+    tmp_path, monkeypatch
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(
+        tmp_path, "opencode", capture=capture, mode="late_terminal_response"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=5, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+    _shorten_prompt_timeout(adapter, handle, monkeypatch)
+
+    try:
+        outcome = adapter.prompt(
+            handle,
+            AssembledInput(instructions=(), text="Run.", context=()),
+            uuid4(),
+        )
+        assert outcome.status is NativeOutcomeStatus.UNKNOWN
+        assert adapter.inspect(handle).response_state is NativeResponseState.UNKNOWN
+
+        time.sleep(0.25)
+        transport = adapter._sessions[handle.process_identity.owned_nonce].transport
+        transport.request("session/close", {"sessionId": handle.session_id}, timeout=2)
+        adapter.read_events(handle, 0)
+
+        assert adapter.inspect(handle).response_state is NativeResponseState.IDLE
+    finally:
+        adapter.close(handle)
+
+
+@pytest.mark.parametrize("probe_failure", ["permission", "start_identity"])
+def test_identity_probe_error_is_unknown_not_gone(tmp_path, monkeypatch, probe_failure):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+
+    try:
+        with monkeypatch.context() as scoped:
+            if probe_failure == "permission":
+
+                def denied(_pid):
+                    raise PermissionError
+
+                scoped.setattr(acp_transport.os, "getpgid", denied)
+            else:
+
+                def unavailable(_pid):
+                    raise acp_transport.ACPTransportError("acp_identity_unavailable")
+
+                scoped.setattr(acp_transport, "_process_start_identity", unavailable)
+            inspection = adapter.inspect(handle)
+
+        assert inspection.process_state is NativeProcessState.UNKNOWN
+    finally:
+        adapter.close(handle)
+
+
+def test_replaced_process_identity_is_gone(tmp_path, monkeypatch):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                acp_transport, "_process_start_identity", lambda _pid: "replacement"
+            )
+            inspection = adapter.inspect(handle)
+        assert inspection.process_state is NativeProcessState.GONE
+    finally:
+        adapter.close(handle)
+
+
+def test_close_unknown_retains_session_and_private_config(tmp_path, monkeypatch):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=5, stop_grace_seconds=1.0)
+    handle = adapter.open(_request(opencode, workspace))
+    session = adapter._sessions[handle.process_identity.owned_nonce]
+    prepared_directory = session.prepared.directory
+    transport = session.transport
+    terminate = transport.terminate
+    close_transport = transport.close
+    attempts = 0
+    close_calls = []
+
+    def uncertain_then_real_terminate(*, grace_seconds):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return False
+        return terminate(grace_seconds=grace_seconds)
+
+    def track_close():
+        close_calls.append(True)
+        close_transport()
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(transport, "terminate", uncertain_then_real_terminate)
+            scoped.setattr(transport, "close", track_close)
+
+            first = adapter.close(handle)
+
+            assert first.status.value == "unknown"
+            assert adapter._sessions[handle.process_identity.owned_nonce] is session
+            assert prepared_directory.exists()
+            assert close_calls == []
+
+            confirmed = adapter.close(handle)
+            if confirmed.status is NativeCloseState.UNKNOWN:
+                assert adapter._sessions[handle.process_identity.owned_nonce] is session
+                assert prepared_directory.exists()
+                assert close_calls == []
+                time.sleep(0.05)
+                confirmed = adapter.close(handle)
+
+            assert confirmed.status is NativeCloseState.CLOSED
+            assert handle.process_identity.owned_nonce not in adapter._sessions
+            assert not prepared_directory.exists()
+            assert close_calls == [True]
+    finally:
+        terminate(grace_seconds=0.2)
+        close_transport()
+        session.prepared.close()
+        adapter._sessions.pop(handle.process_identity.owned_nonce, None)
 
 
 def test_prompt_events_permission_request_and_selected_observed_separation(tmp_path):
@@ -488,6 +829,137 @@ def test_open_timeout_is_bounded_and_owned_process_is_reaped(tmp_path):
         pytest.fail("owned ACP process remained alive after open timed out")
 
 
+def test_failed_open_retains_recovery_state_when_termination_is_unknown(
+    tmp_path, monkeypatch
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, mode="error_new")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    prepared_configs = []
+    transports = []
+    prepare = opencode_module.prepare_opencode_config
+    terminate = ACPProcessTransport.terminate
+
+    def capture_prepared(*args, **kwargs):
+        prepared = prepare(*args, **kwargs)
+        prepared_configs.append(prepared)
+        return prepared
+
+    def uncertain_termination(self, *, grace_seconds):
+        transports.append(self)
+        return False
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(opencode_module, "prepare_opencode_config", capture_prepared)
+            scoped.setattr(ACPProcessTransport, "terminate", uncertain_termination)
+            with pytest.raises(AgentError):
+                adapter.open(_request(opencode, workspace))
+
+            assert len(transports) == 1
+            assert len(prepared_configs) == 1
+            transport = transports[0]
+            prepared = prepared_configs[0]
+            assert not transport._closed
+            assert prepared.directory.exists()
+            orphaned = getattr(adapter, "_orphaned", {})
+            assert len(orphaned) == 1
+            retained = next(iter(orphaned.values()))
+            assert retained.transport is transport
+            assert retained.prepared is prepared
+
+        adapter._reap_orphaned()
+        assert adapter._orphaned == {}
+        assert transport._closed
+        assert not prepared.directory.exists()
+    finally:
+        for transport in transports:
+            for _ in range(10):
+                if terminate(transport, grace_seconds=0.2):
+                    transport.close()
+                    for prepared in prepared_configs:
+                        prepared.close()
+                    break
+                time.sleep(0.05)
+
+
+def test_probe_retains_recovery_state_when_termination_is_unknown(
+    tmp_path, monkeypatch
+):
+    capture = tmp_path / "peer.jsonl"
+    executable = _launcher(tmp_path, "opencode", capture=capture)
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    prepared_configs = []
+    temporary_directories = []
+    transports = []
+    prepare = opencode_module.prepare_opencode_config
+    terminate = ACPProcessTransport.terminate
+    temporary_directory_type = opencode_module.tempfile.TemporaryDirectory
+
+    def capture_prepared(*args, **kwargs):
+        prepared = prepare(*args, **kwargs)
+        prepared_configs.append(prepared)
+        return prepared
+
+    def capture_temporary_directory(*args, **kwargs):
+        temporary = temporary_directory_type(*args, **kwargs)
+        temporary_directories.append(temporary)
+        return temporary
+
+    def uncertain_termination(self, *, grace_seconds):
+        transports.append(self)
+        return False
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(opencode_module, "prepare_opencode_config", capture_prepared)
+            scoped.setattr(
+                opencode_module.tempfile,
+                "TemporaryDirectory",
+                capture_temporary_directory,
+            )
+            scoped.setattr(ACPProcessTransport, "terminate", uncertain_termination)
+            probe = adapter.probe(
+                RuntimeCandidate(harness_id="opencode", executable=str(executable))
+            )
+
+            assert probe.protocol_state is ProtocolState.READY
+            assert len(transports) == 1
+            assert len(prepared_configs) == 1
+            assert len(temporary_directories) == 1
+            transport = transports[0]
+            prepared = prepared_configs[0]
+            temporary = temporary_directories[0]
+            assert not transport._closed
+            assert prepared.directory.exists()
+            assert Path(temporary.name).exists()
+            orphaned = getattr(adapter, "_orphaned", {})
+            assert len(orphaned) == 1
+            retained = next(iter(orphaned.values()))
+            assert retained.transport is transport
+            assert retained.prepared is prepared
+            assert retained.temporary_directory is temporary
+
+        adapter._reap_orphaned()
+        assert adapter._orphaned == {}
+        assert transport._closed
+        assert not prepared.directory.exists()
+        assert not Path(temporary.name).exists()
+    finally:
+        for transport in transports:
+            for _ in range(10):
+                if terminate(transport, grace_seconds=0.2):
+                    transport.close()
+                    for prepared in prepared_configs:
+                        prepared.close()
+                    for temporary in temporary_directories:
+                        temporary.cleanup()
+                    break
+                time.sleep(0.05)
+
+
 def test_inspect_reports_gone_when_owned_process_exits_after_open(tmp_path):
     capture = tmp_path / "peer.jsonl"
     opencode = _launcher(
@@ -583,6 +1055,10 @@ def test_probe_negotiates_protocol_capabilities_without_prompting(tmp_path):
     assert probe.protocol_state is ProtocolState.READY
     assert probe.capabilities["mcp"].status is SupportStatus.SUPPORTED
     assert probe.capabilities["mcp_http"].status is SupportStatus.UNSUPPORTED
+    assert probe.capabilities["native_tools"].status is SupportStatus.UNSUPPORTED
+    assert (
+        probe.capabilities["native_tools"].reason_code == "native_tools_not_projected"
+    )
     assert not any(
         row.get("method") in {"session/new", "session/prompt"}
         for row in _records(capture)

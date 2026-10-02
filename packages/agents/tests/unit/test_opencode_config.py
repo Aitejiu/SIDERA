@@ -73,11 +73,15 @@ def test_child_environment_is_exact_and_excludes_parent_secrets(tmp_path):
     prepared = prepare_opencode_config({}, (), private_root=tmp_path)
     parent = {
         "PATH": "/usr/bin:/bin",
-        "HOME": str(tmp_path),
+        "HOME": "/parent/home",
         "LANG": "C",
+        "XDG_DATA_HOME": "/parent/data",
+        "XDG_STATE_HOME": "/parent/state",
+        "XDG_CACHE_HOME": "/parent/cache",
         "OPENAI_API_KEY": "parent-provider-secret",
         "SIDERA_PARENT_SECRET": "parent-sidera-secret",
         "OPENCODE_CONFIG": "/outside/config.json",
+        "OPENCODE_EXPERIMENTAL": "1",
         "RANDOM_PARENT_VALUE": "drop-me",
     }
 
@@ -91,15 +95,76 @@ def test_child_environment_is_exact_and_excludes_parent_secrets(tmp_path):
             prepared,
         )
         assert environment["PATH"] == parent["PATH"]
-        assert environment["HOME"] == parent["HOME"]
+        assert environment["HOME"] == str(prepared.directory)
+        assert environment["XDG_CONFIG_HOME"] == str(prepared.xdg_config_home)
+        assert environment["XDG_DATA_HOME"] == str(prepared.xdg_data_home)
+        assert environment["XDG_STATE_HOME"] == str(prepared.xdg_state_home)
+        assert environment["XDG_CACHE_HOME"] == str(prepared.xdg_cache_home)
         assert environment["PROFILE_MODE"] == "review"
         assert environment["AUTHORIZED_PROVIDER_KEY"] == "profile-secret"
         assert "OPENAI_API_KEY" not in environment
         assert "SIDERA_PARENT_SECRET" not in environment
+        assert "OPENCODE_EXPERIMENTAL" not in environment
+        assert "OPENCODE_CONFIG" not in environment
         assert "RANDOM_PARENT_VALUE" not in environment
         assert environment["OPENCODE_CONFIG_CONTENT"] == prepared.content
         assert environment["OPENCODE_CONFIG_DIR"] == str(prepared.config_dir)
-        assert environment["XDG_CONFIG_HOME"] == str(prepared.xdg_config_home)
+        for key in (
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ):
+            path = Path(environment[key])
+            assert path.is_relative_to(prepared.directory)
+            assert path.stat().st_mode & 0o077 == 0
+    finally:
+        prepared.close()
+
+
+def test_prepare_config_denies_unlisted_tools_and_projects_only_bound_mcp(
+    tmp_path,
+):
+    tools = (
+        ToolConnection(
+            name="task-bridge",
+            transport="stdio",
+            endpoint_or_argv=("/not-resolved-during-policy-build",),
+            headers={},
+            environment={},
+        ),
+    )
+
+    prepared = prepare_opencode_config({}, (), private_root=tmp_path, tools=tools)
+
+    try:
+        config = json.loads(prepared.content)
+        assert config["permission"] == {
+            "*": "deny",
+            "task-bridge_*": "allow",
+        }
+        assert config["mcp"] == {}
+        assert config["plugin"] == []
+        assert not any(
+            action == "allow" and tool != "task-bridge_*"
+            for tool, action in config["permission"].items()
+            if tool != "*"
+        )
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize("key", ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"])
+def test_profile_cannot_override_private_xdg_roots(tmp_path, key):
+    prepared = prepare_opencode_config({}, (), private_root=tmp_path)
+
+    try:
+        with pytest.raises(AgentError) as error:
+            build_child_environment({"PATH": "/usr/bin"}, {key: "/outside"}, prepared)
+
+        assert error.value.code == "configuration_invalid"
+        assert error.value.field == "environment"
     finally:
         prepared.close()
 

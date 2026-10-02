@@ -292,7 +292,12 @@ class RuntimeCatalog:
                         )
                     )
                 else:
-                    issues.extend(harness.validate(profile, runtime))
+                    local_validation = harness.validate(profile, runtime)
+                    issues.extend(
+                        local_validation.issues
+                        if isinstance(local_validation, ConfigValidation)
+                        else local_validation
+                    )
 
         issues.extend(self._resource_issues(profile, runtime, grant_id))
         preview = None

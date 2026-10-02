@@ -38,11 +38,31 @@ from .opencode_config import (
     PreparedOpenCodeConfig,
     build_child_environment,
     build_mcp_servers,
+    preflight_opencode_config_sources,
     prepare_opencode_config,
 )
 
 _REQUEST_TIMEOUT = 30.0
 _STOP_GRACE = 1.0
+_SAFE_SESSION_UPDATE_TYPES = frozenset(
+    {
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_thought_chunk",
+        "tool_call",
+        "tool_call_update",
+        "plan",
+        "current_mode_update",
+        "config_option_update",
+        "session_info_update",
+        "available_commands_update",
+        "user_message",
+        "agent_message",
+    }
+)
+_TERMINAL_STOP_REASONS = frozenset(
+    {"end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"}
+)
 
 
 def _support(status: SupportStatus, reason: str) -> CapabilitySupport:
@@ -59,8 +79,15 @@ class _Session:
     secret_values: tuple[str, ...]
     pending_updates: deque[Mapping[str, Any]] = field(default_factory=deque)
     lock: threading.Lock = field(default_factory=threading.Lock)
-    response_active: bool = False
+    response_state: NativeResponseState = NativeResponseState.IDLE
     cursor: int = 0
+
+
+@dataclass(slots=True)
+class _OrphanedProcess:
+    transport: ACPProcessTransport
+    prepared: PreparedOpenCodeConfig | None
+    temporary_directory: tempfile.TemporaryDirectory[str] | None = None
 
 
 class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
@@ -81,11 +108,13 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             os.environ if parent_environment is None else parent_environment
         )
         self._sessions: dict[UUID, _Session] = {}
+        self._orphaned: dict[UUID, _OrphanedProcess] = {}
         self._lock = threading.RLock()
 
     def probe(
         self, candidate: RuntimeCandidate, checked_at: datetime | None = None
     ) -> RuntimeProbe:
+        self._reap_orphaned()
         checked = checked_at or datetime.now(UTC)
         try:
             version = opencode_descriptor.read_version(candidate.executable)
@@ -100,33 +129,40 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
 
         prepared: PreparedOpenCodeConfig | None = None
         transport: ACPProcessTransport | None = None
+        temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         try:
-            with tempfile.TemporaryDirectory(
+            temporary_directory = tempfile.TemporaryDirectory(
                 prefix="sidera-agents-probe-"
-            ) as temporary:
-                prepared = prepare_opencode_config({}, (), private_root=Path(temporary))
-                environment = build_child_environment(
-                    self._parent_environment, {}, prepared
-                )
-                transport = ACPProcessTransport.spawn_argv(
-                    (candidate.executable, "acp"),
-                    cwd=Path(temporary),
-                    environment=environment,
-                )
-                initialize = transport.request(
-                    "initialize", _initialize_params(), timeout=self._request_timeout
-                )
-                capabilities = self._negotiated_capabilities(initialize)
-                protocol_state = ProtocolState.READY
+            )
+            temporary = Path(temporary_directory.name)
+            preflight_opencode_config_sources(temporary)
+            prepared = prepare_opencode_config({}, (), private_root=temporary)
+            environment = build_child_environment(
+                self._parent_environment, {}, prepared
+            )
+            transport = ACPProcessTransport.spawn_argv(
+                (candidate.executable, "acp"),
+                cwd=temporary,
+                environment=environment,
+            )
+            initialize = transport.request(
+                "initialize", _initialize_params(), timeout=self._request_timeout
+            )
+            capabilities = self._negotiated_capabilities(initialize)
+            protocol_state = ProtocolState.READY
         except (ACPTransportError, AgentError):
             capabilities = self._unavailable_capabilities("acp_handshake_unavailable")
             protocol_state = ProtocolState.UNAVAILABLE
         finally:
             if transport is not None:
-                transport.terminate(grace_seconds=self._stop_grace)
-                transport.close()
-            if prepared is not None:
-                prepared.close()
+                self._terminate_or_retain(
+                    transport, prepared, temporary_directory=temporary_directory
+                )
+            else:
+                if prepared is not None:
+                    prepared.close()
+                if temporary_directory is not None:
+                    temporary_directory.cleanup()
         return RuntimeProbe(
             actual_version=version,
             protocol_state=protocol_state,
@@ -135,6 +171,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         )
 
     def open(self, request: NativeOpenRequest) -> NativeHandle:
+        self._reap_orphaned()
         if request.runtime.harness_id != self.harness_id:
             raise AgentError("configuration_invalid", "Runtime target is invalid.")
         if request.projected_config:
@@ -148,12 +185,15 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             raise AgentError(
                 "configuration_invalid", "Execution workspace is unavailable."
             )
+        preflight_opencode_config_sources(workspace)
         mcp_servers = build_mcp_servers(request.tools, supports_http=True)
 
         prepared: PreparedOpenCodeConfig | None = None
         transport: ACPProcessTransport | None = None
         try:
-            prepared = prepare_opencode_config(request.projected_config, request.skills)
+            prepared = prepare_opencode_config(
+                request.projected_config, request.skills, tools=request.tools
+            )
             environment = build_child_environment(
                 self._parent_environment, request.environment, prepared
             )
@@ -165,6 +205,12 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             initialize = transport.request(
                 "initialize", _initialize_params(), timeout=self._request_timeout
             )
+            if initialize.get("protocolVersion") != 1:
+                raise AgentError(
+                    "unsupported_capability",
+                    "OpenCode ACP protocol version is unsupported.",
+                    "acp",
+                )
             negotiated = _agent_capabilities(initialize)
             http_supported = _http_supported(negotiated)
             if any(server.get("type") == "http" for server in mcp_servers):
@@ -217,16 +263,14 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             return handle
         except AgentError:
             if transport is not None:
-                transport.terminate(grace_seconds=self._stop_grace)
-                transport.close()
-            if prepared is not None:
+                self._terminate_or_retain(transport, prepared)
+            elif prepared is not None:
                 prepared.close()
             raise
         except ACPTransportError as error:
             if transport is not None:
-                transport.terminate(grace_seconds=self._stop_grace)
-                transport.close()
-            if prepared is not None:
+                self._terminate_or_retain(transport, prepared)
+            elif prepared is not None:
                 prepared.close()
             code = (
                 "native_start_unknown"
@@ -234,6 +278,41 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 else "native_start_failed"
             )
             raise AgentError(code, "OpenCode session could not be confirmed.") from None
+
+    def _terminate_or_retain(
+        self,
+        transport: ACPProcessTransport,
+        prepared: PreparedOpenCodeConfig | None,
+        *,
+        temporary_directory: tempfile.TemporaryDirectory[str] | None = None,
+    ) -> bool:
+        if not transport.terminate(grace_seconds=self._stop_grace):
+            orphan = _OrphanedProcess(
+                transport=transport,
+                prepared=prepared,
+                temporary_directory=temporary_directory,
+            )
+            with self._lock:
+                self._orphaned[transport.identity.owned_nonce] = orphan
+            return False
+        transport.close()
+        if prepared is not None:
+            prepared.close()
+        if temporary_directory is not None:
+            temporary_directory.cleanup()
+        return True
+
+    def _reap_orphaned(self) -> None:
+        with self._lock:
+            for nonce, orphan in tuple(self._orphaned.items()):
+                if not orphan.transport.terminate(grace_seconds=self._stop_grace):
+                    continue
+                orphan.transport.close()
+                if orphan.prepared is not None:
+                    orphan.prepared.close()
+                if orphan.temporary_directory is not None:
+                    orphan.temporary_directory.cleanup()
+                self._orphaned.pop(nonce, None)
 
     def prompt(
         self, handle: NativeHandle, input: AssembledInput, response_id: UUID
@@ -244,7 +323,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 "native_identity_unverified", "OpenCode session is invalid."
             )
         with session.lock:
-            session.response_active = True
+            session.response_state = NativeResponseState.ACTIVE
         try:
             result = session.transport.request(
                 "session/prompt",
@@ -255,6 +334,8 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 timeout=self._request_timeout,
             )
         except ACPTransportError as error:
+            with session.lock:
+                session.response_state = NativeResponseState.UNKNOWN
             return NativeOutcome(
                 response_id=response_id,
                 status=NativeOutcomeStatus.UNKNOWN,
@@ -266,10 +347,17 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 observed_model=None,
                 usage=None,
             )
-        finally:
+        except Exception:
             with session.lock:
-                session.response_active = False
+                session.response_state = NativeResponseState.UNKNOWN
+            raise
         stop_reason = result.get("stopReason")
+        with session.lock:
+            session.response_state = (
+                NativeResponseState.IDLE
+                if stop_reason in _TERMINAL_STOP_REASONS
+                else NativeResponseState.UNKNOWN
+            )
         if stop_reason == "end_turn":
             status = NativeOutcomeStatus.COMPLETED
             reason = None
@@ -297,7 +385,17 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             session.transport.read_available(timeout=0.0)
         except ACPTransportError:
             return ()
+        late_responses = session.transport.drain_late_responses()
         with session.lock:
+            for method, response in late_responses:
+                if method != "session/prompt" or response.get("error") is not None:
+                    continue
+                result = response.get("result")
+                stop_reason = (
+                    result.get("stopReason") if isinstance(result, Mapping) else None
+                )
+                if stop_reason in _TERMINAL_STOP_REASONS:
+                    session.response_state = NativeResponseState.IDLE
             session.pending_updates.extend(
                 message
                 for message in session.transport.drain_notifications()
@@ -313,15 +411,20 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 update_type = update.get("sessionUpdate")
                 if not isinstance(update_type, str):
                     continue
+                safe_update_type = (
+                    update_type
+                    if update_type in _SAFE_SESSION_UPDATE_TYPES
+                    else "unknown"
+                )
                 text = _update_text(update)
-                data: dict[str, object] = {"update_type": update_type}
+                data: dict[str, object] = {"update_type": safe_update_type}
                 if text is not None:
                     data["text"] = _redact(text, session.secret_values)
                 session.cursor += 1
                 event = NativeEvent(
                     cursor=session.cursor,
                     native_id=None,
-                    kind=_event_kind(update_type),
+                    kind=_event_kind(safe_update_type),
                     response_id=None,
                     operation_id=None,
                     occurred_at=datetime.now(UTC),
@@ -355,19 +458,19 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
 
     def inspect(self, handle: NativeHandle) -> NativeInspection:
         session = self._session(handle)
-        alive = session.transport.identity_matches(handle.process_identity)
+        process_state = session.transport.identity_state(handle.process_identity)
         with session.lock:
-            response_state = (
-                NativeResponseState.ACTIVE
-                if session.response_active
-                else NativeResponseState.IDLE
-            )
+            response_state = session.response_state
         return NativeInspection(
-            process_state=NativeProcessState.ALIVE
-            if alive
-            else NativeProcessState.GONE,
+            process_state=process_state,
             response_state=response_state,
-            reason_code=None if alive else "native_process_gone",
+            reason_code=(
+                None
+                if process_state is NativeProcessState.ALIVE
+                else "native_process_gone"
+                if process_state is NativeProcessState.GONE
+                else "native_identity_unverified"
+            ),
         )
 
     def close(self, handle: NativeHandle) -> NativeCloseOutcome:
@@ -387,13 +490,18 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             except ACPTransportError:
                 reason = "native_close_unknown"
         closed = session.transport.terminate(grace_seconds=self._stop_grace)
+        if not closed:
+            return NativeCloseOutcome(
+                status=NativeCloseState.UNKNOWN,
+                reason_code=reason or "native_close_unknown",
+            )
         session.transport.close()
         session.prepared.close()
         with self._lock:
             self._sessions.pop(handle.process_identity.owned_nonce, None)
         return NativeCloseOutcome(
-            status=NativeCloseState.CLOSED if closed else NativeCloseState.UNKNOWN,
-            reason_code=None if closed else (reason or "native_close_unknown"),
+            status=NativeCloseState.CLOSED,
+            reason_code=None,
         )
 
     @staticmethod
@@ -403,6 +511,9 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             "skill": _support(SupportStatus.UNCONFIRMED, "skill_not_negotiated"),
             "mcp": _support(SupportStatus.UNSUPPORTED, reason),
             "mcp_http": _support(SupportStatus.UNSUPPORTED, "http_not_negotiated"),
+            "native_tools": _support(
+                SupportStatus.UNSUPPORTED, "native_tools_not_projected"
+            ),
             "integration": _support(
                 SupportStatus.UNSUPPORTED, "integration_not_supported"
             ),
@@ -424,6 +535,9 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 if _http_supported(agent)
                 else SupportStatus.UNSUPPORTED,
                 "http_advertised" if _http_supported(agent) else "http_not_advertised",
+            ),
+            "native_tools": _support(
+                SupportStatus.UNSUPPORTED, "native_tools_not_projected"
             ),
             "integration": _support(
                 SupportStatus.UNSUPPORTED, "integration_not_supported"

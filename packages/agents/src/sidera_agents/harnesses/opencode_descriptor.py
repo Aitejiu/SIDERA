@@ -13,6 +13,7 @@ from ..contracts import (
     ConfigField,
     ConfigFieldKind,
     ConfigIssue,
+    ConfigValidation,
     ProfileRevision,
     ProtocolState,
     RuntimeCandidate,
@@ -36,6 +37,9 @@ _RESERVED_ENVIRONMENT_KEYS = {
     "TMPDIR",
     "TEMP",
     "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
     "OPENCODE_CONFIG",
     "CODEX_HOME",
 }
@@ -171,6 +175,9 @@ class OpenCodeDescriptor:
                 SupportStatus.UNCONFIRMED, "skill_projection_unconfirmed"
             ),
             "mcp": _support(SupportStatus.UNCONFIRMED, "mcp_projection_unconfirmed"),
+            "native_tools": _support(
+                SupportStatus.UNSUPPORTED, "native_tools_not_projected"
+            ),
             "integration": _support(
                 SupportStatus.UNSUPPORTED, "integration_not_supported"
             ),
@@ -196,7 +203,7 @@ class OpenCodeDescriptor:
 
     def validate(
         self, profile: ProfileRevision, runtime: RuntimeSnapshot
-    ) -> tuple[ConfigIssue, ...]:
+    ) -> ConfigValidation:
         draft = profile.draft
         issues: list[ConfigIssue] = []
         if draft.model_id is not None:
@@ -257,4 +264,8 @@ class OpenCodeDescriptor:
                     ),
                 )
             )
-        return tuple(issues)
+        return ConfigValidation(
+            valid=not issues,
+            issues=tuple(issues),
+            effective_preview=None,
+        )

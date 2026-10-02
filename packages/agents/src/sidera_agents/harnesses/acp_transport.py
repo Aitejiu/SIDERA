@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ..contracts import ProcessIdentity
+from ..contracts import NativeProcessState, ProcessIdentity
 
 _MAX_FRAME_BYTES = 2 * 1024 * 1024
 _DEFAULT_STDERR_LIMIT = 64 * 1024
+_DEFAULT_WRITE_TIMEOUT_SECONDS = 30.0
 
 
 class ACPTransportError(RuntimeError):
@@ -72,9 +73,12 @@ class ACPProcessTransport:
         self._request_lock = threading.Lock()
         self._notification_lock = threading.Lock()
         self._notifications: deque[Mapping[str, Any]] = deque()
+        self._pending_requests: dict[int, str] = {}
+        self._late_responses: deque[tuple[str, Mapping[str, Any]]] = deque()
         self._read_buffer = bytearray()
         self._next_id = 1
         self._closed = False
+        self._broken = False
         try:
             self.identity = ProcessIdentity(
                 pid=process.pid,
@@ -84,6 +88,7 @@ class ACPProcessTransport:
             self._process_group_id = (
                 os.getpgid(process.pid) if os.name == "posix" else None
             )
+            os.set_blocking(self._stdin.fileno(), False)
         except (OSError, ValueError, ACPTransportError):
             self.terminate(grace_seconds=0.1)
             self.close()
@@ -134,22 +139,37 @@ class ACPProcessTransport:
     ) -> Mapping[str, Any]:
         if timeout <= 0 or not method:
             raise ACPTransportError("acp_request_invalid")
-        with self._request_lock:
+        deadline = time.monotonic() + timeout
+        if not self._request_lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            raise ACPTransportError("acp_timeout")
+        try:
+            if self._broken or self._closed:
+                raise ACPTransportError("acp_transport_unusable")
             request_id = self._next_id
             self._next_id += 1
             self._write(
-                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                },
+                deadline=deadline,
             )
-            deadline = time.monotonic() + timeout
+            with self._notification_lock:
+                self._pending_requests[request_id] = method
             while True:
                 message = self._read_message(max(0.0, deadline - time.monotonic()))
                 if isinstance(message.get("method"), str):
-                    self._handle_incoming_method(message)
+                    self._handle_incoming_method(message, deadline=deadline)
                     continue
                 if message.get("id") != request_id:
-                    with self._notification_lock:
-                        self._notifications.append(message)
+                    self._route_response(message)
                     continue
+                with self._notification_lock:
+                    self._pending_requests.pop(request_id, None)
                 error = message.get("error")
                 if error is not None:
                     code = error.get("code") if isinstance(error, Mapping) else None
@@ -163,6 +183,8 @@ class ACPProcessTransport:
                 if not isinstance(result, Mapping):
                     raise ACPTransportError("acp_protocol_invalid")
                 return result
+        finally:
+            self._request_lock.release()
 
     def notify(self, method: str, params: Mapping[str, object]) -> None:
         if not method:
@@ -173,24 +195,19 @@ class ACPProcessTransport:
         if timeout < 0 or not self._request_lock.acquire(blocking=False):
             return
         try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(self._stdout, selectors.EVENT_READ)
-                while True:
-                    if selector.select(timeout):
-                        try:
-                            message = self._read_message(0.0)
-                        except ACPTransportError as error:
-                            if error.reason == "acp_timeout":
-                                return
-                            raise
-                        if isinstance(message.get("method"), str):
-                            self._handle_incoming_method(message)
-                        else:
-                            with self._notification_lock:
-                                self._notifications.append(message)
-                    else:
+            wait_timeout = timeout
+            while True:
+                try:
+                    message = self._read_message(wait_timeout)
+                except ACPTransportError as error:
+                    if error.reason == "acp_timeout":
                         return
-                    timeout = 0.0
+                    raise
+                if isinstance(message.get("method"), str):
+                    self._handle_incoming_method(message)
+                else:
+                    self._route_response(message)
+                wait_timeout = 0.0
         finally:
             self._request_lock.release()
 
@@ -200,30 +217,74 @@ class ACPProcessTransport:
             self._notifications.clear()
             return messages
 
+    def drain_late_responses(
+        self,
+    ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+        with self._notification_lock:
+            messages = tuple(self._late_responses)
+            self._late_responses.clear()
+            return messages
+
     def terminate(self, *, grace_seconds: float) -> bool:
         if grace_seconds <= 0:
             raise ValueError("termination grace must be positive")
-        if self.process.poll() is None:
-            _signal_process_group(self.process, self._process_group_id, signal.SIGTERM)
-            try:
-                self.process.wait(timeout=grace_seconds)
-            except subprocess.TimeoutExpired:
-                _signal_process_group(
-                    self.process, self._process_group_id, signal.SIGKILL
-                )
-                try:
-                    self.process.wait(timeout=max(0.2, grace_seconds))
-                except subprocess.TimeoutExpired:
-                    return False
-        if os.name == "posix" and self._process_group_id is not None:
-            try:
-                os.killpg(self._process_group_id, 0)
-            except ProcessLookupError:
+        state = self.identity_state(self.identity)
+        if state is NativeProcessState.UNKNOWN:
+            return False
+        if os.name != "posix":
+            return self._terminate_process(grace_seconds, state)
+        group_id = self._process_group_id
+        if group_id is None:
+            return False
+        group_exists = _process_group_exists(group_id)
+        if group_exists is None:
+            return False
+        if not group_exists:
+            self.process.poll()
+            return True
+        if state is NativeProcessState.GONE:
+            return False
+        if not self._signal_owned_group(signal.SIGTERM):
+            return False
+
+        deadline = time.monotonic() + grace_seconds
+        while True:
+            group_exists = _process_group_exists(group_id)
+            if group_exists is False:
+                self.process.poll()
                 return True
-            except PermissionError:
+            if group_exists is None:
+                self.process.poll()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.01, remaining))
+                continue
+            state = self.identity_state(self.identity)
+            if state is NativeProcessState.UNKNOWN:
                 return False
-            _signal_process_group(self.process, self._process_group_id, signal.SIGKILL)
-        return self.process.poll() is not None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if state is not NativeProcessState.ALIVE:
+                    return False
+                if not self._signal_owned_group(signal.SIGKILL):
+                    return False
+                kill_deadline = time.monotonic() + max(0.2, grace_seconds)
+                while time.monotonic() < kill_deadline:
+                    group_exists = _process_group_exists(group_id)
+                    if group_exists is False:
+                        self.process.poll()
+                        return True
+                    if group_exists is None:
+                        self.process.poll()
+                        time.sleep(0.01)
+                        continue
+                    time.sleep(min(0.01, kill_deadline - time.monotonic()))
+                if _process_group_exists(group_id) is False:
+                    self.process.poll()
+                    return True
+                return False
+            time.sleep(min(0.01, remaining))
 
     def close(self) -> None:
         if self._closed:
@@ -236,34 +297,127 @@ class ACPProcessTransport:
             except OSError:
                 pass
 
-    def identity_matches(self, identity: ProcessIdentity) -> bool:
+    def identity_state(self, identity: ProcessIdentity) -> NativeProcessState:
         if identity != self.identity or self.process.poll() is not None:
+            return NativeProcessState.GONE
+        try:
+            if os.name == "posix":
+                current_group = os.getpgid(identity.pid)
+                if current_group != self._process_group_id:
+                    return NativeProcessState.GONE
+            current_start = _process_start_identity(identity.pid)
+        except ProcessLookupError:
+            return NativeProcessState.GONE
+        except (OSError, ACPTransportError):
+            return NativeProcessState.UNKNOWN
+        return (
+            NativeProcessState.ALIVE
+            if current_start == identity.start_identity
+            else NativeProcessState.GONE
+        )
+
+    def identity_matches(self, identity: ProcessIdentity) -> bool:
+        return self.identity_state(identity) is NativeProcessState.ALIVE
+
+    def _signal_owned_group(self, sig: signal.Signals) -> bool:
+        if self.identity_state(self.identity) is not NativeProcessState.ALIVE:
             return False
         try:
-            if (
-                os.name == "posix"
-                and os.getpgid(identity.pid) != self._process_group_id
-            ):
-                return False
-            return _process_start_identity(identity.pid) == identity.start_identity
-        except (OSError, ACPTransportError):
+            _signal_process_group(self.process, self._process_group_id, sig)
+        except OSError:
             return False
+        return True
 
-    def _write(self, message: Mapping[str, object]) -> None:
+    def _terminate_process(
+        self, grace_seconds: float, state: NativeProcessState
+    ) -> bool:
+        if state is NativeProcessState.GONE:
+            return self.process.poll() is not None
+        if self.identity_state(self.identity) is not NativeProcessState.ALIVE:
+            return False
+        try:
+            self.process.send_signal(signal.SIGTERM)
+            self.process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            if self.identity_state(self.identity) is not NativeProcessState.ALIVE:
+                return False
+            try:
+                self.process.send_signal(signal.SIGKILL)
+                self.process.wait(timeout=max(0.2, grace_seconds))
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+        except OSError:
+            return False
+        return self.process.poll() is not None
+
+    def _route_response(self, message: Mapping[str, Any]) -> None:
+        request_id = message.get("id")
+        with self._notification_lock:
+            method = (
+                self._pending_requests.pop(request_id, None)
+                if type(request_id) in {int, str}
+                else None
+            )
+            if method is None:
+                self._notifications.append(message)
+            else:
+                self._late_responses.append((method, message))
+
+    def _write(
+        self, message: Mapping[str, object], *, deadline: float | None = None
+    ) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + _DEFAULT_WRITE_TIMEOUT_SECONDS
         try:
             encoded = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
         except (TypeError, ValueError, UnicodeEncodeError):
             raise ACPTransportError("acp_request_invalid") from None
         if len(encoded) > _MAX_FRAME_BYTES:
             raise ACPTransportError("acp_frame_too_large")
-        with self._write_lock:
-            try:
-                self._stdin.write(encoded)
-                self._stdin.flush()
-            except (BrokenPipeError, OSError):
-                raise ACPTransportError("acp_process_closed") from None
+        if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise ACPTransportError("acp_timeout")
+        written = 0
+        try:
+            if self._broken or self._closed:
+                raise ACPTransportError("acp_transport_unusable")
+            with selectors.DefaultSelector() as selector:
+                selector.register(self._stdin, selectors.EVENT_WRITE)
+                while written < len(encoded):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if written:
+                            self._poison_write_stream()
+                        raise ACPTransportError("acp_timeout")
+                    if not selector.select(remaining):
+                        if written:
+                            self._poison_write_stream()
+                        raise ACPTransportError("acp_timeout")
+                    try:
+                        count = os.write(self._stdin.fileno(), encoded[written:])
+                    except BlockingIOError:
+                        continue
+                    except OSError:
+                        if written:
+                            self._poison_write_stream()
+                        raise ACPTransportError("acp_process_closed") from None
+                    if count <= 0:
+                        if written:
+                            self._poison_write_stream()
+                        raise ACPTransportError("acp_process_closed")
+                    written += count
+        finally:
+            self._write_lock.release()
+
+    def _poison_write_stream(self) -> None:
+        self._broken = True
+        try:
+            self._stdin.close()
+        except OSError:
+            pass
 
     def _read_message(self, timeout: float) -> Mapping[str, Any]:
+        if timeout < 0:
+            timeout = 0.0
         deadline = time.monotonic() + timeout
         while True:
             newline = self._read_buffer.find(b"\n")
@@ -277,14 +431,12 @@ class ACPProcessTransport:
                 if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
                     raise ACPTransportError("acp_protocol_invalid")
                 return message
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ACPTransportError("acp_timeout")
-            if self.process.poll() is not None:
-                raise ACPTransportError("acp_process_closed")
+            remaining = max(0.0, deadline - time.monotonic())
             with selectors.DefaultSelector() as selector:
                 selector.register(self._stdout, selectors.EVENT_READ)
                 if not selector.select(remaining):
+                    if self.process.poll() is not None:
+                        raise ACPTransportError("acp_process_closed")
                     raise ACPTransportError("acp_timeout")
             try:
                 chunk = os.read(self._stdout.fileno(), 4096)
@@ -296,7 +448,9 @@ class ACPProcessTransport:
             if len(self._read_buffer) > _MAX_FRAME_BYTES:
                 raise ACPTransportError("acp_frame_too_large")
 
-    def _handle_incoming_method(self, message: Mapping[str, Any]) -> None:
+    def _handle_incoming_method(
+        self, message: Mapping[str, Any], *, deadline: float | None = None
+    ) -> None:
         request_id = message.get("id")
         if request_id is None:
             with self._notification_lock:
@@ -304,13 +458,38 @@ class ACPProcessTransport:
             return
         response: dict[str, object] = {"jsonrpc": "2.0", "id": request_id}
         if message.get("method") == "session/request_permission":
-            response["result"] = {"outcome": "reject"}
+            params = message.get("params")
+            options = params.get("options") if isinstance(params, Mapping) else None
+            reject_option = None
+            if isinstance(options, list):
+                for kind in ("reject_once", "reject_always"):
+                    reject_option = next(
+                        (
+                            option
+                            for option in options
+                            if isinstance(option, Mapping)
+                            and option.get("kind") == kind
+                            and isinstance(option.get("optionId"), str)
+                        ),
+                        None,
+                    )
+                    if reject_option is not None:
+                        break
+            outcome: dict[str, str]
+            if reject_option is None:
+                outcome = {"outcome": "cancelled"}
+            else:
+                outcome = {
+                    "outcome": "selected",
+                    "optionId": reject_option["optionId"],
+                }
+            response["result"] = {"outcome": outcome}
         else:
             response["error"] = {
                 "code": -32601,
                 "message": "unsupported ACP server request",
             }
-        self._write(response)
+        self._write(response, deadline=deadline)
 
 
 def _process_start_identity(pid: int) -> str:
@@ -352,6 +531,18 @@ def _signal_process_group(
             process.send_signal(sig)
         except ProcessLookupError:
             pass
+
+
+def _process_group_exists(group_id: int) -> bool | None:
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    except OSError:
+        return None
+    return True
 
 
 def _terminate_process_group(

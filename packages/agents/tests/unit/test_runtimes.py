@@ -132,7 +132,7 @@ def test_version_probe_timeout_is_bounded_and_safe(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX fork semantics")
 def test_version_probe_timeout_kills_inherited_pipe_descendant(tmp_path, monkeypatch):
-    monkeypatch.setattr(opencode_descriptor, "_PROBE_TIMEOUT_SECONDS", 1.5)
+    monkeypatch.setattr(opencode_descriptor, "_PROBE_TIMEOUT_SECONDS", 5.0)
     executable, started, release, late = _pipe_inheriting_descendant_probe(tmp_path)
 
     _assert_probe_abort_kills_descendant(

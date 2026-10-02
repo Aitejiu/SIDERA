@@ -2,15 +2,21 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
 from sidera_agents.contracts import (
     AuthenticationState,
     CapabilityResourceDraft,
     CapabilitySupport,
+    ConfigValidation,
+    CredentialRef,
     ProfileDraft,
     ProfileRef,
     RuntimeRef,
+    SecretBinding,
     SupportStatus,
+    ToolBinding,
+    ToolConnection,
 )
 from sidera_agents.errors import AgentError
 from sidera_agents.harnesses import opencode_descriptor
@@ -135,6 +141,38 @@ def test_unsupported_native_options_remain_saveable_but_not_executable(
         "native_settings.temperature",
         "thinking",
     }
+
+
+def test_harness_validation_returns_config_validation_contract(
+    runtime_lab, monkeypatch
+):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    profile = _create_profile(
+        runtime_lab, runtime.ref, model_id="unverified/provider-model"
+    )
+    harness = runtime_lab.registry.get("opencode")
+    runtime_snapshot = runtime_lab.runtimes.get_runtime(
+        runtime.ref, grant_id=runtime_lab.grant_id
+    )
+
+    descriptor_validation = opencode_descriptor.OpenCodeDescriptor().validate(
+        profile, runtime_snapshot
+    )
+    local = harness.validate(profile, runtime_snapshot)
+    aggregate = runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    )
+
+    assert isinstance(descriptor_validation, ConfigValidation)
+    assert descriptor_validation.effective_preview is None
+    assert isinstance(local, ConfigValidation)
+    assert local.effective_preview is None
+    assert any(issue.field == "model_id" for issue in local.issues)
+    assert {issue.field for issue in aggregate.issues} >= {
+        issue.field for issue in local.issues
+    }
+    assert aggregate.effective_preview is not None
+    assert aggregate.effective_preview.selected_model == "unverified/provider-model"
 
 
 def test_reserved_environment_fields_are_reported_for_saved_legacy_profile(
@@ -336,6 +374,118 @@ def test_http_mcp_requires_its_own_negotiated_capability(runtime_lab, monkeypatc
     assert issue.support.status is SupportStatus.UNSUPPORTED
     assert issue.support.reason_code == "http_not_advertised"
     assert validation.valid is False
+
+
+def _tool_projection_profile(lab):
+    binding = SecretBinding(
+        credential_ref=CredentialRef(
+            workspace_id=lab.workspace_id, credential_id=uuid4()
+        ),
+        destination="PROFILE_TOKEN",
+    )
+    return _create_profile(lab, lab.runtime.ref, secret_refs=(binding,)), binding
+
+
+def _instrument_tool_projection(lab, *, deny_tool_execute):
+    class SecretReader:
+        def __init__(self):
+            self.calls = []
+
+        def read(self, grant_id, binding):
+            self.calls.append((grant_id, binding))
+            return SecretStr("authorized-profile-secret")
+
+    class ConnectionReader:
+        def __init__(self):
+            self.calls = []
+            self.connection = ToolConnection(
+                name="task-bridge",
+                transport="stdio",
+                endpoint_or_argv=("/synthetic/tool",),
+                headers={},
+                environment={"TOOL_TOKEN": SecretStr("scoped-tool-secret")},
+            )
+
+        def resolve(self, grant_id, connection_id):
+            self.calls.append((grant_id, connection_id))
+            return self.connection
+
+    class Authorizer:
+        def __init__(self, delegate):
+            self.delegate = delegate
+            self.tool_targets = []
+
+        def require(self, grant_id, action, target):
+            if action == "tool.execute":
+                self.tool_targets.append(target)
+                if deny_tool_execute:
+                    raise AgentError("permission_denied", "Access denied.")
+            self.delegate.require(grant_id, action, target)
+
+    secrets = SecretReader()
+    connections = ConnectionReader()
+    authorizer = Authorizer(lab.execution._authorizer)
+    resource_reads = []
+    get_resource = lab.store.get_resource
+
+    def read_resource(ref):
+        resource_reads.append(ref)
+        return get_resource(ref)
+
+    lab.execution._secrets = secrets
+    lab.execution._tool_connections = connections
+    lab.execution._authorizer = authorizer
+    lab.store.get_resource = read_resource
+    return secrets, connections, authorizer, resource_reads
+
+
+def test_tool_execute_denial_precedes_connection_and_secret_resolution(admission_lab):
+    lab = admission_lab
+    profile, _ = _tool_projection_profile(lab)
+    secrets, connections, authorizer, resource_reads = _instrument_tool_projection(
+        lab, deny_tool_execute=True
+    )
+    binding = ToolBinding(connection_id=uuid4())
+    receipt = lab.execution.start(
+        lab.request(profile_ref=profile.ref, tools=(binding,))
+    )
+
+    assert receipt.status.value == "accepted"
+    lab.pump()
+
+    assert authorizer.tool_targets == [binding]
+    assert connections.calls == []
+    assert resource_reads == []
+    assert secrets.calls == []
+    assert lab.native.open_calls == []
+
+
+def test_tool_execute_grant_authorizes_exact_binding_before_projection(admission_lab):
+    lab = admission_lab
+    profile, secret_binding = _tool_projection_profile(lab)
+    secrets, connections, authorizer, resource_reads = _instrument_tool_projection(
+        lab, deny_tool_execute=False
+    )
+    connection_id = uuid4()
+    binding = ToolBinding(connection_id=connection_id)
+    receipt = lab.execution.start(
+        lab.request(profile_ref=profile.ref, tools=(binding,))
+    )
+
+    assert receipt.status.value == "accepted"
+    lab.pump()
+
+    assert authorizer.tool_targets == [binding]
+    assert connections.calls == [(lab.grant_id, connection_id)]
+    assert resource_reads == []
+    assert secrets.calls == [(lab.grant_id, secret_binding)]
+    assert len(lab.native.open_calls) == 1
+    open_request = lab.native.open_calls[0]
+    assert open_request.tools == (connections.connection,)
+    assert (
+        open_request.environment["PROFILE_TOKEN"].get_secret_value()
+        == "authorized-profile-secret"
+    )
 
 
 def test_missing_runtime_and_cross_workspace_profile_reads_are_safe(

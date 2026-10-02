@@ -135,21 +135,30 @@ def run_peer() -> None:
         request_id = request.get("id")
         if method == "initialize":
             _record({"kind": "request", "method": method, "params": params})
+            mode = os.environ.get("ACME_TEST_MODE")
+            result: dict[str, Any] = {
+                "agentCapabilities": {
+                    "loadSession": False,
+                    "mcpCapabilities": {
+                        "http": os.environ.get("ACME_TEST_HTTP") == "1"
+                    },
+                    "sessionCapabilities": {"close": {}},
+                },
+                "agentInfo": {"name": "owned-peer", "version": "1"},
+            }
+            if mode != "missing_protocol_version":
+                result["protocolVersion"] = (
+                    0
+                    if mode == "protocol_version_zero"
+                    else 2
+                    if mode == "protocol_version_two"
+                    else 1
+                )
             _write(
                 {
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {
-                        "protocolVersion": 1,
-                        "agentCapabilities": {
-                            "loadSession": False,
-                            "mcpCapabilities": {
-                                "http": os.environ.get("ACME_TEST_HTTP") == "1"
-                            },
-                            "sessionCapabilities": {"close": {}},
-                        },
-                        "agentInfo": {"name": "owned-peer", "version": "1"},
-                    },
+                    "result": result,
                 }
             )
         elif method == "session/new":
@@ -208,17 +217,54 @@ def run_peer() -> None:
                     },
                 }
             )
+            mode = os.environ.get("ACME_TEST_MODE")
+            permission_params: dict[str, Any] = {}
+            if mode == "permission_options":
+                permission_params["options"] = [
+                    {
+                        "optionId": "allow-once",
+                        "name": "Allow once",
+                        "kind": "allow_once",
+                    },
+                    {
+                        "optionId": "reject-once",
+                        "name": "Reject once",
+                        "kind": "reject_once",
+                    },
+                ]
+            elif mode == "permission_no_reject":
+                permission_params["options"] = [
+                    {
+                        "optionId": "allow-once",
+                        "name": "Allow once",
+                        "kind": "allow_once",
+                    }
+                ]
             _write(
                 {
                     "jsonrpc": "2.0",
                     "method": "session/request_permission",
                     "id": "permission-request",
-                    "params": {},
+                    "params": permission_params,
                 }
             )
             reply = json.loads(sys.stdin.readline())
             _record({"kind": "server_reply", "reply": reply})
             cancelled = False
+            if mode == "withhold_prompt":
+                while True:
+                    time.sleep(1)
+            if mode == "late_terminal_response":
+                time.sleep(0.2)
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"stopReason": "end_turn"},
+                    }
+                )
+                _record({"kind": "terminal_reply", "method": "session/prompt"})
+                continue
             if os.environ.get("ACME_TEST_MODE") == "block_prompt":
                 while True:
                     control = json.loads(sys.stdin.readline())
@@ -230,6 +276,11 @@ def run_peer() -> None:
             if os.environ.get("ACME_TEST_MODE") == "multi_update":
                 update_texts.append("second fixture update")
             for update_text in update_texts:
+                update_type = (
+                    "credential_N06_UNKNOWN_UPDATE_SENTINEL"
+                    if mode == "unknown_update_type"
+                    else "agent_message_chunk"
+                )
                 _write(
                     {
                         "jsonrpc": "2.0",
@@ -237,7 +288,7 @@ def run_peer() -> None:
                         "params": {
                             "sessionId": SESSION_ID,
                             "update": {
-                                "sessionUpdate": "agent_message_chunk",
+                                "sessionUpdate": update_type,
                                 "content": {"type": "text", "text": update_text},
                             },
                         },

@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +28,9 @@ _RESERVED_ENVIRONMENT_KEYS = frozenset(
         "TMPDIR",
         "TEMP",
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_CONTENT",
         "OPENCODE_CONFIG_DIR",
@@ -57,6 +61,9 @@ class PreparedOpenCodeConfig:
     directory: Path
     config_dir: Path
     xdg_config_home: Path
+    xdg_data_home: Path
+    xdg_state_home: Path
+    xdg_cache_home: Path
     content: str
     skill_paths: tuple[Path, ...]
     skill_hashes: tuple[str, ...]
@@ -70,6 +77,7 @@ def prepare_opencode_config(
     skills: tuple[NativeSkill, ...],
     *,
     private_root: Path | None = None,
+    tools: tuple[ToolConnection, ...] = (),
 ) -> PreparedOpenCodeConfig:
     if projected_config:
         raise _invalid("projected_config")
@@ -80,8 +88,18 @@ def prepare_opencode_config(
         directory.chmod(0o700)
         config_dir = directory / "config"
         xdg_config_home = directory / "xdg-config"
-        config_dir.mkdir(mode=0o700)
-        xdg_config_home.mkdir(mode=0o700)
+        xdg_data_home = directory / "xdg-data"
+        xdg_state_home = directory / "xdg-state"
+        xdg_cache_home = directory / "xdg-cache"
+        for path in (
+            config_dir,
+            xdg_config_home,
+            xdg_data_home,
+            xdg_state_home,
+            xdg_cache_home,
+        ):
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
         skill_dir = directory / "skills"
         paths: list[Path] = []
         hashes: list[str] = []
@@ -97,12 +115,16 @@ def prepare_opencode_config(
             "instructions": [str(path) for path in paths],
             "mcp": {},
             "plugin": [],
+            "permission": _tool_permission_policy(tools),
         }
         content = json.dumps(config, sort_keys=True, separators=(",", ":"))
         return PreparedOpenCodeConfig(
             directory=directory,
             config_dir=config_dir,
             xdg_config_home=xdg_config_home,
+            xdg_data_home=xdg_data_home,
+            xdg_state_home=xdg_state_home,
+            xdg_cache_home=xdg_cache_home,
             content=content,
             skill_paths=tuple(paths),
             skill_hashes=tuple(hashes),
@@ -145,8 +167,75 @@ def build_child_environment(
         environment[key] = value
     environment["OPENCODE_CONFIG_CONTENT"] = prepared.content
     environment["OPENCODE_CONFIG_DIR"] = str(prepared.config_dir)
+    environment["HOME"] = str(prepared.directory)
     environment["XDG_CONFIG_HOME"] = str(prepared.xdg_config_home)
+    environment["XDG_DATA_HOME"] = str(prepared.xdg_data_home)
+    environment["XDG_STATE_HOME"] = str(prepared.xdg_state_home)
+    environment["XDG_CACHE_HOME"] = str(prepared.xdg_cache_home)
     return environment
+
+
+def managed_opencode_config_sources() -> tuple[Path, ...]:
+    if sys.platform == "darwin":
+        from getpass import getuser
+
+        managed_preferences = Path("/Library/Managed Preferences")
+        return (
+            Path("/Library/Application Support/opencode/opencode.json"),
+            Path("/Library/Application Support/opencode/opencode.jsonc"),
+            managed_preferences / getuser() / "ai.opencode.managed.plist",
+            managed_preferences / "ai.opencode.managed.plist",
+        )
+    if sys.platform.startswith("linux"):
+        return (
+            Path("/etc/opencode/opencode.json"),
+            Path("/etc/opencode/opencode.jsonc"),
+        )
+    if sys.platform == "win32":
+        program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+        return (
+            program_data / "opencode" / "opencode.json",
+            program_data / "opencode" / "opencode.jsonc",
+        )
+    return ()
+
+
+def preflight_opencode_config_sources(workspace: Path) -> None:
+    try:
+        canonical_workspace = workspace.resolve(strict=True)
+    except OSError:
+        raise _invalid("workspace", "unsupported_capability") from None
+
+    candidates: list[Path] = []
+    for directory in (canonical_workspace, *canonical_workspace.parents):
+        candidates.extend(
+            (
+                directory / "opencode.json",
+                directory / "opencode.jsonc",
+                directory / ".opencode",
+            )
+        )
+    candidates.extend(managed_opencode_config_sources())
+    for candidate in candidates:
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise _invalid("configuration_sources", "unsupported_capability") from None
+        raise _invalid("configuration_sources", "unsupported_capability")
+
+
+def _tool_permission_policy(tools: tuple[ToolConnection, ...]) -> dict[str, str]:
+    policy = {"*": "deny"}
+    names: set[str] = set()
+    for tool in tools:
+        name = tool.name.strip()
+        if not name or re.fullmatch(r"[A-Za-z0-9_-]+", name) is None or name in names:
+            raise _invalid("tools")
+        names.add(name)
+        policy[f"{name}_*"] = "allow"
+    return policy
 
 
 def build_mcp_servers(

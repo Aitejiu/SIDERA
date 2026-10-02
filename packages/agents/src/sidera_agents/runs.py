@@ -522,6 +522,9 @@ class RunExecution:
         )
 
     def _build_open_request(self, item: _PendingStart) -> NativeOpenRequest:
+        for binding in item.request.tools:
+            self._authorizer.require(item.request.grant_id, "tool.execute", binding)
+
         environment: dict[str, object] = dict(item.profile.draft.environment)
         for binding in item.profile.draft.secret_refs:
             try:
@@ -535,6 +538,7 @@ class RunExecution:
                     "secret_unavailable", "Authorized secret is unavailable."
                 ) from None
 
+        tools = self._resolve_tools(item.request, item.profile)
         projected_config: dict[str, object] = dict(item.profile.draft.native_settings)
         if item.profile.draft.model_id is not None:
             projected_config["model_id"] = item.profile.draft.model_id
@@ -545,7 +549,7 @@ class RunExecution:
             runtime=item.runtime,
             projected_config=projected_config,
             workspace=item.request.workspace,
-            tools=self._resolve_tools(item.request, item.profile),
+            tools=tools,
             skills=self._resolve_skills(item.request, item.profile),
             environment=environment,
         )
