@@ -247,7 +247,7 @@ def test_managed_macos_policy_uses_os_account_not_login_environment(
     pwd_module = pytest.importorskip("pwd")
     for variable in ("LOGNAME", "USER", "LNAME", "USERNAME"):
         monkeypatch.setenv(variable, f"poison-{variable.lower()}")
-    monkeypatch.setattr(opencode_config.os, "getuid", lambda: 501)
+    monkeypatch.setattr(opencode_config.os, "geteuid", lambda: 501)
 
     def lookup_account(uid):
         assert uid == 501
@@ -262,6 +262,27 @@ def test_managed_macos_policy_uses_os_account_not_login_environment(
     )
 
 
+def test_managed_macos_policy_uses_effective_os_account(monkeypatch):
+    monkeypatch.setattr(opencode_config.sys, "platform", "darwin")
+    pwd_module = pytest.importorskip("pwd")
+    for variable in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.setenv(variable, f"poison-{variable.lower()}")
+    monkeypatch.setattr(opencode_config.os, "getuid", lambda: 501)
+    monkeypatch.setattr(opencode_config.os, "geteuid", lambda: 502)
+    accounts = {501: "real-account", 502: "effective-account"}
+    monkeypatch.setattr(
+        pwd_module,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_name=accounts[uid]),
+    )
+
+    paths = opencode_config.managed_opencode_config_sources()
+
+    assert paths[2] == Path(
+        "/Library/Managed Preferences/effective-account/ai.opencode.managed.plist"
+    )
+
+
 def test_managed_macos_policy_falls_back_when_os_account_lookup_fails(
     monkeypatch,
 ):
@@ -269,7 +290,7 @@ def test_managed_macos_policy_falls_back_when_os_account_lookup_fails(
     pwd_module = pytest.importorskip("pwd")
     for variable in ("LOGNAME", "USER", "LNAME", "USERNAME"):
         monkeypatch.setenv(variable, f"poison-{variable.lower()}")
-    monkeypatch.setattr(opencode_config.os, "getuid", lambda: 501)
+    monkeypatch.setattr(opencode_config.os, "geteuid", lambda: 501)
 
     def lookup_account(uid):
         assert uid == 501

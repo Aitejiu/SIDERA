@@ -75,6 +75,7 @@ class ACPProcessTransport:
         self._notifications: deque[Mapping[str, Any]] = deque()
         self._pending_requests: dict[int, str] = {}
         self._late_responses: deque[tuple[str, Mapping[str, Any]]] = deque()
+        self._pending_server_requests: deque[Mapping[str, Any]] = deque()
         self._read_buffer = bytearray()
         self._next_id = 1
         self._closed = False
@@ -147,6 +148,9 @@ class ACPProcessTransport:
         try:
             if self._broken or self._closed:
                 raise ACPTransportError("acp_transport_unusable")
+            self._drain_pending_server_requests(deadline=deadline)
+            if time.monotonic() >= deadline:
+                raise ACPTransportError("acp_timeout")
             request_id = self._next_id
             self._next_id += 1
             self._write(
@@ -166,10 +170,13 @@ class ACPProcessTransport:
                     raise ACPTransportError("acp_timeout")
                 message = self._read_message(remaining, deadline=deadline)
                 if time.monotonic() >= deadline:
-                    if not isinstance(message.get("method"), str):
+                    if isinstance(message.get("method"), str):
+                        try:
+                            self._handle_incoming_method(message, deadline=deadline)
+                        except ACPTransportError:
+                            pass
+                    else:
                         self._route_response(message)
-                    elif message.get("id") is None:
-                        self._handle_incoming_method(message)
                     raise ACPTransportError("acp_timeout")
                 if isinstance(message.get("method"), str):
                     self._handle_incoming_method(message, deadline=deadline)
@@ -204,6 +211,13 @@ class ACPProcessTransport:
         if timeout < 0 or not self._request_lock.acquire(blocking=False):
             return
         try:
+            nonblocking = timeout == 0
+            try:
+                self._drain_pending_server_requests(nonblocking=nonblocking)
+            except ACPTransportError as error:
+                if error.reason == "acp_timeout":
+                    return
+                raise
             wait_timeout = timeout
             while True:
                 try:
@@ -213,7 +227,12 @@ class ACPProcessTransport:
                         return
                     raise
                 if isinstance(message.get("method"), str):
-                    self._handle_incoming_method(message)
+                    try:
+                        self._handle_incoming_method(message, nonblocking=nonblocking)
+                    except ACPTransportError as error:
+                        if error.reason == "acp_timeout":
+                            return
+                        raise
                 else:
                     self._route_response(message)
                 wait_timeout = 0.0
@@ -325,7 +344,15 @@ class ACPProcessTransport:
                     return NativeProcessState.GONE
             current_start = _process_start_identity(identity.pid)
         except ProcessLookupError:
-            return NativeProcessState.GONE
+            if os.name != "posix":
+                return NativeProcessState.GONE
+            if self._process_group_id is None:
+                return NativeProcessState.UNKNOWN
+            return (
+                NativeProcessState.GONE
+                if _process_group_exists(self._process_group_id) is False
+                else NativeProcessState.UNKNOWN
+            )
         except (OSError, ACPTransportError):
             return NativeProcessState.UNKNOWN
         return (
@@ -382,7 +409,11 @@ class ACPProcessTransport:
                 self._late_responses.append((method, message))
 
     def _write(
-        self, message: Mapping[str, object], *, deadline: float | None = None
+        self,
+        message: Mapping[str, object],
+        *,
+        deadline: float | None = None,
+        nonblocking: bool = False,
     ) -> None:
         if deadline is None:
             deadline = time.monotonic() + _DEFAULT_WRITE_TIMEOUT_SECONDS
@@ -392,7 +423,12 @@ class ACPProcessTransport:
             raise ACPTransportError("acp_request_invalid") from None
         if len(encoded) > _MAX_FRAME_BYTES:
             raise ACPTransportError("acp_frame_too_large")
-        if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        acquired = (
+            self._write_lock.acquire(blocking=False)
+            if nonblocking
+            else self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        )
+        if not acquired:
             raise ACPTransportError("acp_timeout")
         written = 0
         try:
@@ -402,11 +438,11 @@ class ACPProcessTransport:
                 selector.register(self._stdin, selectors.EVENT_WRITE)
                 while written < len(encoded):
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                    if remaining <= 0 and not nonblocking:
                         if written:
                             self._poison_write_stream()
                         raise ACPTransportError("acp_timeout")
-                    if not selector.select(remaining):
+                    if not selector.select(0 if nonblocking else remaining):
                         if written:
                             self._poison_write_stream()
                         raise ACPTransportError("acp_timeout")
@@ -478,47 +514,61 @@ class ACPProcessTransport:
                 raise ACPTransportError("acp_frame_too_large")
 
     def _handle_incoming_method(
-        self, message: Mapping[str, Any], *, deadline: float | None = None
+        self,
+        message: Mapping[str, Any],
+        *,
+        deadline: float | None = None,
+        nonblocking: bool = False,
     ) -> None:
         request_id = message.get("id")
         if request_id is None:
             with self._notification_lock:
                 self._notifications.append(message)
             return
-        response: dict[str, object] = {"jsonrpc": "2.0", "id": request_id}
-        if message.get("method") == "session/request_permission":
-            params = message.get("params")
-            options = params.get("options") if isinstance(params, Mapping) else None
-            reject_option = None
-            if isinstance(options, list):
-                for kind in ("reject_once", "reject_always"):
-                    reject_option = next(
-                        (
-                            option
-                            for option in options
-                            if isinstance(option, Mapping)
-                            and option.get("kind") == kind
-                            and isinstance(option.get("optionId"), str)
-                        ),
-                        None,
-                    )
-                    if reject_option is not None:
-                        break
-            outcome: dict[str, str]
-            if reject_option is None:
-                outcome = {"outcome": "cancelled"}
+        self._pending_server_requests.append(message)
+        self._drain_pending_server_requests(deadline=deadline, nonblocking=nonblocking)
+
+    def _drain_pending_server_requests(
+        self, *, deadline: float | None = None, nonblocking: bool = False
+    ) -> None:
+        while self._pending_server_requests:
+            message = self._pending_server_requests[0]
+            request_id = message.get("id")
+            response: dict[str, object] = {"jsonrpc": "2.0", "id": request_id}
+            if message.get("method") == "session/request_permission":
+                params = message.get("params")
+                options = params.get("options") if isinstance(params, Mapping) else None
+                reject_option = None
+                if isinstance(options, list):
+                    for kind in ("reject_once", "reject_always"):
+                        reject_option = next(
+                            (
+                                option
+                                for option in options
+                                if isinstance(option, Mapping)
+                                and option.get("kind") == kind
+                                and isinstance(option.get("optionId"), str)
+                            ),
+                            None,
+                        )
+                        if reject_option is not None:
+                            break
+                outcome: dict[str, str]
+                if reject_option is None:
+                    outcome = {"outcome": "cancelled"}
+                else:
+                    outcome = {
+                        "outcome": "selected",
+                        "optionId": reject_option["optionId"],
+                    }
+                response["result"] = {"outcome": outcome}
             else:
-                outcome = {
-                    "outcome": "selected",
-                    "optionId": reject_option["optionId"],
+                response["error"] = {
+                    "code": -32601,
+                    "message": "unsupported ACP server request",
                 }
-            response["result"] = {"outcome": outcome}
-        else:
-            response["error"] = {
-                "code": -32601,
-                "message": "unsupported ACP server request",
-            }
-        self._write(response, deadline=deadline)
+            self._write(response, deadline=deadline, nonblocking=nonblocking)
+            self._pending_server_requests.popleft()
 
 
 def _process_start_identity(pid: int) -> str:

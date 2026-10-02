@@ -181,7 +181,7 @@ def managed_opencode_config_sources() -> tuple[Path, ...]:
 
         managed_preferences = Path("/Library/Managed Preferences")
         try:
-            username = pwd.getpwuid(os.getuid()).pw_name
+            username = pwd.getpwuid(os.geteuid()).pw_name
         except KeyError:
             username = "user"
         return (
