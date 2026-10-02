@@ -177,13 +177,17 @@ def build_child_environment(
 
 def managed_opencode_config_sources() -> tuple[Path, ...]:
     if sys.platform == "darwin":
-        from getpass import getuser
+        import pwd
 
         managed_preferences = Path("/Library/Managed Preferences")
+        try:
+            username = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            username = "user"
         return (
             Path("/Library/Application Support/opencode/opencode.json"),
             Path("/Library/Application Support/opencode/opencode.jsonc"),
-            managed_preferences / getuser() / "ai.opencode.managed.plist",
+            managed_preferences / username / "ai.opencode.managed.plist",
             managed_preferences / "ai.opencode.managed.plist",
         )
     if sys.platform.startswith("linux"):

@@ -4,6 +4,7 @@ import json
 import stat
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,7 @@ from pydantic import SecretStr
 
 from sidera_agents.contracts import NativeSkill, ResourceRef, ToolConnection
 from sidera_agents.errors import AgentError
+from sidera_agents.harnesses import opencode_config
 from sidera_agents.harnesses.opencode_config import (
     build_child_environment,
     build_mcp_servers,
@@ -236,6 +238,50 @@ def test_http_mcp_allows_only_https_or_loopback_http():
     with pytest.raises(AgentError) as error:
         build_mcp_servers((remote_http,), supports_http=True)
     assert error.value.code == "configuration_invalid"
+
+
+def test_managed_macos_policy_uses_os_account_not_login_environment(
+    monkeypatch,
+):
+    monkeypatch.setattr(opencode_config.sys, "platform", "darwin")
+    pwd_module = pytest.importorskip("pwd")
+    for variable in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.setenv(variable, f"poison-{variable.lower()}")
+    monkeypatch.setattr(opencode_config.os, "getuid", lambda: 501)
+
+    def lookup_account(uid):
+        assert uid == 501
+        return SimpleNamespace(pw_name="os-account")
+
+    monkeypatch.setattr(pwd_module, "getpwuid", lookup_account)
+
+    paths = opencode_config.managed_opencode_config_sources()
+
+    assert paths[2] == Path(
+        "/Library/Managed Preferences/os-account/ai.opencode.managed.plist"
+    )
+
+
+def test_managed_macos_policy_falls_back_when_os_account_lookup_fails(
+    monkeypatch,
+):
+    monkeypatch.setattr(opencode_config.sys, "platform", "darwin")
+    pwd_module = pytest.importorskip("pwd")
+    for variable in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.setenv(variable, f"poison-{variable.lower()}")
+    monkeypatch.setattr(opencode_config.os, "getuid", lambda: 501)
+
+    def lookup_account(uid):
+        assert uid == 501
+        raise KeyError(uid)
+
+    monkeypatch.setattr(pwd_module, "getpwuid", lookup_account)
+
+    paths = opencode_config.managed_opencode_config_sources()
+
+    assert paths[2] == Path(
+        "/Library/Managed Preferences/user/ai.opencode.managed.plist"
+    )
 
 
 def test_stdio_projection_rejects_non_regular_or_symlink_executable(tmp_path):
