@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,6 +92,126 @@ def test_request_timeout_includes_lock_wait(tmp_path):
         assert not worker.is_alive()
         assert result.get("reason") == "acp_timeout"
         assert time.monotonic() - started <= 0.15
+    finally:
+        transport.terminate(grace_seconds=0.2)
+        transport.close()
+
+
+def test_request_deadline_rejects_late_response_after_notifications(
+    tmp_path, monkeypatch
+):
+    release_response = tmp_path / "release-response"
+    response_ready = tmp_path / "response-ready"
+    peer = (
+        "import json,sys,time\n"
+        "from pathlib import Path\n"
+        "first=json.loads(sys.stdin.buffer.readline())\n"
+        "notification={'jsonrpc':'2.0','method':'fixture/tick','params':{}}\n"
+        "sys.stdout.buffer.write((json.dumps(notification)+'\\n').encode())\n"
+        "sys.stdout.buffer.flush()\n"
+        f"while not Path({str(release_response)!r}).exists(): time.sleep(0.005)\n"
+        "late={'jsonrpc':'2.0','id':first['id'],'result':{'late':True}}\n"
+        "sys.stdout.buffer.write((json.dumps(late)+'\\n').encode())\n"
+        "sys.stdout.buffer.flush()\n"
+        f"Path({str(response_ready)!r}).write_text('ready')\n"
+        "second=json.loads(sys.stdin.buffer.readline())\n"
+        "result={'jsonrpc':'2.0','id':second['id'],'result':{'method':second['method']}}\n"
+        "sys.stdout.buffer.write((json.dumps(result)+'\\n').encode())\n"
+        "sys.stdout.buffer.flush()\n"
+    )
+    transport = _spawn(tmp_path, peer)
+    notification_seen = threading.Event()
+    resume_request = threading.Event()
+    completed = threading.Event()
+    result = {}
+    original_handler = transport._handle_incoming_method
+
+    def pause_after_notification(message, *, deadline=None):
+        original_handler(message, deadline=deadline)
+        if message.get("method") == "fixture/tick":
+            notification_seen.set()
+            assert resume_request.wait(timeout=2)
+
+    monkeypatch.setattr(transport, "_handle_incoming_method", pause_after_notification)
+    timeout = 0.12
+    request_started = time.monotonic()
+
+    def request_first():
+        try:
+            result["first"] = transport.request("fixture/first", {}, timeout=timeout)
+        except ACPTransportError as error:
+            result["error"] = error.reason
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=request_first, daemon=True)
+    worker.start()
+    try:
+        assert notification_seen.wait(timeout=1)
+        deadline = request_started + timeout + 0.02
+        while time.monotonic() < deadline:
+            time.sleep(0.002)
+
+        release_response.touch()
+        response_deadline = time.monotonic() + 1
+        while not response_ready.exists() and time.monotonic() < response_deadline:
+            time.sleep(0.002)
+        assert response_ready.exists()
+        with selectors.DefaultSelector() as selector:
+            selector.register(transport._stdout, selectors.EVENT_READ)
+            assert selector.select(1)
+        buffered_response = os.read(transport._stdout.fileno(), 4096)
+        assert buffered_response.endswith(b"\n")
+        transport._read_buffer.extend(buffered_response)
+
+        resume_request.set()
+        assert completed.wait(timeout=1)
+        assert result.get("error") == "acp_timeout"
+
+        next_response = transport.request("fixture/second", {}, timeout=1)
+        assert next_response == {"method": "fixture/second"}
+        assert transport.drain_late_responses() == (
+            (
+                "fixture/first",
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"late": True},
+                },
+            ),
+        )
+    finally:
+        release_response.touch()
+        resume_request.set()
+        worker.join(timeout=1)
+        transport.terminate(grace_seconds=0.2)
+        transport.close()
+
+
+def test_request_rejects_complete_buffered_response_after_deadline(
+    tmp_path, monkeypatch
+):
+    transport = _spawn(tmp_path, "import time\ntime.sleep(10)")
+    transport._read_buffer.extend(b'{"jsonrpc":"2.0","id":1,"result":{"late":true}}\n')
+    clock = {"now": 100.0}
+
+    def monotonic():
+        return clock["now"]
+
+    original_write = transport._write
+
+    def advance_past_deadline(message, *, deadline=None):
+        original_write(message, deadline=deadline)
+        clock["now"] = deadline + 0.001
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(acp_transport, "time", SimpleNamespace(monotonic=monotonic))
+            scoped.setattr(transport, "_write", advance_past_deadline)
+            with pytest.raises(ACPTransportError) as error:
+                transport.request("fixture/buffered", {}, timeout=0.1)
+
+        assert error.value.reason == "acp_timeout"
     finally:
         transport.terminate(grace_seconds=0.2)
         transport.close()
@@ -262,4 +383,65 @@ def test_terminate_waits_for_owned_process_group_after_leader_exit(tmp_path):
             os.killpg(transport.process.pid, 0)
     finally:
         transport.terminate(grace_seconds=0.2)
+        transport.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires process groups and fork")
+def test_identity_state_waits_for_owned_group_absence_after_leader_exit(tmp_path):
+    ready = tmp_path / "descendant-ready"
+    release = tmp_path / "descendant-release"
+    exited = tmp_path / "descendant-exited"
+    code = (
+        "import os, signal, time\n"
+        "from pathlib import Path\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"    Path({str(ready)!r}).write_text('ready')\n"
+        f"    while not Path({str(release)!r}).exists(): time.sleep(0.005)\n"
+        f"    Path({str(exited)!r}).write_text('done')\n"
+        "    os._exit(0)\n"
+        "while True: time.sleep(1)\n"
+    )
+    transport = _spawn(tmp_path, code)
+    group_id = transport._process_group_id
+
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert ready.exists()
+        assert transport.identity_state(transport.identity) is NativeProcessState.ALIVE
+
+        transport.process.terminate()
+        transport.process.wait(timeout=1)
+
+        assert acp_transport._process_group_exists(group_id) is True
+        assert (
+            transport.identity_state(transport.identity) is NativeProcessState.UNKNOWN
+        )
+
+        release.touch()
+        deadline = time.monotonic() + 2
+        while not exited.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert exited.exists()
+        while (
+            acp_transport._process_group_exists(group_id) is not False
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert acp_transport._process_group_exists(group_id) is False
+        assert transport.identity_state(transport.identity) is NativeProcessState.GONE
+    finally:
+        release.touch()
+        if transport.process.poll() is None:
+            transport.process.terminate()
+            transport.process.wait(timeout=1)
+        cleanup_deadline = time.monotonic() + 2
+        while (
+            acp_transport._process_group_exists(group_id) is not False
+            and time.monotonic() < cleanup_deadline
+        ):
+            time.sleep(0.005)
         transport.close()

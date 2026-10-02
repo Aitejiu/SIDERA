@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from threading import Thread
+from typing import get_type_hints
 from uuid import uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from pydantic import SecretStr
 
 from sidera_agents.contracts import (
     AssembledInput,
+    ConfigValidation,
     NativeCloseState,
     NativeOpenRequest,
     NativeOutcomeStatus,
@@ -35,9 +37,13 @@ from sidera_agents.harnesses import acp_transport, opencode_config
 from sidera_agents.harnesses import opencode as opencode_module
 from sidera_agents.harnesses.acp_transport import ACPProcessTransport
 from sidera_agents.harnesses.opencode import OpenCodeHarness
-from sidera_agents.harnesses.registry import default_harness_registry
+from sidera_agents.harnesses.registry import TrustedHarness, default_harness_registry
 
 _PEER = Path(__file__).parents[1] / "fixtures" / "acp_peer.py"
+
+
+def test_trusted_harness_validate_returns_config_validation_contract():
+    assert get_type_hints(TrustedHarness.validate)["return"] is ConfigValidation
 
 
 def _launcher(
@@ -331,7 +337,12 @@ def test_open_rejects_managed_opencode_policy_before_session_new(
 
 @pytest.mark.parametrize(
     "mode",
-    ["missing_protocol_version", "protocol_version_zero", "protocol_version_two"],
+    [
+        "missing_protocol_version",
+        "protocol_version_zero",
+        "protocol_version_two",
+        "protocol_version_boolean",
+    ],
 )
 def test_open_rejects_wrong_acp_protocol_version_before_session_new(tmp_path, mode):
     capture = tmp_path / "peer.jsonl"
@@ -1063,3 +1074,20 @@ def test_probe_negotiates_protocol_capabilities_without_prompting(tmp_path):
         row.get("method") in {"session/new", "session/prompt"}
         for row in _records(capture)
     )
+
+
+def test_probe_rejects_boolean_acp_protocol_version(tmp_path):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(
+        tmp_path, "opencode", capture=capture, mode="protocol_version_boolean"
+    )
+    harness = default_harness_registry().get("opencode")
+
+    probe = harness.probe(
+        RuntimeCandidate(harness_id="opencode", executable=str(opencode)),
+        checked_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+
+    assert probe.protocol_state is ProtocolState.UNAVAILABLE
+    assert probe.capabilities["acp"].status is SupportStatus.UNSUPPORTED
+    assert probe.capabilities["acp"].reason_code != "acp_v1_initialized"

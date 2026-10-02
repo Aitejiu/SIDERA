@@ -1104,8 +1104,8 @@ def test_owner_loss_during_projection_prevents_native_open(
 @pytest.mark.parametrize(
     ("process_state", "response_state", "expected_active", "expected_sessions"),
     (
-        ("gone", "idle", 0, 0),
-        ("alive", "idle", 0, 1),
+        ("gone", "unknown", 0, 0),
+        ("unknown", "idle", 0, 1),
         ("unknown", "unknown", 1, 1),
     ),
 )

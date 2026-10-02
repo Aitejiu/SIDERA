@@ -205,7 +205,8 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             initialize = transport.request(
                 "initialize", _initialize_params(), timeout=self._request_timeout
             )
-            if initialize.get("protocolVersion") != 1:
+            protocol_version = initialize.get("protocolVersion")
+            if type(protocol_version) is not int or protocol_version != 1:
                 raise AgentError(
                     "unsupported_capability",
                     "OpenCode ACP protocol version is unsupported.",
@@ -523,7 +524,8 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
     def _negotiated_capabilities(
         initialize: Mapping[str, Any],
     ) -> dict[str, CapabilitySupport]:
-        if initialize.get("protocolVersion") != 1:
+        protocol_version = initialize.get("protocolVersion")
+        if type(protocol_version) is not int or protocol_version != 1:
             raise ACPTransportError("acp_protocol_version_unsupported")
         agent = _agent_capabilities(initialize)
         return {

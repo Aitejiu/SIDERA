@@ -16,6 +16,7 @@ from sidera_agents.contracts import (
     AssembledInput,
     CapabilityResourceDraft,
     CapabilitySupport,
+    ConfigValidation,
     NativeCancelOutcome,
     NativeCancelState,
     NativeCloseOutcome,
@@ -603,9 +604,9 @@ class ControlledHarness:
             checked_at=checked_at,
         )
 
-    def validate(self, profile, runtime) -> tuple:
+    def validate(self, profile, runtime) -> ConfigValidation:
         del profile, runtime
-        return ()
+        return ConfigValidation(valid=True, issues=(), effective_preview=None)
 
     def open(self, request: NativeOpenRequest) -> NativeHandle:
         self.open_calls.append(request)

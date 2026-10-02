@@ -161,7 +161,16 @@ class ACPProcessTransport:
             with self._notification_lock:
                 self._pending_requests[request_id] = method
             while True:
-                message = self._read_message(max(0.0, deadline - time.monotonic()))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ACPTransportError("acp_timeout")
+                message = self._read_message(remaining, deadline=deadline)
+                if time.monotonic() >= deadline:
+                    if not isinstance(message.get("method"), str):
+                        self._route_response(message)
+                    elif message.get("id") is None:
+                        self._handle_incoming_method(message)
+                    raise ACPTransportError("acp_timeout")
                 if isinstance(message.get("method"), str):
                     self._handle_incoming_method(message, deadline=deadline)
                     continue
@@ -261,8 +270,6 @@ class ACPProcessTransport:
                 time.sleep(min(0.01, remaining))
                 continue
             state = self.identity_state(self.identity)
-            if state is NativeProcessState.UNKNOWN:
-                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if state is not NativeProcessState.ALIVE:
@@ -298,8 +305,19 @@ class ACPProcessTransport:
                 pass
 
     def identity_state(self, identity: ProcessIdentity) -> NativeProcessState:
-        if identity != self.identity or self.process.poll() is not None:
+        if identity != self.identity:
             return NativeProcessState.GONE
+        if self.process.poll() is not None:
+            if os.name != "posix":
+                return NativeProcessState.GONE
+            if self._process_group_id is None:
+                return NativeProcessState.UNKNOWN
+            group_exists = _process_group_exists(self._process_group_id)
+            return (
+                NativeProcessState.GONE
+                if group_exists is False
+                else NativeProcessState.UNKNOWN
+            )
         try:
             if os.name == "posix":
                 current_group = os.getpgid(identity.pid)
@@ -415,23 +433,34 @@ class ACPProcessTransport:
         except OSError:
             pass
 
-    def _read_message(self, timeout: float) -> Mapping[str, Any]:
+    def _read_message(
+        self, timeout: float, *, deadline: float | None = None
+    ) -> Mapping[str, Any]:
         if timeout < 0:
             timeout = 0.0
-        deadline = time.monotonic() + timeout
+        read_deadline = time.monotonic() + timeout
+        if deadline is not None:
+            read_deadline = min(read_deadline, deadline)
         while True:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise ACPTransportError("acp_timeout")
             newline = self._read_buffer.find(b"\n")
             if newline >= 0:
                 raw = bytes(self._read_buffer[:newline])
-                del self._read_buffer[: newline + 1]
                 try:
                     message = json.loads(raw)
                 except (UnicodeDecodeError, json.JSONDecodeError):
+                    del self._read_buffer[: newline + 1]
                     raise ACPTransportError("acp_protocol_invalid") from None
                 if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
+                    del self._read_buffer[: newline + 1]
                     raise ACPTransportError("acp_protocol_invalid")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise ACPTransportError("acp_timeout")
+                del self._read_buffer[: newline + 1]
                 return message
-            remaining = max(0.0, deadline - time.monotonic())
+            remaining = max(0.0, read_deadline - now)
             with selectors.DefaultSelector() as selector:
                 selector.register(self._stdout, selectors.EVENT_READ)
                 if not selector.select(remaining):

@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Protocol
 
 from ..contracts import (
-    ConfigIssue,
+    ConfigValidation,
     ProfileRevision,
     RuntimeCandidate,
     RuntimeDescriptor,
@@ -24,7 +24,7 @@ class TrustedHarness(Protocol):
 
     def validate(
         self, profile: ProfileRevision, runtime: RuntimeSnapshot
-    ) -> tuple[ConfigIssue, ...]: ...
+    ) -> ConfigValidation: ...
 
 
 class HarnessRegistry:

@@ -152,6 +152,8 @@ def run_peer() -> None:
                     if mode == "protocol_version_zero"
                     else 2
                     if mode == "protocol_version_two"
+                    else True
+                    if mode == "protocol_version_boolean"
                     else 1
                 )
             _write(
