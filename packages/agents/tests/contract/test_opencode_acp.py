@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from typing import get_type_hints
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ from pydantic import SecretStr
 from sidera_agents.contracts import (
     AssembledInput,
     ConfigValidation,
+    NativeCancelState,
     NativeCloseState,
     NativeOpenRequest,
     NativeOutcomeStatus,
@@ -1026,10 +1027,140 @@ def test_cancel_notification_is_sent_while_prompt_request_waits(tmp_path):
     cancelled = adapter.cancel(handle, response_id)
     prompt_thread.join(timeout=1)
     try:
-        assert cancelled.status.value == "accepted"
+        assert cancelled.status is NativeCancelState.CONFIRMED
+        assert cancelled.response_id == response_id
         assert not prompt_thread.is_alive()
         assert outcomes[0].status is NativeOutcomeStatus.CANCELLED
         assert any(row.get("method") == "session/cancel" for row in _records(capture))
+    finally:
+        adapter.close(handle)
+
+
+def test_stale_cancel_is_fenced_while_a_new_response_is_active(tmp_path, monkeypatch):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(
+        tmp_path, "opencode", capture=capture, mode="block_second_prompt"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+    old_response_id = uuid4()
+    new_response_id = uuid4()
+    outcomes = []
+    prompt_sent = Event()
+    permission_replied = Event()
+    session = adapter._session(handle)
+    original_write = session.transport._write
+
+    def observe_prompt_write(message, **kwargs):
+        result = original_write(message, **kwargs)
+        if message.get("method") == "session/prompt":
+            prompt_sent.set()
+        if message.get("id") == "permission-request":
+            permission_replied.set()
+        return result
+
+    monkeypatch.setattr(session.transport, "_write", observe_prompt_write)
+
+    try:
+        first = adapter.prompt(
+            handle,
+            AssembledInput(instructions=(), text="first", context=()),
+            old_response_id,
+        )
+        prompt_sent.clear()
+        permission_replied.clear()
+        prompt_thread = Thread(
+            target=lambda: outcomes.append(
+                adapter.prompt(
+                    handle,
+                    AssembledInput(instructions=(), text="second", context=()),
+                    new_response_id,
+                )
+            ),
+            daemon=True,
+        )
+        prompt_thread.start()
+        assert prompt_sent.wait(timeout=2)
+        assert permission_replied.wait(timeout=2)
+
+        stale = adapter.cancel(handle, old_response_id)
+        assert first.status is NativeOutcomeStatus.COMPLETED
+        assert stale.status is NativeCancelState.FAILED
+        assert stale.reason_code == "response_not_current"
+        assert not any(
+            row.get("method") == "session/cancel" for row in _records(capture)
+        )
+
+        cancelled = adapter.cancel(handle, new_response_id)
+        prompt_thread.join(timeout=1)
+        assert cancelled.status is NativeCancelState.CONFIRMED
+        assert cancelled.response_id == new_response_id
+        assert not prompt_thread.is_alive()
+        assert outcomes[0].status is NativeOutcomeStatus.CANCELLED
+        assert (
+            sum(row.get("method") == "session/cancel" for row in _records(capture)) == 1
+        )
+    finally:
+        adapter.close(handle)
+
+
+def test_cancel_without_correlated_prompt_result_remains_unknown(tmp_path, monkeypatch):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, mode="withhold_prompt")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+    response_id = uuid4()
+    outcomes = []
+    _shorten_prompt_timeout(adapter, handle, monkeypatch, seconds=0.2)
+    prompt_thread = Thread(
+        target=lambda: outcomes.append(
+            adapter.prompt(
+                handle,
+                AssembledInput(instructions=(), text="wait", context=()),
+                response_id,
+            )
+        ),
+        daemon=True,
+    )
+
+    try:
+        prompt_thread.start()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not any(
+            row.get("kind") == "server_reply" for row in _records(capture)
+        ):
+            time.sleep(0.01)
+        cancelled = adapter.cancel(handle, response_id)
+        prompt_thread.join(timeout=1)
+
+        assert cancelled.status is NativeCancelState.UNKNOWN
+        assert cancelled.response_id == response_id
+        assert not prompt_thread.is_alive()
+        assert outcomes[0].status is NativeOutcomeStatus.UNKNOWN
+    finally:
+        adapter.close(handle)
+
+
+def test_cancel_without_negotiated_capability_is_unsupported(tmp_path):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+
+    try:
+        outcome = adapter.cancel(handle, uuid4())
+        assert outcome.status is NativeCancelState.UNSUPPORTED
+        assert outcome.reason_code == "cancel_not_negotiated"
+        assert "cancel_current_response" not in handle.capabilities
+        assert not any(
+            row.get("method") == "session/cancel" for row in _records(capture)
+        )
     finally:
         adapter.close(handle)
 

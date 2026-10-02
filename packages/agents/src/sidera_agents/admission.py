@@ -24,6 +24,10 @@ class AdmissionResult:
 def request_fingerprint(request: RunStart, profile_config_hash: str) -> str:
     payload = request.model_dump(mode="json", warnings=False)
     payload["profile_config_hash"] = profile_config_hash
+    return canonical_fingerprint(payload)
+
+
+def canonical_fingerprint(payload: object) -> str:
     canonical = json.dumps(
         payload,
         ensure_ascii=True,

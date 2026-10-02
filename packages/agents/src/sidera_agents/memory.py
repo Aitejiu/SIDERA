@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import RLock
 from uuid import UUID
 
 from .admission import OperationRecord
 from .contracts import (
     CapabilityResourceDraft,
+    InputReceipt,
+    InputStatus,
     NativeHandle,
     ProfileDraft,
     ProfileRef,
@@ -16,6 +18,8 @@ from .contracts import (
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RunEvent,
+    RunInput,
     RunSnapshot,
     RunState,
     RuntimeProbe,
@@ -24,6 +28,7 @@ from .contracts import (
     StartStatus,
 )
 from .errors import AgentError
+from .input_delivery import InputOperation, input_size_for_record
 from .ports import RuntimeEntry, RuntimeInstallation, RuntimeObservation, RuntimeRecord
 
 
@@ -55,9 +60,11 @@ class _RunReservation:
 class _StoredRun:
     snapshot: RunSnapshot
     operation_id: UUID
+    authorization_grant_id: UUID
     native_handle: NativeHandle | None = None
     terminal_state: RunState | None = None
     terminal_reason_code: str | None = None
+    events: list[RunEvent] | None = None
 
 
 def _profile_copy(value: ProfileRevision) -> ProfileRevision:
@@ -120,6 +127,7 @@ class MemoryAgentStore:
         self._run_operations: dict[tuple[UUID, UUID], _StoredOperation] = {}
         self._runs: dict[UUID, _StoredRun] = {}
         self._run_reservations: dict[UUID, _RunReservation] = {}
+        self._input_operations: dict[tuple[UUID, UUID, UUID], InputOperation] = {}
 
     def find_runtime(
         self, workspace_id: UUID, harness_id: str, executable: str
@@ -553,6 +561,7 @@ class MemoryAgentStore:
         self,
         *,
         owner_id: UUID,
+        authorization_grant_id: UUID,
         profile_ref: ProfileRef,
         runtime_ref: RuntimeRef,
         installation_key: str,
@@ -662,7 +671,10 @@ class MemoryAgentStore:
                 receipt=receipt,
             )
             self._runs[run_id] = _StoredRun(
-                snapshot=_run_copy(snapshot), operation_id=operation_id
+                snapshot=_run_copy(snapshot),
+                operation_id=operation_id,
+                authorization_grant_id=authorization_grant_id,
+                events=[],
             )
             self._run_reservations[run_id] = _RunReservation(
                 workspace_id=profile_ref.workspace_id,
@@ -673,6 +685,12 @@ class MemoryAgentStore:
                 installation,
                 active_count=installation.active_count + 1,
                 session_count=installation.session_count + 1,
+            )
+            self._append_event(
+                self._runs[run_id],
+                "run.started",
+                operation_id=operation_id,
+                response_id=snapshot.active_response_id,
             )
             return _receipt_copy(receipt), True
 
@@ -703,6 +721,808 @@ class MemoryAgentStore:
             if run is None or run.snapshot.workspace_id != workspace_id:
                 raise _not_found("run")
             return _run_copy(run.snapshot)
+
+    def get_run_authorization_grant(self, workspace_id: UUID, run_id: UUID) -> UUID:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            return run.authorization_grant_id
+
+    def get_native_handle(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> NativeHandle | None:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            return run.native_handle
+
+    def record_lifecycle_event(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+        response_id: UUID | None,
+        kind: str,
+        reason_code: str | None,
+        *,
+        owner_id: UUID,
+    ) -> RunEvent:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            existing = next(
+                (
+                    event
+                    for event in reversed(run.events or [])
+                    if event.operation_id == operation_id and event.kind == kind
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            return self._append_event(
+                run,
+                kind,
+                operation_id=operation_id,
+                response_id=response_id,
+                data={"reason_code": reason_code},
+            )
+
+    def fence_orphaned_runs(
+        self, *, owner_id: UUID, live_run_ids: tuple[UUID, ...]
+    ) -> int:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            live_ids = set(live_run_ids)
+            fenced = 0
+            for run_id, run in tuple(self._runs.items()):
+                snapshot = run.snapshot
+                if (
+                    run_id in live_ids
+                    or not snapshot.input_open
+                    or snapshot.state not in (RunState.RUNNING, RunState.IDLE)
+                ):
+                    continue
+                pending_inputs = tuple(
+                    item
+                    for item in self._input_operations.values()
+                    if item.run_id == run_id
+                    and item.status in ("accepted", "delivering")
+                )
+                for pending in pending_inputs:
+                    status = (
+                        InputStatus.UNKNOWN
+                        if pending.status == "delivering"
+                        else InputStatus.FAILED
+                    )
+                    self.finish_input(
+                        pending.workspace_id,
+                        run_id,
+                        pending.operation_id,
+                        status,
+                        "owner_restarted",
+                        owner_id=owner_id,
+                    )
+                run.snapshot = run.snapshot.model_copy(
+                    update={
+                        "state": RunState.UNKNOWN,
+                        "input_open": False,
+                        "reason_code": "native_response_unknown",
+                    }
+                )
+                self._append_event(run, "run.owner_restarted")
+                fenced += 1
+            return fenced
+
+    def fence_run(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        reason_code: str,
+        *,
+        owner_id: UUID,
+    ) -> RunSnapshot:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            run.snapshot = run.snapshot.model_copy(
+                update={
+                    "state": RunState.UNKNOWN,
+                    "input_open": False,
+                    "reason_code": reason_code,
+                }
+            )
+            pending = tuple(
+                operation
+                for operation in self._input_operations.values()
+                if operation.workspace_id == workspace_id
+                and operation.run_id == run_id
+                and operation.status in (InputStatus.ACCEPTED.value, "delivering")
+            )
+            for operation in pending:
+                status = (
+                    InputStatus.UNKNOWN
+                    if operation.status == "delivering"
+                    else InputStatus.FAILED
+                )
+                self.finish_input(
+                    workspace_id,
+                    run_id,
+                    operation.operation_id,
+                    status,
+                    "native_response_unknown"
+                    if status is InputStatus.UNKNOWN
+                    else "run_fenced",
+                    owner_id=owner_id,
+                )
+            self._append_event(
+                run,
+                "run.fenced",
+                data={"reason_code": reason_code},
+            )
+            return _run_copy(run.snapshot)
+
+    def admit_input(
+        self,
+        request: RunInput,
+        *,
+        owner_id: UUID,
+        fingerprint: str,
+        response_id: UUID,
+        max_pending: int,
+        max_input_bytes: int,
+        payload_bytes: int,
+    ) -> InputReceipt:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(request.run_id)
+            if run is None or run.snapshot.workspace_id != request.workspace_id:
+                raise _not_found("run")
+            if run.authorization_grant_id != request.grant_id:
+                raise AgentError("permission_denied", "Access denied.")
+            key = (request.workspace_id, request.run_id, request.operation_id)
+            existing = self._input_operations.get(key)
+            if existing is not None:
+                if existing.fingerprint != fingerprint:
+                    raise AgentError(
+                        "operation_conflict",
+                        "Operation ID was used with a different request.",
+                    )
+                if not (
+                    existing.status == InputStatus.REJECTED.value
+                    and existing.reason_code == "resource_busy"
+                ):
+                    return existing.receipt()
+
+            snapshot = run.snapshot
+            if not snapshot.input_open or snapshot.state not in (
+                RunState.RUNNING,
+                RunState.IDLE,
+            ):
+                return self._reject_input(
+                    run, request, fingerprint, response_id, "run_closed"
+                )
+
+            pending = self._pending_input_records(request.run_id)
+            if payload_bytes > max_input_bytes:
+                return self._reject_input(
+                    run, request, fingerprint, response_id, "input_too_large"
+                )
+            if len(pending) >= max_pending:
+                return self._reject_input(
+                    run, request, fingerprint, response_id, "input_queue_full"
+                )
+            if (
+                sum(input_size_for_record(item) for item in pending) + payload_bytes
+                > max_input_bytes * max_pending
+            ):
+                return self._reject_input(
+                    run, request, fingerprint, response_id, "input_queue_full"
+                )
+
+            if snapshot.state is RunState.IDLE:
+                reservation = self._run_reservations[request.run_id]
+                installation = self._runtime_installations.get(
+                    reservation.installation_key
+                )
+                head = self._profile_heads.get(
+                    (snapshot.workspace_id, snapshot.profile_ref.profile_id)
+                )
+                profile = (
+                    None
+                    if head is None
+                    else self._profile_revisions.get(
+                        (
+                            snapshot.workspace_id,
+                            snapshot.profile_ref.profile_id,
+                            head.revision,
+                        )
+                    )
+                )
+                profile_active = sum(
+                    other.active
+                    for other in self._run_reservations.values()
+                    if other.workspace_id == snapshot.workspace_id
+                    and other.profile_id == snapshot.profile_ref.profile_id
+                )
+                if (
+                    installation is None
+                    or profile is None
+                    or profile_active >= profile.draft.max_active
+                    or installation.active_count >= installation.max_active
+                ):
+                    return self._reject_input(
+                        run, request, fingerprint, response_id, "resource_busy"
+                    )
+                reservation.active = True
+                self._runtime_installations[reservation.installation_key] = replace(
+                    installation, active_count=installation.active_count + 1
+                )
+                run.snapshot = snapshot.model_copy(
+                    update={
+                        "state": RunState.RUNNING,
+                        "active_response_id": response_id,
+                    }
+                )
+
+            sequence = (
+                max(
+                    (
+                        item.queue_sequence
+                        for item in self._input_operations.values()
+                        if item.workspace_id == request.workspace_id
+                        and item.run_id == request.run_id
+                    ),
+                    default=0,
+                )
+                + 1
+            )
+            record = InputOperation(
+                workspace_id=request.workspace_id,
+                run_id=request.run_id,
+                operation_id=request.operation_id,
+                fingerprint=fingerprint,
+                response_id=response_id,
+                queue_sequence=sequence,
+                status=InputStatus.ACCEPTED.value,
+                reason_code=None,
+                evidence_sequence=None,
+                payload=RunInput.model_validate(
+                    request.model_dump(mode="python", warnings=False)
+                ),
+            )
+            self._input_operations[key] = record
+            evidence = self._append_event(
+                run,
+                "input.accepted",
+                operation_id=request.operation_id,
+                response_id=response_id,
+                data={"queue_sequence": sequence},
+            )
+            record = replace(record, evidence_sequence=evidence.sequence)
+            self._input_operations[key] = record
+            return record.receipt()
+
+    def _reject_input(
+        self,
+        run: _StoredRun,
+        request: RunInput,
+        fingerprint: str,
+        response_id: UUID,
+        reason_code: str,
+    ) -> InputReceipt:
+        key = (request.workspace_id, request.run_id, request.operation_id)
+        existing = self._input_operations.get(key)
+        sequence = (
+            existing.queue_sequence
+            if existing is not None
+            else max(
+                (
+                    item.queue_sequence
+                    for item in self._input_operations.values()
+                    if item.workspace_id == request.workspace_id
+                    and item.run_id == request.run_id
+                ),
+                default=0,
+            )
+            + 1
+        )
+        record = InputOperation(
+            workspace_id=request.workspace_id,
+            run_id=request.run_id,
+            operation_id=request.operation_id,
+            fingerprint=fingerprint,
+            response_id=response_id,
+            queue_sequence=sequence,
+            status=InputStatus.REJECTED.value,
+            reason_code=reason_code,
+            evidence_sequence=None,
+            payload=None,
+        )
+        evidence = self._append_event(
+            run,
+            "input.rejected",
+            operation_id=request.operation_id,
+            response_id=response_id,
+            data={"reason_code": reason_code},
+        )
+        record = replace(record, evidence_sequence=evidence.sequence)
+        self._input_operations[key] = record
+        return record.receipt()
+
+    def get_input_operation(
+        self, workspace_id: UUID, run_id: UUID, operation_id: UUID
+    ) -> InputOperation | None:
+        with self._lock:
+            return self._input_operations.get((workspace_id, run_id, operation_id))
+
+    def get_input_receipt(
+        self, workspace_id: UUID, run_id: UUID, operation_id: UUID
+    ) -> InputReceipt:
+        record = self.get_input_operation(workspace_id, run_id, operation_id)
+        if record is None:
+            raise _not_found("input")
+        return record.receipt()
+
+    def list_pending_inputs(self, run_id: UUID) -> tuple[InputOperation, ...]:
+        with self._lock:
+            return tuple(self._pending_input_records(run_id))
+
+    def _pending_input_records(self, run_id: UUID) -> list[InputOperation]:
+        return sorted(
+            (
+                item
+                for item in self._input_operations.values()
+                if item.run_id == run_id and item.status == InputStatus.ACCEPTED.value
+            ),
+            key=lambda item: item.queue_sequence,
+        )
+
+    def claim_input(
+        self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
+    ) -> InputOperation | None:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(run_id)
+            if run is None:
+                raise _not_found("run")
+            key = (run.snapshot.workspace_id, run_id, operation_id)
+            record = self._input_operations.get(key)
+            if record is None or record.status != InputStatus.ACCEPTED.value:
+                return None
+            if (
+                run.snapshot.state is not RunState.RUNNING
+                or run.snapshot.active_response_id != record.response_id
+            ):
+                return None
+            updated = replace(record, status="delivering")
+            self._input_operations[key] = updated
+            self._append_event(
+                run,
+                "response.started",
+                operation_id=operation_id,
+                response_id=record.response_id,
+            )
+            return updated
+
+    def finish_input(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+        status: InputStatus,
+        reason_code: str | None,
+        *,
+        owner_id: UUID,
+    ) -> InputReceipt:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(run_id)
+            record = self._input_operations.get((workspace_id, run_id, operation_id))
+            if run is None or record is None:
+                raise _not_found("input")
+            if record.status not in {"delivering", InputStatus.ACCEPTED.value}:
+                return record.receipt()
+            kind = {
+                InputStatus.DELIVERED: "input.delivered",
+                InputStatus.FAILED: "input.failed",
+                InputStatus.UNKNOWN: "input.unknown",
+            }.get(status)
+            if kind is None:
+                raise ValueError("Only terminal input outcomes can be recorded.")
+            evidence = self._append_event(
+                run,
+                kind,
+                operation_id=operation_id,
+                response_id=record.response_id,
+                data={"reason_code": reason_code},
+            )
+            updated = replace(
+                record,
+                status=status.value,
+                reason_code=reason_code,
+                evidence_sequence=evidence.sequence,
+                payload=None,
+            )
+            self._input_operations[(workspace_id, run_id, operation_id)] = updated
+            return updated.receipt()
+
+    def finish_conversation_response(
+        self,
+        run_id: UUID,
+        response_id: UUID,
+        *,
+        owner_id: UUID,
+        cancelled: bool = False,
+        observed_model: str | None = None,
+    ) -> RunSnapshot:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise _not_found("run")
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            snapshot = run.snapshot
+            if (
+                snapshot.state is not RunState.RUNNING
+                or snapshot.active_response_id != response_id
+            ):
+                return _run_copy(snapshot)
+            self._append_event(
+                run,
+                "response.interrupted" if cancelled else "response.completed",
+                response_id=response_id,
+            )
+            run.snapshot = run.snapshot.model_copy(
+                update={
+                    "state": RunState.IDLE,
+                    "input_open": True,
+                    "active_response_id": None,
+                    "effective_config": run.snapshot.effective_config.model_copy(
+                        update={"observed_model": observed_model}
+                    ),
+                }
+            )
+            reservation = self._run_reservations[run_id]
+            if reservation.active:
+                reservation.active = False
+                installation = self._runtime_installations[reservation.installation_key]
+                self._runtime_installations[reservation.installation_key] = replace(
+                    installation, active_count=installation.active_count - 1
+                )
+            self._append_event(run, "run.idle", response_id=response_id)
+            return _run_copy(run.snapshot)
+
+    def activate_pending_input(
+        self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
+    ) -> bool:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            run = self._runs.get(run_id)
+            if run is None:
+                raise _not_found("run")
+            snapshot = run.snapshot
+            key = (snapshot.workspace_id, run_id, operation_id)
+            operation = self._input_operations.get(key)
+            if (
+                snapshot.state is not RunState.IDLE
+                or not snapshot.input_open
+                or operation is None
+                or operation.status != InputStatus.ACCEPTED.value
+            ):
+                return False
+            reservation = self._run_reservations[run_id]
+            installation = self._runtime_installations[reservation.installation_key]
+            profile_head = self._profile_heads.get(
+                (snapshot.workspace_id, snapshot.profile_ref.profile_id)
+            )
+            profile = (
+                None
+                if profile_head is None
+                else self._profile_revisions.get(
+                    (
+                        snapshot.workspace_id,
+                        snapshot.profile_ref.profile_id,
+                        profile_head.revision,
+                    )
+                )
+            )
+            profile_active = sum(
+                item.active
+                for item in self._run_reservations.values()
+                if item.workspace_id == snapshot.workspace_id
+                and item.profile_id == snapshot.profile_ref.profile_id
+            )
+            if (
+                profile is None
+                or profile_active >= profile.draft.max_active
+                or installation.active_count >= installation.max_active
+            ):
+                return False
+            reservation.active = True
+            self._runtime_installations[reservation.installation_key] = replace(
+                installation, active_count=installation.active_count + 1
+            )
+            run.snapshot = snapshot.model_copy(
+                update={
+                    "state": RunState.RUNNING,
+                    "active_response_id": operation.response_id,
+                }
+            )
+            self._append_event(
+                run,
+                "response.queued",
+                operation_id=operation_id,
+                response_id=operation.response_id,
+                data={"status": InputStatus.ACCEPTED.value},
+            )
+            return True
+
+    def close_input_admission(
+        self,
+        run_id: UUID,
+        response_id: UUID,
+        *,
+        owner_id: UUID,
+        terminal_state: RunState = RunState.COMPLETED,
+        reason_code: str | None = None,
+    ) -> RunSnapshot:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise _not_found("run")
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            snapshot = run.snapshot
+            if snapshot.active_response_id != response_id:
+                return _run_copy(snapshot)
+            self._append_event(
+                run,
+                "response.completed"
+                if terminal_state is RunState.COMPLETED
+                else "response.failed",
+                response_id=response_id,
+                data={"reason_code": reason_code},
+            )
+            snapshot = run.snapshot
+            pending = self._pending_input_records(run_id)
+            if terminal_state is RunState.COMPLETED and pending:
+                run.snapshot = run.snapshot.model_copy(
+                    update={
+                        "state": RunState.RUNNING,
+                        "input_open": True,
+                        "active_response_id": pending[0].response_id,
+                    }
+                )
+                return _run_copy(run.snapshot)
+            for item in pending:
+                self.finish_input(
+                    item.workspace_id,
+                    run_id,
+                    item.operation_id,
+                    InputStatus.FAILED,
+                    "input_cancelled"
+                    if terminal_state is RunState.STOPPED
+                    else "run_failed",
+                    owner_id=owner_id,
+                )
+            run.snapshot = run.snapshot.model_copy(
+                update={
+                    "state": RunState.CLOSING,
+                    "input_open": False,
+                    "active_response_id": None,
+                    "reason_code": reason_code,
+                }
+            )
+            reservation = self._run_reservations[run_id]
+            if reservation.active:
+                reservation.active = False
+                installation = self._runtime_installations[reservation.installation_key]
+                self._runtime_installations[reservation.installation_key] = replace(
+                    installation, active_count=installation.active_count - 1
+                )
+                reservation.active = False
+            run.terminal_state = terminal_state
+            run.terminal_reason_code = reason_code
+            self._append_event(run, "run.closed", response_id=response_id)
+            return _run_copy(run.snapshot)
+
+    def request_stop(
+        self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
+    ) -> InputReceipt | RunEvent:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise _not_found("run")
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            previous = next(
+                (
+                    event
+                    for event in reversed(run.events or [])
+                    if event.operation_id == operation_id
+                    and event.kind.startswith("stop.")
+                ),
+                None,
+            )
+            if previous is not None:
+                return previous
+            pending = tuple(
+                item
+                for item in self._input_operations.values()
+                if item.run_id == run_id
+                and item.status in (InputStatus.ACCEPTED.value, "delivering")
+            )
+            for item in pending:
+                self.finish_input(
+                    item.workspace_id,
+                    run_id,
+                    item.operation_id,
+                    InputStatus.UNKNOWN
+                    if item.status == "delivering"
+                    else InputStatus.FAILED,
+                    "input_cancelled",
+                    owner_id=owner_id,
+                )
+            run.snapshot = run.snapshot.model_copy(
+                update={"state": RunState.CLOSING, "input_open": False}
+            )
+            return self._append_event(run, "stop.accepted", operation_id=operation_id)
+
+    def complete_stop(
+        self,
+        run_id: UUID,
+        operation_id: UUID,
+        *,
+        owner_id: UUID,
+        stopped: bool,
+        reason_code: str | None,
+    ) -> RunEvent:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise _not_found("run")
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            reservation = self._run_reservations[run_id]
+            if stopped and reservation.active:
+                reservation.active = False
+                installation = self._runtime_installations[reservation.installation_key]
+                self._runtime_installations[reservation.installation_key] = replace(
+                    installation, active_count=installation.active_count - 1
+                )
+            state = RunState.STOPPED if stopped else RunState.UNKNOWN
+            if stopped and reservation.session:
+                reservation.session = False
+                installation = self._runtime_installations[reservation.installation_key]
+                self._runtime_installations[reservation.installation_key] = replace(
+                    installation, session_count=installation.session_count - 1
+                )
+            run.snapshot = run.snapshot.model_copy(
+                update={
+                    "state": state,
+                    "input_open": False,
+                    "active_response_id": None,
+                    "reason_code": reason_code,
+                }
+            )
+            run.terminal_state = RunState.STOPPED if stopped else None
+            run.terminal_reason_code = reason_code
+            return self._append_event(
+                run,
+                "stop.stopped" if stopped else "stop.unknown",
+                operation_id=operation_id,
+                data={"reason_code": reason_code},
+            )
+
+    def get_lifecycle_event(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+        prefix: str,
+    ) -> RunEvent | None:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            return next(
+                (
+                    event
+                    for event in reversed(run.events or [])
+                    if event.operation_id == operation_id
+                    and event.kind.startswith(prefix)
+                ),
+                None,
+            )
+
+    def get_lifecycle_events(
+        self, workspace_id: UUID, run_id: UUID, after_sequence: int = 0
+    ) -> tuple[RunEvent, ...]:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            return tuple(
+                event for event in run.events or () if event.sequence > after_sequence
+            )
+
+    def _append_event(
+        self,
+        run: _StoredRun,
+        kind: str,
+        *,
+        operation_id: UUID | None = None,
+        response_id: UUID | None = None,
+        data: dict[str, object] | None = None,
+    ) -> RunEvent:
+        sequence = run.snapshot.last_event_sequence + 1
+        event = RunEvent(
+            run_id=run.snapshot.run_id,
+            sequence=sequence,
+            kind=kind,
+            occurred_at=datetime.now(UTC),
+            operation_id=operation_id,
+            response_id=response_id,
+            data={}
+            if data is None
+            else {
+                key: value
+                for key, value in data.items()
+                if key in {"status", "reason_code", "queue_sequence"}
+            },
+        )
+        if run.events is None:
+            run.events = []
+        run.events.append(event)
+        run.snapshot = run.snapshot.model_copy(update={"last_event_sequence": sequence})
+        return event
 
     def list_starting_runs(self) -> tuple[RunSnapshot, ...]:
         with self._lock:
@@ -782,7 +1602,16 @@ class MemoryAgentStore:
                 reservation.active = active_reserved
             if session_reserved is not None:
                 reservation.session = session_reserved
-            run.snapshot = _run_copy(snapshot)
+            run.snapshot = _run_copy(
+                snapshot.model_copy(
+                    update={
+                        "last_event_sequence": max(
+                            snapshot.last_event_sequence,
+                            run.snapshot.last_event_sequence,
+                        )
+                    }
+                )
+            )
             if terminal_state is not None:
                 run.terminal_state = terminal_state
                 run.terminal_reason_code = terminal_reason_code

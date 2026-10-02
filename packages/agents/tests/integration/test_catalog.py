@@ -27,6 +27,8 @@ def test_postgres_catalog_cas_persistence_and_owned_schema_migrations(
         "runtime_installations",
         "runtime_references",
         "run_operations",
+        "run_events",
+        "run_inputs",
         "runs",
         "run_reservations",
     }

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -56,6 +57,8 @@ _OWNED_TABLES = {
     "runtime_installations",
     "runtime_references",
     "run_operations",
+    "run_events",
+    "run_inputs",
     "runs",
     "run_reservations",
 }
@@ -578,6 +581,9 @@ class ControlledHarness:
         self.outcomes: dict[UUID, NativeOutcomeStatus] = {}
         self.inspections: dict[UUID, NativeInspection] = {}
         self.handles: dict[UUID, NativeHandle] = {}
+        self.active_responses: dict[UUID, UUID] = {}
+        self.response_lock = RLock()
+        self.cancel_side_effects: list[tuple[UUID, UUID]] = []
 
     def describe(self) -> RuntimeDescriptor:
         return RuntimeDescriptor(
@@ -628,15 +634,44 @@ class ControlledHarness:
         )
         return handle
 
-    def prompt(
+    def begin_prompt(
         self, handle: NativeHandle, input: AssembledInput, response_id: UUID
-    ) -> NativeOutcome:
-        self.prompt_calls.append((handle, input, response_id))
-        status = self.outcomes.get(handle.run_id, NativeOutcomeStatus.COMPLETED)
-        if status is NativeOutcomeStatus.COMPLETED:
+    ) -> None:
+        with self.response_lock:
+            if handle.run_id in self.active_responses:
+                raise AssertionError(
+                    "controlled harness already has an active response"
+                )
+            self.active_responses[handle.run_id] = response_id
+            self.prompt_calls.append((handle, input, response_id))
             self.inspections[handle.run_id] = NativeInspection(
                 process_state=NativeProcessState.ALIVE,
-                response_state=NativeResponseState.IDLE,
+                response_state=NativeResponseState.ACTIVE,
+                reason_code=None,
+            )
+
+    def finish_prompt(
+        self,
+        handle: NativeHandle,
+        response_id: UUID,
+        status: NativeOutcomeStatus,
+    ) -> NativeOutcome:
+        with self.response_lock:
+            if self.active_responses.get(handle.run_id) == response_id:
+                self.active_responses.pop(handle.run_id, None)
+            response_state = (
+                NativeResponseState.IDLE
+                if status
+                in {
+                    NativeOutcomeStatus.COMPLETED,
+                    NativeOutcomeStatus.CANCELLED,
+                    NativeOutcomeStatus.FAILED,
+                }
+                else NativeResponseState.UNKNOWN
+            )
+            self.inspections[handle.run_id] = NativeInspection(
+                process_state=NativeProcessState.ALIVE,
+                response_state=response_state,
                 reason_code=None,
             )
         return NativeOutcome(
@@ -647,6 +682,13 @@ class ControlledHarness:
             usage=None,
         )
 
+    def prompt(
+        self, handle: NativeHandle, input: AssembledInput, response_id: UUID
+    ) -> NativeOutcome:
+        self.begin_prompt(handle, input, response_id)
+        status = self.outcomes.get(handle.run_id, NativeOutcomeStatus.COMPLETED)
+        return self.finish_prompt(handle, response_id, status)
+
     def read_events(
         self, handle: NativeHandle, after_cursor: int, limit: int = 100
     ) -> tuple[NativeEvent, ...]:
@@ -654,11 +696,17 @@ class ControlledHarness:
         return ()
 
     def cancel(self, handle: NativeHandle, response_id: UUID) -> NativeCancelOutcome:
-        del handle
+        with self.response_lock:
+            if self.active_responses.get(handle.run_id) != response_id:
+                return NativeCancelOutcome(
+                    response_id=response_id,
+                    status=NativeCancelState.FAILED,
+                    reason_code="response_not_current",
+                )
         return NativeCancelOutcome(
             response_id=response_id,
             status=NativeCancelState.UNSUPPORTED,
-            reason_code="unsupported",
+            reason_code="cancel_not_supported",
         )
 
     def inspect(self, handle: NativeHandle) -> NativeInspection:

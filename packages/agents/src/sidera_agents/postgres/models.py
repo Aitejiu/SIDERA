@@ -136,6 +136,9 @@ class AgentRunRow(Base):
     run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     workspace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    original_grant_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
     profile_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     profile_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     runtime_workspace_id: Mapped[UUID] = mapped_column(
@@ -162,3 +165,44 @@ class RunReservationRow(Base):
     installation_key: Mapped[str] = mapped_column(String(71), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     session: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+class RunInputRow(Base):
+    __tablename__ = "run_inputs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "queue_sequence"),
+        {"schema": "agents"},
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(71), nullable=False)
+    response_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    queue_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    evidence_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context: Mapped[list[dict[str, object]] | None] = mapped_column(JSON, nullable=True)
+
+
+class RunEventRow(Base):
+    __tablename__ = "run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence"),
+        {"schema": "agents"},
+    )
+
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(80), nullable=False)
+    operation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    response_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    native_cursor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)

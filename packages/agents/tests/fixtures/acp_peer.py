@@ -128,6 +128,7 @@ def run_peer() -> None:
         }
     )
 
+    prompt_count = 0
     for raw in sys.stdin:
         request = json.loads(raw)
         method = request.get("method")
@@ -136,13 +137,16 @@ def run_peer() -> None:
         if method == "initialize":
             _record({"kind": "request", "method": method, "params": params})
             mode = os.environ.get("ACME_TEST_MODE")
+            session_capabilities = {"close": {}}
+            if mode in {"block_prompt", "block_second_prompt", "withhold_prompt"}:
+                session_capabilities["cancelCurrentResponse"] = {}
             result: dict[str, Any] = {
                 "agentCapabilities": {
                     "loadSession": False,
                     "mcpCapabilities": {
                         "http": os.environ.get("ACME_TEST_HTTP") == "1"
                     },
-                    "sessionCapabilities": {"close": {}},
+                    "sessionCapabilities": session_capabilities,
                 },
                 "agentInfo": {"name": "owned-peer", "version": "1"},
             }
@@ -205,6 +209,7 @@ def run_peer() -> None:
             if mode == "exit_after_session":
                 return
         elif method == "session/prompt":
+            prompt_count += 1
             _record(
                 {
                     "kind": "request",
@@ -267,7 +272,9 @@ def run_peer() -> None:
                 )
                 _record({"kind": "terminal_reply", "method": "session/prompt"})
                 continue
-            if os.environ.get("ACME_TEST_MODE") == "block_prompt":
+            if mode == "block_prompt" or (
+                mode == "block_second_prompt" and prompt_count == 2
+            ):
                 while True:
                     control = json.loads(sys.stdin.readline())
                     if control.get("method") == "session/cancel":

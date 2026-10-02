@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -76,10 +77,15 @@ class _Session:
     prepared: PreparedOpenCodeConfig
     http_supported: bool
     close_supported: bool
+    cancel_supported: bool
     secret_values: tuple[str, ...]
     pending_updates: deque[Mapping[str, Any]] = field(default_factory=deque)
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    condition: threading.Condition = field(default_factory=threading.Condition)
     response_state: NativeResponseState = NativeResponseState.IDLE
+    active_response_id: UUID | None = None
+    cancel_requested_response_id: UUID | None = None
+    cancel_waiting_response_id: UUID | None = None
+    cancel_outcomes: dict[UUID, NativeCancelOutcome] = field(default_factory=dict)
     cursor: int = 0
 
 
@@ -214,6 +220,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 )
             negotiated = _agent_capabilities(initialize)
             http_supported = _http_supported(negotiated)
+            cancel_supported = _cancel_current_response_supported(negotiated)
             if any(server.get("type") == "http" for server in mcp_servers):
                 snapshot_support = request.runtime.capabilities.get("mcp_http")
                 if (
@@ -249,6 +256,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                     "acp_v1",
                     "mcp_stdio",
                     *(("mcp_http",) if http_supported else ()),
+                    *(("cancel_current_response",) if cancel_supported else ()),
                 ),
             )
             session = _Session(
@@ -257,6 +265,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 prepared=prepared,
                 http_supported=http_supported,
                 close_supported=_close_supported(negotiated),
+                cancel_supported=cancel_supported,
                 secret_values=_secret_values(request),
             )
             with self._lock:
@@ -323,7 +332,14 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             raise AgentError(
                 "native_identity_unverified", "OpenCode session is invalid."
             )
-        with session.lock:
+        with session.condition:
+            if session.active_response_id is not None:
+                raise AgentError(
+                    "native_response_unknown",
+                    "OpenCode has an unresolved response in this session.",
+                )
+            session.active_response_id = response_id
+            session.cancel_requested_response_id = None
             session.response_state = NativeResponseState.ACTIVE
         try:
             result = session.transport.request(
@@ -335,8 +351,10 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 timeout=self._request_timeout,
             )
         except ACPTransportError as error:
-            with session.lock:
-                session.response_state = NativeResponseState.UNKNOWN
+            with session.condition:
+                if session.active_response_id == response_id:
+                    session.response_state = NativeResponseState.UNKNOWN
+                session.condition.notify_all()
             return NativeOutcome(
                 response_id=response_id,
                 status=NativeOutcomeStatus.UNKNOWN,
@@ -349,16 +367,36 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 usage=None,
             )
         except Exception:
-            with session.lock:
-                session.response_state = NativeResponseState.UNKNOWN
+            with session.condition:
+                if session.active_response_id == response_id:
+                    session.response_state = NativeResponseState.UNKNOWN
+                session.condition.notify_all()
             raise
         stop_reason = result.get("stopReason")
-        with session.lock:
-            session.response_state = (
-                NativeResponseState.IDLE
-                if stop_reason in _TERMINAL_STOP_REASONS
-                else NativeResponseState.UNKNOWN
-            )
+        with session.condition:
+            if session.active_response_id != response_id:
+                session.response_state = NativeResponseState.UNKNOWN
+            elif stop_reason in _TERMINAL_STOP_REASONS:
+                session.response_state = NativeResponseState.IDLE
+                if (
+                    session.cancel_requested_response_id == response_id
+                    and session.cancel_waiting_response_id == response_id
+                ):
+                    confirmed = stop_reason == "cancelled"
+                    session.cancel_outcomes[response_id] = NativeCancelOutcome(
+                        response_id=response_id,
+                        status=(
+                            NativeCancelState.CONFIRMED
+                            if confirmed
+                            else NativeCancelState.FAILED
+                        ),
+                        reason_code=None if confirmed else "response_completed",
+                    )
+                session.active_response_id = None
+                session.cancel_requested_response_id = None
+            else:
+                session.response_state = NativeResponseState.UNKNOWN
+            session.condition.notify_all()
         if stop_reason == "end_turn":
             status = NativeOutcomeStatus.COMPLETED
             reason = None
@@ -387,7 +425,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         except ACPTransportError:
             return ()
         late_responses = session.transport.drain_late_responses()
-        with session.lock:
+        with session.condition:
             for method, response in late_responses:
                 if method != "session/prompt" or response.get("error") is not None:
                     continue
@@ -397,6 +435,24 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 )
                 if stop_reason in _TERMINAL_STOP_REASONS:
                     session.response_state = NativeResponseState.IDLE
+                    response_id = session.active_response_id
+                    if (
+                        response_id is not None
+                        and session.cancel_requested_response_id == response_id
+                        and session.cancel_waiting_response_id == response_id
+                    ):
+                        confirmed = stop_reason == "cancelled"
+                        session.cancel_outcomes[response_id] = NativeCancelOutcome(
+                            response_id=response_id,
+                            status=(
+                                NativeCancelState.CONFIRMED
+                                if confirmed
+                                else NativeCancelState.FAILED
+                            ),
+                            reason_code=None if confirmed else "response_completed",
+                        )
+                    session.active_response_id = None
+                    session.cancel_requested_response_id = None
             session.pending_updates.extend(
                 message
                 for message in session.transport.drain_notifications()
@@ -433,34 +489,90 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 )
                 if event.cursor > after_cursor:
                     events.append(event)
+            session.condition.notify_all()
             return tuple(events)
 
     def cancel(self, handle: NativeHandle, response_id: UUID) -> NativeCancelOutcome:
         session = self._session(handle)
+        if not session.cancel_supported:
+            return NativeCancelOutcome(
+                response_id=response_id,
+                status=NativeCancelState.UNSUPPORTED,
+                reason_code="cancel_not_negotiated",
+            )
         if handle.session_id is None:
             return NativeCancelOutcome(
                 response_id=response_id,
                 status=NativeCancelState.FAILED,
                 reason_code="native_identity_unverified",
             )
-        try:
-            session.transport.notify("session/cancel", {"sessionId": handle.session_id})
-        except ACPTransportError:
-            return NativeCancelOutcome(
-                response_id=response_id,
-                status=NativeCancelState.UNKNOWN,
-                reason_code="native_response_unknown",
-            )
-        return NativeCancelOutcome(
-            response_id=response_id,
-            status=NativeCancelState.ACCEPTED,
-            reason_code=None,
-        )
+        with session.condition:
+            if session.active_response_id != response_id:
+                return NativeCancelOutcome(
+                    response_id=response_id,
+                    status=NativeCancelState.FAILED,
+                    reason_code="response_not_current",
+                )
+            if session.response_state is not NativeResponseState.ACTIVE:
+                return NativeCancelOutcome(
+                    response_id=response_id,
+                    status=NativeCancelState.UNKNOWN,
+                    reason_code="native_response_unknown",
+                )
+            if session.cancel_waiting_response_id is not None:
+                return NativeCancelOutcome(
+                    response_id=response_id,
+                    status=NativeCancelState.UNKNOWN,
+                    reason_code="native_response_unknown",
+                )
+            session.cancel_requested_response_id = response_id
+            session.cancel_waiting_response_id = response_id
+            try:
+                session.transport.notify(
+                    "session/cancel", {"sessionId": handle.session_id}
+                )
+            except ACPTransportError:
+                session.cancel_requested_response_id = None
+                session.cancel_waiting_response_id = None
+                return NativeCancelOutcome(
+                    response_id=response_id,
+                    status=NativeCancelState.UNKNOWN,
+                    reason_code="native_response_unknown",
+                )
+
+            try:
+                deadline = time.monotonic() + self._request_timeout
+                while True:
+                    confirmed = session.cancel_outcomes.pop(response_id, None)
+                    if confirmed is not None:
+                        return confirmed
+                    if (
+                        session.active_response_id != response_id
+                        or session.response_state is not NativeResponseState.ACTIVE
+                    ):
+                        return NativeCancelOutcome(
+                            response_id=response_id,
+                            status=NativeCancelState.UNKNOWN,
+                            reason_code="native_response_unknown",
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return NativeCancelOutcome(
+                            response_id=response_id,
+                            status=NativeCancelState.UNKNOWN,
+                            reason_code="native_response_unknown",
+                        )
+                    session.condition.wait(remaining)
+            finally:
+                session.cancel_waiting_response_id = None
+                if session.cancel_requested_response_id == response_id:
+                    session.cancel_requested_response_id = None
+                session.cancel_outcomes.pop(response_id, None)
 
     def inspect(self, handle: NativeHandle) -> NativeInspection:
         session = self._session(handle)
         process_state = session.transport.identity_state(handle.process_identity)
-        with session.lock:
+        with session.condition:
             response_state = session.response_state
         return NativeInspection(
             process_state=process_state,
@@ -584,6 +696,13 @@ def _http_supported(capabilities: Mapping[str, Any]) -> bool:
 def _close_supported(capabilities: Mapping[str, Any]) -> bool:
     sessions = capabilities.get("sessionCapabilities")
     return isinstance(sessions, Mapping) and isinstance(sessions.get("close"), Mapping)
+
+
+def _cancel_current_response_supported(capabilities: Mapping[str, Any]) -> bool:
+    sessions = capabilities.get("sessionCapabilities")
+    return isinstance(sessions, Mapping) and isinstance(
+        sessions.get("cancelCurrentResponse"), Mapping
+    )
 
 
 def _secret_values(request: NativeOpenRequest) -> tuple[str, ...]:

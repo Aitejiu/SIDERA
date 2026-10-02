@@ -17,6 +17,9 @@ from ..admission import OperationRecord
 from ..contracts import (
     AuthenticationState,
     CapabilityResourceDraft,
+    ContextItem,
+    InputReceipt,
+    InputStatus,
     NativeHandle,
     ProfileDraft,
     ProfileRef,
@@ -25,6 +28,8 @@ from ..contracts import (
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RunEvent,
+    RunInput,
     RunSnapshot,
     RunState,
     RuntimeProbe,
@@ -33,6 +38,7 @@ from ..contracts import (
     StartStatus,
 )
 from ..errors import AgentError
+from ..input_delivery import InputOperation, input_size_for_record
 from ..ports import (
     RuntimeEntry,
     RuntimeInstallation,
@@ -45,6 +51,8 @@ from .models import (
     ProfileRevisionRow,
     ResourceHead,
     ResourceRevisionRow,
+    RunEventRow,
+    RunInputRow,
     RunOperationRow,
     RunReservationRow,
     RuntimeInstallationRow,
@@ -146,6 +154,45 @@ def _start_receipt_from_row(row: Mapping[str, Any]) -> StartReceipt:
         status=StartStatus(row["status"]),
         run_id=row["run_id"],
         reason_code=row["reason_code"],
+    )
+
+
+def _input_from_row(row: Mapping[str, Any], grant_id: UUID) -> InputOperation:
+    payload = None
+    if row["text"] is not None:
+        payload = RunInput(
+            workspace_id=row["workspace_id"],
+            run_id=row["run_id"],
+            operation_id=row["operation_id"],
+            grant_id=grant_id,
+            text=row["text"],
+            context=tuple(
+                ContextItem.model_validate(item) for item in (row["context"] or [])
+            ),
+        )
+    return InputOperation(
+        workspace_id=row["workspace_id"],
+        run_id=row["run_id"],
+        operation_id=row["operation_id"],
+        fingerprint=row["fingerprint"],
+        response_id=row["response_id"],
+        queue_sequence=row["queue_sequence"],
+        status=row["status"],
+        reason_code=row["reason_code"],
+        evidence_sequence=row["evidence_sequence"],
+        payload=payload,
+    )
+
+
+def _event_from_row(row: Mapping[str, Any]) -> RunEvent:
+    return RunEvent(
+        run_id=row["run_id"],
+        sequence=row["sequence"],
+        kind=row["kind"],
+        occurred_at=_utc_timestamp(row["occurred_at"]),
+        operation_id=row["operation_id"],
+        response_id=row["response_id"],
+        data=row["data"],
     )
 
 
@@ -296,6 +343,57 @@ class PostgresAgentStore:
                 "execution_owner_unavailable",
                 "The execution owner lock is not held.",
             )
+
+    @staticmethod
+    def _append_event(
+        connection: Connection,
+        run_row: dict[str, Any],
+        kind: str,
+        *,
+        operation_id: UUID | None = None,
+        response_id: UUID | None = None,
+        data: dict[str, object] | None = None,
+    ) -> tuple[RunEvent, dict[str, object]]:
+        snapshot = RunSnapshot.model_validate(run_row["snapshot"])
+        sequence = snapshot.last_event_sequence + 1
+        event_data = (
+            {}
+            if data is None
+            else {
+                key: value
+                for key, value in data.items()
+                if key in {"status", "reason_code", "queue_sequence"}
+            }
+        )
+        occurred_at = datetime.now(UTC)
+        connection.execute(
+            RunEventRow.__table__.insert().values(
+                run_id=snapshot.run_id,
+                sequence=sequence,
+                occurred_at=occurred_at,
+                kind=kind,
+                operation_id=operation_id,
+                response_id=response_id,
+                status=kind.rsplit(".", 1)[-1],
+                reason_code=event_data.get("reason_code"),
+                native_cursor=None,
+                data=event_data,
+            )
+        )
+        updated = snapshot.model_copy(update={"last_event_sequence": sequence})
+        run_row["snapshot"] = updated.model_dump(mode="json", warnings=False)
+        return (
+            RunEvent(
+                run_id=snapshot.run_id,
+                sequence=sequence,
+                kind=kind,
+                occurred_at=occurred_at,
+                operation_id=operation_id,
+                response_id=response_id,
+                data=event_data,
+            ),
+            run_row["snapshot"],
+        )
 
     def find_runtime(
         self, workspace_id: UUID, harness_id: str, executable: str
@@ -965,6 +1063,7 @@ class PostgresAgentStore:
         self,
         *,
         owner_id: UUID,
+        authorization_grant_id: UUID,
         profile_ref: ProfileRef,
         runtime_ref: RuntimeRef,
         installation_key: str,
@@ -1130,22 +1229,23 @@ class PostgresAgentStore:
                     False,
                 )
 
-            connection.execute(
-                runs.insert().values(
-                    run_id=run_id,
-                    workspace_id=profile_ref.workspace_id,
-                    operation_id=operation_id,
-                    profile_id=profile_ref.profile_id,
-                    profile_revision=profile_ref.revision,
-                    runtime_workspace_id=runtime_ref.workspace_id,
-                    runtime_id=runtime_ref.runtime_id,
-                    installation_key=installation_key,
-                    state=snapshot.state.value,
-                    snapshot=snapshot.model_dump(mode="json", warnings=False),
-                    native_handle=None,
-                    terminal_state=None,
-                )
-            )
+            run_values = {
+                "run_id": run_id,
+                "workspace_id": profile_ref.workspace_id,
+                "operation_id": operation_id,
+                "original_grant_id": authorization_grant_id,
+                "profile_id": profile_ref.profile_id,
+                "profile_revision": profile_ref.revision,
+                "runtime_workspace_id": runtime_ref.workspace_id,
+                "runtime_id": runtime_ref.runtime_id,
+                "installation_key": installation_key,
+                "state": snapshot.state.value,
+                "snapshot": snapshot.model_dump(mode="json", warnings=False),
+                "native_handle": None,
+                "terminal_state": None,
+                "terminal_reason_code": None,
+            }
+            connection.execute(runs.insert().values(**run_values))
             connection.execute(
                 reservations.insert().values(
                     run_id=run_id,
@@ -1175,6 +1275,22 @@ class PostgresAgentStore:
                     run_id=run_id,
                     reason_code=None,
                 )
+            )
+            run_row = {
+                "snapshot": snapshot.model_dump(mode="json", warnings=False),
+            }
+            event, event_snapshot = self._append_event(
+                connection,
+                run_row,
+                "run.started",
+                operation_id=operation_id,
+                response_id=snapshot.active_response_id,
+            )
+            del event
+            connection.execute(
+                update(runs)
+                .where(runs.c.run_id == run_id)
+                .values(snapshot=event_snapshot)
             )
         return (
             StartReceipt(
@@ -1247,6 +1363,1113 @@ class PostgresAgentStore:
         if row is None:
             raise _not_found("run")
         return RunSnapshot.model_validate(row["snapshot"])
+
+    @staticmethod
+    def _locked_run(connection: Connection, workspace_id: UUID, run_id: UUID):
+        table = AgentRunRow.__table__
+        return (
+            connection.execute(
+                select(table)
+                .where(table.c.workspace_id == workspace_id, table.c.run_id == run_id)
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+
+    @staticmethod
+    def _locked_run_capacity(connection: Connection, workspace_id: UUID, run_id: UUID):
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        runs = AgentRunRow.__table__
+        installation_key = connection.execute(
+            select(reservations.c.installation_key).where(
+                reservations.c.workspace_id == workspace_id,
+                reservations.c.run_id == run_id,
+            )
+        ).scalar_one_or_none()
+        if installation_key is None:
+            return None, None, None
+        installation = (
+            connection.execute(
+                select(installations)
+                .where(installations.c.installation_key == installation_key)
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+        reservation = (
+            connection.execute(
+                select(reservations)
+                .where(
+                    reservations.c.workspace_id == workspace_id,
+                    reservations.c.run_id == run_id,
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+        run = (
+            connection.execute(
+                select(runs)
+                .where(runs.c.workspace_id == workspace_id, runs.c.run_id == run_id)
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if installation is None or reservation is None or run is None:
+            return None, None, None
+        return dict(run), dict(reservation), dict(installation)
+
+    @staticmethod
+    def _write_run(connection: Connection, run_row: dict[str, Any]) -> None:
+        snapshot = RunSnapshot.model_validate(run_row["snapshot"])
+        connection.execute(
+            update(AgentRunRow.__table__)
+            .where(AgentRunRow.__table__.c.run_id == snapshot.run_id)
+            .values(state=snapshot.state.value, snapshot=run_row["snapshot"])
+        )
+
+    @staticmethod
+    def _input_row(
+        connection: Connection,
+        workspace_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+        *,
+        lock: bool = False,
+    ):
+        table = RunInputRow.__table__
+        query = select(table).where(
+            table.c.workspace_id == workspace_id,
+            table.c.run_id == run_id,
+            table.c.operation_id == operation_id,
+        )
+        if lock:
+            query = query.with_for_update()
+        return connection.execute(query).mappings().one_or_none()
+
+    @staticmethod
+    def _input_rows(connection: Connection, run_id: UUID, statuses: tuple[str, ...]):
+        table = RunInputRow.__table__
+        return (
+            connection.execute(
+                select(table)
+                .where(table.c.run_id == run_id, table.c.status.in_(statuses))
+                .order_by(table.c.queue_sequence)
+            )
+            .mappings()
+            .all()
+        )
+
+    def get_run_authorization_grant(self, workspace_id: UUID, run_id: UUID) -> UUID:
+        table = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            grant_id = connection.execute(
+                select(table.c.original_grant_id).where(
+                    table.c.workspace_id == workspace_id, table.c.run_id == run_id
+                )
+            ).scalar_one_or_none()
+        if grant_id is None:
+            raise _not_found("run")
+        return grant_id
+
+    def get_native_handle(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> NativeHandle | None:
+        table = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.native_handle).where(
+                    table.c.workspace_id == workspace_id, table.c.run_id == run_id
+                )
+            ).scalar_one_or_none()
+        return None if row is None else NativeHandle.model_validate(row)
+
+    def admit_input(
+        self,
+        request: RunInput,
+        *,
+        owner_id: UUID,
+        fingerprint: str,
+        response_id: UUID,
+        max_pending: int,
+        max_input_bytes: int,
+        payload_bytes: int,
+    ) -> InputReceipt:
+        inputs = RunInputRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        profile_heads = ProfileHead.__table__
+        profile_revisions = ProfileRevisionRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run_row, reservation, installation = self._locked_run_capacity(
+                connection, request.workspace_id, request.run_id
+            )
+            if run_row is None:
+                raise _not_found("run")
+            if run_row["original_grant_id"] != request.grant_id:
+                raise AgentError("permission_denied", "Access denied.")
+            existing = self._input_row(
+                connection,
+                request.workspace_id,
+                request.run_id,
+                request.operation_id,
+                lock=True,
+            )
+            if existing is not None:
+                if existing["fingerprint"] != fingerprint:
+                    raise AgentError(
+                        "operation_conflict",
+                        "Operation ID was used with a different request.",
+                    )
+                if not (
+                    existing["status"] == InputStatus.REJECTED.value
+                    and existing["reason_code"] == "resource_busy"
+                ):
+                    return _input_from_row(
+                        existing, run_row["original_grant_id"]
+                    ).receipt()
+
+            snapshot = RunSnapshot.model_validate(run_row["snapshot"])
+            pending_rows = self._input_rows(
+                connection,
+                request.run_id,
+                (InputStatus.ACCEPTED.value, "delivering"),
+            )
+            pending_operations = tuple(
+                _input_from_row(row, run_row["original_grant_id"])
+                for row in pending_rows
+            )
+            reason = None
+            if not snapshot.input_open or snapshot.state not in (
+                RunState.RUNNING,
+                RunState.IDLE,
+            ):
+                reason = "run_closed"
+            elif payload_bytes > max_input_bytes:
+                reason = "input_too_large"
+            elif len(pending_rows) >= max_pending or (
+                sum(input_size_for_record(item) for item in pending_operations)
+                + payload_bytes
+                > max_input_bytes * max_pending
+            ):
+                reason = "input_queue_full"
+
+            if reason is None and snapshot.state is RunState.IDLE:
+                if reservation is None:
+                    raise AgentError("catalog_corrupt", "Run reservation is missing.")
+                head = connection.execute(
+                    select(profile_heads.c.revision).where(
+                        profile_heads.c.workspace_id == snapshot.workspace_id,
+                        profile_heads.c.profile_id == snapshot.profile_ref.profile_id,
+                    )
+                ).scalar_one_or_none()
+                current_profile = (
+                    None
+                    if head is None
+                    else connection.execute(
+                        select(profile_revisions.c.draft).where(
+                            profile_revisions.c.workspace_id == snapshot.workspace_id,
+                            profile_revisions.c.profile_id
+                            == snapshot.profile_ref.profile_id,
+                            profile_revisions.c.revision == head,
+                        )
+                    ).scalar_one_or_none()
+                )
+                active_count = connection.execute(
+                    select(func.count())
+                    .select_from(reservations)
+                    .where(
+                        reservations.c.workspace_id == snapshot.workspace_id,
+                        reservations.c.profile_id == snapshot.profile_ref.profile_id,
+                        reservations.c.active.is_(True),
+                    )
+                ).scalar_one()
+                active_limit = (
+                    None
+                    if current_profile is None
+                    else ProfileDraft.model_validate(current_profile).max_active
+                )
+                if (
+                    installation is None
+                    or active_limit is None
+                    or active_count >= active_limit
+                    or installation["active_count"] >= installation["max_active"]
+                ):
+                    reason = "resource_busy"
+                else:
+                    connection.execute(
+                        update(reservations)
+                        .where(reservations.c.run_id == request.run_id)
+                        .values(active=True)
+                    )
+                    connection.execute(
+                        update(installations)
+                        .where(
+                            installations.c.installation_key
+                            == reservation["installation_key"]
+                        )
+                        .values(active_count=installation["active_count"] + 1)
+                    )
+                    snapshot = snapshot.model_copy(
+                        update={
+                            "state": RunState.RUNNING,
+                            "active_response_id": response_id,
+                        }
+                    )
+                    run_row["snapshot"] = snapshot.model_dump(
+                        mode="json", warnings=False
+                    )
+
+            max_sequence = connection.execute(
+                select(func.max(inputs.c.queue_sequence)).where(
+                    inputs.c.run_id == request.run_id
+                )
+            ).scalar_one()
+            queue_sequence = (
+                existing["queue_sequence"]
+                if existing is not None
+                else (max_sequence or 0) + 1
+            )
+            kind = "input.rejected" if reason is not None else "input.accepted"
+            event, _ = self._append_event(
+                connection,
+                run_row,
+                kind,
+                operation_id=request.operation_id,
+                response_id=response_id,
+                data={"reason_code": reason, "queue_sequence": queue_sequence},
+            )
+            row_values = {
+                "workspace_id": request.workspace_id,
+                "run_id": request.run_id,
+                "operation_id": request.operation_id,
+                "fingerprint": fingerprint,
+                "response_id": response_id,
+                "queue_sequence": queue_sequence,
+                "status": (
+                    InputStatus.REJECTED.value if reason else InputStatus.ACCEPTED.value
+                ),
+                "reason_code": reason,
+                "evidence_sequence": event.sequence,
+                "text": None if reason else request.text,
+                "context": None
+                if reason
+                else [
+                    item.model_dump(mode="json", warnings=False)
+                    for item in request.context
+                ],
+            }
+            if existing is None:
+                connection.execute(inputs.insert().values(**row_values))
+            else:
+                connection.execute(
+                    update(inputs)
+                    .where(
+                        inputs.c.workspace_id == request.workspace_id,
+                        inputs.c.run_id == request.run_id,
+                        inputs.c.operation_id == request.operation_id,
+                    )
+                    .values(
+                        **{
+                            key: value
+                            for key, value in row_values.items()
+                            if key not in {"workspace_id", "run_id", "operation_id"}
+                        }
+                    )
+                )
+            self._write_run(connection, run_row)
+            return _input_from_row(row_values, run_row["original_grant_id"]).receipt()
+
+    def get_input_operation(
+        self, workspace_id: UUID, run_id: UUID, operation_id: UUID
+    ) -> InputOperation | None:
+        inputs = RunInputRow.__table__
+        runs = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(inputs, runs.c.original_grant_id)
+                    .join(runs, runs.c.run_id == inputs.c.run_id)
+                    .where(
+                        inputs.c.workspace_id == workspace_id,
+                        inputs.c.run_id == run_id,
+                        inputs.c.operation_id == operation_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return None if row is None else _input_from_row(row, row["original_grant_id"])
+
+    def get_input_receipt(
+        self, workspace_id: UUID, run_id: UUID, operation_id: UUID
+    ) -> InputReceipt:
+        operation = self.get_input_operation(workspace_id, run_id, operation_id)
+        if operation is None:
+            raise _not_found("input")
+        return operation.receipt()
+
+    def list_pending_inputs(self, run_id: UUID) -> tuple[InputOperation, ...]:
+        inputs = RunInputRow.__table__
+        runs = AgentRunRow.__table__
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(inputs, runs.c.original_grant_id)
+                    .join(runs, runs.c.run_id == inputs.c.run_id)
+                    .where(
+                        inputs.c.run_id == run_id,
+                        inputs.c.status == InputStatus.ACCEPTED.value,
+                    )
+                    .order_by(inputs.c.queue_sequence)
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(_input_from_row(row, row["original_grant_id"]) for row in rows)
+
+    @staticmethod
+    def _finish_input_tx(
+        connection: Connection,
+        run_row: dict[str, Any],
+        input_row: Mapping[str, Any],
+        status: InputStatus,
+        reason_code: str | None,
+    ) -> InputReceipt:
+        if status not in (
+            InputStatus.DELIVERED,
+            InputStatus.FAILED,
+            InputStatus.UNKNOWN,
+        ):
+            raise ValueError("Only terminal input outcomes can be recorded.")
+        event, _ = PostgresAgentStore._append_event(
+            connection,
+            run_row,
+            "input." + status.value,
+            operation_id=input_row["operation_id"],
+            response_id=input_row["response_id"],
+            data={"reason_code": reason_code},
+        )
+        table = RunInputRow.__table__
+        connection.execute(
+            update(table)
+            .where(
+                table.c.workspace_id == input_row["workspace_id"],
+                table.c.run_id == input_row["run_id"],
+                table.c.operation_id == input_row["operation_id"],
+            )
+            .values(
+                status=status.value,
+                reason_code=reason_code,
+                evidence_sequence=event.sequence,
+                text=None,
+                context=None,
+            )
+        )
+        return InputReceipt(
+            operation_id=input_row["operation_id"],
+            run_id=input_row["run_id"],
+            status=status,
+            reason_code=reason_code,
+            evidence_sequence=event.sequence,
+        )
+
+    def claim_input(
+        self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
+    ) -> InputOperation | None:
+        inputs = RunInputRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run = (
+                connection.execute(
+                    select(AgentRunRow.__table__)
+                    .where(AgentRunRow.__table__.c.run_id == run_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if run is None:
+                raise _not_found("run")
+            row = self._input_row(
+                connection, run["workspace_id"], run_id, operation_id, lock=True
+            )
+            if row is None or row["status"] != InputStatus.ACCEPTED.value:
+                return None
+            snapshot = RunSnapshot.model_validate(run["snapshot"])
+            if (
+                snapshot.state is not RunState.RUNNING
+                or snapshot.active_response_id != row["response_id"]
+            ):
+                return None
+            connection.execute(
+                update(inputs)
+                .where(
+                    inputs.c.workspace_id == run["workspace_id"],
+                    inputs.c.run_id == run_id,
+                    inputs.c.operation_id == operation_id,
+                )
+                .values(status="delivering")
+            )
+            mutable_run = dict(run)
+            self._append_event(
+                connection,
+                mutable_run,
+                "response.started",
+                operation_id=operation_id,
+                response_id=row["response_id"],
+            )
+            self._write_run(connection, mutable_run)
+            updated = dict(row)
+            updated["status"] = "delivering"
+            return _input_from_row(updated, run["original_grant_id"])
+
+    def finish_input(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+        status: InputStatus,
+        reason_code: str | None,
+        *,
+        owner_id: UUID,
+    ) -> InputReceipt:
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run_row = self._locked_run(connection, workspace_id, run_id)
+            if run_row is None:
+                raise _not_found("input")
+            input_row = self._input_row(
+                connection, workspace_id, run_id, operation_id, lock=True
+            )
+            if input_row is None:
+                raise _not_found("input")
+            if input_row["status"] not in ("delivering", InputStatus.ACCEPTED.value):
+                return _input_from_row(
+                    input_row, run_row["original_grant_id"]
+                ).receipt()
+            # The lifecycle event sequence is part of the run snapshot.
+            mutable_run = dict(run_row)
+            receipt = self._finish_input_tx(
+                connection, mutable_run, input_row, status, reason_code
+            )
+            self._write_run(connection, mutable_run)
+            return receipt
+
+    def finish_conversation_response(
+        self,
+        run_id: UUID,
+        response_id: UUID,
+        *,
+        owner_id: UUID,
+        cancelled: bool = False,
+        observed_model: str | None = None,
+    ) -> RunSnapshot:
+        runs = AgentRunRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run, reservation, installation = self._locked_run_capacity(
+                connection,
+                connection.execute(
+                    select(runs.c.workspace_id).where(runs.c.run_id == run_id)
+                ).scalar_one_or_none(),
+                run_id,
+            )
+            if run is None:
+                raise _not_found("run")
+            mutable = dict(run)
+            snapshot = RunSnapshot.model_validate(run["snapshot"])
+            if (
+                snapshot.state is not RunState.RUNNING
+                or snapshot.active_response_id != response_id
+            ):
+                return snapshot
+            self._append_event(
+                connection,
+                mutable,
+                "response.interrupted" if cancelled else "response.completed",
+                response_id=response_id,
+            )
+            latest = RunSnapshot.model_validate(mutable["snapshot"])
+            config = latest.effective_config.model_copy(
+                update={"observed_model": observed_model}
+            )
+            snapshot = latest.model_copy(
+                update={
+                    "state": RunState.IDLE,
+                    "input_open": True,
+                    "active_response_id": None,
+                    "effective_config": config,
+                }
+            )
+            if reservation["active"]:
+                if installation["active_count"] < 1:
+                    raise AgentError(
+                        "catalog_corrupt", "Run reservation count is invalid."
+                    )
+                connection.execute(
+                    update(reservations)
+                    .where(reservations.c.run_id == run_id)
+                    .values(active=False)
+                )
+                connection.execute(
+                    update(installations)
+                    .where(
+                        installations.c.installation_key
+                        == reservation["installation_key"]
+                    )
+                    .values(active_count=installation["active_count"] - 1)
+                )
+            mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            self._append_event(connection, mutable, "run.idle", response_id=response_id)
+            self._write_run(connection, mutable)
+        return RunSnapshot.model_validate(mutable["snapshot"])
+
+    def activate_pending_input(
+        self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
+    ) -> bool:
+        runs = AgentRunRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        heads = ProfileHead.__table__
+        revisions = ProfileRevisionRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            workspace_id = connection.execute(
+                select(runs.c.workspace_id).where(runs.c.run_id == run_id)
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                raise _not_found("run")
+            run, reservation, installation = self._locked_run_capacity(
+                connection, workspace_id, run_id
+            )
+            if run is None:
+                raise _not_found("run")
+            snapshot = RunSnapshot.model_validate(run["snapshot"])
+            operation = self._input_row(
+                connection, snapshot.workspace_id, run_id, operation_id, lock=True
+            )
+            if (
+                snapshot.state is not RunState.IDLE
+                or not snapshot.input_open
+                or operation is None
+                or operation["status"] != InputStatus.ACCEPTED.value
+            ):
+                return False
+            if reservation is None:
+                raise AgentError("catalog_corrupt", "Run reservation is missing.")
+            head_revision = connection.execute(
+                select(heads.c.revision).where(
+                    heads.c.workspace_id == snapshot.workspace_id,
+                    heads.c.profile_id == snapshot.profile_ref.profile_id,
+                )
+            ).scalar_one_or_none()
+            draft = (
+                None
+                if head_revision is None
+                else connection.execute(
+                    select(revisions.c.draft).where(
+                        revisions.c.workspace_id == snapshot.workspace_id,
+                        revisions.c.profile_id == snapshot.profile_ref.profile_id,
+                        revisions.c.revision == head_revision,
+                    )
+                ).scalar_one_or_none()
+            )
+            profile_active = connection.execute(
+                select(func.count())
+                .select_from(reservations)
+                .where(
+                    reservations.c.workspace_id == snapshot.workspace_id,
+                    reservations.c.profile_id == snapshot.profile_ref.profile_id,
+                    reservations.c.active.is_(True),
+                )
+            ).scalar_one()
+            active_limit = (
+                None if draft is None else ProfileDraft.model_validate(draft).max_active
+            )
+            if (
+                installation is None
+                or active_limit is None
+                or profile_active >= active_limit
+                or installation["active_count"] >= installation["max_active"]
+            ):
+                return False
+            connection.execute(
+                update(reservations)
+                .where(reservations.c.run_id == run_id)
+                .values(active=True)
+            )
+            connection.execute(
+                update(installations)
+                .where(
+                    installations.c.installation_key == reservation["installation_key"]
+                )
+                .values(active_count=installation["active_count"] + 1)
+            )
+            mutable = dict(run)
+            snapshot = snapshot.model_copy(
+                update={
+                    "state": RunState.RUNNING,
+                    "active_response_id": operation["response_id"],
+                }
+            )
+            mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            self._append_event(
+                connection,
+                mutable,
+                "response.queued",
+                operation_id=operation_id,
+                response_id=operation["response_id"],
+                data={"status": InputStatus.ACCEPTED.value},
+            )
+            self._write_run(connection, mutable)
+            return True
+
+    def close_input_admission(
+        self,
+        run_id: UUID,
+        response_id: UUID,
+        *,
+        owner_id: UUID,
+        terminal_state: RunState = RunState.COMPLETED,
+        reason_code: str | None = None,
+    ) -> RunSnapshot:
+        runs = AgentRunRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            workspace_id = connection.execute(
+                select(runs.c.workspace_id).where(runs.c.run_id == run_id)
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                raise _not_found("run")
+            run, reservation, installation = self._locked_run_capacity(
+                connection, workspace_id, run_id
+            )
+            if run is None:
+                raise _not_found("run")
+            mutable = dict(run)
+            snapshot = RunSnapshot.model_validate(run["snapshot"])
+            if snapshot.active_response_id != response_id:
+                return snapshot
+            self._append_event(
+                connection,
+                mutable,
+                "response.completed"
+                if terminal_state is RunState.COMPLETED
+                else "response.failed",
+                response_id=response_id,
+                data={"reason_code": reason_code},
+            )
+            pending = self._input_rows(
+                connection, run_id, (InputStatus.ACCEPTED.value,)
+            )
+            if terminal_state is RunState.COMPLETED and pending:
+                snapshot = RunSnapshot.model_validate(mutable["snapshot"]).model_copy(
+                    update={
+                        "state": RunState.RUNNING,
+                        "input_open": True,
+                        "active_response_id": pending[0]["response_id"],
+                    }
+                )
+                mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+                self._write_run(connection, mutable)
+                return snapshot
+            for input_row in pending:
+                self._finish_input_tx(
+                    connection,
+                    mutable,
+                    input_row,
+                    InputStatus.FAILED,
+                    "input_cancelled"
+                    if terminal_state is RunState.STOPPED
+                    else "run_failed",
+                )
+            snapshot = RunSnapshot.model_validate(mutable["snapshot"]).model_copy(
+                update={
+                    "state": RunState.CLOSING,
+                    "input_open": False,
+                    "active_response_id": None,
+                    "reason_code": reason_code,
+                }
+            )
+            if reservation["active"]:
+                if installation["active_count"] < 1:
+                    raise AgentError(
+                        "catalog_corrupt", "Run reservation count is invalid."
+                    )
+                connection.execute(
+                    update(reservations)
+                    .where(reservations.c.run_id == run_id)
+                    .values(active=False)
+                )
+                connection.execute(
+                    update(installations)
+                    .where(
+                        installations.c.installation_key
+                        == reservation["installation_key"]
+                    )
+                    .values(active_count=installation["active_count"] - 1)
+                )
+            mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            self._append_event(
+                connection, mutable, "run.closed", response_id=response_id
+            )
+            connection.execute(
+                update(runs)
+                .where(runs.c.run_id == run_id)
+                .values(
+                    state=RunState.CLOSING.value,
+                    snapshot=mutable["snapshot"],
+                    terminal_state=terminal_state.value,
+                    terminal_reason_code=reason_code,
+                )
+            )
+        return RunSnapshot.model_validate(mutable["snapshot"])
+
+    def request_stop(
+        self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
+    ) -> RunEvent:
+        runs = AgentRunRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            workspace_id = connection.execute(
+                select(runs.c.workspace_id).where(runs.c.run_id == run_id)
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                raise _not_found("run")
+            run, _, _ = self._locked_run_capacity(connection, workspace_id, run_id)
+            if run is None:
+                raise _not_found("run")
+            prior = (
+                connection.execute(
+                    select(RunEventRow.__table__)
+                    .where(
+                        RunEventRow.__table__.c.run_id == run_id,
+                        RunEventRow.__table__.c.operation_id == operation_id,
+                        RunEventRow.__table__.c.kind.like("stop.%"),
+                    )
+                    .order_by(RunEventRow.__table__.c.sequence.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if prior is not None:
+                return _event_from_row(prior)
+            mutable = dict(run)
+            for row in self._input_rows(
+                connection, run_id, (InputStatus.ACCEPTED.value, "delivering")
+            ):
+                status = (
+                    InputStatus.UNKNOWN
+                    if row["status"] == "delivering"
+                    else InputStatus.FAILED
+                )
+                self._finish_input_tx(
+                    connection, mutable, row, status, "input_cancelled"
+                )
+            snapshot = RunSnapshot.model_validate(mutable["snapshot"]).model_copy(
+                update={"state": RunState.CLOSING, "input_open": False}
+            )
+            mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            event, _ = self._append_event(
+                connection, mutable, "stop.accepted", operation_id=operation_id
+            )
+            self._write_run(connection, mutable)
+            return event
+
+    def complete_stop(
+        self,
+        run_id: UUID,
+        operation_id: UUID,
+        *,
+        owner_id: UUID,
+        stopped: bool,
+        reason_code: str | None,
+    ) -> RunEvent:
+        runs = AgentRunRow.__table__
+        reservations = RunReservationRow.__table__
+        installations = RuntimeInstallationRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            workspace_id = connection.execute(
+                select(runs.c.workspace_id).where(runs.c.run_id == run_id)
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                raise _not_found("run")
+            run, reservation, installation = self._locked_run_capacity(
+                connection, workspace_id, run_id
+            )
+            if run is None:
+                raise _not_found("run")
+            mutable = dict(run)
+            if reservation is None:
+                raise _not_found("run")
+            active_after = False if stopped else reservation["active"]
+            active_delta = int(reservation["active"]) if stopped else 0
+            session_delta = int(reservation["session"]) if stopped else 0
+            if (
+                installation["active_count"] < active_delta
+                or installation["session_count"] < session_delta
+            ):
+                raise AgentError("catalog_corrupt", "Run reservation count is invalid.")
+            connection.execute(
+                update(installations)
+                .where(
+                    installations.c.installation_key == reservation["installation_key"]
+                )
+                .values(
+                    active_count=installation["active_count"]
+                    - (int(reservation["active"]) if stopped else 0),
+                    session_count=installation["session_count"]
+                    - (int(reservation["session"]) if stopped else 0),
+                )
+            )
+            connection.execute(
+                update(reservations)
+                .where(reservations.c.run_id == run_id)
+                .values(
+                    active=active_after,
+                    session=False if stopped else reservation["session"],
+                )
+            )
+            state = RunState.STOPPED if stopped else RunState.UNKNOWN
+            snapshot = RunSnapshot.model_validate(mutable["snapshot"]).model_copy(
+                update={
+                    "state": state,
+                    "input_open": False,
+                    "active_response_id": None,
+                    "reason_code": reason_code,
+                }
+            )
+            mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            event, _ = self._append_event(
+                connection,
+                mutable,
+                "stop.stopped" if stopped else "stop.unknown",
+                operation_id=operation_id,
+                data={"reason_code": reason_code},
+            )
+            connection.execute(
+                update(runs)
+                .where(runs.c.run_id == run_id)
+                .values(
+                    state=state.value,
+                    snapshot=mutable["snapshot"],
+                    terminal_state=RunState.STOPPED.value if stopped else None,
+                    terminal_reason_code=reason_code if stopped else None,
+                )
+            )
+            return event
+
+    def record_lifecycle_event(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+        response_id: UUID | None,
+        kind: str,
+        reason_code: str | None,
+        *,
+        owner_id: UUID,
+    ) -> RunEvent:
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run = self._locked_run(connection, workspace_id, run_id)
+            if run is None:
+                raise _not_found("run")
+            existing = (
+                connection.execute(
+                    select(RunEventRow.__table__).where(
+                        RunEventRow.__table__.c.run_id == run_id,
+                        RunEventRow.__table__.c.operation_id == operation_id,
+                        RunEventRow.__table__.c.kind == kind,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is not None:
+                return _event_from_row(existing)
+            mutable = dict(run)
+            event, _ = self._append_event(
+                connection,
+                mutable,
+                kind,
+                operation_id=operation_id,
+                response_id=response_id,
+                data={"reason_code": reason_code},
+            )
+            self._write_run(connection, mutable)
+            return event
+
+    def get_lifecycle_event(
+        self, workspace_id: UUID, run_id: UUID, operation_id: UUID, prefix: str
+    ) -> RunEvent | None:
+        runs = AgentRunRow.__table__
+        events = RunEventRow.__table__
+        with self._engine.connect() as connection:
+            exists = connection.execute(
+                select(runs.c.run_id).where(
+                    runs.c.workspace_id == workspace_id, runs.c.run_id == run_id
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                raise _not_found("run")
+            row = (
+                connection.execute(
+                    select(events)
+                    .where(
+                        events.c.run_id == run_id,
+                        events.c.operation_id == operation_id,
+                        events.c.kind.like(prefix + "%"),
+                    )
+                    .order_by(events.c.sequence.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return None if row is None else _event_from_row(row)
+
+    def get_lifecycle_events(
+        self, workspace_id: UUID, run_id: UUID, after_sequence: int = 0
+    ) -> tuple[RunEvent, ...]:
+        runs = AgentRunRow.__table__
+        events = RunEventRow.__table__
+        with self._engine.connect() as connection:
+            exists = connection.execute(
+                select(runs.c.run_id).where(
+                    runs.c.workspace_id == workspace_id,
+                    runs.c.run_id == run_id,
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                raise _not_found("run")
+            rows = (
+                connection.execute(
+                    select(events)
+                    .where(
+                        events.c.run_id == run_id,
+                        events.c.sequence > after_sequence,
+                    )
+                    .order_by(events.c.sequence)
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(_event_from_row(row) for row in rows)
+
+    def fence_orphaned_runs(
+        self, *, owner_id: UUID, live_run_ids: tuple[UUID, ...]
+    ) -> int:
+        runs = AgentRunRow.__table__
+        fenced = 0
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            query = select(runs.c.workspace_id, runs.c.run_id).where(
+                runs.c.state.in_((RunState.RUNNING.value, RunState.IDLE.value))
+            )
+            if live_run_ids:
+                query = query.where(runs.c.run_id.not_in(live_run_ids))
+            candidates = connection.execute(query).mappings().all()
+            for candidate in candidates:
+                run, _, _ = self._locked_run_capacity(
+                    connection, candidate["workspace_id"], candidate["run_id"]
+                )
+                if run is None:
+                    continue
+                snapshot = RunSnapshot.model_validate(run["snapshot"])
+                if not snapshot.input_open:
+                    continue
+                mutable = dict(run)
+                input_rows = self._input_rows(
+                    connection,
+                    snapshot.run_id,
+                    (InputStatus.ACCEPTED.value, "delivering"),
+                )
+                for input_row in input_rows:
+                    status = (
+                        InputStatus.UNKNOWN
+                        if input_row["status"] == "delivering"
+                        else InputStatus.FAILED
+                    )
+                    self._finish_input_tx(
+                        connection, mutable, input_row, status, "owner_restarted"
+                    )
+                snapshot = RunSnapshot.model_validate(mutable["snapshot"]).model_copy(
+                    update={
+                        "state": RunState.UNKNOWN,
+                        "input_open": False,
+                        "reason_code": "native_response_unknown",
+                    }
+                )
+                mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+                self._append_event(connection, mutable, "run.owner_restarted")
+                self._write_run(connection, mutable)
+                fenced += 1
+        return fenced
+
+    def fence_run(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        reason_code: str,
+        *,
+        owner_id: UUID,
+    ) -> RunSnapshot:
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run, _, _ = self._locked_run_capacity(connection, workspace_id, run_id)
+            if run is None:
+                raise _not_found("run")
+            mutable = dict(run)
+            snapshot = RunSnapshot.model_validate(run["snapshot"]).model_copy(
+                update={
+                    "state": RunState.UNKNOWN,
+                    "input_open": False,
+                    "reason_code": reason_code,
+                }
+            )
+            mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            pending = self._input_rows(
+                connection,
+                run_id,
+                (InputStatus.ACCEPTED.value, "delivering"),
+            )
+            for input_row in pending:
+                status = (
+                    InputStatus.UNKNOWN
+                    if input_row["status"] == "delivering"
+                    else InputStatus.FAILED
+                )
+                self._finish_input_tx(
+                    connection,
+                    mutable,
+                    input_row,
+                    status,
+                    "native_response_unknown"
+                    if status is InputStatus.UNKNOWN
+                    else "run_fenced",
+                )
+            self._append_event(
+                connection,
+                mutable,
+                "run.fenced",
+                data={"reason_code": reason_code},
+            )
+            self._write_run(connection, mutable)
+            return RunSnapshot.model_validate(mutable["snapshot"])
 
     def list_starting_runs(self) -> tuple[RunSnapshot, ...]:
         table = AgentRunRow.__table__
@@ -1362,6 +2585,11 @@ class PostgresAgentStore:
                 or snapshot.workspace_id != run["workspace_id"]
             ):
                 raise AgentError("catalog_corrupt", "Run identity is invalid.")
+            current_snapshot = RunSnapshot.model_validate(run["snapshot"])
+            if snapshot.last_event_sequence < current_snapshot.last_event_sequence:
+                snapshot = snapshot.model_copy(
+                    update={"last_event_sequence": current_snapshot.last_event_sequence}
+                )
             active_delta = (
                 int(active_reserved) - int(reservation["active"])
                 if active_reserved is not None
