@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Literal, cast
@@ -11,6 +11,7 @@ from uuid import UUID
 from sidera_control_plane.domain.context_packages import (
     ContextMaterializationV1,
     ContextMetadata,
+    ControlPlaneFactSection,
     context_package_reference,
 )
 from sidera_control_plane.domain.errors import ValidationError
@@ -25,6 +26,7 @@ from sidera_control_plane.domain.plan_revisions import (
     plan_snapshot_content_hash,
 )
 from sidera_control_plane.domain.planning import PlanningRequest, PlanningRequestKind
+from sidera_control_plane.domain.planning_revision_proposals import _base_descriptor
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker_item import WorkerItem
@@ -228,7 +230,9 @@ class RevisionExecutionFactV1:
                 else None
             ),
             "pinned_worker_id": (
-                str(self.pinned_worker_id) if self.pinned_worker_id is not None else None
+                str(self.pinned_worker_id)
+                if self.pinned_worker_id is not None
+                else None
             ),
             "version": self.version,
             "capability_requirements": list(self.capability_requirements),
@@ -316,7 +320,9 @@ class RevisionPlanningContextV1:
 
     def __post_init__(self) -> None:
         if self.schema_version != PLANNING_CONTEXT_SCHEMA_VERSION:
-            raise ValidationError("unsupported revision planning context schema_version")
+            raise ValidationError(
+                "unsupported revision planning context schema_version"
+            )
         if self.kind != "revision":
             raise ValidationError("revision planning context kind must be revision")
         if not isinstance(self.base_descriptor, RevisionBaseDescriptorV1):
@@ -331,8 +337,12 @@ class RevisionPlanningContextV1:
         object.__setattr__(self, "worker_items", tuple(self.worker_items))
         object.__setattr__(self, "executions", tuple(self.executions))
         object.__setattr__(self, "sessions", tuple(self.sessions))
-        object.__setattr__(self, "context_package_refs", tuple(self.context_package_refs))
-        object.__setattr__(self, "adapter_capabilities", tuple(self.adapter_capabilities))
+        object.__setattr__(
+            self, "context_package_refs", tuple(self.context_package_refs)
+        )
+        object.__setattr__(
+            self, "adapter_capabilities", tuple(self.adapter_capabilities)
+        )
         byte_size = len(self.canonical_bytes())
         if byte_size > self.max_context_bytes:
             raise ValidationError(
@@ -372,6 +382,236 @@ class RevisionPlanningContextV1:
 type PlanningContextV1 = CreatePlanningContextV1 | RevisionPlanningContextV1
 
 
+def encode_native_revision_facts(
+    context: RevisionPlanningContextV1,
+) -> dict[str, object]:
+    if not isinstance(context, RevisionPlanningContextV1):
+        raise TypeError("native revision facts require a typed revision context")
+    graph = context.to_mapping()
+    graph["encoding_version"] = 1
+    plan = cast(dict[str, object], graph.pop("plan_snapshot"))
+    graph["base_plan"] = plan
+    base = cast(dict[str, object], graph["base_descriptor"])
+    base["plan_id"] = base.pop("plan_snapshot_id")
+    plan["parent_plan_id"] = plan.pop("parent_snapshot_id")
+    policy = plan.get("collaboration_policy")
+    if isinstance(policy, dict):
+        policy["runtime_capabilities"] = policy.pop("runtime_capability_snapshot")
+    for session in cast(list[dict[str, object]], graph["sessions"]):
+        session["capabilities"] = session.pop("capability_snapshot")
+    encoded_size = len(
+        json.dumps(
+            graph,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    if encoded_size > context.max_context_bytes:
+        raise ValidationError("native revision facts exceed byte budget")
+    return graph
+
+
+def decode_native_revision_facts(value: Mapping[str, object]) -> dict[str, object]:
+    graph = _fact_fields(
+        ControlPlaneFactSection(value).to_mapping()["facts"],
+        {
+            "encoding_version",
+            "schema_version",
+            "kind",
+            "base_descriptor",
+            "base_plan",
+            "tasks",
+            "worker_items",
+            "executions",
+            "sessions",
+            "context_package_refs",
+            "adapter_capabilities",
+        },
+    )
+    if (
+        type(graph["encoding_version"]) is not int
+        or graph.pop("encoding_version") != 1
+        or type(graph["schema_version"]) is not int
+        or graph["schema_version"] != 1
+        or graph["kind"] != "revision"
+    ):
+        raise ValidationError("unsupported native revision fact encoding")
+    base = _fact_fields(
+        graph["base_descriptor"],
+        {
+            item.name if item.name != "plan_snapshot_id" else "plan_id"
+            for item in fields(RevisionBaseDescriptorV1)
+        },
+    )
+    graph["base_descriptor"] = base
+    _restore_fact_alias(base, "plan_id", "plan_snapshot_id")
+    plan = graph.pop("base_plan")
+    if not isinstance(plan, dict):
+        raise ValidationError("native revision base plan must be a mapping")
+    graph["plan_snapshot"] = plan
+    _restore_fact_alias(plan, "parent_plan_id", "parent_snapshot_id")
+    policy = plan.get("collaboration_policy")
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise ValidationError(
+                "native revision collaboration policy must be a mapping"
+            )
+        _restore_fact_alias(
+            policy, "runtime_capabilities", "runtime_capability_snapshot"
+        )
+    for key, model in (
+        ("tasks", RevisionTaskFactV1),
+        ("worker_items", RevisionWorkerItemFactV1),
+        ("executions", RevisionExecutionFactV1),
+        ("sessions", RevisionSessionFactV1),
+        ("context_package_refs", ConfirmedContextPackageRefV1),
+        ("adapter_capabilities", AdapterCapabilitySnapshotV1),
+    ):
+        items = graph[key]
+        if not isinstance(items, list):
+            raise ValidationError("native revision fact collection must be an array")
+        expected = {
+            item.name if item.name != "capability_snapshot" else "capabilities"
+            for item in fields(model)
+        }
+        for item in items:
+            _fact_fields(item, expected)
+            if key == "sessions":
+                _restore_fact_alias(item, "capabilities", "capability_snapshot")
+    descriptor = _base_descriptor(base)
+    restored_plan = TaskPlanSnapshot.from_payload(plan)
+    if (
+        restored_plan.id,
+        restored_plan.workspace_id,
+        restored_plan.root_task_id,
+        restored_plan.generation,
+        plan_snapshot_content_hash(restored_plan),
+    ) != (
+        descriptor.plan_snapshot_id,
+        descriptor.workspace_id,
+        descriptor.root_task_id,
+        descriptor.plan_generation,
+        descriptor.plan_content_hash,
+    ):
+        raise ValidationError(
+            "native revision fact base differs from its canonical plan"
+        )
+    return graph
+
+
+def _fact_fields(value: object, expected: set[str]) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValidationError("native revision fact shape is invalid")
+    return value
+
+
+def _restore_fact_alias(value: dict[str, object], native: str, canonical: str) -> None:
+    if native not in value or canonical in value:
+        raise ValidationError("native revision fact alias is missing or ambiguous")
+    value[canonical] = value.pop(native)
+
+
+def load_revision_planning_context(
+    uow, request: PlanningRequest, *, context_package=None
+) -> RevisionPlanningContextV1:
+    base = request.base_descriptor
+    if base is None:
+        raise ValueError("revision request has no exact base descriptor")
+    snapshot = uow.plans.get(base.plan_snapshot_id, request.workspace_id)
+    if snapshot is None:
+        raise ValueError("revision base plan snapshot is unavailable")
+    task_ids = tuple(
+        dict.fromkeys(
+            (
+                snapshot.root_task_id,
+                *(
+                    item.task_id
+                    for item in snapshot.subtasks
+                    if item.task_id is not None
+                ),
+            )
+        )
+    )
+    tasks = uow.tasks.get_many(task_ids, request.workspace_id)
+    worker_ids = tuple(
+        dict.fromkeys(
+            item.worker_item_id
+            for item in snapshot.worker_item_plans
+            if item.worker_item_id is not None
+        )
+    )
+    worker_items = tuple(
+        item
+        for item_id in worker_ids
+        for item in (uow.worker_items.get(item_id, request.workspace_id),)
+        if item is not None
+    )
+    executions = uow.executions.list_for_tasks(task_ids, request.workspace_id)
+    sessions = tuple(
+        session
+        for execution in executions
+        for session in (uow.sessions.get_active_for_execution(execution.id),)
+        if session is not None
+    )
+    context_refs = (
+        ()
+        if context_package is None
+        else (
+            ConfirmedContextPackageRefV1(
+                ref=context_package_reference(
+                    context_package.package_id, context_package.package_hash
+                ),
+                package_hash=context_package.package_hash,
+                context_version=context_package.context_version,
+            ),
+        )
+    )
+    return RevisionPlanningContextBuilder(
+        max_context_bytes=request.profile_snapshot.budget.max_context_bytes
+    ).build(
+        request=request,
+        snapshot=snapshot,
+        tasks=tasks,
+        worker_items=worker_items,
+        executions=executions,
+        sessions=sessions,
+        context_package_refs=context_refs,
+        adapter_capabilities=_adapter_capability_snapshots(sessions),
+    )
+
+
+def _adapter_capability_snapshots(
+    sessions: Sequence[ExecutionSession],
+) -> tuple[AdapterCapabilitySnapshotV1, ...]:
+    snapshots = []
+    for session in sessions:
+        profile = session.capability_snapshot
+        if profile is None:
+            continue
+        snapshots.append(
+            AdapterCapabilitySnapshotV1(
+                adapter_ref=f"worker-session:{session.id}",
+                interface_version="sidera.worker.v1",
+                config_version=session.adapter_config_version or 1,
+                capabilities=(
+                    f"input:{profile.input.value}",
+                    f"idempotency:{profile.idempotency.value}",
+                    f"resume:{profile.resume.value}",
+                    f"stop:{profile.stop.value}",
+                    f"sandbox:{profile.sandbox.value}",
+                    f"stability:{profile.stability.value}",
+                    *(
+                        f"context_package:{version}"
+                        for version in profile.context_package_versions
+                    ),
+                ),
+            )
+        )
+    return tuple(snapshots)
+
+
 class RevisionPlanningContextBuilder:
     """Build a deterministic planner view from already-loaded domain facts."""
 
@@ -390,14 +630,19 @@ class RevisionPlanningContextBuilder:
         executions: Sequence[Execution],
         sessions: Sequence[ExecutionSession],
         context_package_refs: Sequence[
-            ConfirmedContextPackageRefV1 | ContextMetadata | ContextMaterializationV1 | str
+            ConfirmedContextPackageRefV1
+            | ContextMetadata
+            | ContextMaterializationV1
+            | str
         ],
         adapter_capabilities: Sequence[AdapterCapabilitySnapshotV1],
     ) -> RevisionPlanningContextV1:
         if not isinstance(request, PlanningRequest):
             raise TypeError("revision planning context request must be typed")
         if request.kind is not PlanningRequestKind.REVISION:
-            raise ValidationError("revision planning context requires a revision request")
+            raise ValidationError(
+                "revision planning context requires a revision request"
+            )
         base = request.base_descriptor
         if base is None:
             raise ValidationError("revision planning context requires an exact base")
@@ -411,7 +656,9 @@ class RevisionPlanningContextBuilder:
             raise ValidationError("revision base generation does not match snapshot")
         actual_hash = plan_snapshot_content_hash(snapshot)
         if actual_hash != base.plan_content_hash:
-            raise ValidationError("revision base plan content hash does not match snapshot")
+            raise ValidationError(
+                "revision base plan content hash does not match snapshot"
+            )
 
         plan_payload = _normalize_plan_payload(snapshot.to_payload())
         task_facts = _build_task_facts(snapshot, tasks)
@@ -449,7 +696,11 @@ class RevisionPlanningContextBuilder:
         normalized_context_refs = tuple(
             sorted(
                 (_context_package_ref(item) for item in context_package_refs),
-                key=lambda item: (item.ref, item.package_hash or "", item.context_version or 0),
+                key=lambda item: (
+                    item.ref,
+                    item.package_hash or "",
+                    item.context_version or 0,
+                ),
             )
         )
         normalized_adapters = tuple(
@@ -519,7 +770,10 @@ def _build_worker_facts(
                 "revision planning context is missing current WorkerItem: "
                 f"{placement.worker_item_id}"
             )
-        if item.workspace_id != snapshot.workspace_id or item.root_task_id != snapshot.root_task_id:
+        if (
+            item.workspace_id != snapshot.workspace_id
+            or item.root_task_id != snapshot.root_task_id
+        ):
             raise ValidationError("WorkerItem does not belong to the revision root")
         facts.append(
             RevisionWorkerItemFactV1(
@@ -550,11 +804,16 @@ def _build_execution_facts(
     facts: list[RevisionExecutionFactV1] = []
     for execution in executions:
         if execution.id in seen:
-            raise ValidationError("revision planning context contains duplicate execution")
+            raise ValidationError(
+                "revision planning context contains duplicate execution"
+            )
         seen.add(execution.id)
         if execution.task_id not in task_ids:
             continue
-        if execution.worker_item_id is not None and execution.worker_item_id not in worker_ids:
+        if (
+            execution.worker_item_id is not None
+            and execution.worker_item_id not in worker_ids
+        ):
             continue
         if execution.status in TERMINAL_EXECUTION_STATUSES:
             continue
@@ -574,7 +833,13 @@ def _build_execution_facts(
                 adapter_forbidden=tuple(execution.adapter_forbidden),
             )
         )
-    facts.sort(key=lambda item: (str(item.task_id), str(item.worker_item_id), str(item.execution_id)))
+    facts.sort(
+        key=lambda item: (
+            str(item.task_id),
+            str(item.worker_item_id),
+            str(item.execution_id),
+        )
+    )
     return tuple(facts), {item.execution_id for item in facts}
 
 
@@ -587,7 +852,9 @@ def _build_session_facts(
     facts: list[RevisionSessionFactV1] = []
     for session in sessions:
         if session.id in seen:
-            raise ValidationError("revision planning context contains duplicate session")
+            raise ValidationError(
+                "revision planning context contains duplicate session"
+            )
         seen.add(session.id)
         if session.execution_id not in execution_ids:
             continue
@@ -610,7 +877,9 @@ def _build_session_facts(
     return tuple(facts)
 
 
-def _worker_capability_mapping(session: ExecutionSession) -> Mapping[str, object] | None:
+def _worker_capability_mapping(
+    session: ExecutionSession,
+) -> Mapping[str, object] | None:
     profile = session.capability_snapshot
     if profile is None:
         return None
@@ -664,7 +933,9 @@ def _unique_by_id[T](items: Sequence[T], label: str) -> dict[UUID, T]:
         if not isinstance(item_id, UUID):
             raise TypeError(f"{label} facts must expose a UUID id")
         if item_id in result:
-            raise ValidationError(f"revision planning context contains duplicate {label}")
+            raise ValidationError(
+                f"revision planning context contains duplicate {label}"
+            )
         result[item_id] = item
     return result
 
@@ -727,7 +998,11 @@ def _non_negative(value: object, field_name: str) -> int:
 
 
 def _aware(value: object, field_name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValidationError(f"{field_name} must be timezone aware")
     return value
 

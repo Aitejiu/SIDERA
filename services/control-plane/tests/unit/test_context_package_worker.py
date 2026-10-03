@@ -109,7 +109,9 @@ class FakeAssemblyRepository:
             ContextAssemblyStatus.RETRY_WAIT,
         }:
             return ()
-        attempt = request.attempt + int(request.status is ContextAssemblyStatus.RETRY_WAIT)
+        attempt = request.attempt + int(
+            request.status is ContextAssemblyStatus.RETRY_WAIT
+        )
         self.request = replace(
             request,
             status=ContextAssemblyStatus.ASSEMBLING,
@@ -204,6 +206,7 @@ class FakePlanningRun:
         self.version = 1
         self.error_code: str | None = None
         self.profile_snapshot = SimpleNamespace(
+            execution_mode="legacy",
             profile_id=PROFILE_ID,
             profile_key="test",
             profile_version=1,
@@ -271,7 +274,9 @@ class FakeUnitOfWork:
         )
         self.planning_runs = SimpleNamespace(
             get=lambda *_args, **_kwargs: state.run,
-            save=lambda run, previous_version: state.__setattr__("saved_run", (run, previous_version)),
+            save=lambda run, previous_version: state.__setattr__(
+                "saved_run", (run, previous_version)
+            ),
         )
         self.planning_requests = SimpleNamespace(
             get=lambda *_args, **_kwargs: state.planning_request,
@@ -294,7 +299,9 @@ class FakeUnitOfWork:
         self._state.active_uows -= 1
 
 
-def _worker(state: FakeState, catalog: FakeCatalog, *, max_attempts: int = 5) -> ContextPackageWorker:
+def _worker(
+    state: FakeState, catalog: FakeCatalog, *, max_attempts: int = 5
+) -> ContextPackageWorker:
     return ContextPackageWorker(
         uow_factory=lambda: FakeUnitOfWork(state),
         catalog=catalog,
@@ -480,7 +487,9 @@ def test_worker_adds_only_bounded_handoff_facts_to_execution_package() -> None:
             )
         ),
     )
-    worker = _worker(FakeState(_assembly_request()), FakeCatalog(FakeState(_assembly_request())))
+    worker = _worker(
+        FakeState(_assembly_request()), FakeCatalog(FakeState(_assembly_request()))
+    )
 
     facts = worker._execution_facts(uow, request)
 
@@ -506,7 +515,9 @@ def test_worker_rejects_a_stale_handoff_bundle_reference() -> None:
         worker_item_id=uuid4(),
         context_version=1,
     )
-    uow = SimpleNamespace(handoff_context_bundles=SimpleNamespace(get=lambda *_args, **_kwargs: None))
+    uow = SimpleNamespace(
+        handoff_context_bundles=SimpleNamespace(get=lambda *_args, **_kwargs: None)
+    )
 
     with pytest.raises(ContextAssemblyError, match="no longer available"):
         worker._handoff_facts(uow, request)

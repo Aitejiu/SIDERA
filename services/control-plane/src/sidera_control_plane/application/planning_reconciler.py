@@ -46,7 +46,10 @@ class PlanningReconciler:
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
-        if planning_context_ttl_seconds is not None and planning_context_ttl_seconds < 1:
+        if (
+            planning_context_ttl_seconds is not None
+            and planning_context_ttl_seconds < 1
+        ):
             raise ValueError("planning_context_ttl_seconds must be positive")
         self._uow_factory = uow_factory
         self._owner_id = owner_id
@@ -62,9 +65,7 @@ class PlanningReconciler:
         blocked = 0
         failed = 0
         with self._uow_factory() as uow:
-            expired_leases = uow.planning_leases.claim_expired(
-                now=now, limit=limit
-            )
+            expired_leases = uow.planning_leases.claim_expired(now=now, limit=limit)
             expired_run_ids = {lease.planning_run_id for lease in expired_leases}
             expired = len(expired_leases)
             for lease in expired_leases:
@@ -112,6 +113,45 @@ class PlanningReconciler:
         run.fencing_token = lease.fencing_token
         previous_request_version = request.version
         previous_run_version = run.version
+        if run.profile_snapshot.execution_mode == "native_profile":
+            link = uow.planning_authorities.get_link(
+                run.workspace_id, run.id, for_update=True
+            )
+            uncertain = (
+                link is not None
+                and not link.retry_boundary_closed
+                and link.status != "pending"
+            )
+            if uncertain:
+                uow.planning_authorities.save_link(
+                    link,
+                    status="cleanup_pending" if link.run_id is not None else "unknown",
+                    reason_code="native_lease_expired",
+                )
+            transition = request.block_run_unknown if uncertain else request.fail_run
+            transition(
+                run_id=run.id,
+                lease_id=lease.id,
+                fencing_token=lease.fencing_token,
+                error_code="native_lease_expired",
+                error_message="native planning lease expired without a committed result",
+                now=now,
+            )
+            uow.planning_runs.save(run, previous_run_version)
+            uow.planning_requests.save(request, previous_request_version)
+            self._record_event(
+                uow,
+                request=request,
+                event_type="PlanningRunUpdated",
+                payload={
+                    "planning_run_id": str(run.id),
+                    "status": run.status.value,
+                    "error_code": run.error_code,
+                    "retry_queued": False,
+                    "next_run_id": None,
+                },
+            )
+            return (0, int(uncertain), int(not uncertain))
         request.fail_run(
             run_id=run.id,
             lease_id=lease.id,
@@ -121,7 +161,7 @@ class PlanningReconciler:
             now=now,
         )
         uow.planning_runs.save(run, previous_run_version)
-        should_retry = self._should_retry(run, request, now)
+        should_retry = self._should_retry(run, request, now, uow=uow)
         new_run = None
         if should_retry:
             new_run = self._retry_request(uow, request, previous_request_version, now)
@@ -163,7 +203,7 @@ class PlanningReconciler:
             is not None
         ):
             return (0, 0, 0)
-        if not self._should_retry(run, request, now):
+        if not self._should_retry(run, request, now, uow=uow):
             return (0, 0, 1)
         previous_request_version = request.version
         new_run = self._retry_request(uow, request, previous_request_version, now)
@@ -232,7 +272,12 @@ class PlanningReconciler:
         )
 
     def _should_retry(
-        self, run: PlanningRun, request: PlanningRequest, now: datetime
+        self,
+        run: PlanningRun,
+        request: PlanningRequest,
+        now: datetime,
+        *,
+        uow: ControlPlaneUnitOfWork,
     ) -> bool:
         policy = request.profile_snapshot.retry_policy
         retries_used = max(
@@ -252,6 +297,17 @@ class PlanningReconciler:
             )
             if now < retry_at:
                 return False
+        if run.profile_snapshot.execution_mode == "native_profile":
+            link = uow.planning_authorities.get_link(run.workspace_id, run.id)
+            if link is None or not link.retry_boundary_closed:
+                return False
+            if run.error_code in {
+                "invalid_planner_output",
+                "invalid_result",
+                "proposal_schema_invalid",
+            }:
+                return policy.invalid_output_policy is InvalidOutputPolicy.RETRY
+            return run.error_code in {"timeout", "rate_limited"}
         if run.error_code == "unknown_outcome":
             return (
                 policy.unknown_outcome_policy is UnknownOutcomePolicy.RETRY

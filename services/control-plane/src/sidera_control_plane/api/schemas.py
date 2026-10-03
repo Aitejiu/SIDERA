@@ -60,6 +60,7 @@ from sidera_control_plane.application.plan_revision_queries import (
     RevisionTransitionPreviewView,
     RevisionWorkerItemChangeView,
 )
+from sidera_control_plane.application.planning_assignments import PlanningAssigneeChoice
 from sidera_control_plane.application.planning_metrics import (
     PlanningMetricsView,
 )
@@ -69,6 +70,7 @@ from sidera_control_plane.application.planning_queries import (
     PlanningClarificationView,
     PlanningCollaborationView,
     PlanningMaterializationView,
+    PlanningNativeRunView,
     PlanningProfileView,
     PlanningProposalView,
     PlanningRequestDetailView,
@@ -361,6 +363,21 @@ class RegisterPlanningProfilePayload(BaseModel):
     collaboration_runtime_config_version: int | None = Field(default=None, ge=1)
 
 
+class SubmitTaskGoalPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: NonEmptyString
+    objective: NonEmptyString
+    constraints: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    acceptance_criteria: tuple[NonEmptyString, ...] = Field(min_length=1)
+    requested_outputs: tuple[NonEmptyString, ...] = Field(min_length=1)
+    context_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    planning_profile_id: UUID
+    planning_profile_version: int = Field(gt=0, strict=True)
+    planner_agent_ref: ProfileRef
+    source_ref: NonEmptyString | None = None
+
+
 class SubmitPlanningRequestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -384,6 +401,7 @@ class SubmitPlanRevisionPayload(BaseModel):
     expected_base_content_hash: NonEmptyString
     objective: NonEmptyString
     constraints: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
+    context_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
     acceptance_criteria: tuple[NonEmptyString, ...] = Field(min_length=1)
     planning_profile_id: UUID
     planning_profile_version: int = Field(gt=0)
@@ -429,6 +447,7 @@ class ConfirmPlanningProposalPayload(BaseModel):
     proposal_content_hash: NonEmptyString
     profile_id: UUID
     profile_version: int = Field(ge=1)
+    assignee_bindings: tuple[PlanningAssigneeChoice, ...] = ()
 
 
 class ConfirmPlanRevisionPayload(BaseModel):
@@ -441,6 +460,7 @@ class ConfirmPlanRevisionPayload(BaseModel):
     expected_base_content_hash: NonEmptyString
     profile_id: UUID
     profile_version: int = Field(ge=1)
+    assignee_bindings: tuple[PlanningAssigneeChoice, ...] = ()
 
 
 class RetryBlockedPlanningRunPayload(BaseModel):
@@ -2976,6 +2996,9 @@ class CommandRequest(BaseModel):
         elif self.command_type == "SubmitPlanningRequest":
             self._require_create("workspace")
             parsed = SubmitPlanningRequestPayload.model_validate(self.payload)
+        elif self.command_type == "SubmitTaskGoal":
+            self._require_create("workspace")
+            parsed = SubmitTaskGoalPayload.model_validate(self.payload)
         elif self.command_type == "SubmitPlanRevision":
             self._require_mutation_target("task")
             parsed = SubmitPlanRevisionPayload.model_validate(self.payload)
@@ -3188,12 +3211,21 @@ class CommandRequest(BaseModel):
             parsed = payload_types[self.command_type].model_validate(self.payload)
         else:
             return self
+        omitted_bindings = "assignee_bindings" not in self.payload
+        omitted_context_refs = "context_refs" not in self.payload
         self.payload = dict(
             parsed.model_dump(
                 mode="json",
                 exclude_none=self.command_type == "RecoverWorkerHandoff",
             )
         )
+        if (
+            self.command_type in {"ConfirmPlanningProposal", "ConfirmPlanRevision"}
+            and omitted_bindings
+        ):
+            self.payload.pop("assignee_bindings")
+        if self.command_type == "SubmitPlanRevision" and omitted_context_refs:
+            self.payload.pop("context_refs")
         return self
 
     def _require_create(self, target_type: AggregateType) -> None:
@@ -3225,8 +3257,7 @@ class CommandRequest(BaseModel):
     def _require_requeue_target(self) -> None:
         if self.target_type != "notification_delivery":
             raise ValueError(
-                "RequeueNotificationDelivery requires "
-                "target_type=notification_delivery"
+                "RequeueNotificationDelivery requires target_type=notification_delivery"
             )
         if self.target_id is None:
             raise ValueError("RequeueNotificationDelivery requires target_id")
@@ -3280,9 +3311,7 @@ class CommandStatusResponse(BaseModel):
     target_type: AggregateType | None = None
     target_id: UUID | None = None
     expected_version: int | None = None
-    payload_sha256: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    payload_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     payload: dict[str, Any] | None = None
 
     @classmethod
@@ -3566,8 +3595,7 @@ class PlanningCollaborationResponse(BaseModel):
             runtime_interface=view.runtime_interface,
             runtime_config_version=view.runtime_config_version,
             input_groups=tuple(
-                PlanningInputGroupResponse.from_view(item)
-                for item in view.input_groups
+                PlanningInputGroupResponse.from_view(item) for item in view.input_groups
             ),
         )
 
@@ -3579,7 +3607,9 @@ class PlanningInputGroupCandidateResponse(BaseModel):
     priority: int
 
     @classmethod
-    def from_view(cls, candidate: InputGroupCandidateV1) -> "PlanningInputGroupCandidateResponse":
+    def from_view(
+        cls, candidate: InputGroupCandidateV1
+    ) -> "PlanningInputGroupCandidateResponse":
         return cls(
             worker_item_key=candidate.worker_item_key,
             priority=candidate.priority,
@@ -3595,9 +3625,7 @@ class PlanningInputGroupRequirementsResponse(BaseModel):
     evidence_status: str
 
     @classmethod
-    def from_view(
-        cls, group: InputGroupV1
-    ) -> "PlanningInputGroupRequirementsResponse":
+    def from_view(cls, group: InputGroupV1) -> "PlanningInputGroupRequirementsResponse":
         return cls(
             execution_status=group.requirements.execution_status.value,
             required_artifact_refs=group.requirements.required_artifact_refs,
@@ -4553,11 +4581,11 @@ class PlanningBriefResponse(BaseModel):
 class PlanningUsageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    input_tokens: int
-    output_tokens: int
-    cost_microunits: int
-    runtime_seconds: int
-    context_bytes: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_microunits: int | None
+    runtime_seconds: int | None
+    context_bytes: int | None
 
     @classmethod
     def from_view(cls, view: PlanningUsageView) -> "PlanningUsageResponse":
@@ -4567,6 +4595,30 @@ class PlanningUsageResponse(BaseModel):
             cost_microunits=view.cost_microunits,
             runtime_seconds=view.runtime_seconds,
             context_bytes=view.context_bytes,
+        )
+
+
+class PlanningNativeRunResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_operation_id: UUID
+    run_id: UUID | None
+    status: str
+    reason_code: str | None
+    event_cursor: int
+    response_id: UUID | None
+    closed: bool
+
+    @classmethod
+    def from_view(cls, view: PlanningNativeRunView) -> "PlanningNativeRunResponse":
+        return cls(
+            start_operation_id=view.start_operation_id,
+            run_id=view.run_id,
+            status=view.status,
+            reason_code=view.reason_code,
+            event_cursor=view.event_cursor,
+            response_id=view.response_id,
+            closed=view.closed,
         )
 
 
@@ -4581,7 +4633,7 @@ class PlanningRunResponse(BaseModel):
     operation_id: UUID
     status: str
     result_kind: str | None
-    capability_snapshot: PlanningCapabilityResponse
+    capability_snapshot: PlanningCapabilityResponse | None
     usage: PlanningUsageResponse
     provider_ref: str | None
     error_code: str | None
@@ -4589,6 +4641,9 @@ class PlanningRunResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     version: int
+    execution_mode: Literal["legacy", "native_profile"] = "legacy"
+    planner_agent_ref: ProfileRef | None = None
+    native_run: PlanningNativeRunResponse | None = None
 
     @classmethod
     def from_view(cls, view: PlanningRunView) -> "PlanningRunResponse":
@@ -4601,9 +4656,9 @@ class PlanningRunResponse(BaseModel):
             operation_id=view.operation_id,
             status=view.status,
             result_kind=view.result_kind,
-            capability_snapshot=PlanningCapabilityResponse.from_view(
-                view.capability_snapshot
-            ),
+            capability_snapshot=None
+            if view.capability_snapshot is None
+            else PlanningCapabilityResponse.from_view(view.capability_snapshot),
             usage=PlanningUsageResponse.from_view(view.usage),
             provider_ref=view.provider_ref,
             error_code=view.error_code,
@@ -4611,6 +4666,11 @@ class PlanningRunResponse(BaseModel):
             started_at=view.started_at,
             finished_at=view.finished_at,
             version=view.version,
+            execution_mode=view.execution_mode,
+            planner_agent_ref=view.planner_agent_ref,
+            native_run=None
+            if view.native_run is None
+            else PlanningNativeRunResponse.from_view(view.native_run),
         )
 
 
@@ -5184,7 +5244,9 @@ class ContextPackageResponse(BaseModel):
             manifest_schema_version=manifest.manifest_schema_version,
             result_input_manifest=(
                 jsonable_encoder(manifest.result_input_manifest.to_mapping())
-                if isinstance(manifest, (ContextPackageManifestV2, ContextPackageManifestV3))
+                if isinstance(
+                    manifest, (ContextPackageManifestV2, ContextPackageManifestV3)
+                )
                 and manifest.result_input_manifest is not None
                 else None
             ),
@@ -5512,10 +5574,10 @@ class PlanningOutcomeMetricsResponse(BaseModel):
 
 
 class PlanningUsageMetricsResponse(BaseModel):
-    input_tokens: int
-    output_tokens: int
-    cost_microunits: int
-    context_bytes: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_microunits: int | None
+    context_bytes: int | None
 
 
 class PlanningLifecycleMetricsResponse(BaseModel):
@@ -6051,13 +6113,13 @@ class NotificationThreadDetailResponse(BaseModel):
             thread=NotificationThreadResponse.from_view(view.thread),
             facts=NotificationFactPageResponse(
                 items=tuple(
-                    NotificationFactResponse.from_view(item) for item in view.facts.items
+                    NotificationFactResponse.from_view(item)
+                    for item in view.facts.items
                 ),
                 next_cursor=view.facts.next_cursor,
             ),
             deliveries=tuple(
-                NotificationDeliveryResponse.from_view(item)
-                for item in view.deliveries
+                NotificationDeliveryResponse.from_view(item) for item in view.deliveries
             ),
             notification_ref=view.thread.notification_ref,
             available_commands=cast(

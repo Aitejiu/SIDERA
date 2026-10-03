@@ -61,6 +61,7 @@ from sidera_control_plane.api.schemas import (
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
     SubmitPlanRevisionPayload,
+    SubmitTaskGoalPayload,
     UpdateUnstartedAgentBindingPayload,
 )
 from sidera_control_plane.config import Settings
@@ -73,6 +74,7 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ),
     ("RegisterPlanningProfile", RegisterPlanningProfilePayload),
     ("SubmitPlanningRequest", SubmitPlanningRequestPayload),
+    ("SubmitTaskGoal", SubmitTaskGoalPayload),
     ("SubmitPlanRevision", SubmitPlanRevisionPayload),
     ("CancelPlanningRequest", CancelPlanningRequestPayload),
     ("AnswerPlanningClarification", AnswerPlanningClarificationPayload),

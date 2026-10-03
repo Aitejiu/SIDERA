@@ -64,10 +64,10 @@ class PlanningOutcomeMetricsView:
 
 @dataclass(frozen=True, slots=True)
 class PlanningUsageMetricsView:
-    input_tokens: int
-    output_tokens: int
-    cost_microunits: int
-    context_bytes: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_microunits: int | None
+    context_bytes: int | None
 
 
 @dataclass(frozen=True, slots=True)

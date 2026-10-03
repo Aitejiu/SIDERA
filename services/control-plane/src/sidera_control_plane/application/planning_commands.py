@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from sidera_agents.contracts import ProfileRef
+from sidera_agents.errors import AgentError
+from sidera_agents.ports import ExecutionAuthorizer
+
+from sidera_control_plane.application.assignments import (
+    AssignmentCommandHandler,
+    TrustedAssignmentIdentity,
+    require_trusted_assignment_identity,
+)
 from sidera_control_plane.application.context_requests import (
     build_planning_context_assembly_request,
 )
@@ -14,6 +24,11 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
 from sidera_control_plane.application.notification_commands import (
     bind_planning_request_origin,
     copy_planning_request_origin_to_root,
+)
+from sidera_control_plane.application.planning_assignments import (
+    PlanningAssigneeChoice,
+    parse_assignee_bindings,
+    prepare_planning_assignments,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.proposal_materializer import (
@@ -27,6 +42,7 @@ from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
     work_context_event,
 )
+from sidera_control_plane.domain.agent_bindings import AssignmentDenied
 from sidera_control_plane.domain.collaboration import (
     CollaborationRuntimeBindingSnapshot,
 )
@@ -61,7 +77,9 @@ from sidera_control_plane.domain.planning import (
     PlanningRun,
     PlanningRunLeaseStatus,
     PlanningRunStatus,
+    TaskGoalSubmission,
 )
+from sidera_control_plane.domain.planning_authority import NativePlanningCleanupPending
 from sidera_control_plane.domain.planning_profiles import (
     InvalidOutputPolicy,
     PlanningBudgetPolicy,
@@ -71,11 +89,26 @@ from sidera_control_plane.domain.planning_profiles import (
     UnknownOutcomePolicy,
 )
 from sidera_control_plane.domain.planning_proposals import ProposalRevision
+from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.work_context import (
     WorkContext,
     WorkContextRevision,
     WorkContextRevisionReason,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningCommandTarget:
+    workspace_id: UUID
+    principal_id: str
+    planning_request_id: UUID | None
+    planning_profile_id: UUID
+    planning_profile_version: int
+    planner_agent_ref: ProfileRef
+    proposal_content_hash: str | None
+    context_refs: tuple[str, ...]
+    root_task_id: UUID | None = None
+    assignee_bindings: tuple[PlanningAssigneeChoice, ...] = ()
 
 
 class PlanningCommandHandler:
@@ -85,6 +118,7 @@ class PlanningCommandHandler:
             "RegisterCollaborationRuntimeModule",
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
+            "SubmitTaskGoal",
             "SubmitPlanRevision",
             "CancelPlanningRequest",
             "AnswerPlanningClarification",
@@ -108,6 +142,9 @@ class PlanningCommandHandler:
         planning_context_ttl_seconds: int = 1_800,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
         result_inputs_enabled: bool = False,
+        assignment_handler: AssignmentCommandHandler | None = None,
+        identity: TrustedAssignmentIdentity | None = None,
+        authorizer: ExecutionAuthorizer | None = None,
     ) -> None:
         if planning_context_ttl_seconds < 1:
             raise ValueError("planning_context_ttl_seconds must be positive")
@@ -126,10 +163,201 @@ class PlanningCommandHandler:
             work_context_factory or WorkContextRevisionFactory()
         )
         self._candidate_submission_service = candidate_submission_service
+        self._assignments = assignment_handler
+        self._identity = identity
+        self._authorizer = authorizer
+
+    def preflight(self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope) -> None:
+        if (
+            envelope.command_type not in self.command_types
+            or envelope.command_type.startswith("Register")
+        ):
+            return
+        request = None
+        root_task_id = None
+        if envelope.command_type in {
+            "SubmitTaskGoal",
+            "SubmitPlanningRequest",
+            "SubmitPlanRevision",
+        }:
+            field = (
+                "profile"
+                if envelope.command_type == "SubmitPlanningRequest"
+                else "planning_profile"
+            )
+            policy = uow.planning_profiles.get(
+                _uuid(envelope.payload, field + "_id"),
+                envelope.workspace_id,
+                version=_positive_int(envelope.payload, field + "_version"),
+            )
+            if policy is None:
+                raise NotFound("planning profile not found")
+            if policy.execution_mode != "native_profile":
+                if envelope.command_type != "SubmitTaskGoal":
+                    return
+                raise AssignmentDenied("native planning policy required")
+            snapshot = policy.snapshot()
+            if envelope.command_type == "SubmitTaskGoal":
+                try:
+                    pin = ProfileRef.model_validate(
+                        envelope.payload.get("planner_agent_ref")
+                    )
+                except ValueError:
+                    raise ValidationError(
+                        "exact planner Agent Profile reference required"
+                    ) from None
+                if pin != snapshot.planner_agent_ref:
+                    raise AssignmentDenied(
+                        "planner Agent Profile differs from selected policy"
+                    )
+            elif envelope.command_type == "SubmitPlanRevision":
+                root_task_id = _uuid(envelope.payload, "root_task_id")
+                root = uow.tasks.get(root_task_id, envelope.workspace_id)
+                if (
+                    envelope.target_type != "task"
+                    or envelope.target_id != root_task_id
+                    or root is None
+                    or root.workspace_id != envelope.workspace_id
+                ):
+                    raise AssignmentDenied("exact workspace root required")
+            context_refs = _string_tuple(
+                envelope.payload.get("context_refs", ()), "context_refs"
+            )
+            action = "planning.submit"
+        else:
+            if envelope.command_type == "RetryBlockedPlanningRun":
+                if envelope.target_type != "planning_run" or envelope.target_id is None:
+                    raise ValidationError(
+                        "RetryBlockedPlanningRun requires a planning_run target"
+                    )
+                run = uow.planning_runs.get(envelope.target_id, envelope.workspace_id)
+                if run is None:
+                    raise NotFound("planning run not found")
+                request = uow.planning_requests.get(
+                    run.planning_request_id, envelope.workspace_id
+                )
+                if request is None:
+                    raise NotFound("planning request not found")
+                if (
+                    run.workspace_id,
+                    request.workspace_id,
+                    run.planning_request_id,
+                ) != (envelope.workspace_id, envelope.workspace_id, request.id):
+                    raise AssignmentDenied("planning Run parent scope differs")
+                if (
+                    run.profile_snapshot.execution_mode == "native_profile"
+                    and run.profile_snapshot != request.profile_snapshot
+                ):
+                    raise AssignmentDenied(
+                        "planning Run policy differs from its saved request"
+                    )
+            elif envelope.command_type in {
+                "CancelPlanningRequest",
+                "AnswerPlanningClarification",
+                "RequestProposalRevision",
+                "RejectPlanningProposal",
+                "ConfirmPlanningProposal",
+                "ConfirmPlanRevision",
+            }:
+                if (
+                    envelope.target_type != "planning_request"
+                    or envelope.target_id is None
+                ):
+                    raise ValidationError(
+                        "saved planning command requires a planning_request target"
+                    )
+                request = uow.planning_requests.get(
+                    envelope.target_id, envelope.workspace_id
+                )
+                if request is None:
+                    raise NotFound("planning request not found")
+            else:
+                return
+            if (
+                request is None
+                or request.profile_snapshot.execution_mode != "native_profile"
+            ):
+                return
+            snapshot = request.profile_snapshot
+            goal = uow.task_goals.get(envelope.workspace_id, request.id)
+            root_task_id = request.root_task_id if goal is None else goal.root_task_id
+            context_refs = request.briefs[-1].context_refs
+            action = (
+                "planning.confirm"
+                if envelope.command_type
+                in {"ConfirmPlanningProposal", "ConfirmPlanRevision"}
+                else "planning.write"
+            )
+        require_trusted_assignment_identity(envelope, self._identity)
+        if self._authorizer is None or self._assignments is None:
+            raise AssignmentDenied("trusted native planning services required")
+        if action == "planning.confirm" and (
+            self._identity.actor_type != "user"
+            or self._identity.principal_id != self._local_actor_id
+            or self._local_actor_type != "user"
+        ):
+            raise AssignmentDenied("verified human confirmation required")
+        bindings = (
+            parse_assignee_bindings(envelope.payload.get("assignee_bindings", ()))
+            if action == "planning.confirm"
+            else ()
+        )
+        target = PlanningCommandTarget(
+            envelope.workspace_id,
+            self._identity.principal_id,
+            None if request is None else request.id,
+            snapshot.profile_id,
+            snapshot.profile_version,
+            snapshot.planner_agent_ref,
+            _optional_string(
+                envelope.payload.get(
+                    "proposal_content_hash",
+                    envelope.payload.get("expected_proposal_content_hash"),
+                )
+            ),
+            context_refs,
+            root_task_id,
+            bindings,
+        )
+        try:
+            self._authorizer.require(self._identity.grant_id, action, target)
+        except AgentError:
+            raise AssignmentDenied("native planning scope denied") from None
+        self._assignments.resolve_profile(
+            envelope.workspace_id,
+            snapshot.planner_agent_ref.profile_id,
+            snapshot.planner_agent_ref.revision,
+        )
+        for choice in bindings:
+            if choice.assignee_kind == "human":
+                if choice.assignee_id != self._identity.principal_id:
+                    raise AssignmentDenied(
+                        "human must be the trusted current local user"
+                    )
+            else:
+                self._assignments.resolve_profile(
+                    envelope.workspace_id,
+                    UUID(choice.assignee_id),
+                    choice.profile_revision,
+                )
+        if action == "planning.confirm":
+            materialized = uow.proposal_materializations.get_by_request(
+                request.id, envelope.workspace_id
+            )
+            if materialized is not None:
+                for kind, mapping in (
+                    ("subtask", materialized.subtask_task_mapping),
+                    ("worker_item", materialized.worker_item_mapping),
+                ):
+                    for target_id in mapping.values():
+                        self._assignments.authorize_target(
+                            envelope.workspace_id, kind, target_id
+                        )
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        self.preflight(uow, envelope)
         if envelope.command_type == "RegisterPlannerModule":
             return self._register_module(uow, envelope)
         if envelope.command_type == "RegisterCollaborationRuntimeModule":
@@ -138,6 +366,8 @@ class PlanningCommandHandler:
             return self._register_profile(uow, envelope)
         if envelope.command_type == "SubmitPlanningRequest":
             return self._submit_request(uow, envelope)
+        if envelope.command_type == "SubmitTaskGoal":
+            return self._submit_goal(uow, envelope)
         if envelope.command_type == "SubmitPlanRevision":
             return self._submit_plan_revision(uow, envelope)
         if envelope.command_type == "CancelPlanningRequest":
@@ -401,8 +631,63 @@ class PlanningCommandHandler:
             },
         )
 
-    def _submit_request(
+    def _submit_goal(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> CommandResult:
+        payload = envelope.payload
+        if set(payload) - {
+            "title",
+            "objective",
+            "constraints",
+            "acceptance_criteria",
+            "requested_outputs",
+            "context_refs",
+            "planning_profile_id",
+            "planning_profile_version",
+            "planner_agent_ref",
+            "source_ref",
+        }:
+            raise ValidationError("invalid task goal payload")
+        if (
+            envelope.target_type != "workspace"
+            or envelope.target_id is not None
+            or envelope.expected_version is not None
+        ):
+            raise ValidationError("SubmitTaskGoal requires a workspace create command")
+        policy = uow.planning_profiles.get(
+            _uuid(payload, "planning_profile_id"),
+            envelope.workspace_id,
+            version=_positive_int(payload, "planning_profile_version"),
+        )
+        root = Task.create(
+            task_id=uuid4(),
+            workspace_id=envelope.workspace_id,
+            title=_required_string(payload, "title"),
+            description=_required_string(payload, "objective"),
+            acceptance_criteria=_string_tuple(
+                payload.get("acceptance_criteria", ()), "acceptance_criteria"
+            ),
+            priority=policy.default_priority,
+            requested_by=self._identity.principal_id,
+        )
+        uow.tasks.add(root)
+        normalized = replace(
+            envelope,
+            payload={
+                **payload,
+                "profile_id": str(policy.id),
+                "profile_version": policy.version,
+                "source_type": "task_goal",
+            },
+        )
+        return self._submit_request(uow, normalized, submitted_root=root)
+
+    def _submit_request(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        envelope: CommandEnvelope,
+        *,
+        submitted_root: Task | None = None,
     ) -> CommandResult:
         payload = envelope.payload
         profile_id = _uuid(payload, "profile_id")
@@ -413,22 +698,7 @@ class PlanningCommandHandler:
         if profile is None:
             raise NotFound("planning profile not found")
         profile.assert_user_selectable()
-        instance = uow.modules.get_instance(
-            profile.planner_module_instance_id, envelope.workspace_id
-        )
-        if instance is None:
-            raise ValidationError("planning profile module instance is unavailable")
-        definition = uow.modules.get_definition(
-            instance.definition_id, envelope.workspace_id
-        )
-        if definition is None or not isinstance(
-            definition.capabilities, PlannerAdapterCapabilityProfile
-        ):
-            raise ValidationError("planning profile planner capability is unavailable")
-        snapshot = profile.snapshot(
-            definition.capabilities,
-            module_instance_config_version=instance.config_version,
-        )
+        snapshot = self._policy_snapshot(uow, profile)
         request = PlanningRequest.create(
             request_id=uuid4(),
             workspace_id=envelope.workspace_id,
@@ -449,6 +719,31 @@ class PlanningCommandHandler:
             run_id=uuid4(),
             now=self._clock(),
         )
+        return self._save_initial_request(
+            uow, envelope, profile, request, submitted_root
+        )
+
+    def _policy_snapshot(self, uow, profile):
+        if profile.execution_mode == "native_profile":
+            return profile.snapshot()
+        instance = uow.modules.get_instance(
+            profile.planner_module_instance_id, profile.workspace_id
+        )
+        if instance is None:
+            raise ValidationError("planning profile module instance is unavailable")
+        definition = uow.modules.get_definition(
+            instance.definition_id, profile.workspace_id
+        )
+        if definition is None or not isinstance(
+            definition.capabilities, PlannerAdapterCapabilityProfile
+        ):
+            raise ValidationError("planning profile planner capability is unavailable")
+        return profile.snapshot(
+            definition.capabilities,
+            module_instance_config_version=instance.config_version,
+        )
+
+    def _save_initial_request(self, uow, envelope, profile, request, submitted_root):
         work_context_revision = self._work_context_factory.create(
             work_context_id=uuid4(),
             workspace_id=envelope.workspace_id,
@@ -477,6 +772,29 @@ class PlanningCommandHandler:
                 created_at=request.created_at,
             )
         )
+        root_event = None
+        if submitted_root is not None:
+            uow.task_goals.add(
+                TaskGoalSubmission(
+                    request.workspace_id,
+                    submitted_root.id,
+                    request.id,
+                    submitted_root.version,
+                    self._identity.principal_id,
+                    self._identity.grant_id,
+                )
+            )
+            root_event = _event(
+                envelope,
+                aggregate_type="task",
+                aggregate_id=submitted_root.id,
+                aggregate_version=submitted_root.version,
+                event_type="TaskCreated",
+                payload={
+                    "title": submitted_root.title,
+                    "planning_request_id": str(request.id),
+                },
+            )
         context_event = work_context_event(
             envelope,
             context=work_context,
@@ -499,13 +817,21 @@ class PlanningCommandHandler:
                 "source_ref": request.source_ref,
             },
         )
+        if root_event is not None:
+            uow.events.append_with_outbox(root_event)
         uow.events.append_with_outbox(context_event)
         uow.events.append_with_outbox(event)
         return CommandResult(
             command_id=envelope.id,
-            aggregate_id=request.id,
-            aggregate_version=request.version,
-            event_ids=(context_event.id, event.id),
+            aggregate_id=request.id if submitted_root is None else submitted_root.id,
+            aggregate_version=request.version
+            if submitted_root is None
+            else submitted_root.version,
+            event_ids=tuple(
+                item.id
+                for item in (root_event, context_event, event)
+                if item is not None
+            ),
             data={
                 "planning_request_id": str(request.id),
                 "planning_run_id": str(request.current_run_id),
@@ -513,6 +839,18 @@ class PlanningCommandHandler:
                 "work_context_id": str(work_context.id),
                 "work_context_revision": work_context.current_revision_number,
                 "work_context_content_hash": work_context_revision.content_hash,
+                **(
+                    {}
+                    if submitted_root is None
+                    else {
+                        "root_task_id": str(submitted_root.id),
+                        "planning_profile_id": str(profile.id),
+                        "planning_profile_version": profile.version,
+                        "planner_agent_ref": request.profile_snapshot.planner_agent_ref.model_dump(
+                            mode="json"
+                        ),
+                    }
+                ),
             },
         )
 
@@ -616,29 +954,15 @@ class PlanningCommandHandler:
             raise ValidationError(
                 "plan revision requires a planning profile with proposal schema v3, v4, v5, or v6"
             )
-        instance = uow.modules.get_instance(
-            profile.planner_module_instance_id, envelope.workspace_id
-        )
-        if instance is None:
-            raise ValidationError("planning profile module instance is unavailable")
-        definition = uow.modules.get_definition(
-            instance.definition_id, envelope.workspace_id
-        )
-        if definition is None or not isinstance(
-            definition.capabilities, PlannerAdapterCapabilityProfile
-        ):
-            raise ValidationError("planning profile planner capability is unavailable")
+        profile_snapshot = self._policy_snapshot(uow, profile)
         if (
-            profile.proposal_schema_version
-            not in definition.capabilities.proposal_schema_versions
+            profile.execution_mode != "native_profile"
+            and profile.proposal_schema_version
+            not in profile_snapshot.planner_capabilities.proposal_schema_versions
         ):
             raise ValidationError(
                 "planner adapter does not support the selected revision proposal schema"
             )
-        profile_snapshot = profile.snapshot(
-            definition.capabilities,
-            module_instance_config_version=instance.config_version,
-        )
 
         work_context = uow.work_contexts.get_by_root_task(
             root_task_id, envelope.workspace_id, for_update=True
@@ -672,7 +996,7 @@ class PlanningCommandHandler:
             acceptance_criteria=_string_tuple(
                 payload.get("acceptance_criteria", ()), "acceptance_criteria"
             ),
-            context_refs=(),
+            context_refs=_string_tuple(payload.get("context_refs", ()), "context_refs"),
             requested_outputs=("plan",),
             source_type="plan_revision",
             source_ref=str(envelope.id),
@@ -1138,6 +1462,14 @@ class PlanningCommandHandler:
         self._assert_result_input_confirmation_allowed(
             uow, request=request, proposal=proposal, profile=profile
         )
+        assignments = prepare_planning_assignments(
+            uow,
+            request=request,
+            proposal=proposal,
+            envelope=envelope,
+            handler=self._assignments,
+            identity=self._identity,
+        )
         result = self._materializer.materialize(
             uow,
             request=request,
@@ -1145,6 +1477,8 @@ class PlanningCommandHandler:
             profile=profile,
             envelope=envelope,
             now=self._clock(),
+            assignments=assignments,
+            defer_events=True,
         )
         materialization = result.materialization
         copy_planning_request_origin_to_root(
@@ -1165,6 +1499,8 @@ class PlanningCommandHandler:
                 causation_id=envelope.id,
                 actor_type=envelope.actor_type,
             )
+        for event in result.pending_events:
+            uow.events.append_with_outbox(event)
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -1194,6 +1530,15 @@ class PlanningCommandHandler:
                     for key, value in materialization.execution_request_mapping.items()
                 },
                 "deep_link": materialization.deep_link,
+                **(
+                    {
+                        "assignee_bindings": [
+                            binding.to_mapping() for binding in result.bindings
+                        ]
+                    }
+                    if assignments is not None
+                    else {}
+                ),
             },
         )
 
@@ -1216,6 +1561,14 @@ class PlanningCommandHandler:
         self._assert_result_input_confirmation_allowed(
             uow, request=request, proposal=proposal, profile=profile
         )
+        assignments = prepare_planning_assignments(
+            uow,
+            request=request,
+            proposal=proposal,
+            envelope=envelope,
+            handler=self._assignments,
+            identity=self._identity,
+        )
         now = self._clock()
         try:
             result = self._revision_materializer.materialize(
@@ -1225,6 +1578,8 @@ class PlanningCommandHandler:
                 profile=profile,
                 envelope=envelope,
                 now=now,
+                assignments=assignments,
+                defer_events=True,
             )
         except RevisionStaleBase as exc:
             previous_request_version = request.version
@@ -1261,6 +1616,8 @@ class PlanningCommandHandler:
             )
 
         materialization = result.materialization
+        for event in result.pending_events:
+            uow.events.append_with_outbox(event)
         return CommandResult(
             command_id=envelope.id,
             aggregate_id=request.id,
@@ -1288,6 +1645,15 @@ class PlanningCommandHandler:
                 },
                 "execution_request_mapping": {},
                 "deep_link": materialization.deep_link,
+                **(
+                    {
+                        "assignee_bindings": [
+                            binding.to_mapping() for binding in result.bindings
+                        ]
+                    }
+                    if assignments is not None
+                    else {}
+                ),
             },
         )
 
@@ -1308,6 +1674,46 @@ class PlanningCommandHandler:
             raise NotFound("planning request not found")
         if request.runs[-1].id != run.id:
             raise ValidationError("blocked run is not the current planning run")
+        if run.profile_snapshot.execution_mode == "native_profile":
+            link = uow.planning_authorities.get_link(
+                run.workspace_id, run.id, for_update=True
+            )
+            if link is None or not link.retry_boundary_closed:
+                raise NativePlanningCleanupPending(
+                    "original native planning boundary is not closed"
+                )
+            policy = run.profile_snapshot.retry_policy
+            invalid_output = run.error_code in {
+                "invalid_planner_output",
+                "invalid_result",
+                "proposal_schema_invalid",
+            }
+            allowed = (
+                invalid_output
+                and policy.invalid_output_policy is InvalidOutputPolicy.RETRY
+            ) or run.error_code in {"timeout", "rate_limited"}
+            retries_used = max(
+                sum(
+                    candidate.brief_revision == run.brief_revision
+                    for candidate in request.runs
+                )
+                - 1,
+                0,
+            )
+            if not allowed or retries_used >= policy.max_retries:
+                raise ValidationError(
+                    "native planning policy does not permit this classified retry"
+                )
+            if run.finished_at is not None:
+                retry_at = run.finished_at + timedelta(
+                    seconds=policy.backoff_seconds[
+                        min(retries_used, len(policy.backoff_seconds) - 1)
+                    ]
+                )
+                if self._clock() < retry_at:
+                    raise ValidationError(
+                        "native planning retry backoff has not elapsed"
+                    )
         previous_request_version = request.version
         request.retry_blocked(new_run_id=uuid4(), now=self._clock())
         new_run = request.runs[-1]
@@ -1539,10 +1945,10 @@ class PlanningCommandHandler:
             return
         proposal_schema_version = getattr(proposal, "proposal_schema_version", 0)
         profile_schema_version = getattr(profile, "proposal_schema_version", 0)
-        if (
-            proposal_schema_version not in {5, 6}
-            and profile_schema_version not in {5, 6}
-        ):
+        if proposal_schema_version not in {5, 6} and profile_schema_version not in {
+            5,
+            6,
+        }:
             return
         existing = uow.proposal_materializations.get_by_request(
             request.id, request.workspace_id

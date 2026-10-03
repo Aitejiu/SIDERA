@@ -333,17 +333,26 @@ def _require_demo_runtime_configuration(
         )
     payload = getattr(request, "payload", {})
     if not isinstance(payload, dict):
-        raise DemoRuntimeBindingForbidden("demo runtime configuration payload is invalid")
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime configuration payload is invalid"
+        )
     allowed_adapter_ids = frozenset(
         manifest.module_ids[key] for key in _DEMO_WORKER_ADAPTER_KEYS[worker_key]
     )
     expected_workspace = manifest.module_ids["workspace"]
-    adapter_id = _demo_uuid(payload.get("adapter_module_instance_id"), "adapter_module_instance_id")
-    workspace_id = _demo_uuid(payload.get("workspace_module_instance_id"), "workspace_module_instance_id")
+    adapter_id = _demo_uuid(
+        payload.get("adapter_module_instance_id"), "adapter_module_instance_id"
+    )
+    workspace_id = _demo_uuid(
+        payload.get("workspace_module_instance_id"), "workspace_module_instance_id"
+    )
     if adapter_id not in allowed_adapter_ids:
         raise DemoRuntimeBindingForbidden(
             "demo runtime configuration adapter is outside the allowed provider binding",
-            details={"worker_key": worker_key, "adapter_module_instance_id": str(adapter_id)},
+            details={
+                "worker_key": worker_key,
+                "adapter_module_instance_id": str(adapter_id),
+            },
         )
     if workspace_id != expected_workspace:
         raise DemoRuntimeBindingForbidden(
@@ -458,8 +467,12 @@ def get_command_service(
         NativeWorkerServices | None, Depends(get_native_worker_services)
     ] = None,
 ) -> CommandService:
-    assignments = AssignmentCommandHandler(catalog=agent_catalog, runtimes=agent_runtimes,
-        identity=assignment_identity, authorizer=assignment_authorizer)
+    assignments = AssignmentCommandHandler(
+        catalog=agent_catalog,
+        runtimes=agent_runtimes,
+        identity=assignment_identity,
+        authorizer=assignment_authorizer,
+    )
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
@@ -481,6 +494,27 @@ def get_command_service(
             max_projection_bytes=settings.collaboration_max_projection_bytes
         ),
     )
+    planning = PlanningCommandHandler(
+        local_actor_type=settings.local_actor_type,
+        local_actor_id=settings.local_actor_id,
+        clock=lambda: datetime.now(UTC),
+        planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
+        result_inputs_enabled=settings.result_inputs_enabled,
+        candidate_submission_service=KnowledgeCandidateSubmissionService(
+            FileCandidateProposalSpool(
+                settings.knowledge_candidate_spool_dir,
+                quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
+            )
+        ),
+        assignment_handler=assignments,
+        identity=assignment_identity,
+        authorizer=assignment_authorizer,
+    )
+
+    def preflight(uow, envelope):
+        assignments.preflight(uow, envelope)
+        planning.preflight(uow, envelope)
+
     return CommandService(
         factory,
         (
@@ -518,19 +552,7 @@ def get_command_service(
                 factory,
                 clock=lambda: datetime.now(UTC),
             ),
-            PlanningCommandHandler(
-                local_actor_type=settings.local_actor_type,
-                local_actor_id=settings.local_actor_id,
-                clock=lambda: datetime.now(UTC),
-                planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
-                result_inputs_enabled=settings.result_inputs_enabled,
-                candidate_submission_service=KnowledgeCandidateSubmissionService(
-                    FileCandidateProposalSpool(
-                        settings.knowledge_candidate_spool_dir,
-                        quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
-                    )
-                ),
-            ),
+            planning,
             NotificationCommandHandler(
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
@@ -561,7 +583,7 @@ def get_command_service(
                 approver=governance_approver,
             ),
         ),
-        preflight=assignments.preflight,
+        preflight=preflight,
     )
 
 

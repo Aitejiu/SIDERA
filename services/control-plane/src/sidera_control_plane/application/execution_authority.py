@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -200,3 +201,211 @@ class ExecutionAuthorityReader:
                     _deny()
             else:
                 _deny()
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningActionTarget:
+    workspace_id: UUID
+    principal_id: str
+    planning_request_id: UUID
+    planning_run_id: UUID
+    planning_profile_id: UUID
+    planning_profile_version: int
+    profile_ref: ProfileRef
+    operation_id: UUID
+    target: object
+
+
+def require_active_planning(
+    uow, run, request, *, now, owner_id=None, lease_id=None, fencing_token=None
+):
+    lease = uow.planning_leases.get_active_for_run(run.id, run.workspace_id)
+    if (
+        request.id != run.planning_request_id
+        or request.workspace_id != run.workspace_id
+        or request.current_run_id != run.id
+        or request.current_brief_revision != run.brief_revision
+        or request.status.value != "planning"
+        or run.status.value != "running"
+        or run.profile_snapshot != request.profile_snapshot
+        or run.profile_snapshot.execution_mode != "native_profile"
+        or lease is None
+        or lease.status.value != "active"
+        or lease.expires_at <= now
+        or not owner_id
+        or type(lease_id) is not UUID
+        or type(fencing_token) is not int
+        or fencing_token < 1
+        or lease.owner_id != owner_id
+        or lease.id != lease_id
+        or lease.fencing_token != fencing_token
+        or lease.planning_run_id != run.id
+        or lease.workspace_id != run.workspace_id
+    ):
+        _deny()
+    return lease
+
+
+class PlanningAuthorityReader:
+    def __init__(self, uow_factory, *, principal, authorizer, clock=None):
+        self._uow_factory, self._principal, self._authorizer = (
+            uow_factory,
+            principal,
+            authorizer,
+        )
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def require(self, grant_id: UUID, action: str, target: object) -> None:
+        if not isinstance(grant_id, UUID) or not self._principal():
+            _deny()
+        with self._uow_factory() as uow:
+            authority = uow.planning_authorities.get(grant_id)
+            if authority is None or authority.principal_id != self._principal():
+                _deny()
+            run = uow.planning_runs.get(
+                authority.planning_run_id, authority.workspace_id
+            )
+            request = uow.planning_requests.get(
+                authority.planning_request_id, authority.workspace_id
+            )
+            link = uow.planning_authorities.get_link(
+                authority.workspace_id, authority.planning_run_id
+            )
+            if (
+                run is None
+                or request is None
+                or link is None
+                or (
+                    link.authority_id,
+                    link.start_operation_id,
+                    link.profile_ref,
+                    run.planning_request_id,
+                    run.operation_id,
+                    run.profile_snapshot.profile_id,
+                    run.profile_snapshot.profile_version,
+                    run.profile_snapshot.planner_agent_ref,
+                    run.profile_snapshot.execution_mode,
+                )
+                != (
+                    authority.id,
+                    authority.operation_id,
+                    authority.profile_ref,
+                    request.id,
+                    authority.operation_id,
+                    authority.planning_profile_id,
+                    authority.planning_profile_version,
+                    authority.profile_ref,
+                    "native_profile",
+                )
+                or link.start_request.workspace != authority.execution_workspace
+            ):
+                _deny()
+            if action in {"run.read", "run.stop"}:
+                if (
+                    type(target) is not UUID
+                    or target != authority.workspace_id
+                    or action not in authority.actions
+                ):
+                    _deny()
+                return
+            if (
+                authority.revoked
+                or action not in authority.actions
+                or self._authorizer is None
+            ):
+                _deny()
+            require_active_planning(
+                uow,
+                run,
+                request,
+                now=self._clock(),
+                owner_id=authority.owner_id,
+                lease_id=authority.lease_id,
+                fencing_token=authority.fencing_token,
+            )
+            if action in {"run.start", "profile.read"}:
+                if (
+                    not isinstance(target, ProfileRef)
+                    or target != authority.profile_ref
+                ):
+                    _deny()
+                if action == "run.start" and (
+                    link.status not in {"pending", "starting"}
+                    or link.run_id is not None
+                ):
+                    _deny()
+            elif action == "runtime.read":
+                if (
+                    not isinstance(target, RuntimeRef)
+                    or target != authority.runtime_ref
+                ):
+                    _deny()
+            elif action == "workspace.execute":
+                if (
+                    not isinstance(target, ExecutionWorkspace)
+                    or target != authority.execution_workspace
+                ):
+                    _deny()
+            elif action == "source.read":
+                if not isinstance(target, SourceRef) or target not in authority.sources:
+                    _deny()
+            elif action == "tool.execute":
+                if not isinstance(target, ToolBinding) or target not in authority.tools:
+                    _deny()
+            elif action == "resource.read":
+                if (
+                    not isinstance(target, ResourceRef)
+                    or target not in authority.resources
+                ):
+                    _deny()
+            elif action == "secret.read":
+                ref = (
+                    target.credential_ref
+                    if isinstance(target, SecretBinding)
+                    else target
+                )
+                if (
+                    not isinstance(ref, CredentialRef)
+                    or ref not in authority.credentials
+                ):
+                    _deny()
+            else:
+                _deny()
+            try:
+                self._authorizer.require(
+                    authority.upstream_grant_id,
+                    action,
+                    PlanningActionTarget(
+                        authority.workspace_id,
+                        authority.principal_id,
+                        request.id,
+                        run.id,
+                        authority.planning_profile_id,
+                        authority.planning_profile_version,
+                        authority.profile_ref,
+                        authority.operation_id,
+                        target,
+                    ),
+                )
+            except (DomainError, AgentError):
+                _deny()
+
+
+class NativeAuthorityReader:
+    """Dispatch only grants actually owned by one CP consumer."""
+
+    def __init__(self, uow_factory, *, worker, planner):
+        self._uow_factory, self._worker, self._planner = uow_factory, worker, planner
+
+    def require(self, grant_id: UUID, action: str, target: object) -> None:
+        if not isinstance(grant_id, UUID):
+            _deny()
+        with self._uow_factory() as uow:
+            worker = uow.execution_authorities.get(grant_id)
+            planner = uow.planning_authorities.get(grant_id)
+        if (worker is None) == (planner is None):
+            _deny()
+        reader = self._worker if worker is not None else self._planner
+        if reader is None:
+            _deny()
+        reader.require(grant_id, action, target)

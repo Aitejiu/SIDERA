@@ -99,6 +99,9 @@ class AssignmentCommandHandler:
         for kind, target_id, _ in _targets(envelope):
             self._authorize(envelope.workspace_id, kind, target_id, "assignment.write")
 
+    def authorize_target(self, workspace_id, target_type, target_id):
+        self._authorize(workspace_id, target_type, target_id, "assignment.write")
+
     def handle(self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope):
         if envelope.command_type not in self.command_types:
             raise ValidationError("unsupported assignment command")

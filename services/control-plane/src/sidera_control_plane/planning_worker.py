@@ -4,13 +4,16 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+from sidera_agents.ports import ExecutionAuthorizer
+
 from sidera_control_plane.acceptance_guard import load_acceptance_guard
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
+from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
 from sidera_control_plane.application.context_materialization import ContextMaterializer
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
@@ -25,6 +28,7 @@ from sidera_control_plane.application.planning_runner import (
     PlanningRunner,
     RegistryPlannerAdapterFactory,
 )
+from sidera_control_plane.application.ports import PlanningWorkspaceProvider
 from sidera_control_plane.composition.planner_adapters import (
     build_planner_adapter_builders,
 )
@@ -76,7 +80,16 @@ class PlanningWorkerRuntime:
     catalog: KnowledgeHttpAdapter
 
 
-def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
+def build_planning_worker(
+    settings: Settings,
+    *,
+    native_services: NativeWorkerServices | None = None,
+    planning_workspace_provider: PlanningWorkspaceProvider | None = None,
+    planning_authorizer: ExecutionAuthorizer | None = None,
+    native_clock: Callable[[], datetime] | None = None,
+    native_wait: Callable[[float], None] | None = None,
+    native_poll_interval_seconds: float = 1.0,
+) -> PlanningWorkerRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
         base_url=settings.knowledge_base_url,
@@ -89,10 +102,6 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         settings,
         acceptance_guard=acceptance_guard,
     )
-    factory = RegistryPlannerAdapterFactory(
-        builders,
-        temp_root=settings.planning_temp_root,
-    )
     try:
         candidate_submission_service = KnowledgeCandidateSubmissionService(
             FileCandidateProposalSpool(
@@ -104,6 +113,20 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             database,
             projection_change_retention_seconds=settings.projection_change_retention_seconds,
         )
+        materializer = ContextMaterializer(catalog)
+        run_clock = native_clock or (lambda: datetime.now(UTC))
+        factory = RegistryPlannerAdapterFactory(
+            builders,
+            temp_root=settings.planning_temp_root,
+            native_services=native_services,
+            uow_factory=uow_factory,
+            planning_workspace_provider=planning_workspace_provider,
+            planning_context_materializer=materializer,
+            planning_authorizer=planning_authorizer,
+            native_clock=native_clock,
+            native_wait=native_wait,
+            native_poll_interval_seconds=native_poll_interval_seconds,
+        )
         runner = PlanningRunner(
             uow_factory=uow_factory,
             adapter_factory=factory,
@@ -112,8 +135,8 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
             lease_renew_interval_seconds=settings.planning_lease_renew_interval_seconds,
             max_diagnostic_bytes=settings.planning_max_diagnostic_bytes,
             planner_temp_root=settings.planning_temp_root,
-            clock=lambda: datetime.now(UTC),
-            context_materializer=ContextMaterializer(catalog),
+            clock=run_clock,
+            context_materializer=materializer,
             context_package_cutover_at=settings.context_package_cutover_at,
             candidate_submission_service=candidate_submission_service,
             acceptance_guard=acceptance_guard,
@@ -121,7 +144,7 @@ def build_planning_worker(settings: Settings) -> PlanningWorkerRuntime:
         reconciler = PlanningReconciler(
             uow_factory=uow_factory,
             owner_id=f"planning-reconciler:{settings.local_actor_id}",
-            clock=lambda: datetime.now(UTC),
+            clock=run_clock,
             planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
         )
         return PlanningWorkerRuntime(

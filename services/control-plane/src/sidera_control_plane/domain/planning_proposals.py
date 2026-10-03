@@ -10,6 +10,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from sidera_agents.contracts import ProfileRef
+
 from sidera_control_plane.domain.collaboration import (
     CollaborationPolicyRequestV1,
     CollaborationPolicyRequestV2,
@@ -54,11 +56,19 @@ class DecisionSummary:
     estimated_tokens: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "understanding", _required_text(self.understanding, "understanding"))
-        object.__setattr__(self, "assumptions", _text_tuple(self.assumptions, "assumptions"))
+        object.__setattr__(
+            self, "understanding", _required_text(self.understanding, "understanding")
+        )
+        object.__setattr__(
+            self, "assumptions", _text_tuple(self.assumptions, "assumptions")
+        )
         object.__setattr__(self, "risks", _text_tuple(self.risks, "risks"))
-        object.__setattr__(self, "scope_includes", _text_tuple(self.scope_includes, "scope_includes"))
-        object.__setattr__(self, "scope_excludes", _text_tuple(self.scope_excludes, "scope_excludes"))
+        object.__setattr__(
+            self, "scope_includes", _text_tuple(self.scope_includes, "scope_includes")
+        )
+        object.__setattr__(
+            self, "scope_excludes", _text_tuple(self.scope_excludes, "scope_excludes")
+        )
         _non_negative_int(self.estimated_cost_microunits, "estimated_cost_microunits")
         _non_negative_int(self.estimated_tokens, "estimated_tokens")
         _non_negative_int(self.estimated_runtime_seconds, "estimated_runtime_seconds")
@@ -74,8 +84,16 @@ class ProposedRootTask:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", _required_text(self.title, "root title"))
-        object.__setattr__(self, "goal_summary", _required_text(self.goal_summary, "root goal_summary"))
-        object.__setattr__(self, "acceptance_refs", _text_tuple(self.acceptance_refs, "root acceptance_refs", allow_empty=False))
+        object.__setattr__(
+            self, "goal_summary", _required_text(self.goal_summary, "root goal_summary")
+        )
+        object.__setattr__(
+            self,
+            "acceptance_refs",
+            _text_tuple(
+                self.acceptance_refs, "root acceptance_refs", allow_empty=False
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +111,31 @@ class ProposedSubtask:
         object.__setattr__(self, "key", _key(self.key, "subtask key"))
         object.__setattr__(self, "kind", _enum(self.kind, WorkItemKind, "subtask kind"))
         object.__setattr__(self, "title", _required_text(self.title, "subtask title"))
-        object.__setattr__(self, "goal_summary", _required_text(self.goal_summary, "subtask goal_summary"))
-        object.__setattr__(self, "acceptance_refs", _text_tuple(self.acceptance_refs, "subtask acceptance_refs", allow_empty=False))
-        object.__setattr__(self, "expected_outputs", _text_tuple(self.expected_outputs, "subtask expected_outputs", allow_empty=False))
-        object.__setattr__(self, "milestone_key", _optional_text(self.milestone_key, "milestone_key"))
-        object.__setattr__(self, "source_refs", _text_tuple(self.source_refs, "subtask source_refs"))
+        object.__setattr__(
+            self,
+            "goal_summary",
+            _required_text(self.goal_summary, "subtask goal_summary"),
+        )
+        object.__setattr__(
+            self,
+            "acceptance_refs",
+            _text_tuple(
+                self.acceptance_refs, "subtask acceptance_refs", allow_empty=False
+            ),
+        )
+        object.__setattr__(
+            self,
+            "expected_outputs",
+            _text_tuple(
+                self.expected_outputs, "subtask expected_outputs", allow_empty=False
+            ),
+        )
+        object.__setattr__(
+            self, "milestone_key", _optional_text(self.milestone_key, "milestone_key")
+        )
+        object.__setattr__(
+            self, "source_refs", _text_tuple(self.source_refs, "subtask source_refs")
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,17 +154,49 @@ class ProposedWorkerItem:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "key", _key(self.key, "worker item key"))
-        object.__setattr__(self, "subtask_key", _key(self.subtask_key, "worker subtask key"))
-        object.__setattr__(self, "title", _required_text(self.title, "worker item title"))
+        object.__setattr__(
+            self, "subtask_key", _key(self.subtask_key, "worker subtask key")
+        )
+        object.__setattr__(
+            self, "title", _required_text(self.title, "worker item title")
+        )
         object.__setattr__(self, "role", _required_text(self.role, "worker item role"))
-        object.__setattr__(self, "responsibility", _required_text(self.responsibility, "worker item responsibility"))
-        object.__setattr__(self, "capability_requirements", _text_tuple(self.capability_requirements, "capability_requirements", allow_empty=False))
-        object.__setattr__(self, "worker_policy_ref", _optional_text(self.worker_policy_ref, "worker_policy_ref"))
-        object.__setattr__(self, "configuration_ref", _optional_text(self.configuration_ref, "configuration_ref"))
+        object.__setattr__(
+            self,
+            "responsibility",
+            _required_text(self.responsibility, "worker item responsibility"),
+        )
+        object.__setattr__(
+            self,
+            "capability_requirements",
+            _text_tuple(
+                self.capability_requirements,
+                "capability_requirements",
+                allow_empty=False,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "worker_policy_ref",
+            _optional_text(self.worker_policy_ref, "worker_policy_ref"),
+        )
+        object.__setattr__(
+            self,
+            "configuration_ref",
+            _optional_text(self.configuration_ref, "configuration_ref"),
+        )
         if self.concurrency_limit is not None:
             _positive_int(self.concurrency_limit, "concurrency_limit")
-        object.__setattr__(self, "source_refs", _text_tuple(self.source_refs, "worker item source_refs"))
-        object.__setattr__(self, "pinned_worker_id", _optional_text(self.pinned_worker_id, "pinned_worker_id"))
+        object.__setattr__(
+            self,
+            "source_refs",
+            _text_tuple(self.source_refs, "worker item source_refs"),
+        )
+        object.__setattr__(
+            self,
+            "pinned_worker_id",
+            _optional_text(self.pinned_worker_id, "pinned_worker_id"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +207,24 @@ class ActivationDependency:
     required_artifact_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "upstream_worker_item_key", _key(self.upstream_worker_item_key, "activation upstream key"))
-        object.__setattr__(self, "downstream_worker_item_key", _key(self.downstream_worker_item_key, "activation downstream key"))
-        object.__setattr__(self, "kind", _required_text(self.kind, "activation dependency kind"))
-        object.__setattr__(self, "required_artifact_refs", _text_tuple(self.required_artifact_refs, "required_artifact_refs"))
+        object.__setattr__(
+            self,
+            "upstream_worker_item_key",
+            _key(self.upstream_worker_item_key, "activation upstream key"),
+        )
+        object.__setattr__(
+            self,
+            "downstream_worker_item_key",
+            _key(self.downstream_worker_item_key, "activation downstream key"),
+        )
+        object.__setattr__(
+            self, "kind", _required_text(self.kind, "activation dependency kind")
+        )
+        object.__setattr__(
+            self,
+            "required_artifact_refs",
+            _text_tuple(self.required_artifact_refs, "required_artifact_refs"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,20 +243,56 @@ class ExecutionIntent:
     activation_dependencies: tuple[ActivationDependency, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "worker_item_key", _key(self.worker_item_key, "intent worker item key"))
-        object.__setattr__(self, "purpose", _required_text(self.purpose, "intent purpose"))
-        object.__setattr__(self, "context_refs", _text_tuple(self.context_refs, "intent context_refs"))
-        object.__setattr__(self, "expected_artifact_refs", _text_tuple(self.expected_artifact_refs, "expected_artifact_refs", allow_empty=False))
-        object.__setattr__(self, "required_evidence_refs", _text_tuple(self.required_evidence_refs, "required_evidence_refs", allow_empty=False))
-        object.__setattr__(self, "capability_requirements", _text_tuple(self.capability_requirements, "intent capability_requirements", allow_empty=False))
-        object.__setattr__(self, "adapter_preferences", _text_tuple(self.adapter_preferences, "adapter_preferences"))
-        object.__setattr__(self, "budget_class", _required_text(self.budget_class, "budget_class"))
+        object.__setattr__(
+            self,
+            "worker_item_key",
+            _key(self.worker_item_key, "intent worker item key"),
+        )
+        object.__setattr__(
+            self, "purpose", _required_text(self.purpose, "intent purpose")
+        )
+        object.__setattr__(
+            self, "context_refs", _text_tuple(self.context_refs, "intent context_refs")
+        )
+        object.__setattr__(
+            self,
+            "expected_artifact_refs",
+            _text_tuple(
+                self.expected_artifact_refs, "expected_artifact_refs", allow_empty=False
+            ),
+        )
+        object.__setattr__(
+            self,
+            "required_evidence_refs",
+            _text_tuple(
+                self.required_evidence_refs, "required_evidence_refs", allow_empty=False
+            ),
+        )
+        object.__setattr__(
+            self,
+            "capability_requirements",
+            _text_tuple(
+                self.capability_requirements,
+                "intent capability_requirements",
+                allow_empty=False,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "adapter_preferences",
+            _text_tuple(self.adapter_preferences, "adapter_preferences"),
+        )
+        object.__setattr__(
+            self, "budget_class", _required_text(self.budget_class, "budget_class")
+        )
         if self.deadline_seconds is not None:
             _non_negative_int(self.deadline_seconds, "deadline_seconds")
         if self.not_before_seconds is not None:
             _non_negative_int(self.not_before_seconds, "not_before_seconds")
         _positive_int(self.max_attempts, "max_attempts")
-        object.__setattr__(self, "activation_dependencies", tuple(self.activation_dependencies))
+        object.__setattr__(
+            self, "activation_dependencies", tuple(self.activation_dependencies)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,38 +308,83 @@ class ImpactPolicy:
             raise ValidationError("activate_immediately must be a boolean")
         if not isinstance(self.manual_gate, bool):
             raise ValidationError("manual_gate must be a boolean")
-        object.__setattr__(self, "budget_level", _required_text(self.budget_level, "impact budget_level"))
-        object.__setattr__(self, "failure_policy", _required_text(self.failure_policy, "failure_policy"))
-        object.__setattr__(self, "revision_operation", _optional_text(self.revision_operation, "revision_operation"))
+        object.__setattr__(
+            self,
+            "budget_level",
+            _required_text(self.budget_level, "impact budget_level"),
+        )
+        object.__setattr__(
+            self,
+            "failure_policy",
+            _required_text(self.failure_policy, "failure_policy"),
+        )
+        object.__setattr__(
+            self,
+            "revision_operation",
+            _optional_text(self.revision_operation, "revision_operation"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PlanningProfileDescriptor:
     profile_id: UUID
     profile_version: int
-    planner_module_instance_id: UUID
-    planner_module_config_version: int
+    planner_module_instance_id: UUID | None
+    planner_module_config_version: int | None
+    execution_mode: str = "legacy"
+    planner_agent_ref: ProfileRef | None = None
 
     @classmethod
-    def from_snapshot(cls, snapshot: PlanningProfileSnapshot) -> PlanningProfileDescriptor:
+    def from_snapshot(
+        cls, snapshot: PlanningProfileSnapshot
+    ) -> PlanningProfileDescriptor:
         return cls(
             profile_id=snapshot.profile_id,
             profile_version=snapshot.profile_version,
             planner_module_instance_id=snapshot.planner_module_instance_id,
             planner_module_config_version=snapshot.planner_module_config_version,
+            execution_mode=snapshot.execution_mode,
+            planner_agent_ref=snapshot.planner_agent_ref,
         )
 
     def __post_init__(self) -> None:
         _positive_int(self.profile_version, "profile_version")
-        _positive_int(self.planner_module_config_version, "planner_module_config_version")
+        if self.execution_mode == "native_profile":
+            if (
+                self.planner_module_instance_id is not None
+                or self.planner_module_config_version is not None
+                or not isinstance(self.planner_agent_ref, ProfileRef)
+            ):
+                raise ValidationError(
+                    "native proposal requires only its exact Agent Profile pin"
+                )
+        elif self.execution_mode == "legacy":
+            if (
+                not isinstance(self.planner_module_instance_id, UUID)
+                or self.planner_agent_ref is not None
+            ):
+                raise ValidationError("legacy proposal requires its planner module")
+            _positive_int(
+                self.planner_module_config_version, "planner_module_config_version"
+            )
+        else:
+            raise ValidationError("invalid proposal execution mode")
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        value = {
             "profile_id": str(self.profile_id),
             "profile_version": self.profile_version,
-            "planner_module_instance_id": str(self.planner_module_instance_id),
+            "planner_module_instance_id": None
+            if self.planner_module_instance_id is None
+            else str(self.planner_module_instance_id),
             "planner_module_config_version": self.planner_module_config_version,
         }
+        if self.execution_mode == "native_profile":
+            value.update(
+                execution_mode=self.execution_mode,
+                planner_agent_ref=self.planner_agent_ref.model_dump(mode="json"),
+            )
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,15 +420,25 @@ class PlanningProposalPayload:
 
     def __post_init__(self) -> None:
         _positive_int(self.schema_version, "proposal schema_version")
-        object.__setattr__(self, "kind", _enum(self.kind, PlanningRequestKind, "proposal kind"))
+        object.__setattr__(
+            self, "kind", _enum(self.kind, PlanningRequestKind, "proposal kind")
+        )
         object.__setattr__(self, "subtasks", tuple(self.subtasks))
         object.__setattr__(self, "worker_items", tuple(self.worker_items))
         object.__setattr__(self, "subtask_milestones", tuple(self.subtask_milestones))
-        object.__setattr__(self, "subtask_dependencies", tuple(self.subtask_dependencies))
-        object.__setattr__(self, "worker_item_dependencies", tuple(self.worker_item_dependencies))
+        object.__setattr__(
+            self, "subtask_dependencies", tuple(self.subtask_dependencies)
+        )
+        object.__setattr__(
+            self, "worker_item_dependencies", tuple(self.worker_item_dependencies)
+        )
         object.__setattr__(self, "execution_intents", tuple(self.execution_intents))
         if self.base_descriptor is not None:
-            object.__setattr__(self, "base_descriptor", _freeze_mapping(self.base_descriptor, "base_descriptor"))
+            object.__setattr__(
+                self,
+                "base_descriptor",
+                _freeze_mapping(self.base_descriptor, "base_descriptor"),
+            )
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -276,10 +451,19 @@ class PlanningProposalPayload:
             },
             "subtasks": [_subtask_mapping(item) for item in self.subtasks],
             "worker_items": [_worker_item_mapping(item) for item in self.worker_items],
-            "milestones": [_milestone_mapping(item) for item in self.subtask_milestones],
-            "subtask_dependencies": [_subtask_dependency_mapping(item) for item in self.subtask_dependencies],
-            "worker_item_dependencies": [_worker_dependency_mapping(item) for item in self.worker_item_dependencies],
-            "execution_intents": [_intent_mapping(item) for item in self.execution_intents],
+            "milestones": [
+                _milestone_mapping(item) for item in self.subtask_milestones
+            ],
+            "subtask_dependencies": [
+                _subtask_dependency_mapping(item) for item in self.subtask_dependencies
+            ],
+            "worker_item_dependencies": [
+                _worker_dependency_mapping(item)
+                for item in self.worker_item_dependencies
+            ],
+            "execution_intents": [
+                _intent_mapping(item) for item in self.execution_intents
+            ],
             "decision_summary": _summary_mapping(self.decision_summary),
             "impact_policy": _impact_mapping(self.impact_policy),
             "base_descriptor": _json_value(self.base_descriptor),
@@ -327,23 +511,44 @@ class PlanningProposalPayload:
                     goal_summary=_string(root, "goal_summary"),
                     acceptance_refs=_strings(root, "acceptance_refs"),
                 ),
-                subtasks=tuple(_subtask_from_mapping(item) for item in _mappings(value, "subtasks")),
-                worker_items=tuple(_worker_from_mapping(item) for item in _mappings(value, "worker_items")),
-                subtask_milestones=tuple(_milestone_from_mapping(item) for item in _mappings(value, "milestones")),
-                subtask_dependencies=tuple(_subtask_dependency_from_mapping(item) for item in _mappings(value, "subtask_dependencies")),
-                worker_item_dependencies=tuple(_worker_dependency_from_mapping(item) for item in _mappings(value, "worker_item_dependencies")),
-                execution_intents=tuple(_intent_from_mapping(item) for item in _mappings(value, "execution_intents")),
+                subtasks=tuple(
+                    _subtask_from_mapping(item) for item in _mappings(value, "subtasks")
+                ),
+                worker_items=tuple(
+                    _worker_from_mapping(item)
+                    for item in _mappings(value, "worker_items")
+                ),
+                subtask_milestones=tuple(
+                    _milestone_from_mapping(item)
+                    for item in _mappings(value, "milestones")
+                ),
+                subtask_dependencies=tuple(
+                    _subtask_dependency_from_mapping(item)
+                    for item in _mappings(value, "subtask_dependencies")
+                ),
+                worker_item_dependencies=tuple(
+                    _worker_dependency_from_mapping(item)
+                    for item in _mappings(value, "worker_item_dependencies")
+                ),
+                execution_intents=tuple(
+                    _intent_from_mapping(item)
+                    for item in _mappings(value, "execution_intents")
+                ),
                 decision_summary=DecisionSummary(
                     understanding=_string(summary, "understanding"),
                     assumptions=_strings(summary, "assumptions"),
                     risks=_strings(summary, "risks"),
-                    estimated_cost_microunits=_int(summary, "estimated_cost_microunits"),
+                    estimated_cost_microunits=_int(
+                        summary, "estimated_cost_microunits"
+                    ),
                     estimated_tokens=(
                         _int(summary, "estimated_tokens")
                         if "estimated_tokens" in summary
                         else 0
                     ),
-                    estimated_runtime_seconds=_int(summary, "estimated_runtime_seconds"),
+                    estimated_runtime_seconds=_int(
+                        summary, "estimated_runtime_seconds"
+                    ),
                     estimated_concurrency=_int(summary, "estimated_concurrency"),
                     scope_includes=_strings(summary, "scope_includes"),
                     scope_excludes=_strings(summary, "scope_excludes"),
@@ -401,14 +606,10 @@ class PlanningProposalPayloadV4:
         if not isinstance(
             self.collaboration_policy_request, CollaborationPolicyRequestV1
         ):
-            raise ValidationError(
-                "proposal v4 requires a collaboration policy request"
-            )
+            raise ValidationError("proposal v4 requires a collaboration policy request")
 
     @classmethod
-    def from_mapping(
-        cls, value: Mapping[str, object]
-    ) -> PlanningProposalPayloadV4:
+    def from_mapping(cls, value: Mapping[str, object]) -> PlanningProposalPayloadV4:
         if not isinstance(value, Mapping):
             raise ValidationError("proposal v4 payload must be a mapping")
         allowed = {
@@ -427,16 +628,12 @@ class PlanningProposalPayloadV4:
         }
         unknown = sorted(str(key) for key in value if key not in allowed)
         if unknown:
-            raise ValidationError(
-                f"unknown proposal v4 fields: {', '.join(unknown)}"
-            )
+            raise ValidationError(f"unknown proposal v4 fields: {', '.join(unknown)}")
         if _int(value, "schema_version") != 4:
             raise ValidationError("proposal schema_version must be 4")
         policy_value = value.get("collaboration_policy_request")
         if not isinstance(policy_value, Mapping):
-            raise ValidationError(
-                "collaboration_policy_request must be a mapping"
-            )
+            raise ValidationError("collaboration_policy_request must be a mapping")
         legacy_mapping = dict(value)
         legacy_mapping.pop("collaboration_policy_request", None)
         legacy_mapping["schema_version"] = 2
@@ -543,9 +740,7 @@ class PlanningProposalPayloadV5:
             )
 
     @classmethod
-    def from_mapping(
-        cls, value: Mapping[str, object]
-    ) -> PlanningProposalPayloadV5:
+    def from_mapping(cls, value: Mapping[str, object]) -> PlanningProposalPayloadV5:
         if not isinstance(value, Mapping):
             raise ValidationError("proposal v5 payload must be a mapping")
         allowed = {
@@ -564,16 +759,12 @@ class PlanningProposalPayloadV5:
         }
         unknown = sorted(str(key) for key in value if key not in allowed)
         if unknown:
-            raise ValidationError(
-                f"unknown proposal v5 fields: {', '.join(unknown)}"
-            )
+            raise ValidationError(f"unknown proposal v5 fields: {', '.join(unknown)}")
         if _int(value, "schema_version") != 5:
             raise ValidationError("proposal schema_version must be 5")
         policy_value = value.get("collaboration_policy_request")
         if not isinstance(policy_value, Mapping):
-            raise ValidationError(
-                "collaboration_policy_request must be a mapping"
-            )
+            raise ValidationError("collaboration_policy_request must be a mapping")
         legacy_mapping = dict(value)
         legacy_mapping.pop("collaboration_policy_request", None)
         legacy_mapping["schema_version"] = 2
@@ -711,9 +902,7 @@ class PlanningProposalPayloadV6:
         }
         unknown = sorted(str(key) for key in value if key not in allowed)
         if unknown:
-            raise ValidationError(
-                f"unknown proposal v6 fields: {', '.join(unknown)}"
-            )
+            raise ValidationError(f"unknown proposal v6 fields: {', '.join(unknown)}")
         if _int(value, "schema_version") != 6:
             raise ValidationError("proposal schema_version must be 6")
         policy_value = value.get("collaboration_policy_request")
@@ -951,7 +1140,9 @@ def canonical_proposal_bytes(
                 PlanningRevisionProposalPayloadV6,
             ),
         ):
-            raise ValidationError("canonical proposal serializer requires typed payload")
+            raise ValidationError(
+                "canonical proposal serializer requires typed payload"
+            )
         proposal_mapping = payload.canonical_payload()
     _positive_int(brief_revision, "brief_revision")
     document = {
@@ -1152,7 +1343,20 @@ def _impact_mapping(value: ImpactPolicy) -> dict[str, object]:
 
 
 def _subtask_from_mapping(value: Mapping[str, object]) -> ProposedSubtask:
-    _reject_nested(value, {"key", "kind", "title", "goal_summary", "acceptance_refs", "expected_outputs", "milestone_key", "source_refs"}, "subtask")
+    _reject_nested(
+        value,
+        {
+            "key",
+            "kind",
+            "title",
+            "goal_summary",
+            "acceptance_refs",
+            "expected_outputs",
+            "milestone_key",
+            "source_refs",
+        },
+        "subtask",
+    )
     return ProposedSubtask(
         key=_string(value, "key"),
         kind=WorkItemKind(_string(value, "kind")),
@@ -1160,13 +1364,33 @@ def _subtask_from_mapping(value: Mapping[str, object]) -> ProposedSubtask:
         goal_summary=_string(value, "goal_summary"),
         acceptance_refs=_strings(value, "acceptance_refs"),
         expected_outputs=_strings(value, "expected_outputs"),
-        milestone_key=(str(value["milestone_key"]) if value.get("milestone_key") is not None else None),
+        milestone_key=(
+            str(value["milestone_key"])
+            if value.get("milestone_key") is not None
+            else None
+        ),
         source_refs=_strings(value, "source_refs"),
     )
 
 
 def _worker_from_mapping(value: Mapping[str, object]) -> ProposedWorkerItem:
-    _reject_nested(value, {"key", "subtask_key", "title", "role", "responsibility", "capability_requirements", "worker_policy_ref", "configuration_ref", "concurrency_limit", "source_refs", "pinned_worker_id"}, "worker item")
+    _reject_nested(
+        value,
+        {
+            "key",
+            "subtask_key",
+            "title",
+            "role",
+            "responsibility",
+            "capability_requirements",
+            "worker_policy_ref",
+            "configuration_ref",
+            "concurrency_limit",
+            "source_refs",
+            "pinned_worker_id",
+        },
+        "worker item",
+    )
     return ProposedWorkerItem(
         key=_string(value, "key"),
         subtask_key=_string(value, "subtask_key"),
@@ -1174,16 +1398,32 @@ def _worker_from_mapping(value: Mapping[str, object]) -> ProposedWorkerItem:
         role=_string(value, "role"),
         responsibility=_string(value, "responsibility"),
         capability_requirements=_strings(value, "capability_requirements"),
-        worker_policy_ref=(str(value["worker_policy_ref"]) if value.get("worker_policy_ref") is not None else None),
-        configuration_ref=(str(value["configuration_ref"]) if value.get("configuration_ref") is not None else None),
+        worker_policy_ref=(
+            str(value["worker_policy_ref"])
+            if value.get("worker_policy_ref") is not None
+            else None
+        ),
+        configuration_ref=(
+            str(value["configuration_ref"])
+            if value.get("configuration_ref") is not None
+            else None
+        ),
         concurrency_limit=_optional_int(value, "concurrency_limit"),
         source_refs=_strings(value, "source_refs"),
-        pinned_worker_id=(str(value["pinned_worker_id"]) if value.get("pinned_worker_id") is not None else None),
+        pinned_worker_id=(
+            str(value["pinned_worker_id"])
+            if value.get("pinned_worker_id") is not None
+            else None
+        ),
     )
 
 
 def _milestone_from_mapping(value: Mapping[str, object]) -> SubtaskMilestone:
-    _reject_nested(value, {"key", "title", "subtask_keys", "acceptance_refs", "order_hint"}, "milestone")
+    _reject_nested(
+        value,
+        {"key", "title", "subtask_keys", "acceptance_refs", "order_hint"},
+        "milestone",
+    )
     return SubtaskMilestone(
         key=_string(value, "key"),
         title=_string(value, "title"),
@@ -1194,7 +1434,17 @@ def _milestone_from_mapping(value: Mapping[str, object]) -> SubtaskMilestone:
 
 
 def _subtask_dependency_from_mapping(value: Mapping[str, object]) -> SubtaskDependency:
-    _reject_nested(value, {"upstream_subtask_key", "downstream_subtask_key", "kind", "required_evidence_refs", "enforcement"}, "subtask dependency")
+    _reject_nested(
+        value,
+        {
+            "upstream_subtask_key",
+            "downstream_subtask_key",
+            "kind",
+            "required_evidence_refs",
+            "enforcement",
+        },
+        "subtask dependency",
+    )
     return SubtaskDependency(
         upstream_subtask_key=_string(value, "upstream_subtask_key"),
         downstream_subtask_key=_string(value, "downstream_subtask_key"),
@@ -1204,8 +1454,19 @@ def _subtask_dependency_from_mapping(value: Mapping[str, object]) -> SubtaskDepe
     )
 
 
-def _worker_dependency_from_mapping(value: Mapping[str, object]) -> WorkerItemDependency:
-    _reject_nested(value, {"upstream_worker_item_key", "downstream_worker_item_key", "kind", "required_artifact_refs"}, "worker dependency")
+def _worker_dependency_from_mapping(
+    value: Mapping[str, object],
+) -> WorkerItemDependency:
+    _reject_nested(
+        value,
+        {
+            "upstream_worker_item_key",
+            "downstream_worker_item_key",
+            "kind",
+            "required_artifact_refs",
+        },
+        "worker dependency",
+    )
     return WorkerItemDependency(
         upstream_worker_item_key=_string(value, "upstream_worker_item_key"),
         downstream_worker_item_key=_string(value, "downstream_worker_item_key"),
@@ -1215,10 +1476,36 @@ def _worker_dependency_from_mapping(value: Mapping[str, object]) -> WorkerItemDe
 
 
 def _intent_from_mapping(value: Mapping[str, object]) -> ExecutionIntent:
-    _reject_nested(value, {"worker_item_key", "purpose", "context_refs", "expected_artifact_refs", "required_evidence_refs", "capability_requirements", "adapter_preferences", "budget_class", "deadline_seconds", "not_before_seconds", "max_attempts", "activation_dependencies"}, "execution intent")
+    _reject_nested(
+        value,
+        {
+            "worker_item_key",
+            "purpose",
+            "context_refs",
+            "expected_artifact_refs",
+            "required_evidence_refs",
+            "capability_requirements",
+            "adapter_preferences",
+            "budget_class",
+            "deadline_seconds",
+            "not_before_seconds",
+            "max_attempts",
+            "activation_dependencies",
+        },
+        "execution intent",
+    )
     dependencies = []
     for item in _mappings(value, "activation_dependencies"):
-        _reject_nested(item, {"upstream_worker_item_key", "downstream_worker_item_key", "kind", "required_artifact_refs"}, "activation dependency")
+        _reject_nested(
+            item,
+            {
+                "upstream_worker_item_key",
+                "downstream_worker_item_key",
+                "kind",
+                "required_artifact_refs",
+            },
+            "activation dependency",
+        )
         dependencies.append(
             ActivationDependency(
                 upstream_worker_item_key=_string(item, "upstream_worker_item_key"),
@@ -1250,7 +1537,9 @@ def _mapping(value: Mapping[str, object], name: str) -> Mapping[str, object]:
     return item
 
 
-def _mappings(value: Mapping[str, object], name: str) -> tuple[Mapping[str, object], ...]:
+def _mappings(
+    value: Mapping[str, object], name: str
+) -> tuple[Mapping[str, object], ...]:
     item = value.get(name)
     if not isinstance(item, (list, tuple)):
         raise ValidationError(f"proposal field {name!r} must be a list")
@@ -1305,7 +1594,9 @@ def _reject_nested(value: Mapping[str, object], allowed: set[str], name: str) ->
         raise ValidationError(f"unknown {name} fields: {', '.join(unknown)}")
 
 
-def _text_tuple(values: Sequence[str], name: str, *, allow_empty: bool = True) -> tuple[str, ...]:
+def _text_tuple(
+    values: Sequence[str], name: str, *, allow_empty: bool = True
+) -> tuple[str, ...]:
     if isinstance(values, str):
         raise ValidationError(f"{name} must be a sequence of strings")
     result: list[str] = []
@@ -1363,11 +1654,13 @@ def _enum(value: object, enum_type: type[StrEnum], name: str) -> StrEnum:
 def _freeze_mapping(value: Mapping[str, object], name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValidationError(f"{name} must be a mapping")
-    return MappingProxyType({
-        key: _freeze(item, f"{name}.{key}")
-        for key, item in value.items()
-        if _mapping_key(key, name)
-    })
+    return MappingProxyType(
+        {
+            key: _freeze(item, f"{name}.{key}")
+            for key, item in value.items()
+            if _mapping_key(key, name)
+        }
+    )
 
 
 def _freeze(value: object, name: str) -> object:
@@ -1406,4 +1699,6 @@ def _json_value(value: object) -> object:
         return value.value
     if isinstance(value, (str, int, bool)) or value is None:
         return value
-    raise ValidationError(f"unsupported canonical proposal value: {type(value).__name__}")
+    raise ValidationError(
+        f"unsupported canonical proposal value: {type(value).__name__}"
+    )

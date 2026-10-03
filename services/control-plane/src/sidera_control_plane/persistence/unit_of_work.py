@@ -38,6 +38,7 @@ from sidera_control_plane.application.ports import (
     NotificationLedger,
     NotificationObservationStore,
     PlanEntityLineageRepositoryPort,
+    PlanningAuthorityRepositoryPort,
     PlanningLeaseRepositoryPort,
     PlanningProfileRepositoryPort,
     PlanningRecordRepositoryPort,
@@ -50,6 +51,7 @@ from sidera_control_plane.application.ports import (
     ResultRepositoryPort,
     SchedulingBlockRepositoryPort,
     SessionRepositoryPort,
+    TaskGoalRepositoryPort,
     TaskRepositoryPort,
     WorkContextRepositoryPort,
     WorkerItemRepositoryPort,
@@ -127,6 +129,9 @@ from sidera_control_plane.persistence.plan_transition_repository import (
     PlanTransitionRepository,
     WorkerTransitionRepository,
 )
+from sidera_control_plane.persistence.planning_authority_repository import (
+    PlanningAuthorityRepository,
+)
 from sidera_control_plane.persistence.planning_repository import (
     PlanningProfileRepository,
     PlanningRecordRepository,
@@ -148,6 +153,7 @@ from sidera_control_plane.persistence.scheduling_block_repository import (
     SqlAlchemySchedulingBlockRepository,
 )
 from sidera_control_plane.persistence.session_repository import SessionRepository
+from sidera_control_plane.persistence.task_goal_repository import TaskGoalRepository
 from sidera_control_plane.persistence.work_context_repository import (
     WorkContextRepository,
 )
@@ -161,6 +167,8 @@ from sidera_control_plane.persistence.workspace_repository import WorkspaceRepos
 
 class SqlAlchemyUnitOfWork:
     session: Session
+    task_goals: TaskGoalRepositoryPort
+    planning_authorities: PlanningAuthorityRepositoryPort
     agent_bindings: AgentBindingRepositoryPort
     execution_authorities: ExecutionAuthorityRepositoryPort
     tasks: TaskRepositoryPort
@@ -222,6 +230,8 @@ class SqlAlchemyUnitOfWork:
 
     def __enter__(self) -> Self:
         self.session = Session(self._database.engine, expire_on_commit=False)
+        self.task_goals = TaskGoalRepository(self.session)
+        self.planning_authorities = PlanningAuthorityRepository(self.session)
         self.agent_bindings = AgentBindingRepository(self.session)
         self.execution_authorities = ExecutionAuthorityRepository(self.session)
         self.tasks = TaskRepository(self.session)
@@ -246,9 +256,7 @@ class SqlAlchemyUnitOfWork:
         self.executions = ExecutionRepository(self.session)
         self.execution_requests = ExecutionRequestRepository(self.session)
         self.collaboration_runs = CollaborationRunRepository(self.session)
-        self.collaboration_evaluations = CollaborationEvaluationRepository(
-            self.session
-        )
+        self.collaboration_evaluations = CollaborationEvaluationRepository(self.session)
         self.collaboration_ledger = CollaborationLedgerRepository(self.session)
         self.input_selections = InputSelectionRepository(self.session)
         self.collaboration_governance = CollaborationGovernanceRepository(self.session)
@@ -268,9 +276,7 @@ class SqlAlchemyUnitOfWork:
         self.planning_runs = PlanningRunRepository(self.session)
         self.planning_leases = PlanningRunLeaseRepository(self.session)
         self.planning_records = PlanningRecordRepository(self.session)
-        self.proposal_materializations = ProposalMaterializationRepository(
-            self.session
-        )
+        self.proposal_materializations = ProposalMaterializationRepository(self.session)
         self.sessions = SessionRepository(self.session)
         self.modules = ModuleRepository(self.session, self.projection_changes)
         self.bindings = ExecutionBindingRepository(self.session)

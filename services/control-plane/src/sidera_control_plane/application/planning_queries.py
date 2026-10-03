@@ -62,11 +62,11 @@ class PlanningBriefView:
 
 @dataclass(frozen=True, slots=True)
 class PlanningUsageView:
-    input_tokens: int
-    output_tokens: int
-    cost_microunits: int
-    runtime_seconds: int
-    context_bytes: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_microunits: int | None
+    runtime_seconds: int | None
+    context_bytes: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +170,17 @@ class PlanningCollaborationView:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningNativeRunView:
+    start_operation_id: UUID
+    run_id: UUID | None
+    status: str
+    reason_code: str | None
+    event_cursor: int
+    response_id: UUID | None
+    closed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningRunView:
     id: UUID
     planning_request_id: UUID
@@ -179,7 +190,7 @@ class PlanningRunView:
     operation_id: UUID
     status: str
     result_kind: str | None
-    capability_snapshot: PlanningCapabilityView
+    capability_snapshot: PlanningCapabilityView | None
     usage: PlanningUsageView
     provider_ref: str | None
     error_code: str | None
@@ -187,6 +198,9 @@ class PlanningRunView:
     started_at: datetime | None
     finished_at: datetime | None
     version: int
+    execution_mode: str = "legacy"
+    planner_agent_ref: ProfileRef | None = None
+    native_run: PlanningNativeRunView | None = None
 
 
 @dataclass(frozen=True, slots=True)

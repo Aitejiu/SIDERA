@@ -112,6 +112,9 @@ _CP_FUNCTIONS = frozenset(
     }
 )
 _NATIVE_CLEANUP_TABLES = (
+    "planning_agent_links",
+    "planning_authorities",
+    "task_goal_submissions",
     "agent_admission_pin_history",
     "agent_execution_links",
     "execution_authorities",

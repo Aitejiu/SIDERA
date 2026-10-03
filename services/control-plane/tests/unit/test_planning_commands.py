@@ -491,7 +491,9 @@ class NotificationRepository:
         resource_id: UUID,
         binding_kind: str,
     ) -> NotificationSourceBinding | None:
-        return self.bindings.get((workspace_id, resource_type, resource_id, binding_kind))
+        return self.bindings.get(
+            (workspace_id, resource_type, resource_id, binding_kind)
+        )
 
     def add_binding_or_get_existing(
         self, item: NotificationSourceBinding
@@ -1102,15 +1104,15 @@ class StubProposalMaterializer:
         return SimpleNamespace(
             materialization=self.materialization,
             event_ids=(),
+            pending_events=(),
+            bindings=(),
         )
 
 
 def test_confirm_initial_proposal_copies_request_origin_to_root() -> None:
     definition, instance = module_facts()
     stored_profile = profile(instance.id)
-    request = proposal_ready_request(
-        stored_profile
-    )
+    request = proposal_ready_request(stored_profile)
     source_ref = "src_" + "c" * 32
     request.source_type = "akashic_private"
     request.source_ref = source_ref

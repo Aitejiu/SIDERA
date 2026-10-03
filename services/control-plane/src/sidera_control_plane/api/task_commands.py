@@ -61,7 +61,9 @@ def execute_command(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
-    trusted_identity: Annotated[TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)] = None,
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     return _execute_command(request, response, service, settings, trusted_identity)
 
@@ -162,7 +164,10 @@ def _execute_command(
         )
     if request.command_type in _REWORK_COMMAND_TYPES:
         require_result_integration_enabled(settings)
-        if request.actor.type != settings.local_actor_type or request.actor.id != settings.local_actor_id:
+        if (
+            request.actor.type != settings.local_actor_type
+            or request.actor.id != settings.local_actor_id
+        ):
             raise ValidationError(
                 "result recovery commands require the configured local actor",
                 details={"actor_type": settings.local_actor_type},
@@ -202,6 +207,7 @@ def _execute_command(
             "RegisterCollaborationRuntimeModule",
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
+            "SubmitTaskGoal",
             "SubmitPlanRevision",
             "ConfirmPlanningProposal",
             "ConfirmPlanRevision",

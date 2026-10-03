@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from sidera_agents.contracts import ProfileRef
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 
 from sidera_control_plane.application.errors import InvalidCursor
 from sidera_control_plane.application.planning_metrics import (
@@ -31,6 +31,7 @@ from sidera_control_plane.application.planning_queries import (
     PlanningClarificationView,
     PlanningCollaborationView,
     PlanningMaterializationView,
+    PlanningNativeRunView,
     PlanningPage,
     PlanningProfileView,
     PlanningProposalView,
@@ -47,6 +48,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionRequestModel,
     ModuleDefinitionModel,
     ModuleInstanceModel,
+    PlanningAgentLinkModel,
     PlanningBriefRevisionModel,
     PlanningClarificationModel,
     PlanningProfileModel,
@@ -240,7 +242,11 @@ class SqlAlchemyPlanningQueryStore:
                 if profile_row is not None
                 else None
             )
-            run_views = tuple(_run_view(row, request.profile_snapshot) for row in runs)
+            links = _native_links(session, workspace_id, runs)
+            run_views = tuple(
+                _run_view(row, request.profile_snapshot, links.get(row.id))
+                for row in runs
+            )
             active_run = run_views[-1] if run_views else None
             pending = tuple(
                 _clarification_view(row)
@@ -298,7 +304,10 @@ class SqlAlchemyPlanningQueryStore:
                 )
                 .order_by(PlanningRunModel.attempt.asc(), PlanningRunModel.id.asc())
             ).all()
-        return tuple(_run_view(row, request.profile_snapshot) for row in rows)
+            links = _native_links(session, workspace_id, rows)
+        return tuple(
+            _run_view(row, request.profile_snapshot, links.get(row.id)) for row in rows
+        )
 
     def list_clarifications(
         self, workspace_id: UUID, request_id: UUID
@@ -381,23 +390,28 @@ class SqlAlchemyPlanningMetricsStore:
             total_runs = sum(run_counts.values())
             usage_row = session.execute(
                 select(
-                    func.coalesce(
-                        func.sum(PlanningRunModel.usage["input_tokens"].as_integer()),
-                        0,
-                    ),
-                    func.coalesce(
-                        func.sum(PlanningRunModel.usage["output_tokens"].as_integer()),
-                        0,
-                    ),
-                    func.coalesce(
-                        func.sum(
-                            PlanningRunModel.usage["cost_microunits"].as_integer()
-                        ),
-                        0,
-                    ),
-                    func.coalesce(
-                        func.sum(PlanningRunModel.usage["context_bytes"].as_integer()),
-                        0,
+                    *(
+                        case(
+                            (
+                                func.count()
+                                == func.count(
+                                    PlanningRunModel.usage[field].as_integer()
+                                ),
+                                func.coalesce(
+                                    func.sum(
+                                        PlanningRunModel.usage[field].as_integer()
+                                    ),
+                                    0,
+                                ),
+                            ),
+                            else_=None,
+                        )
+                        for field in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cost_microunits",
+                            "context_bytes",
+                        )
                     ),
                 ).where(PlanningRunModel.workspace_id == workspace_id)
             ).one()
@@ -712,10 +726,10 @@ class SqlAlchemyPlanningMetricsStore:
                 invalid_output_rate=invalid_count / total_runs if total_runs else 0.0,
             ),
             usage=PlanningUsageMetricsView(
-                input_tokens=int(usage_row[0] or 0),
-                output_tokens=int(usage_row[1] or 0),
-                cost_microunits=int(usage_row[2] or 0),
-                context_bytes=int(usage_row[3] or 0),
+                input_tokens=None if usage_row[0] is None else int(usage_row[0]),
+                output_tokens=None if usage_row[1] is None else int(usage_row[1]),
+                cost_microunits=None if usage_row[2] is None else int(usage_row[2]),
+                context_bytes=None if usage_row[3] is None else int(usage_row[3]),
             ),
             planning=PlanningLifecycleMetricsView(
                 clarifications=int(clarifications),
@@ -811,7 +825,28 @@ def _brief_view(row: PlanningBriefRevisionModel) -> PlanningBriefView:
     )
 
 
-def _run_view(row: PlanningRunModel, snapshot: Mapping[str, object]) -> PlanningRunView:
+def _native_links(
+    session: Any, workspace_id: UUID, runs: Any
+) -> dict[UUID, PlanningAgentLinkModel]:
+    run_ids = tuple(row.id for row in runs if row.execution_mode == "native_profile")
+    if not run_ids:
+        return {}
+    return {
+        row.planning_run_id: row
+        for row in session.scalars(
+            select(PlanningAgentLinkModel).where(
+                PlanningAgentLinkModel.workspace_id == workspace_id,
+                PlanningAgentLinkModel.planning_run_id.in_(run_ids),
+            )
+        ).all()
+    }
+
+
+def _run_view(
+    row: PlanningRunModel,
+    snapshot: Mapping[str, object],
+    link: PlanningAgentLinkModel | None = None,
+) -> PlanningRunView:
     capability = row.capability_snapshot or snapshot.get("planner_capabilities", {})
     return PlanningRunView(
         id=row.id,
@@ -822,7 +857,9 @@ def _run_view(row: PlanningRunModel, snapshot: Mapping[str, object]) -> Planning
         operation_id=row.operation_id,
         status=row.status,
         result_kind=row.result_kind,
-        capability_snapshot=_capability_view(_mapping(capability)),
+        capability_snapshot=None
+        if row.execution_mode == "native_profile"
+        else _capability_view(_mapping(capability)),
         usage=_usage_view(row.usage),
         provider_ref=row.provider_ref,
         error_code=row.error_code,
@@ -830,6 +867,21 @@ def _run_view(row: PlanningRunModel, snapshot: Mapping[str, object]) -> Planning
         started_at=row.started_at,
         finished_at=row.finished_at,
         version=row.version,
+        execution_mode=row.execution_mode,
+        planner_agent_ref=None
+        if row.planner_agent_ref is None
+        else ProfileRef.model_validate(row.planner_agent_ref),
+        native_run=None
+        if link is None
+        else PlanningNativeRunView(
+            start_operation_id=link.start_operation_id,
+            run_id=link.run_id,
+            status=link.status,
+            reason_code=link.reason_code,
+            event_cursor=link.event_cursor,
+            response_id=link.response_id,
+            closed=link.closed,
+        ),
     )
 
 
@@ -964,21 +1016,35 @@ def _capability_view(value: Mapping[str, object]) -> PlanningCapabilityView:
 def _usage_view(value: Mapping[str, object] | None) -> PlanningUsageView:
     value = value or {}
     return PlanningUsageView(
-        input_tokens=_non_negative_int(value.get("input_tokens")),
-        output_tokens=_non_negative_int(value.get("output_tokens")),
-        cost_microunits=_non_negative_int(value.get("cost_microunits")),
-        runtime_seconds=_non_negative_int(value.get("runtime_seconds")),
-        context_bytes=_non_negative_int(value.get("context_bytes")),
+        **{
+            field: None
+            if value.get(field, 0) is None
+            else _non_negative_int(value.get(field, 0))
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cost_microunits",
+                "runtime_seconds",
+                "context_bytes",
+            )
+        }
     )
 
 
 def _sum_usage(runs: tuple[PlanningRunView, ...]) -> PlanningUsageView:
     return PlanningUsageView(
-        input_tokens=sum(run.usage.input_tokens for run in runs),
-        output_tokens=sum(run.usage.output_tokens for run in runs),
-        cost_microunits=sum(run.usage.cost_microunits for run in runs),
-        runtime_seconds=sum(run.usage.runtime_seconds for run in runs),
-        context_bytes=sum(run.usage.context_bytes for run in runs),
+        **{
+            field: None
+            if any(getattr(run.usage, field) is None for run in runs)
+            else sum(getattr(run.usage, field) for run in runs)
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cost_microunits",
+                "runtime_seconds",
+                "context_bytes",
+            )
+        }
     )
 
 

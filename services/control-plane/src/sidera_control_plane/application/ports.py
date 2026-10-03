@@ -7,6 +7,7 @@ from types import TracebackType
 from typing import BinaryIO, Literal, Protocol, Self
 from uuid import UUID
 
+from sidera_agents.contracts import ExecutionWorkspace
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.collaboration_projection import CollaborationFacts
@@ -141,6 +142,11 @@ from sidera_control_plane.domain.planning import (
     PlanningRun,
     PlanningRunLease,
     ProposalMaterialization,
+    TaskGoalSubmission,
+)
+from sidera_control_plane.domain.planning_authority import (
+    PlanningAgentLink,
+    PlanningAuthority,
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfile
 from sidera_control_plane.domain.planning_proposals import ProposalRevision
@@ -156,6 +162,12 @@ from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
 )
+
+
+class PlanningWorkspaceProvider(Protocol):
+    def prepare(
+        self, *, workspace_id: UUID, planning_run_id: UUID, operation_id: UUID
+    ) -> ExecutionWorkspace: ...
 
 
 class TaskRepositoryPort(Protocol):
@@ -2603,8 +2615,33 @@ class ExecutionAuthorityRepositoryPort(Protocol):
         raise NotImplementedError
 
 
+class PlanningAuthorityRepositoryPort(Protocol):
+    def add(self, authority: PlanningAuthority) -> None: ...
+    def get(
+        self, authority_id: UUID, *, workspace_id: UUID | None = None
+    ) -> PlanningAuthority | None: ...
+    def add_link(self, link: PlanningAgentLink) -> None: ...
+    def get_link(
+        self, workspace_id: UUID, planning_run_id: UUID, *, for_update: bool = False
+    ) -> PlanningAgentLink | None: ...
+    def save_link(
+        self, expected: PlanningAgentLink, **changes: object
+    ) -> PlanningAgentLink: ...
+    def revoke(self, authority_id: UUID, workspace_id: UUID) -> None: ...
+
+
+class TaskGoalRepositoryPort(Protocol):
+    def add(self, submission: "TaskGoalSubmission") -> None: ...
+
+    def get(
+        self, workspace_id: UUID, planning_request_id: UUID, *, for_update: bool = False
+    ) -> "TaskGoalSubmission | None": ...
+
+
 class ControlPlaneUnitOfWork(Protocol):
     session: Session
+    task_goals: TaskGoalRepositoryPort
+    planning_authorities: PlanningAuthorityRepositoryPort
     agent_bindings: AgentBindingRepositoryPort
     execution_authorities: ExecutionAuthorityRepositoryPort
     tasks: TaskRepositoryPort

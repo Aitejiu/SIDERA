@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,10 +49,8 @@ from sidera_control_plane.application.ports import (
     PlannerAdapter,
 )
 from sidera_control_plane.application.revision_planning_context import (
-    AdapterCapabilitySnapshotV1,
-    ConfirmedContextPackageRefV1,
-    RevisionPlanningContextBuilder,
     RevisionPlanningContextV1,
+    load_revision_planning_context,
 )
 from sidera_control_plane.application.secret_resolution import (
     EnvironmentSecretResolver,
@@ -73,14 +71,12 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV1,
     ContextPackageStatus,
     ContextPurpose,
-    context_package_reference,
 )
 from sidera_control_plane.domain.errors import (
     DomainError,
     StaleFencingToken,
 )
 from sidera_control_plane.domain.events import EventData
-from sidera_control_plane.domain.execution import ExecutionSession
 from sidera_control_plane.domain.modules import (
     PLANNER_ADAPTER_MODULE_TYPE,
     IdempotencyCapability,
@@ -161,10 +157,28 @@ class RegistryPlannerAdapterFactory:
         *,
         secret_resolver: SecretResolver | None = None,
         temp_root: Path = Path(".sidera/planning"),
+        native_services=None,
+        uow_factory=None,
+        planning_workspace_provider=None,
+        planning_context_materializer=None,
+        planning_authorizer=None,
+        native_clock=None,
+        native_wait=None,
+        native_poll_interval_seconds: float = 1.0,
     ) -> None:
         self._builders = dict(builders)
         self._secret_resolver = secret_resolver or EnvironmentSecretResolver()
         self._temp_root = temp_root
+        self._native_options = {
+            "services": native_services,
+            "uow_factory": uow_factory,
+            "workspace_provider": planning_workspace_provider,
+            "materializer": planning_context_materializer,
+            "authorizer": planning_authorizer,
+            "clock": native_clock,
+            "wait": native_wait,
+            "poll_interval_seconds": native_poll_interval_seconds,
+        }
 
     def create(
         self,
@@ -172,6 +186,21 @@ class RegistryPlannerAdapterFactory:
         instance: ModuleInstance | None,
         profile_snapshot: PlanningProfileSnapshot,
     ) -> PlannerAdapter:
+        if profile_snapshot.execution_mode == "native_profile":
+            if self._native_options["workspace_provider"] is None:
+                raise PlanningAdapterUnavailable(
+                    "planning_workspace_unavailable", blocked=False
+                )
+            if any(
+                self._native_options[key] is None
+                for key in ("services", "uow_factory", "materializer", "authorizer")
+            ):
+                raise PlanningAdapterUnavailable("permission_denied", blocked=True)
+            from sidera_control_plane.application.agent_planner_adapter import (
+                AgentPlannerAdapter,
+            )
+
+            return AgentPlannerAdapter(**self._native_options)
         if definition is None or instance is None:
             raise PlanningAdapterUnavailable(
                 "planning_profile_unavailable", blocked=False
@@ -482,8 +511,9 @@ class PlanningRunner:
                 request_run = request.run(queued_run.id)
                 context_package: ContextPackageManifestV1 | None = None
                 context_revision: WorkContextRevision | None = None
-                if self._context_materializer is not None and not self._legacy_run(
-                    request_run.queued_at
+                if request_run.profile_snapshot.execution_mode == "native_profile" or (
+                    self._context_materializer is not None
+                    and not self._legacy_run(request_run.queued_at)
                 ):
                     gate = self._context_claim_gate(uow, request_run, now=now)
                     if gate == "wait":
@@ -592,8 +622,12 @@ class PlanningRunner:
                         "status": request_run.status.value,
                     },
                 )
-                instance = uow.modules.get_instance(
-                    request_run.planner_module_instance_id, request.workspace_id
+                instance = (
+                    None
+                    if request_run.profile_snapshot.execution_mode == "native_profile"
+                    else uow.modules.get_instance(
+                        request_run.planner_module_instance_id, request.workspace_id
+                    )
                 )
                 definition = (
                     None
@@ -631,69 +665,8 @@ class PlanningRunner:
         *,
         context_package: ContextPackageManifestV1 | None,
     ) -> RevisionPlanningContextV1:
-        base = request.base_descriptor
-        if base is None:
-            raise ValueError("revision request has no exact base descriptor")
-        snapshot = uow.plans.get(base.plan_snapshot_id, request.workspace_id)
-        if snapshot is None:
-            raise ValueError("revision base plan snapshot is unavailable")
-
-        task_ids = tuple(
-            dict.fromkeys(
-                (
-                    snapshot.root_task_id,
-                    *(
-                        item.task_id
-                        for item in snapshot.subtasks
-                        if item.task_id is not None
-                    ),
-                )
-            )
-        )
-        tasks = uow.tasks.get_many(task_ids, request.workspace_id)
-        worker_ids = tuple(
-            dict.fromkeys(
-                item.worker_item_id
-                for item in snapshot.worker_item_plans
-                if item.worker_item_id is not None
-            )
-        )
-        worker_items = tuple(
-            item
-            for item_id in worker_ids
-            for item in (uow.worker_items.get(item_id, request.workspace_id),)
-            if item is not None
-        )
-        executions = uow.executions.list_for_tasks(task_ids, request.workspace_id)
-        sessions = tuple(
-            session
-            for execution in executions
-            for session in (uow.sessions.get_active_for_execution(execution.id),)
-            if session is not None
-        )
-        context_refs: tuple[ConfirmedContextPackageRefV1, ...] = ()
-        if context_package is not None:
-            context_refs = (
-                ConfirmedContextPackageRefV1(
-                    ref=context_package_reference(
-                        context_package.package_id,
-                        context_package.package_hash,
-                    ),
-                    package_hash=context_package.package_hash,
-                    context_version=context_package.context_version,
-                ),
-            )
-        return RevisionPlanningContextBuilder(
-            max_context_bytes=request.profile_snapshot.budget.max_context_bytes,
-        ).build(
-            request=request,
-            snapshot=snapshot,
-            tasks=tasks,
-            worker_items=worker_items,
-            executions=executions,
-            sessions=sessions,
-            context_package_refs=context_refs,
-            adapter_capabilities=_adapter_capability_snapshots(sessions),
+        return load_revision_planning_context(
+            uow, request, context_package=context_package
         )
 
     def _legacy_run(self, queued_at: datetime) -> bool:
@@ -709,7 +682,10 @@ class PlanningRunner:
         *,
         now: datetime,
     ) -> ContextClaimGate:
-        if 1 not in run.capability_snapshot.context_package_versions:
+        if (
+            run.profile_snapshot.execution_mode != "native_profile"
+            and 1 not in run.capability_snapshot.context_package_versions
+        ):
             return "context_adapter_unsupported"
         assembly = uow.context_assemblies.get_for_consumer(
             ContextPurpose.PLANNING_RUN,
@@ -756,6 +732,9 @@ class PlanningRunner:
                 safe_message="planner adapter is unavailable",
                 retryable=not exc.blocked,
                 unknown_outcome=False,
+                usage=PlanningUsage.unknown()
+                if item.profile_snapshot.execution_mode == "native_profile"
+                else PlanningUsage.zero(),
             )
             return self._persist_failure(item, failure, blocked=exc.blocked)
         except Exception:  # noqa: BLE001
@@ -766,12 +745,19 @@ class PlanningRunner:
                     safe_message="planner profile is unavailable",
                     retryable=False,
                     unknown_outcome=False,
+                    usage=PlanningUsage.unknown()
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else PlanningUsage.zero(),
                 ),
             )
 
         now = self._clock()
         context_materialization = None
-        if self._context_materializer is not None and item.context_package is not None:
+        if (
+            item.profile_snapshot.execution_mode != "native_profile"
+            and self._context_materializer is not None
+            and item.context_package is not None
+        ):
             try:
                 context_materialization = self._prepare_context(
                     item,
@@ -895,18 +881,44 @@ class PlanningRunner:
                     started_at=now,
                     deadline_at=deadline,
                     cancel_requested=keeper.cancel_requested,
+                    cancel_check=(lambda: keeper.cancel_requested)
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
+                    owner_id=self._owner_id
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
+                    lease_id=item.lease_id
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
+                    fencing_token=item.fencing_token
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
                 ),
             )
         except Exception as exc:  # noqa: BLE001
-            result = PlannerExplicitFailure(
-                code="planner_exception",
-                safe_message=f"planner adapter raised {type(exc).__name__}",
-                retryable=False,
-                unknown_outcome=False,
+            result = (
+                adapter.classify_failure(planner_input, "planner_exception")
+                if item.profile_snapshot.execution_mode == "native_profile"
+                else PlannerExplicitFailure(
+                    code="planner_exception",
+                    safe_message=f"planner adapter raised {type(exc).__name__}",
+                    retryable=False,
+                    unknown_outcome=False,
+                )
             )
         finally:
             keeper.stop()
 
+        if item.profile_snapshot.execution_mode == "native_profile":
+            if keeper.health_error is not None or keeper.cancel_requested:
+                result = adapter.classify_failure(
+                    planner_input,
+                    "planning_lease_unavailable"
+                    if keeper.health_error is not None
+                    else "native_cancelled",
+                    usage=result.usage,
+                )
+            return self._persist_result(item, result)
         if keeper.cancel_requested:
             try:
                 adapter.cancel(planner_input.operation_id)
@@ -1215,10 +1227,13 @@ class PlanningRunner:
                 )
         if isinstance(result, PlannerFailure):
             blocked = result.unknown_outcome and (
-                item.profile_snapshot.planner_capabilities.idempotency
-                is not IdempotencyCapability.OPERATION_ID
-                or item.profile_snapshot.retry_policy.unknown_outcome_policy
-                is UnknownOutcomePolicy.BLOCK
+                item.profile_snapshot.execution_mode == "native_profile"
+                or (
+                    item.profile_snapshot.planner_capabilities.idempotency
+                    is not IdempotencyCapability.OPERATION_ID
+                    or item.profile_snapshot.retry_policy.unknown_outcome_policy
+                    is UnknownOutcomePolicy.BLOCK
+                )
             )
             return self._persist_failure(
                 item, result, blocked=blocked, usage=result.usage
@@ -1659,36 +1674,6 @@ def _capability_catalog(
         max_concurrency=profile_snapshot.budget.max_concurrency,
         workspace_providers=(),
     )
-
-
-def _adapter_capability_snapshots(
-    sessions: Sequence[ExecutionSession],
-) -> tuple[AdapterCapabilitySnapshotV1, ...]:
-    snapshots: list[AdapterCapabilitySnapshotV1] = []
-    for session in sessions:
-        profile = session.capability_snapshot
-        if profile is None:
-            continue
-        snapshots.append(
-            AdapterCapabilitySnapshotV1(
-                adapter_ref=f"worker-session:{session.id}",
-                interface_version="sidera.worker.v1",
-                config_version=session.adapter_config_version or 1,
-                capabilities=(
-                    f"input:{profile.input.value}",
-                    f"idempotency:{profile.idempotency.value}",
-                    f"resume:{profile.resume.value}",
-                    f"stop:{profile.stop.value}",
-                    f"sandbox:{profile.sandbox.value}",
-                    f"stability:{profile.stability.value}",
-                    *(
-                        f"context_package:{version}"
-                        for version in profile.context_package_versions
-                    ),
-                ),
-            )
-        )
-    return tuple(snapshots)
 
 
 def _provider_ref(item: _ClaimedRun) -> str:
