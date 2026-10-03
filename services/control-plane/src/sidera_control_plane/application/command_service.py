@@ -36,8 +36,11 @@ class CommandService:
         self,
         uow_factory: Callable[[], ControlPlaneUnitOfWork],
         handlers: tuple[CommandHandler, ...],
+        *,
+        preflight: Callable[[ControlPlaneUnitOfWork, CommandEnvelope], None] | None = None,
     ) -> None:
         self._uow_factory = uow_factory
+        self._preflight = preflight
         self._handlers: dict[str, CommandHandler] = {}
         for handler in handlers:
             for command_type in handler.command_types:
@@ -73,6 +76,8 @@ class CommandService:
         rejection: DomainError | None = None
         result: CommandResult | None = None
         with self._uow_factory() as uow:
+            if self._preflight is not None:
+                self._preflight(uow, envelope)
             stored = _find_existing_command(uow, envelope, request_hash)
             if stored is not None:
                 return replay_command(stored)
@@ -107,6 +112,8 @@ class CommandService:
         self, envelope: CommandEnvelope, request_hash: str
     ) -> CommandResult:
         with self._uow_factory() as uow:
+            if self._preflight is not None:
+                self._preflight(uow, envelope)
             stored = _find_existing_command(uow, envelope, request_hash)
         if stored is None:
             raise RuntimeError("concurrent command commit winner was not found")

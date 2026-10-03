@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
 from sqlalchemy import and_, func, or_, select
 
 from sidera_control_plane.application.errors import InvalidCursor
@@ -83,7 +84,7 @@ class SqlAlchemyPlanningQueryStore:
                     ModuleDefinitionModel.provider,
                     ModuleDefinitionModel.capabilities,
                 )
-                .join(
+                .outerjoin(
                     ModuleInstanceModel,
                     and_(
                         ModuleInstanceModel.id
@@ -91,7 +92,7 @@ class SqlAlchemyPlanningQueryStore:
                         ModuleInstanceModel.workspace_id == workspace_id,
                     ),
                 )
-                .join(
+                .outerjoin(
                     ModuleDefinitionModel,
                     and_(
                         ModuleDefinitionModel.id == ModuleInstanceModel.definition_id,
@@ -191,7 +192,7 @@ class SqlAlchemyPlanningQueryStore:
                     ModuleDefinitionModel.provider,
                     ModuleDefinitionModel.capabilities,
                 )
-                .join(
+                .outerjoin(
                     ModuleInstanceModel,
                     and_(
                         ModuleInstanceModel.id
@@ -199,7 +200,7 @@ class SqlAlchemyPlanningQueryStore:
                         ModuleInstanceModel.workspace_id == workspace_id,
                     ),
                 )
-                .join(
+                .outerjoin(
                     ModuleDefinitionModel,
                     and_(
                         ModuleDefinitionModel.id == ModuleInstanceModel.definition_id,
@@ -740,8 +741,8 @@ class SqlAlchemyPlanningMetricsStore:
 
 def _profile_view(
     row: PlanningProfileModel,
-    provider: str,
-    capabilities: Mapping[str, object],
+    provider: str | None,
+    capabilities: Mapping[str, object] | None,
 ) -> PlanningProfileView:
     return PlanningProfileView(
         id=row.id,
@@ -755,8 +756,14 @@ def _profile_view(
         planner_interface_version=row.planner_interface_version,
         status=row.status,
         user_selectable=row.user_selectable,
-        capabilities=_capability_view(capabilities),
+        capabilities=None
+        if row.execution_mode == "native_profile"
+        else _capability_view(capabilities),
         created_at=row.created_at,
+        execution_mode=row.execution_mode,
+        planner_agent_ref=None
+        if row.planner_agent_ref is None
+        else ProfileRef.model_validate(row.planner_agent_ref),
     )
 
 

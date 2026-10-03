@@ -6,11 +6,17 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import Depends, Request
+from sidera_agents.api import AgentCatalog, AgentRuntimes
+from sidera_agents.ports import ExecutionAuthorizer
 
 from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
 from sidera_control_plane.application.artifact_content import ArtifactContentService
+from sidera_control_plane.application.assignments import (
+    AssignmentCommandHandler,
+    TrustedAssignmentIdentity,
+)
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
 )
@@ -349,10 +355,33 @@ def _demo_uuid(value: object, field: str) -> UUID:
         ) from exc
 
 
+def get_trusted_assignment_identity() -> TrustedAssignmentIdentity | None:
+    """Standalone composition may override this with a verified request principal."""
+    return
+
+
+def get_assignment_authorizer() -> ExecutionAuthorizer | None:
+    return None
+
+
+def get_assignment_agent_catalog() -> AgentCatalog | None:
+    return None
+
+
+def get_assignment_agent_runtimes() -> AgentRuntimes | None:
+    return None
+
+
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
+    assignment_identity: Annotated[TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)] = None,
+    assignment_authorizer: Annotated[ExecutionAuthorizer | None, Depends(get_assignment_authorizer)] = None,
+    agent_catalog: Annotated[AgentCatalog | None, Depends(get_assignment_agent_catalog)] = None,
+    agent_runtimes: Annotated[AgentRuntimes | None, Depends(get_assignment_agent_runtimes)] = None,
 ) -> CommandService:
+    assignments = AssignmentCommandHandler(catalog=agent_catalog, runtimes=agent_runtimes,
+        identity=assignment_identity, authorizer=assignment_authorizer)
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
@@ -377,6 +406,7 @@ def get_command_service(
     return CommandService(
         factory,
         (
+            assignments,
             ResultAcceptanceService(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
@@ -453,6 +483,7 @@ def get_command_service(
                 approver=governance_approver,
             ),
         ),
+        preflight=assignments.preflight,
     )
 
 

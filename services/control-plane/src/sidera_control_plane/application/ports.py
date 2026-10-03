@@ -27,6 +27,11 @@ from sidera_control_plane.application.result_ports import (
     CodeInputReceipt,
     ResultRepositoryPort,
 )
+from sidera_control_plane.domain.agent_bindings import (
+    AgentBinding,
+    AgentExecutionLink,
+    ExecutionAuthority,
+)
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -2472,8 +2477,77 @@ class NotificationLedger(Protocol):
 NotificationLedgerPort = NotificationLedger
 
 
+class AgentBindingRepositoryPort(Protocol):
+    def get(
+        self,
+        workspace_id: UUID,
+        target_type: str,
+        target_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentBinding | None:
+        raise NotImplementedError
+
+    def append(self, binding: AgentBinding) -> None:
+        raise NotImplementedError
+
+    def history(
+        self, workspace_id: UUID, target_type: str, target_id: UUID
+    ) -> tuple[AgentBinding, ...]:
+        raise NotImplementedError
+
+    def execution_facts(
+        self, workspace_id: UUID, target_type: str, target_id: UUID
+    ) -> tuple[bool, frozenset[str]]:
+        raise NotImplementedError
+
+
+class ExecutionAuthorityRepositoryPort(Protocol):
+    def get(
+        self, authority_id: UUID, *, workspace_id: UUID | None = None
+    ) -> ExecutionAuthority | None:
+        raise NotImplementedError
+
+    def add(self, authority: ExecutionAuthority) -> None:
+        raise NotImplementedError
+
+    def revoke(self, authority_id: UUID, workspace_id: UUID) -> None:
+        raise NotImplementedError
+
+    def prepared_location_ref(
+        self, authority_id: UUID, workspace_id: UUID
+    ) -> str | None:
+        raise NotImplementedError
+
+    def add_link(self, link: AgentExecutionLink) -> None:
+        raise NotImplementedError
+
+    def get_link(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentExecutionLink | None:
+        raise NotImplementedError
+
+    def advance_link(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        authority_id: UUID,
+        run_id: UUID | None,
+        event_cursor: int,
+        status: str,
+    ) -> AgentExecutionLink:
+        raise NotImplementedError
+
+
 class ControlPlaneUnitOfWork(Protocol):
     session: Session
+    agent_bindings: AgentBindingRepositoryPort
+    execution_authorities: ExecutionAuthorityRepositoryPort
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
     plan_transitions: PlanTransitionRepositoryPort

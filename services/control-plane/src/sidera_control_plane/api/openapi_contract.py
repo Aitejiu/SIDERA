@@ -57,9 +57,11 @@ from sidera_control_plane.api.schemas import (
     RetryResultVerificationPayload,
     ReviseWorkContextPayload,
     RevokeContextPackagePayload,
+    SetAgentAssigneePayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
     SubmitPlanRevisionPayload,
+    UpdateUnstartedAgentBindingPayload,
 )
 from sidera_control_plane.config import Settings
 
@@ -87,6 +89,9 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 
 _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("SetSubtaskAssignee", SetAgentAssigneePayload),
+    ("SetWorkerItemAssignee", SetAgentAssigneePayload),
+    ("UpdateUnstartedAgentBinding", UpdateUnstartedAgentBindingPayload),
     ("ConfigureWorkerRuntime", ConfigureWorkerRuntimePayload),
     ("SetModuleLifecycle", SetModuleLifecyclePayload),
     ("PinExecutionWorker", PinExecutionWorkerPayload),

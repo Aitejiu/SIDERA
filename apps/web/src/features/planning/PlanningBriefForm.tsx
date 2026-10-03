@@ -13,6 +13,10 @@ import {
 } from "./api";
 import type { PlanningProfile, SubmitPlanningRequestPayload } from "./types";
 
+type LegacyPlanningProfile = PlanningProfile & {
+  capabilities: NonNullable<PlanningProfile["capabilities"]>;
+};
+
 export function PlanningBriefForm() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const resolvedWorkspaceId = workspaceId ?? "";
@@ -32,7 +36,11 @@ export function PlanningBriefForm() {
     queryFn: ({ signal }) => listPlanningProfiles(resolvedWorkspaceId, signal),
     enabled: resolvedWorkspaceId.length > 0,
   });
-  const profiles = profilesQuery.data?.items.filter((profile) => profile.user_selectable) ?? [];
+  const profiles = profilesQuery.data?.items.filter((profile): profile is LegacyPlanningProfile => (
+    profile.user_selectable
+    && (profile.execution_mode ?? "legacy") === "legacy"
+    && profile.capabilities !== null
+  )) ?? [];
   const selectedProfile = profiles.find((profile) => profile.id === profileId)
     ?? profiles.find((profile) => (
       profile.capabilities.proposal_schema_versions.length === 1
@@ -304,7 +312,7 @@ function ListField({
   );
 }
 
-function ProfileSummary({ profile }: { profile: PlanningProfile }) {
+function ProfileSummary({ profile }: { profile: LegacyPlanningProfile }) {
   return (
     <div className="planning-profile-summary">
       <strong>{profile.display_name}</strong>

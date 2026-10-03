@@ -111,6 +111,9 @@ EXPECTED_TYPED_POST_RESPONSES = {
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
+    "SetSubtaskAssignee": "SetAgentAssigneePayload",
+    "SetWorkerItemAssignee": "SetAgentAssigneePayload",
+    "UpdateUnstartedAgentBinding": "UpdateUnstartedAgentBindingPayload",
     "RegisterPlannerModule": "RegisterPlannerModulePayload",
     "RegisterCollaborationRuntimeModule": "RegisterCollaborationRuntimeModulePayload",
     "RegisterPlanningProfile": "RegisterPlanningProfilePayload",
@@ -391,6 +394,49 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert error_body["properties"]["details"]["type"] == "object"
 
     assert json.loads(first_bytes) == first
+
+
+def test_native_assignment_and_planning_policy_export(tmp_path: Path) -> None:
+    document = export_openapi(tmp_path / "openapi.json")
+    schemas = document["components"]["schemas"]
+    assert {
+        "SetAgentAssigneePayload",
+        "UpdateUnstartedAgentBindingPayload",
+        "UnstartedAssignmentTarget",
+    } <= schemas.keys()
+    assignment = schemas["SetAgentAssigneePayload"]
+    fields = {"assignee_kind", "assignee_id", "profile_revision"}
+    assert set(assignment["properties"]) == fields
+    assert set(assignment["required"]) == fields
+    assert assignment["additionalProperties"] is False
+    assert assignment["properties"]["assignee_kind"]["enum"] == ["human", "profile"]
+    assert assignment["properties"]["profile_revision"]["anyOf"] == [
+        {"exclusiveMinimum": 0, "type": "integer"},
+        {"type": "null"},
+    ]
+    update = schemas["UpdateUnstartedAgentBindingPayload"]
+    assert set(update["properties"]) == fields | {"targets"}
+    assert set(update["required"]) == fields | {"targets"}
+    assert update["properties"]["targets"]["minItems"] == 1
+    assert update["properties"]["targets"]["items"] == {
+        "$ref": "#/components/schemas/UnstartedAssignmentTarget"
+    }
+    target = schemas["UnstartedAssignmentTarget"]
+    assert target["additionalProperties"] is False
+    assert set(target["required"]) == {"target_type", "target_id", "expected_version"}
+    assert target["properties"]["target_type"]["enum"] == ["subtask", "worker_item"]
+    assert target["properties"]["expected_version"]["exclusiveMinimum"] == 0
+    planning = schemas["PlanningProfileResponse"]["properties"]
+    assert planning["execution_mode"]["enum"] == ["legacy", "native_profile"]
+    assert planning["execution_mode"]["default"] == "legacy"
+    for name in (
+        "planner_provider",
+        "planner_module_instance_id",
+        "planner_module_config_version",
+        "capabilities",
+        "planner_agent_ref",
+    ):
+        assert {"type": "null"} in planning[name]["anyOf"]
 
 
 def test_committed_openapi_matches_current_export(tmp_path: Path) -> None:

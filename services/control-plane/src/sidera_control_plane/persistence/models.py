@@ -33,6 +33,132 @@ class TimestampMixin:
     )
 
 
+class AgentBindingModel(Base):
+    __tablename__ = "agent_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('subtask', 'worker_item')", name="ck_agent_bindings_target"
+        ),
+        CheckConstraint("version >= 1", name="ck_agent_bindings_version"),
+        CheckConstraint(
+            "(assignee_kind = 'human' AND profile_ref IS NULL AND NOT runnable) OR "
+            "(assignee_kind = 'profile' AND profile_ref IS NOT NULL AND "
+            "profile_ref->>'workspace_id' = workspace_id::text AND "
+            "profile_ref->>'profile_id' = assignee_id)",
+            name="ck_agent_bindings_pin",
+        ),
+        Index(
+            "uq_agent_bindings_current",
+            "workspace_id",
+            "target_type",
+            "target_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    target_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    target_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    assignee_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    assignee_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    profile_ref: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    runnable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    not_runnable_reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class ExecutionAuthorityModel(Base):
+    __tablename__ = "execution_authorities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "target_type", "target_id", "binding_version"],
+            [
+                "agent_bindings.workspace_id",
+                "agent_bindings.target_type",
+                "agent_bindings.target_id",
+                "agent_bindings.version",
+            ],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("id", "execution_id", "workspace_id"),
+    )
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+class AgentExecutionLinkModel(Base):
+    __tablename__ = "agent_execution_links"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["authority_id", "execution_id", "workspace_id"],
+            [
+                "execution_authorities.id",
+                "execution_authorities.execution_id",
+                "execution_authorities.workspace_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("workspace_id", "start_operation_id"),
+        UniqueConstraint("workspace_id", "run_id"),
+        CheckConstraint(
+            "binding_version >= 1 AND event_cursor >= 0",
+            name="ck_agent_execution_links_versions",
+        ),
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    start_operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    profile_ref: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    run_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    event_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    authority_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class WorkspaceModel(TimestampMixin, Base):
     __tablename__ = "workspaces"
     __table_args__ = (CheckConstraint("version >= 1", name="ck_workspaces_version"),)
@@ -2156,6 +2282,14 @@ class PlanningProfileModel(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("version >= 1", name="ck_planning_profiles_version"),
         CheckConstraint(
+            "(execution_mode = 'legacy' AND planner_module_instance_id IS NOT NULL AND "
+            "planner_module_config_version IS NOT NULL AND planner_agent_ref IS NULL) OR "
+            "(execution_mode = 'native_profile' AND planner_module_instance_id IS NULL AND "
+            "planner_module_config_version IS NULL AND planner_agent_ref IS NOT NULL AND "
+            "planner_agent_ref->>'workspace_id' = workspace_id::text)",
+            name="ck_planning_profiles_execution_mode",
+        ),
+        CheckConstraint(
             "planner_module_config_version >= 1",
             name="ck_planning_profiles_module_config_version",
         ),
@@ -2201,10 +2335,18 @@ class PlanningProfileModel(TimestampMixin, Base):
     profile_key: Mapped[str] = mapped_column(String(255), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    planner_module_instance_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
+    planner_module_instance_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
     )
-    planner_module_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    planner_module_config_version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    execution_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="legacy"
+    )
+    planner_agent_ref: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     planner_interface_version: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     user_selectable: Mapped[bool] = mapped_column(Boolean, nullable=False)

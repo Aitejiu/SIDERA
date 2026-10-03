@@ -5308,7 +5308,7 @@ export interface components {
         };
         /** PlanningProfileResponse */
         PlanningProfileResponse: {
-            capabilities: components["schemas"]["PlanningCapabilityResponse"];
+            capabilities: components["schemas"]["PlanningCapabilityResponse"] | null;
             /**
              * Created At
              * Format: date-time
@@ -5317,21 +5317,25 @@ export interface components {
             /** Display Name */
             display_name: string;
             /**
+             * Execution Mode
+             * @default legacy
+             * @enum {string}
+             */
+            execution_mode: "legacy" | "native_profile";
+            /**
              * Id
              * Format: uuid
              */
             id: string;
+            planner_agent_ref?: components["schemas"]["ProfileRef"] | null;
             /** Planner Interface Version */
             planner_interface_version: string;
             /** Planner Module Config Version */
-            planner_module_config_version: number;
-            /**
-             * Planner Module Instance Id
-             * Format: uuid
-             */
-            planner_module_instance_id: string;
+            planner_module_config_version: number | null;
+            /** Planner Module Instance Id */
+            planner_module_instance_id: string | null;
             /** Planner Provider */
-            planner_provider: string;
+            planner_provider: string | null;
             /** Profile Key */
             profile_key: string;
             /** Status */
@@ -5658,6 +5662,21 @@ export interface components {
              * Format: uuid
              */
             target_worker_id: string;
+        };
+        /** ProfileRef */
+        ProfileRef: {
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
+            /** Revision */
+            revision: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** ReconcileWorkerTransitionPayload */
         ReconcileWorkerTransitionPayload: {
@@ -7121,6 +7140,18 @@ export interface components {
              */
             workspace_id: string;
         };
+        /** SetAgentAssigneePayload */
+        SetAgentAssigneePayload: {
+            /** Assignee Id */
+            assignee_id: string;
+            /**
+             * Assignee Kind
+             * @enum {string}
+             */
+            assignee_kind: "human" | "profile";
+            /** Profile Revision */
+            profile_revision: number | null;
+        };
         /** SetModuleLifecyclePayload */
         SetModuleLifecyclePayload: {
             /**
@@ -8089,6 +8120,35 @@ export interface components {
             ordinal: number;
             /** Question */
             question: string;
+        };
+        /** UnstartedAssignmentTarget */
+        UnstartedAssignmentTarget: {
+            /** Expected Version */
+            expected_version: number;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /**
+             * Target Type
+             * @enum {string}
+             */
+            target_type: "subtask" | "worker_item";
+        };
+        /** UpdateUnstartedAgentBindingPayload */
+        UpdateUnstartedAgentBindingPayload: {
+            /** Assignee Id */
+            assignee_id: string;
+            /**
+             * Assignee Kind
+             * @enum {string}
+             */
+            assignee_kind: "human" | "profile";
+            /** Profile Revision */
+            profile_revision: number | null;
+            /** Targets */
+            targets: components["schemas"]["UnstartedAssignmentTarget"][];
         };
         /** UsageSummaryProjectionResponse */
         UsageSummaryProjectionResponse: {

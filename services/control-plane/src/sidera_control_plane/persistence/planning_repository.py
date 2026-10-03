@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -80,6 +81,10 @@ class PlanningProfileRepository:
                 display_name=profile.display_name,
                 planner_module_instance_id=profile.planner_module_instance_id,
                 planner_module_config_version=profile.planner_module_config_version,
+                execution_mode=profile.execution_mode,
+                planner_agent_ref=None
+                if profile.planner_agent_ref is None
+                else profile.planner_agent_ref.model_dump(mode="json"),
                 planner_interface_version=profile.planner_interface_version,
                 status=profile.status.value,
                 user_selectable=profile.user_selectable,
@@ -827,6 +832,10 @@ def _to_profile(row: PlanningProfileModel) -> PlanningProfile:
         profile_key=row.profile_key,
         version=row.version,
         display_name=row.display_name,
+        execution_mode=row.execution_mode,
+        planner_agent_ref=None
+        if row.planner_agent_ref is None
+        else ProfileRef.model_validate(row.planner_agent_ref),
         planner_module_instance_id=row.planner_module_instance_id,
         planner_module_config_version=row.planner_module_config_version,
         planner_interface_version=row.planner_interface_version,
@@ -875,7 +884,13 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
         "profile_key": snapshot.profile_key,
         "profile_version": snapshot.profile_version,
         "display_name": snapshot.display_name,
-        "planner_module_instance_id": str(snapshot.planner_module_instance_id),
+        "execution_mode": snapshot.execution_mode,
+        "planner_agent_ref": None
+        if snapshot.planner_agent_ref is None
+        else snapshot.planner_agent_ref.model_dump(mode="json"),
+        "planner_module_instance_id": None
+        if snapshot.planner_module_instance_id is None
+        else str(snapshot.planner_module_instance_id),
         "planner_module_config_version": snapshot.planner_module_config_version,
         "planner_interface_version": snapshot.planner_interface_version,
         "prompt_policy_version": snapshot.prompt_policy_version,
@@ -890,7 +905,9 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
         "execution_max_attempts": snapshot.execution_max_attempts,
         "execution_budget_level": snapshot.execution_budget_level,
         "planner_secret_refs": list(snapshot.planner_secret_refs),
-        "planner_capabilities": _capability_to_mapping(capabilities),
+        "planner_capabilities": None
+        if capabilities is None
+        else _capability_to_mapping(capabilities),
         "collaboration_runtime_binding": (
             None
             if snapshot.collaboration_runtime_binding is None
@@ -902,14 +919,23 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
 def _snapshot_from_mapping(value: Mapping[str, object]) -> PlanningProfileSnapshot:
     budget = _mapping(value.get("budget"), "snapshot budget")
     retry = _mapping(value.get("retry_policy"), "snapshot retry_policy")
+    native = value.get("execution_mode", "legacy") == "native_profile"
     return PlanningProfileSnapshot(
         profile_id=_uuid(value, "profile_id"),
         workspace_id=_uuid(value, "workspace_id"),
         profile_key=_string(value, "profile_key"),
         profile_version=_int(value, "profile_version"),
         display_name=_string(value, "display_name"),
-        planner_module_instance_id=_uuid(value, "planner_module_instance_id"),
-        planner_module_config_version=_int(value, "planner_module_config_version"),
+        execution_mode=value.get("execution_mode", "legacy"),
+        planner_agent_ref=None
+        if value.get("planner_agent_ref") is None
+        else ProfileRef.model_validate(value["planner_agent_ref"]),
+        planner_module_instance_id=None
+        if native and value.get("planner_module_instance_id") is None
+        else _uuid(value, "planner_module_instance_id"),
+        planner_module_config_version=None
+        if native and value.get("planner_module_config_version") is None
+        else _int(value, "planner_module_config_version"),
         planner_interface_version=_string(value, "planner_interface_version"),
         prompt_policy_version=_string(value, "prompt_policy_version"),
         system_policy=_mapping(value.get("system_policy"), "snapshot system_policy"),
@@ -940,7 +966,9 @@ def _snapshot_from_mapping(value: Mapping[str, object]) -> PlanningProfileSnapsh
         execution_max_attempts=_int(value, "execution_max_attempts"),
         execution_budget_level=_string(value, "execution_budget_level"),
         planner_secret_refs=_strings(value, "planner_secret_refs"),
-        planner_capabilities=_capability_from_mapping(
+        planner_capabilities=None
+        if native and value.get("planner_capabilities") is None
+        else _capability_from_mapping(
             _mapping(value.get("planner_capabilities"), "planner_capabilities")
         ),
         collaboration_runtime_binding=_binding_from_mapping(

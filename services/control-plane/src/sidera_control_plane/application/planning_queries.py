@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
+
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.domain.result_inputs import InputGroupInvalid, InputGroupV1
 
@@ -31,14 +33,16 @@ class PlanningProfileView:
     profile_key: str
     version: int
     display_name: str
-    planner_provider: str
-    planner_module_instance_id: UUID
-    planner_module_config_version: int
+    planner_provider: str | None
+    planner_module_instance_id: UUID | None
+    planner_module_config_version: int | None
     planner_interface_version: str
     status: str
     user_selectable: bool
-    capabilities: PlanningCapabilityView
+    capabilities: PlanningCapabilityView | None
     created_at: datetime
+    execution_mode: str = "legacy"
+    planner_agent_ref: ProfileRef | None = None
 
 
 @dataclass(frozen=True, slots=True)

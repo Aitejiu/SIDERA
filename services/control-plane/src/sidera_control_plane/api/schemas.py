@@ -8,10 +8,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     StringConstraints,
     field_serializer,
     model_validator,
 )
+from sidera_agents.contracts import ProfileRef
 
 from sidera_control_plane.application.collaboration_metrics import (
     CollaborationMetricsView,
@@ -2868,6 +2870,32 @@ class ContinueExecutionSessionPayload(BaseModel):
     not_before: datetime
 
 
+class SetAgentAssigneePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    assignee_kind: Literal["human", "profile"]
+    assignee_id: NonEmptyString
+    profile_revision: Annotated[StrictInt, Field(gt=0)] | None
+
+    @model_validator(mode="after")
+    def validate_assignee(self):
+        if self.assignee_kind == "human" and self.profile_revision is not None:
+            raise ValueError("human cannot have a profile revision")
+        if self.assignee_kind == "profile":
+            UUID(self.assignee_id)
+        return self
+
+
+class UnstartedAssignmentTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_type: Literal["subtask", "worker_item"]
+    target_id: UUID
+    expected_version: Annotated[StrictInt, Field(gt=0)]
+
+
+class UpdateUnstartedAgentBindingPayload(SetAgentAssigneePayload):
+    targets: list[UnstartedAssignmentTarget] = Field(min_length=1)
+
+
 class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2881,6 +2909,19 @@ class CommandRequest(BaseModel):
     idempotency_key: NonEmptyString
     correlation_id: UUID
     payload: dict[str, Any]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_assignment_version(cls, value):
+        if isinstance(value, dict) and value.get("command_type") in {
+            "SetSubtaskAssignee",
+            "SetWorkerItemAssignee",
+            "UpdateUnstartedAgentBinding",
+        }:
+            version = value.get("expected_version")
+            if type(version) is not int or version < 1:
+                raise ValueError("assignment needs exact positive aggregate version")
+        return value
 
     @model_validator(mode="after")
     def validate_command_shape(self) -> "CommandRequest":
@@ -2898,9 +2939,29 @@ class CommandRequest(BaseModel):
         return self._validate_payload()
 
     def _validate_payload(self) -> "CommandRequest":
-        if self.command_type == "CreateTask":
+        if self.command_type in {
+            "SetSubtaskAssignee",
+            "SetWorkerItemAssignee",
+            "UpdateUnstartedAgentBinding",
+        }:
+            kind = (
+                "task"
+                if self.command_type == "SetSubtaskAssignee"
+                else "worker_item"
+                if self.command_type == "SetWorkerItemAssignee"
+                else self.target_type
+            )
+            if kind not in {"task", "worker_item"}:
+                raise ValueError("invalid assignment target")
+            self._require_mutation_target(kind)
+            parsed: BaseModel = (
+                UpdateUnstartedAgentBindingPayload
+                if self.command_type == "UpdateUnstartedAgentBinding"
+                else SetAgentAssigneePayload
+            ).model_validate(self.payload)
+        elif self.command_type == "CreateTask":
             self._require_create("task")
-            parsed: BaseModel = CreateTaskPayload.model_validate(self.payload)
+            parsed = CreateTaskPayload.model_validate(self.payload)
         elif self.command_type == "RegisterPlannerModule":
             self._require_create("workspace")
             parsed = RegisterPlannerModulePayload.model_validate(self.payload)
@@ -4423,14 +4484,16 @@ class PlanningProfileResponse(BaseModel):
     profile_key: str
     version: int
     display_name: str
-    planner_provider: str
-    planner_module_instance_id: UUID
-    planner_module_config_version: int
+    planner_provider: str | None
+    planner_module_instance_id: UUID | None
+    planner_module_config_version: int | None
     planner_interface_version: str
     status: str
     user_selectable: bool
-    capabilities: PlanningCapabilityResponse
+    capabilities: PlanningCapabilityResponse | None
     created_at: datetime
+    execution_mode: Literal["legacy", "native_profile"] = "legacy"
+    planner_agent_ref: ProfileRef | None = None
 
     @classmethod
     def from_view(cls, view: PlanningProfileView) -> "PlanningProfileResponse":
@@ -4446,8 +4509,12 @@ class PlanningProfileResponse(BaseModel):
             planner_interface_version=view.planner_interface_version,
             status=view.status,
             user_selectable=view.user_selectable,
-            capabilities=PlanningCapabilityResponse.from_view(view.capabilities),
+            capabilities=None
+            if view.capabilities is None
+            else PlanningCapabilityResponse.from_view(view.capabilities),
             created_at=view.created_at,
+            execution_mode=view.execution_mode,
+            planner_agent_ref=view.planner_agent_ref,
         )
 
 

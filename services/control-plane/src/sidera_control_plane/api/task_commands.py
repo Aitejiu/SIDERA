@@ -6,10 +6,16 @@ from fastapi import APIRouter, Depends, Response
 from sidera_control_plane.api.dependencies import (
     get_command_service,
     get_settings,
+    get_trusted_assignment_identity,
     require_demo_runtime_binding,
     require_result_integration_enabled,
 )
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
+from sidera_control_plane.application.assignments import (
+    ASSIGNMENT_COMMAND_TYPES,
+    TrustedAssignmentIdentity,
+    require_trusted_assignment_identity,
+)
 from sidera_control_plane.application.collaboration_governance_commands import (
     CollaborationGovernanceCommandError,
 )
@@ -55,8 +61,9 @@ def execute_command(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)] = None,
 ) -> CommandResponse:
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 @router.post(
@@ -130,7 +137,10 @@ def _execute_command(
     response: Response,
     service: CommandService,
     settings: Settings,
+    trusted_identity: TrustedAssignmentIdentity | None = None,
 ) -> CommandResponse:
+    if request.command_type in ASSIGNMENT_COMMAND_TYPES:
+        require_trusted_assignment_identity(request.to_envelope(), trusted_identity)
     require_demo_runtime_binding(request, settings)
     if request.command_type in _GOVERNANCE_COMMAND_TYPES and (
         request.actor.type != settings.local_actor_type

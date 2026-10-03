@@ -6,6 +6,7 @@ from typing import Self
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.ports import (
+    AgentBindingRepositoryPort,
     ArtifactRepositoryPort,
     AttentionAcknowledgementRepositoryPort,
     CollaborationEvaluationRepositoryPort,
@@ -18,6 +19,7 @@ from sidera_control_plane.application.ports import (
     ContextPatchRepositoryPort,
     EventStorePort,
     EvidenceClaimRepositoryPort,
+    ExecutionAuthorityRepositoryPort,
     ExecutionBindingRepositoryPort,
     ExecutionEventRepositoryPort,
     ExecutionInputRepositoryPort,
@@ -59,6 +61,9 @@ from sidera_control_plane.application.ports import (
 from sidera_control_plane.application.projection_changes import (
     ProjectionChangePublisher,
 )
+from sidera_control_plane.persistence.agent_binding_repository import (
+    AgentBindingRepository,
+)
 from sidera_control_plane.persistence.attention_repository import (
     AttentionAcknowledgementRepository,
 )
@@ -78,6 +83,9 @@ from sidera_control_plane.persistence.context_patch_repository import (
     ContextPatchRepository,
 )
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.execution_authority_repository import (
+    ExecutionAuthorityRepository,
+)
 from sidera_control_plane.persistence.execution_repository import ExecutionRepository
 from sidera_control_plane.persistence.execution_request_repository import (
     ExecutionRequestRepository,
@@ -153,6 +161,8 @@ from sidera_control_plane.persistence.workspace_repository import WorkspaceRepos
 
 class SqlAlchemyUnitOfWork:
     session: Session
+    agent_bindings: AgentBindingRepositoryPort
+    execution_authorities: ExecutionAuthorityRepositoryPort
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
     plan_transitions: PlanTransitionRepositoryPort
@@ -212,6 +222,8 @@ class SqlAlchemyUnitOfWork:
 
     def __enter__(self) -> Self:
         self.session = Session(self._database.engine, expire_on_commit=False)
+        self.agent_bindings = AgentBindingRepository(self.session)
+        self.execution_authorities = ExecutionAuthorityRepository(self.session)
         self.tasks = TaskRepository(self.session)
         self.plans = PlanRepository(self.session)
         self.plan_transitions = PlanTransitionRepository(self.session)
