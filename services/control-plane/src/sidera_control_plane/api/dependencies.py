@@ -13,6 +13,7 @@ from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
 from sidera_control_plane.application.agent_sources import TaskContextSourceReader
+from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.assignments import (
     AssignmentCommandHandler,
@@ -207,10 +208,17 @@ def get_settings(request: Request) -> Settings:
     return settings
 
 
-def get_worker_runtime_resolver() -> WorkerRuntimeResolver:
+def get_native_worker_services() -> NativeWorkerServices | None:
+    """Product composition injects public agents services and a trusted scope."""
+    return None
+
+
+def get_worker_runtime_resolver(
+    native_services: NativeWorkerServices | None = None,
+) -> WorkerRuntimeResolver:
     """Construct the shared runtime-fact resolver used by command/query edges."""
 
-    return WorkerRuntimeResolver()
+    return WorkerRuntimeResolver(native_services=native_services)
 
 
 class AdapterWorkflowRequiresLoopback(ValidationError):
@@ -434,10 +442,21 @@ def get_agent_context_source_reader(
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
-    assignment_identity: Annotated[TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)] = None,
-    assignment_authorizer: Annotated[ExecutionAuthorizer | None, Depends(get_assignment_authorizer)] = None,
-    agent_catalog: Annotated[AgentCatalog | None, Depends(get_assignment_agent_catalog)] = None,
-    agent_runtimes: Annotated[AgentRuntimes | None, Depends(get_assignment_agent_runtimes)] = None,
+    assignment_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
+    assignment_authorizer: Annotated[
+        ExecutionAuthorizer | None, Depends(get_assignment_authorizer)
+    ] = None,
+    agent_catalog: Annotated[
+        AgentCatalog | None, Depends(get_assignment_agent_catalog)
+    ] = None,
+    agent_runtimes: Annotated[
+        AgentRuntimes | None, Depends(get_assignment_agent_runtimes)
+    ] = None,
+    native_services: Annotated[
+        NativeWorkerServices | None, Depends(get_native_worker_services)
+    ] = None,
 ) -> CommandService:
     assignments = AssignmentCommandHandler(catalog=agent_catalog, runtimes=agent_runtimes,
         identity=assignment_identity, authorizer=assignment_authorizer)
@@ -445,7 +464,7 @@ def get_command_service(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
-    runtime_resolver = get_worker_runtime_resolver()
+    runtime_resolver = get_worker_runtime_resolver(native_services)
     handoff_candidates = HandoffCandidateService(
         factory,
         runtime_resolver=runtime_resolver,
@@ -555,12 +574,15 @@ def get_command_query_service(
 def get_handoff_public_query_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
+    native_services: Annotated[
+        NativeWorkerServices | None, Depends(get_native_worker_services)
+    ] = None,
 ) -> HandoffPublicQueryService:
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
-    runtime_resolver = get_worker_runtime_resolver()
+    runtime_resolver = get_worker_runtime_resolver(native_services)
     candidate_service = HandoffCandidateService(
         factory,
         runtime_resolver=runtime_resolver,

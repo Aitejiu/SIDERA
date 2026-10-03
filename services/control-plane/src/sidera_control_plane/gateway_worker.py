@@ -16,12 +16,17 @@ from sidera_control_plane.adapters.git_workspace import (
     opaque_repository_ref,
 )
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
+from sidera_control_plane.application.agent_sources import TaskContextSourceReader
+from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.code_result_capture import (
     CodeResultCaptureService,
 )
 from sidera_control_plane.application.context_materialization import (
     ContextMaterializer,
+)
+from sidera_control_plane.application.execution_authority import (
+    ExecutionAuthorityReader,
 )
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
@@ -87,7 +92,9 @@ def _resolve_active_session_sync_workspace(settings: Settings) -> UUID | None:
     return getattr(settings, "gateway_sync_workspace_id", None)
 
 
-def build_gateway(settings: Settings) -> GatewayRuntime:
+def build_gateway(
+    settings: Settings, *, native_services: NativeWorkerServices | None = None
+) -> GatewayRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
         base_url=settings.knowledge_base_url,
@@ -153,6 +160,21 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             adapter_factories=adapter_factories,
             workspace_factories=workspace_factories,
             spec_factory=ConfiguredExecutionSpecFactory(),
+            native_services=native_services,
+            native_source_reader=(
+                TaskContextSourceReader(
+                    uow_factory,
+                    authorizer=ExecutionAuthorityReader(
+                        uow_factory,
+                        principal=lambda: native_services.principal_id,
+                        authorizer=native_services.authorizer,
+                    ),
+                    catalog=catalog,
+                    result_input_content=artifact_content_service,
+                )
+                if native_services is not None
+                else None
+            ),
             artifact_content_store=artifact_content_store,
             context_materializer=ContextMaterializer(
                 catalog,

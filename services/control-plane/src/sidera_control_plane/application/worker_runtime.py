@@ -3,11 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Protocol
 from uuid import UUID
 
+from sidera_agents.errors import AgentError
+
+from sidera_control_plane.application.agent_worker_adapter import (
+    NativeWorkerServices,
+    native_binding,
+    native_capabilities,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.execution import Execution
 from sidera_control_plane.domain.modules import (
@@ -93,6 +100,89 @@ def require_verification_runtime(
 class WorkerRuntimeResolver:
     """Resolve one exact Worker runtime from control-plane facts only."""
 
+    def __init__(self, *, native_services: NativeWorkerServices | None = None):
+        self._native_services = native_services
+
+    def _native_resolution(self, uow, worker, execution, resolved):
+        repository = getattr(uow, "agent_bindings", None)
+        binding = None if repository is None else native_binding(uow, execution)
+        if binding is None:
+            if worker.adapter_type == "agent-run":
+                return _issue(
+                    SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                    worker,
+                    reason="binding_confirmation_required",
+                )
+            return resolved
+        reason = None
+        if binding.assignee.kind == "human":
+            reason = "human_manual"
+        elif not binding.runnable:
+            reason = "binding_not_runnable"
+        elif self._native_services is None:
+            reason = "native_services_unavailable"
+        elif worker.adapter_type != "agent-run":
+            reason = "agent_run_business_adapter_required"
+        if reason is not None:
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason=reason,
+            )
+        if isinstance(resolved, SchedulingIssue):
+            return resolved
+        services = self._native_services
+        try:
+            profile = services.catalog.get_profile(
+                binding.profile_ref, grant_id=services.catalog_grant_id
+            )
+            status = services.catalog.get_profile_status(
+                binding.profile_ref, grant_id=services.catalog_grant_id
+            )
+            runtime = services.runtimes.get_runtime(
+                profile.draft.runtime_ref, grant_id=services.catalog_grant_id
+            )
+        except AgentError as exc:
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason=exc.code,
+            )
+        if (
+            profile.ref != binding.profile_ref
+            or status.profile_id != binding.profile_ref.profile_id
+            or runtime.ref != profile.draft.runtime_ref
+            or not status.enabled
+            or not runtime.installed
+            or not runtime.enabled
+            or runtime.protocol_state.value != "ready"
+            or runtime.auth_state.value == "failed"
+        ):
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason="native_runtime_unavailable",
+            )
+        for capability in execution.capability_requirements:
+            support = runtime.capabilities.get(capability)
+            if support is None or support.status.value != "supported":
+                return _issue(
+                    SchedulingBlockReason.RUNTIME_CAPABILITY_MISMATCH,
+                    worker,
+                    reason="required_capability_unavailable",
+                    field=capability,
+                )
+        return replace(
+            resolved,
+            capability_snapshot=native_capabilities(),
+            resolution_facts={
+                **resolved.resolution_facts,
+                "execution_mode": "native",
+                "profile_ref": binding.profile_ref.model_dump(mode="json"),
+                "binding_version": binding.version,
+            },
+        )
+
     def inspect_candidates(
         self,
         uow: ControlPlaneUnitOfWork,
@@ -130,7 +220,7 @@ class WorkerRuntimeResolver:
         )
         definition_by_id = {definition.id: definition for definition in definitions}
 
-        return tuple(
+        inspections = tuple(
             _inspection_for(
                 worker=worker,
                 execution=execution,
@@ -139,6 +229,19 @@ class WorkerRuntimeResolver:
                 definitions=definition_by_id,
             )
             for worker in candidate_workers
+        )
+        return tuple(
+            RuntimeCandidateInspection(
+                item.worker,
+                result if isinstance(result, ResolvedWorkerRuntime) else None,
+                result if isinstance(result, SchedulingIssue) else None,
+            )
+            for item in inspections
+            for result in (
+                self._native_resolution(
+                    uow, item.worker, execution, item.resolved or item.issue
+                ),
+            )
         )
 
     def lock_and_resolve(
@@ -190,13 +293,14 @@ class WorkerRuntimeResolver:
             execution.workspace_id,
             for_update=True,
         )
-        return _resolve(
+        resolved = _resolve(
             worker=worker,
             execution=execution,
             configuration=configuration,
             instances=instance_by_id,
             definitions={definition.id: definition for definition in definitions},
         )
+        return self._native_resolution(uow, worker, execution, resolved)
 
     def validate_configuration(
         self,

@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
+from sidera_control_plane.application.agent_worker_adapter import native_binding
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
@@ -192,6 +193,27 @@ class Scheduler:
                     return 0, 0, 0, None
                 execution = claimed[0]
                 execution_id = execution.id
+                agent_binding = (
+                    native_binding(uow, execution)
+                    if hasattr(uow, "agent_bindings")
+                    else None
+                )
+                if agent_binding is not None and not agent_binding.runnable:
+                    return self._commit_deferred(
+                        uow=uow,
+                        execution=execution,
+                        execution_id=execution_id,
+                        issue=SchedulingIssue(
+                            SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                            {
+                                "reason": "human_manual"
+                                if agent_binding.assignee.kind == "human"
+                                else "binding_not_runnable"
+                            },
+                            True,
+                        ),
+                        now=now,
+                    )
                 if _result_acceptance_recorded(uow, execution):
                     return 1, 0, 0, execution_id
                 if execution.worker_item_id is not None:

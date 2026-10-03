@@ -1,6 +1,7 @@
 import hashlib
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -67,6 +68,7 @@ class GitWorktreeWorkspaceManager:
         self._physical_location_by_manifest_id: dict[UUID, Path] = {}
         self._workspace_binding_by_manifest_id: dict[UUID, tuple[UUID, int]] = {}
         self._repository_by_ref: dict[str, Path] = {}
+        self._native_refence_proposals: dict[UUID, ExecutionWorkspaceManifest] = {}
 
     def prepare(
         self, spec: ExecutionSpec, *, operation_id: UUID
@@ -159,6 +161,86 @@ class GitWorktreeWorkspaceManager:
             workspace_config_version=spec.workspace_config_version,
         )
         return manifest
+
+    def physical_directory(self, manifest: ExecutionWorkspaceManifest) -> Path:
+        stored = self._manifests_by_id.get(manifest.id)
+        if stored is None:
+            raise WorkspaceProviderError("prepared workspace identity is unavailable")
+        _require_manifest_identity(stored, manifest)
+        if manifest.lifecycle not in {
+            WorkspaceLifecycle.READY,
+            WorkspaceLifecycle.ACTIVE,
+            WorkspaceLifecycle.FROZEN,
+            WorkspaceLifecycle.RETAINED,
+        }:
+            raise WorkspaceProviderError("prepared workspace lifecycle is unavailable")
+        location = self._physical_location_by_manifest_id.get(manifest.id)
+        if location is None or location.is_symlink() or not location.is_dir():
+            raise WorkspaceProviderError("prepared workspace directory is unavailable")
+        location = location.resolve()
+        if self._workspace_root not in location.parents:
+            raise WorkspaceProviderError("prepared workspace directory escapes root")
+        checkout = self._require_checkout(manifest)
+        repository = self._resolve_repository_for_manifest(manifest, location)
+        if self._opaque_repository_ref(repository) != checkout.repository_ref:
+            raise WorkspaceProviderError("prepared workspace repository changed")
+        self._verify_worktree(
+            location, repository=repository, expected_branch=checkout.branch
+        )
+        return location
+
+    def refence_not_admitted(
+        self, manifest, *, pin, binding, physical_input, operation_id
+    ):
+        candidate = replace(manifest)
+        candidate.refence_not_admitted(pin=pin, binding=binding)
+        directory = self.physical_directory(manifest)
+        expected_commit = manifest.checkouts[0].current_head
+        if physical_input is not None:
+            if (
+                not isinstance(physical_input, CodeInputReceipt)
+                or not physical_input.succeeded
+                or physical_input.execution_id != manifest.execution_id
+            ):
+                raise WorkspaceProviderError("native refence input receipt is invalid")
+            expected_commit = physical_input.actual_commit
+            if (
+                self._git_output(("rev-parse", "HEAD^{tree}"), cwd=directory)
+                != physical_input.actual_tree
+            ):
+                raise WorkspaceProviderError(
+                    "native refence prepared input tree changed"
+                )
+        if self._git_output(
+            ("rev-parse", "HEAD"), cwd=directory
+        ) != expected_commit or self._git_output(
+            ("status", "--porcelain", "--untracked-files=all"), cwd=directory
+        ):
+            raise WorkspaceProviderError(
+                "native refence requires unchanged clean prepared inputs"
+            )
+        existing = self._native_refence_proposals.get(operation_id)
+        if existing is not None and existing != candidate:
+            raise WorkspaceProviderError("native refence operation identity changed")
+        self._native_refence_proposals[operation_id] = replace(candidate)
+        return candidate
+
+    def confirm_not_admitted_refence(self, persisted, *, operation_id):
+        proposed = self._native_refence_proposals.get(operation_id)
+        if proposed is None or proposed != persisted:
+            raise WorkspaceProviderError(
+                "native refence has no matching persisted result"
+            )
+        stored = self._manifests_by_id.get(persisted.id)
+        if stored is None or stored.fencing_token not in {
+            persisted.fencing_token - 1,
+            persisted.fencing_token,
+        }:
+            raise WorkspaceProviderError("native refence original workspace changed")
+        _require_manifest_identity(
+            replace(stored, fencing_token=persisted.fencing_token), persisted
+        )
+        self._manifests_by_id[persisted.id] = replace(persisted)
 
     def materialize(
         self,

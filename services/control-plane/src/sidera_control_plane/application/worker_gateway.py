@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_agents.contracts import ExecutionWorkspace
+from sidera_agents.errors import AgentError
 from sidera_runtime_guard import RuntimeBudgetGuard, RuntimeGuardError
 from sqlalchemy.exc import OperationalError
 
@@ -24,12 +26,30 @@ from sidera_control_plane.acceptance_resource_binding import (
     derive_runtime_resource_chain,
     load_execution_resource_facts,
 )
+from sidera_control_plane.application.agent_sources import (
+    TaskContextSourceReader,
+    context_source_items,
+)
+from sidera_control_plane.application.agent_worker_adapter import (
+    NativeContextPreparationReceipt,
+    NativeDeferredResult,
+    NativeSourceValidation,
+    NativeStartDeferred,
+    NativeWorkerServices,
+    native_authority_pins,
+    native_binding,
+    native_capabilities,
+    native_operation_id,
+    native_preparation_command,
+    read_native_preparation_receipt,
+)
 from sidera_control_plane.application.artifact_content import (
     ALLOWED_ARTIFACT_MEDIA_TYPES,
 )
 from sidera_control_plane.application.code_result_capture import (
     CODE_RESULT_CAPTURE_OPERATION_KIND,
     CodeResultCaptureService,
+    capture_operation_for_execution,
     code_capture_operation_id,
 )
 from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
@@ -52,6 +72,9 @@ from sidera_control_plane.application.event_ingestor import (
     ArtifactRegistry,
     EventIngestionReport,
     SessionEventIngestor,
+)
+from sidera_control_plane.application.execution_authority import (
+    ExecutionAuthorityReader,
 )
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -90,6 +113,11 @@ from sidera_control_plane.application.worker_completion import (
     ExecutionCompletionPolicy,
     decide_completion,
     resolve_completion_policy,
+)
+from sidera_control_plane.composition.worker_adapters import build_native_worker_adapter
+from sidera_control_plane.domain.agent_bindings import (
+    AgentExecutionLink,
+    ExecutionAuthority,
 )
 from sidera_control_plane.domain.artifacts import ArtifactCandidate
 from sidera_control_plane.domain.code_results import (
@@ -181,6 +209,7 @@ from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     RepositoryCheckoutSpec,
     WorkspaceLifecycle,
+    workspace_location_ref_hash,
     workspace_manifest_digest,
 )
 
@@ -677,6 +706,8 @@ class WorkerGateway:
         artifact_registry: ArtifactRegistry | None = None,
         artifact_content_store: ArtifactContentWriter | None = None,
         context_materializer: ContextMaterializer | None = None,
+        native_services: NativeWorkerServices | None = None,
+        native_source_reader: TaskContextSourceReader | None = None,
         context_package_cutover_at: datetime | None = None,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
         code_result_capture_service: CodeResultCaptureService | None = None,
@@ -707,6 +738,8 @@ class WorkerGateway:
         ):
             raise ValueError("context_package_cutover_at must be timezone aware")
         self._context_materializer = context_materializer
+        self._native_services = native_services
+        self._native_source_reader = native_source_reader
         self._context_package_cutover_at = context_package_cutover_at
         self._scheduling_blocks = SchedulingBlockService()
         self._candidate_submission_service = candidate_submission_service
@@ -831,6 +864,14 @@ class WorkerGateway:
                 raise
         try:
             context = self._load_context(message)
+            if self._native_binding(context) is not None:
+                self._require_normal_handoff_schedule(context.execution)
+                keeper = self._lease_keeper(context)
+                keeper.start()
+                try:
+                    return self._handle_native(context)
+                finally:
+                    keeper.stop()
             self._validate_completion_contract(context)
             self._require_normal_handoff_schedule(context.execution)
             keeper = self._lease_keeper(context)
@@ -982,6 +1023,670 @@ class WorkerGateway:
             _log_gateway_error(message, exc)
             raise
 
+    def _native_binding(self, context):
+        with self._uow_factory() as uow:
+            return native_binding(uow, context.execution)
+
+    def _native_authorizer(self):
+        if self._native_services is None:
+            raise GatewayMessageError(
+                "native services are unavailable", code="native_services_unavailable"
+            )
+        return ExecutionAuthorityReader(
+            self._uow_factory,
+            principal=lambda: self._native_services.principal_id,
+            authorizer=self._native_services.authorizer,
+            clock=self._clock,
+        )
+
+    def _native_adapter(self, context):
+        if self._native_source_reader is None:
+            raise GatewayMessageError(
+                "native sources are unavailable", code="native_sources_unavailable"
+            )
+        authorizer = self._native_authorizer()
+        services = self._native_services
+        return build_native_worker_adapter(
+            self._uow_factory,
+            services=services,
+            source_reader=self._native_source_reader,
+            authorizer=authorizer,
+            workspace_id=context.execution.workspace_id,
+            execution_id=context.execution.id,
+            clock=self._clock,
+            capability_snapshot=context.binding.capability_snapshot,
+        )
+
+    def _adapter_for_context(self, context, *, operation):
+        if self._native_binding(context) is not None:
+            return self._native_adapter(context)
+        return self._adapter(
+            context.adapter_definition, context.adapter_instance, operation=operation
+        )
+
+    def _handle_native(self, context):
+        binding = self._native_binding(context)
+        if binding is None or not binding.runnable or binding.profile_ref is None:
+            raise GatewayMessageError(
+                "native binding is not runnable", code="binding_not_runnable"
+            )
+        spec = self._spec_factory.create(
+            context.execution,
+            context.task,
+            context.binding,
+            context.adapter_instance,
+            context.workspace_instance,
+            worker_item=context.worker_item,
+        )
+        with self._uow_factory() as uow:
+            link = uow.execution_authorities.get_link(
+                context.execution.workspace_id, context.execution.id
+            )
+        if (
+            link is not None
+            and link.not_admitted
+            and context.execution.not_before > self._clock()
+        ):
+            return NativeDeferredResult(
+                link.workspace_id,
+                link.execution_id,
+                link.status,
+                link.start_operation_id,
+            )
+        if link is None or link.status in {"pending", "waiting_capacity"}:
+            workspace, link = self._prepare_native_context(context, spec, binding)
+        else:
+            with self._uow_factory() as uow:
+                workspace = uow.workspaces.get_for_execution(
+                    context.execution.id, context.execution.workspace_id
+                )
+            self._native_preparation_receipt(link)
+            if (
+                workspace is None
+                or workspace.fencing_token != context.binding.fencing_token
+            ):
+                raise GatewayMessageError(
+                    "native prepared workspace is stale",
+                    code="runtime_binding_version_mismatch",
+                )
+        adapter = self._native_adapter(context)
+        operation_id = link.start_operation_id
+        with self._uow_factory() as uow:
+            existing = uow.sessions.get_active_for_execution(
+                context.execution.id, for_update=True
+            )
+            if existing is not None:
+                result = GatewayExecutionResult(
+                    context.execution.id,
+                    context.execution.workspace_id,
+                    existing.id,
+                    existing.adapter_session_id,
+                )
+            else:
+                operation = uow.gateway_operations.get_by_operation_id(
+                    operation_id, context.execution.workspace_id
+                )
+                if operation is None:
+                    self._begin_operation(
+                        uow,
+                        context,
+                        operation_id=operation_id,
+                        operation_type=GatewayOperationType.START_SESSION,
+                        session_id=None,
+                    )
+                result = None
+        if result is None:
+            try:
+                handle = adapter.start_session(
+                    spec, workspace, operation_id=operation_id
+                )
+            except NativeStartDeferred as deferred:
+                if deferred.link.not_admitted:
+                    self._record_native_capacity_wait(context, deferred.link)
+                return NativeDeferredResult(
+                    link.workspace_id, link.execution_id, deferred.status, operation_id
+                )
+            except AgentError as exc:
+                raise GatewayMessageError(
+                    "native admission denied", code=exc.code
+                ) from None
+            result = self._persist_session_success(context, handle, operation_id)
+        self.sync_session(
+            workspace_id=context.execution.workspace_id,
+            execution_id=context.execution.id,
+            session_id=result.session_id,
+            lease_id=context.lease.id,
+            fencing_token=context.binding.fencing_token,
+        )
+        return result
+
+    def _native_facts(self, context):
+        if self._context_materializer is None or context.worker_item is None:
+            raise GatewayMessageError(
+                "native context is unavailable", code="context_package_missing"
+            )
+        with self._uow_factory() as uow:
+            resolve_execution_context_authorization(uow, context.execution)
+            schema = execution_context_manifest_schema_version(uow, context.execution)
+            package = uow.context_packages.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                context.execution.id,
+                context.execution.workspace_id,
+                manifest_schema_version=schema,
+            )
+            revision = (
+                None
+                if package is None
+                else uow.work_contexts.get_revision(
+                    package.work_context_revision_id,
+                    context.execution.workspace_id,
+                )
+            )
+            item = uow.worker_items.get(
+                context.worker_item.id, context.execution.workspace_id
+            )
+        if (
+            package is None
+            or item is None
+            or package.context_version != item.context_version
+        ):
+            raise GatewayMessageError(
+                "native context package is stale", code="context_package_stale"
+            )
+        try:
+            return self._context_materializer.validate_facts(
+                package,
+                revision,
+                mode=ContextMaterializationMode.CONSUMER_START,
+                workspace_id=context.execution.workspace_id,
+                consumer_id=context.execution.id,
+                purpose=ContextPurpose.EXECUTION,
+                context_version=item.context_version,
+                expected_package_hash=package.package_hash,
+                now=self._clock(),
+                correlation_id=context.execution.id,
+                caller_request_id=uuid4(),
+            )
+        except ContextMaterializationError as exc:
+            raise GatewayMessageError(
+                "native sources could not be validated", code=exc.code
+            ) from None
+
+    def _ensure_native_workspace(self, context, spec, binding):
+        operation_id = native_operation_id(
+            context.execution.id, binding.version, "prepare-workspace"
+        )
+        provider = self._workspace_provider(
+            context.workspace_definition,
+            context.workspace_instance,
+            operation=RuntimeModuleOperation.START,
+        )
+        with self._uow_factory() as uow:
+            manifest = uow.workspaces.get_for_execution(
+                context.execution.id, context.execution.workspace_id, for_update=True
+            )
+            state = self._begin_operation(
+                uow,
+                context,
+                operation_id=operation_id,
+                operation_type=GatewayOperationType.PREPARE_WORKSPACE,
+                session_id=None,
+            )
+            pins = uow.execution_authorities.admission_history(
+                context.execution.workspace_id, context.execution.id
+            )
+            has_session = uow.execution_authorities.has_session(
+                context.execution.workspace_id, context.execution.id
+            )
+        if (
+            manifest is not None
+            and manifest.fencing_token != context.binding.fencing_token
+        ):
+            pin = next(
+                (
+                    pin
+                    for pin in reversed(pins)
+                    if pin.fencing_token == manifest.fencing_token
+                ),
+                None,
+            )
+            if pin is None or has_session or pin.link.preparation is None:
+                raise GatewayMessageError(
+                    "native workspace has no archived BUSY proof",
+                    code="runtime_binding_version_mismatch",
+                )
+            old_receipt = self._native_preparation_receipt(pin.link)
+            candidate = provider.refence_not_admitted(
+                manifest,
+                pin=pin,
+                binding=context.binding,
+                physical_input=old_receipt.physical_input,
+                operation_id=operation_id,
+            )
+            with self._uow_factory() as uow:
+                execution = uow.executions.get(
+                    context.execution.id,
+                    context.execution.workspace_id,
+                    for_update=True,
+                )
+                lease = uow.leases.get(
+                    context.lease.id, context.execution.workspace_id, for_update=True
+                )
+                current = uow.workspaces.get_for_execution(
+                    context.execution.id,
+                    context.execution.workspace_id,
+                    for_update=True,
+                )
+                runtime_binding = uow.bindings.get_for_execution(
+                    context.execution.id,
+                    context.execution.workspace_id,
+                    for_update=True,
+                )
+                old_authority = uow.execution_authorities.get(
+                    pin.link.authority_id, workspace_id=context.execution.workspace_id
+                )
+                old_lease = uow.leases.get(pin.lease_id, context.execution.workspace_id)
+                if (
+                    execution is None
+                    or lease is None
+                    or current != manifest
+                    or runtime_binding != context.binding
+                    or native_binding(uow, execution) != binding
+                    or old_authority is None
+                    or not old_authority.revoked
+                    or old_lease is None
+                    or old_lease.status is not LeaseStatus.RELEASED
+                    or uow.execution_authorities.has_session(
+                        execution.workspace_id, execution.id
+                    )
+                    or uow.execution_authorities.get_link(
+                        execution.workspace_id, execution.id
+                    )
+                    is not None
+                ):
+                    raise GatewayMessageError(
+                        "native workspace refence pins changed",
+                        code="runtime_binding_version_mismatch",
+                    )
+                execution.assert_fence(
+                    lease_id=lease.id, fencing_token=context.binding.fencing_token
+                )
+                lease.assert_owner(
+                    context.worker.id, context.binding.fencing_token, self._clock()
+                )
+                uow.workspaces.save(candidate, manifest.version)
+                self._succeed_operation(
+                    uow, operation_id, context, candidate.location_ref
+                )
+            with self._uow_factory() as uow:
+                persisted = uow.workspaces.get(candidate.id, candidate.workspace_id)
+            provider.confirm_not_admitted_refence(persisted, operation_id=operation_id)
+            return persisted
+        if manifest is not None:
+            _validate_manifest(context, manifest)
+            provider.physical_directory(manifest)
+            with self._uow_factory() as uow:
+                self._succeed_operation(
+                    uow, operation_id, context, manifest.location_ref
+                )
+            return manifest
+        if state.recovery_required or state.completed:
+            raise GatewayRecoveryRequired(
+                "original native workspace preparation requires reconciliation"
+            )
+        manifest = provider.prepare(spec, operation_id=operation_id)
+        _validate_manifest(context, manifest)
+        if manifest.lifecycle is WorkspaceLifecycle.REQUESTED:
+            manifest.mark_preparing()
+            manifest.mark_ready()
+        provider.physical_directory(manifest)
+        self._persist_workspace_success(context, manifest, operation_id)
+        return manifest
+
+    def _prepare_native_context(self, context, spec, binding):
+        facts = self._native_facts(context)
+        workspace = self._ensure_native_workspace(context, spec, binding)
+        provider = self._workspace_provider(
+            context.workspace_definition,
+            context.workspace_instance,
+            operation=RuntimeModuleOperation.START,
+        )
+        directory = provider.physical_directory(workspace)
+        with self._uow_factory() as uow:
+            link = uow.execution_authorities.get_link(
+                context.execution.workspace_id, context.execution.id
+            )
+        if link is None:
+            services = self._native_services
+            if services is None:
+                raise GatewayMessageError(
+                    "native services are unavailable",
+                    code="native_services_unavailable",
+                )
+            pins = native_authority_pins(services, binding.profile_ref)
+            authority = ExecutionAuthority(
+                id=native_operation_id(
+                    context.execution.id, binding.version, "authority"
+                ),
+                workspace_id=context.execution.workspace_id,
+                principal_id=services.principal_id,
+                execution_id=context.execution.id,
+                target_type=binding.target_type,
+                target_id=binding.target_id,
+                binding_version=binding.version,
+                profile_ref=binding.profile_ref,
+                runtime_ref=pins.runtime_ref,
+                lease_id=context.lease.id,
+                fencing_token=context.binding.fencing_token,
+                workspace_ref=workspace.id,
+                execution_workspace=ExecutionWorkspace(
+                    directory=str(directory), writable=True, artifact_directory=None
+                ),
+                actions=(
+                    "run.start",
+                    "run.read",
+                    "run.stop",
+                    "profile.read",
+                    "runtime.read",
+                    "source.read",
+                    "workspace.execute",
+                )
+                + pins.actions,
+                sources=tuple(item.source_ref for item in context_source_items(facts)),
+                credentials=pins.credentials,
+                resources=pins.resources,
+                tools=pins.tools,
+            )
+            link = AgentExecutionLink(
+                context.execution.workspace_id,
+                context.execution.id,
+                native_operation_id(context.execution.id, binding.version),
+                binding.profile_ref,
+                None,
+                0,
+                "pending",
+                authority.id,
+                binding.version,
+            )
+            with self._uow_factory() as uow:
+                current = native_binding(uow, context.execution)
+                execution = uow.executions.get(
+                    context.execution.id,
+                    context.execution.workspace_id,
+                    for_update=True,
+                )
+                lease = uow.leases.get(
+                    context.lease.id, context.execution.workspace_id, for_update=True
+                )
+                if current != binding or execution is None or lease is None:
+                    raise GatewayMessageError(
+                        "native binding changed during preparation",
+                        code="binding_not_runnable",
+                    )
+                execution.assert_fence(
+                    lease_id=lease.id, fencing_token=context.binding.fencing_token
+                )
+                lease.assert_owner(
+                    context.worker.id, context.binding.fencing_token, self._clock()
+                )
+                uow.execution_authorities.add(authority)
+                uow.flush()
+                uow.execution_authorities.add_link(link)
+        if (
+            link.binding_version != binding.version
+            or link.profile_ref != binding.profile_ref
+        ):
+            raise GatewayMessageError(
+                "native intention changed", code="binding_not_runnable"
+            )
+        reader = self._native_source_reader
+        if reader is None:
+            raise GatewayMessageError(
+                "native sources are unavailable", code="native_sources_unavailable"
+            )
+        reader.require_execution(
+            link.authority_id,
+            link.workspace_id,
+            link.execution_id,
+            link.start_operation_id,
+        )
+        items = reader.context_items(link.authority_id, link.execution_id)
+        sources = []
+        for item in items:
+            try:
+                content = reader.read(link.authority_id, item.source_ref)
+            except AgentError as exc:
+                if item.required or exc.code not in {
+                    "context_reference_not_found",
+                    "context_service_unavailable",
+                }:
+                    raise GatewayMessageError(
+                        "native required source is unavailable", code=exc.code
+                    ) from None
+            else:
+                sources.append(
+                    NativeSourceValidation(
+                        ref=item.source_ref,
+                        content_hash=content.content_hash,
+                        validated_bytes=len(content.text.encode("utf-8")),
+                    )
+                )
+        if link.preparation is not None:
+            receipt = self._native_preparation_receipt(link)
+            if (
+                receipt.package_id != facts.manifest.package_id
+                or receipt.package_hash != facts.manifest.package_hash
+                or receipt.revision_hash != facts.revision.content_hash
+                or receipt.sources != tuple(sources)
+                or receipt.workspace_manifest_digest
+                != workspace_manifest_digest(workspace)
+            ):
+                raise GatewayMessageError(
+                    "native prepared input changed", code="context_package_stale"
+                )
+            return workspace, link
+        code_inputs = getattr(facts.manifest, "code_input_manifest", None)
+        if getattr(facts.manifest, "verification_manifest", None) is not None:
+            raise GatewayMessageError(
+                "verification requires the deterministic local provider",
+                code="verification_input_unsupported",
+            )
+        physical = (
+            None
+            if code_inputs is None
+            else self._materialize_code_inputs(context, workspace, code_inputs)
+        )
+        capture_id = native_operation_id(
+            context.execution.id, binding.version, "code-capture"
+        )
+        self._record_code_result_start(
+            context,
+            spec,
+            workspace,
+            input_commit=None if physical is None else physical.actual_commit,
+            operation_id=capture_id,
+        )
+        package = facts.manifest
+        command_id = uuid5(
+            NAMESPACE_URL,
+            f"sidera.native.prepare-context:{context.execution.id}:{binding.version}:{package.package_id}:{package.package_hash}:{facts.revision.content_hash}",
+        )
+        receipt = NativeContextPreparationReceipt(
+            command_id=command_id,
+            workspace_id=link.workspace_id,
+            execution_id=link.execution_id,
+            binding_version=binding.version,
+            authority_id=link.authority_id,
+            lease_id=context.lease.id,
+            fencing_token=context.binding.fencing_token,
+            package_id=package.package_id,
+            package_hash=package.package_hash,
+            revision_id=facts.revision.revision_id,
+            revision_hash=facts.revision.content_hash,
+            context_version=package.context_version,
+            sources=tuple(sources),
+            validated_bytes=sum(item.validated_bytes for item in sources),
+            validated_sections=len(sources),
+            workspace_manifest_id=workspace.id,
+            workspace_manifest_digest=workspace_manifest_digest(workspace),
+            workspace_location_hash=workspace_location_ref_hash(workspace.location_ref),
+            physical_input=physical,
+            capture_operation_id=capture_id,
+        )
+        mapping = receipt.model_dump(mode="json")
+        command = self._native_preparation_command(receipt)
+        with self._uow_factory() as uow:
+            execution, _, current, _ = uow.execution_authorities.lock_intention(
+                link, now=self._clock()
+            )
+            item = uow.worker_items.get(
+                execution.worker_item_id, execution.workspace_id, for_update=True
+            )
+            current_package = uow.context_packages.get(
+                package.package_id, execution.workspace_id
+            )
+            if (
+                item is None
+                or item.context_version != receipt.context_version
+                or current_package != package
+            ):
+                raise GatewayMessageError(
+                    "native context changed before acknowledgement",
+                    code="context_package_stale",
+                )
+            stored = uow.commands.find_by_id(link.workspace_id, command_id)
+            if stored is not None:
+                if (
+                    stored.request_hash != hash_request(command)
+                    or stored.result["data"].get("preparation") != mapping
+                ):
+                    raise GatewayMessageError(
+                        "native preparation replay changed",
+                        code="context_hash_mismatch",
+                    )
+            else:
+                previous_version = item.version
+                item.acknowledge_context(
+                    expected_context_version=receipt.context_version, now=self._clock()
+                )
+                if item.version != previous_version:
+                    uow.worker_items.save(item, previous_version)
+                event = EventData(
+                    uuid5(
+                        NAMESPACE_URL, f"sidera.native.context-prepared:{command_id}"
+                    ),
+                    link.workspace_id,
+                    "context_sources_preparation",
+                    receipt.command_id,
+                    1,
+                    "ContextSourcesPrepared",
+                    {"preparation": mapping},
+                    "system",
+                    "gateway",
+                    command_id,
+                    command_id,
+                )
+                events = (event,) + self._resolve_result_input_attention(
+                    uow, execution=execution, envelope=command, now=self._clock()
+                )
+                uow.commands.record_applied(
+                    command,
+                    hash_request(command),
+                    CommandResult(
+                        command_id,
+                        execution.id,
+                        execution.version,
+                        tuple(event.id for event in events),
+                        {"preparation": mapping},
+                    ),
+                )
+                for event in events:
+                    uow.events.append_with_outbox(event)
+            link = uow.execution_authorities.save_preparation(
+                current, mapping, now=self._clock()
+            )
+        return workspace, link
+
+    @staticmethod
+    def _native_preparation_command(receipt):
+        return native_preparation_command(receipt)
+
+    def _native_preparation_receipt(self, link):
+        try:
+            with self._uow_factory() as uow:
+                return read_native_preparation_receipt(uow, link)
+        except ResultError as exc:
+            raise GatewayMessageError(
+                "native preparation receipt is unavailable", code=exc.code
+            ) from None
+
+    def _record_native_capacity_wait(self, context, link):
+        now = self._clock()
+        with self._uow_factory() as uow:
+            execution, _, current, _ = uow.execution_authorities.lock_intention(
+                link, now=now
+            )
+            if not current.not_admitted:
+                raise GatewayMessageError(
+                    "native capacity wait requires a proven BUSY receipt",
+                    code="native_admission_changed",
+                )
+            command_id = uuid4()
+            data = {
+                "execution_id": str(execution.id),
+                "start_operation_id": str(current.start_operation_id),
+                "status": "waiting_capacity",
+                "authority_id": str(current.authority_id),
+                "binding_version": current.binding_version,
+                "run_id": None,
+            }
+            command = CommandEnvelope(
+                command_id,
+                execution.workspace_id,
+                "ObserveNativeCapacity",
+                "execution",
+                "system",
+                "gateway",
+                execution.id,
+                data,
+                None,
+                f"native-capacity:{command_id}",
+                current.start_operation_id,
+            )
+            events = self._scheduling_blocks.record(
+                uow,
+                execution=execution,
+                issue=SchedulingIssue(
+                    SchedulingBlockReason.WAITING_CAPACITY,
+                    {"reason": "native_capacity"},
+                    False,
+                ),
+                envelope=command,
+                now=now,
+            )
+            block = uow.scheduling_blocks.get_active_for_execution(
+                execution.id, execution.workspace_id
+            )
+            previous = execution.version
+            execution.not_before = now + timedelta(
+                seconds=min(300, 2 ** min(block.occurrence_count, 8))
+            )
+            execution.version += 1
+            uow.executions.save(execution, previous)
+            uow.commands.record_applied(
+                command,
+                hash_request(command),
+                CommandResult(
+                    command.id,
+                    execution.id,
+                    execution.version,
+                    tuple(event.id for event in events),
+                    data,
+                ),
+            )
+            for event in events:
+                uow.events.append_with_outbox(event)
+
     def _require_normal_handoff_schedule(self, execution: Execution) -> None:
         if execution.worker_item_id is None:
             return
@@ -1048,10 +1753,8 @@ class WorkerGateway:
         )
         if not context.execution.stop_requested:
             raise GatewayMessageError("stop request is no longer active")
-        adapter = self._adapter(
-            context.adapter_definition,
-            context.adapter_instance,
-            operation=RuntimeModuleOperation.STOP,
+        adapter = self._adapter_for_context(
+            context, operation=RuntimeModuleOperation.STOP
         )
         recovery_code: str | None = None
         handle: AdapterSessionHandle | None = None
@@ -3885,7 +4588,12 @@ class WorkerGateway:
                 "bound workspace config version does not match",
                 code="runtime_binding_version_mismatch",
             )
-        if binding.capability_snapshot != adapter_definition.capabilities:
+        expected_capabilities = (
+            native_capabilities()
+            if native_binding(uow, execution) is not None
+            else adapter_definition.capabilities
+        )
+        if binding.capability_snapshot != expected_capabilities:
             raise GatewayMessageError(
                 "binding capability snapshot is stale",
                 code="runtime_capability_mismatch",
@@ -4002,10 +4710,8 @@ class WorkerGateway:
             if session is None or session.id != session_id:
                 raise GatewayMessageError("active session does not match sync request")
             handle = _session_handle(session)
-        adapter = self._adapter(
-            context.adapter_definition,
-            context.adapter_instance,
-            operation=RuntimeModuleOperation.OBSERVE,
+        adapter = self._adapter_for_context(
+            context, operation=RuntimeModuleOperation.OBSERVE
         )
         adapter_events = tuple(adapter.read_events(handle))
         event_report = self._event_ingestor.ingest(
@@ -4129,7 +4835,11 @@ class WorkerGateway:
         session_id: UUID,
     ) -> CompletionDecision | None:
         try:
-            policy = resolve_completion_policy(context.adapter_instance)
+            policy = (
+                ExecutionCompletionPolicy.EXPLICIT
+                if self._native_binding(context) is not None
+                else resolve_completion_policy(context.adapter_instance)
+            )
         except CompletionPolicyError as exc:
             raise GatewayMessageError(
                 "worker completion policy is invalid",
@@ -4291,6 +5001,49 @@ class WorkerGateway:
                 )
             else:
                 synced += 1
+        return synced + self._sync_native_intentions(workspace_id)
+
+    def _sync_native_intentions(self, workspace_id):
+        if self._native_services is None:
+            return 0
+        with self._uow_factory() as uow:
+            links = uow.execution_authorities.list_intentions(workspace_id, limit=100)
+        synced = 0
+        for link in links:
+            try:
+                with self._uow_factory() as uow:
+                    authority = uow.execution_authorities.get(
+                        link.authority_id, workspace_id=workspace_id
+                    )
+                    execution = uow.executions.get(link.execution_id, workspace_id)
+                    if (
+                        authority is None
+                        or authority.revoked
+                        or execution is None
+                        or execution.status is not ExecutionStatus.LEASED
+                        or uow.execution_authorities.has_session(
+                            workspace_id, execution.id
+                        )
+                    ):
+                        continue
+                context = self._load_context_by_ids(
+                    workspace_id=workspace_id,
+                    execution_id=link.execution_id,
+                    lease_id=authority.lease_id,
+                    fencing_token=authority.fencing_token,
+                    operation=RuntimeModuleOperation.START,
+                    causation_id=self._native_preparation_receipt(link).command_id,
+                )
+                if not self._lease_keeper(context).renew_once():
+                    continue
+                self._require_normal_handoff_schedule(context.execution)
+                self._handle_native(context)
+                synced += 1
+            except (GatewayError, DomainError, AgentError):
+                logger.debug(
+                    "native intention is fenced or awaiting original reconciliation",
+                    exc_info=True,
+                )
         return synced
 
     def sync_active_demo_sessions(self, workspace_id: UUID) -> int:
@@ -4542,7 +5295,9 @@ class WorkerGateway:
         self.observe_terminal(
             workspace_id=context.execution.workspace_id,
             execution_id=context.execution.id,
-            operation_id=code_capture_operation_id(context.execution.id),
+            operation_id=self._capture_operation_id(
+                context.execution.workspace_id, context.execution.id
+            ),
             outcome=decision.outcome,
             fencing_token=context.binding.fencing_token,
             details=details,
@@ -4552,7 +5307,9 @@ class WorkerGateway:
         return self.capture_execution_result(
             workspace_id=context.execution.workspace_id,
             execution_id=context.execution.id,
-            operation_id=code_capture_operation_id(context.execution.id),
+            operation_id=self._capture_operation_id(
+                context.execution.workspace_id, context.execution.id
+            ),
         )
 
     def _observe_completion_without_capture(
@@ -4564,7 +5321,7 @@ class WorkerGateway:
     ) -> ResultOperationAttemptV1:
         execution_id = context.execution.id
         workspace_id = context.execution.workspace_id
-        operation_id = code_capture_operation_id(execution_id)
+        operation_id = self._capture_operation_id(workspace_id, execution_id)
         now = self._clock()
         with self._uow_factory() as uow:
             execution = uow.executions.get(
@@ -4796,6 +5553,7 @@ class WorkerGateway:
         workspace: ExecutionWorkspaceManifest,
         *,
         input_commit: str | None = None,
+        operation_id: UUID | None = None,
     ) -> None:
         service = self._code_result_capture_service
         if service is None:
@@ -4813,13 +5571,25 @@ class WorkerGateway:
                 manifest=workspace,
                 input_commit=input_commit or workspace.checkouts[0].current_head,
                 writable_paths=writable_paths,
-                operation_id=code_capture_operation_id(context.execution.id),
+                operation_id=operation_id
+                or code_capture_operation_id(context.execution.id),
             )
         except ResultError as exc:
             raise GatewayMessageError(
                 "execution result input boundary could not be recorded",
                 code=exc.code,
             ) from exc
+
+    def _capture_operation_id(self, workspace_id, execution_id):
+        try:
+            with self._uow_factory() as uow:
+                return capture_operation_for_execution(
+                    uow, workspace_id=workspace_id, execution_id=execution_id
+                )
+        except ResultError as exc:
+            raise GatewayMessageError(
+                "execution capture pin is unavailable", code=exc.code
+            ) from None
 
     def _materialize_code_inputs(
         self,
@@ -4884,12 +5654,15 @@ class WorkerGateway:
         if service is None:
             return None
         snapshot: CodeResultSnapshotV1 | None = None
+        if not report.terminal_observations:
+            return None
+        operation_id = self._capture_operation_id(workspace_id, execution_id)
         for observation in report.terminal_observations:
             try:
                 service.observe_terminal(
                     workspace_id=workspace_id,
                     execution_id=execution_id,
-                    operation_id=code_capture_operation_id(execution_id),
+                    operation_id=operation_id,
                     outcome=observation.outcome,
                     fencing_token=fencing_token,
                     details={
@@ -4902,7 +5675,7 @@ class WorkerGateway:
                     snapshot = service.capture_execution(
                         workspace_id=workspace_id,
                         execution_id=execution_id,
-                        operation_id=code_capture_operation_id(execution_id),
+                        operation_id=operation_id,
                     )
             except ResultError as exc:
                 raise GatewayMessageError(
@@ -5958,6 +6731,81 @@ class WorkerGateway:
             lease.assert_owner(
                 context.binding.worker_id, context.binding.fencing_token, self._clock()
             )
+            native_command = None
+            event_cause = context.causation_id
+            if native_binding(uow, execution) is not None:
+                link = uow.execution_authorities.get_link(
+                    execution.workspace_id, execution.id
+                )
+                authority = (
+                    uow.execution_authorities.get(
+                        link.authority_id, workspace_id=execution.workspace_id
+                    )
+                    if link is not None
+                    else None
+                )
+                if (
+                    link is None
+                    or authority is None
+                    or authority.revoked
+                    or link.start_operation_id != operation_id
+                    or link.run_id is None
+                    or authority.lease_id != lease.id
+                    or authority.fencing_token != context.binding.fencing_token
+                    or handle.adapter_session_id != f"agent-run:{link.run_id}"
+                    or handle.execution_session_id
+                    != uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}")
+                ):
+                    raise GatewayMessageError(
+                        "native Session no longer matches its saved admission",
+                        code="native_admission_changed",
+                    )
+                command_id = uuid5(
+                    NAMESPACE_URL, f"sidera.native.observe-started:{operation_id}"
+                )
+                data = {
+                    "execution_id": str(execution.id),
+                    "start_operation_id": str(operation_id),
+                    "run_id": str(link.run_id),
+                    "session_id": str(handle.execution_session_id),
+                    "lease_id": str(lease.id),
+                    "fencing_token": context.binding.fencing_token,
+                }
+                native_command = CommandEnvelope(
+                    command_id,
+                    execution.workspace_id,
+                    "ObserveNativeStarted",
+                    "execution",
+                    "system",
+                    "gateway",
+                    execution.id,
+                    data,
+                    None,
+                    f"native-started:{operation_id}",
+                    operation_id,
+                )
+                stored = uow.commands.find_by_id(execution.workspace_id, command_id)
+                if stored is not None:
+                    session = uow.sessions.get(
+                        handle.execution_session_id, execution.workspace_id
+                    )
+                    if (
+                        stored.request_hash != hash_request(native_command)
+                        or stored.result["data"] != data
+                        or session is None
+                        or session.execution_id != execution.id
+                    ):
+                        raise GatewayMessageError(
+                            "native start observation replay changed",
+                            code="native_admission_changed",
+                        )
+                    return GatewayExecutionResult(
+                        execution.id,
+                        execution.workspace_id,
+                        session.id,
+                        session.adapter_session_id,
+                    )
+                event_cause = command_id
             previous_execution_version = execution.version
             previous_worker_version = worker.version
             execution.start(
@@ -5985,10 +6833,25 @@ class WorkerGateway:
             uow.executions.save(execution, previous_execution_version)
             uow.workers.save(worker, previous_worker_version)
             uow.sessions.add(session)
-            if context.causation_id is not None:
-                for event in (
+            events = ()
+            if native_command is not None:
+                manifest = uow.workspaces.get_for_execution(
+                    execution.id, execution.workspace_id, for_update=True
+                )
+                if (
+                    manifest is not None
+                    and manifest.lifecycle is WorkspaceLifecycle.READY
+                ):
+                    previous_manifest_version = manifest.version
+                    manifest.mark_active()
+                    uow.workspaces.save(manifest, previous_manifest_version)
+                events = self._scheduling_blocks.resolve(
+                    uow, execution=execution, envelope=native_command, now=self._clock()
+                )
+            if event_cause is not None:
+                events += (
                     _gateway_event(
-                        context.causation_id,
+                        event_cause,
                         workspace_id=execution.workspace_id,
                         aggregate_type="execution",
                         aggregate_id=execution.id,
@@ -6002,7 +6865,7 @@ class WorkerGateway:
                         },
                     ),
                     _gateway_event(
-                        context.causation_id,
+                        event_cause,
                         workspace_id=session.workspace_id,
                         aggregate_type="execution_session",
                         aggregate_id=session.id,
@@ -6016,8 +6879,24 @@ class WorkerGateway:
                             "last_sequence": session.last_sequence,
                         },
                     ),
-                ):
-                    uow.events.append_with_outbox(event)
+                )
+            if native_command is not None:
+                events = tuple(
+                    replace(event, correlation_id=operation_id) for event in events
+                )
+                uow.commands.record_applied(
+                    native_command,
+                    hash_request(native_command),
+                    CommandResult(
+                        native_command.id,
+                        execution.id,
+                        execution.version,
+                        tuple(event.id for event in events),
+                        native_command.payload,
+                    ),
+                )
+            for event in events:
+                uow.events.append_with_outbox(event)
             self._succeed_operation(
                 uow,
                 operation_id,

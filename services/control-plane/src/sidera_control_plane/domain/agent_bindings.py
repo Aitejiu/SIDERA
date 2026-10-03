@@ -1,3 +1,5 @@
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -10,6 +12,7 @@ from sidera_agents.contracts import (
     ResourceRef,
     RuntimeRef,
     SourceRef,
+    StartReceipt,
     ToolBinding,
 )
 
@@ -105,6 +108,9 @@ class AgentExecutionLink:
     status: str
     authority_id: UUID
     binding_version: int
+    request_sha256: str | None = None
+    start_receipt: StartReceipt | None = None
+    preparation: Mapping[str, object] | None = None
 
     def __post_init__(self):
         if self.profile_ref.workspace_id != self.workspace_id:
@@ -118,6 +124,7 @@ class AgentExecutionLink:
             "starting",
             "running",
             "waiting",
+            "waiting_capacity",
             "unknown",
             "closing",
             "succeeded",
@@ -126,6 +133,56 @@ class AgentExecutionLink:
             "cancelled",
         }:
             raise ValidationError("unknown native execution status")
+        if self.request_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", self.request_sha256
+        ):
+            raise ValidationError("native request fingerprint must be SHA-256")
+        if self.start_receipt is not None and (
+            self.start_receipt.operation_id != self.start_operation_id
+        ):
+            raise ValidationError("native admission operation mismatch")
+        if self.status == "waiting_capacity" and not self.not_admitted:
+            raise ValidationError("capacity waiting requires exact BUSY evidence")
+
+    @property
+    def not_admitted(self) -> bool:
+        return (
+            self.status == "waiting_capacity"
+            and self.request_sha256 is not None
+            and self.run_id is None
+            and self.event_cursor == 0
+            and self.start_receipt is not None
+            and self.start_receipt.operation_id == self.start_operation_id
+            and self.start_receipt.status.value == "busy"
+            and self.start_receipt.run_id is None
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NotAdmittedProof:
+    link: AgentExecutionLink
+    lease_id: UUID
+    fencing_token: int
+
+    def __post_init__(self):
+        if not self.link.not_admitted or self.fencing_token < 1:
+            raise ValidationError("pre-admission requeue requires typed BUSY proof")
+
+
+@dataclass(frozen=True, slots=True)
+class RetiredAdmissionPin:
+    link: AgentExecutionLink
+    lease_id: UUID
+    fencing_token: int
+    retired_at: datetime
+    cause_command_id: UUID
+    execution_binding_snapshot: Mapping[str, object] | None = None
+    workspace_snapshot: Mapping[str, object] | None = None
+
+    def __post_init__(self):
+        NotAdmittedProof(self.link, self.lease_id, self.fencing_token)
+        if self.retired_at.tzinfo is None:
+            raise ValidationError("admission retirement time must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)

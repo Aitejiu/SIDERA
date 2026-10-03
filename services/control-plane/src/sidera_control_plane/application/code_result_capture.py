@@ -8,6 +8,9 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.agent_worker_adapter import (
+    read_native_preparation_receipt,
+)
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
@@ -68,6 +71,18 @@ def code_capture_operation_id(execution_id: UUID) -> UUID:
     if not isinstance(execution_id, UUID):
         raise TypeError("execution_id must be a UUID")
     return uuid5(NAMESPACE_URL, f"sidera.code-result-capture:{execution_id}")
+
+
+def capture_operation_for_execution(
+    uow: ControlPlaneUnitOfWork,
+    *,
+    workspace_id: UUID,
+    execution_id: UUID,
+) -> UUID:
+    link = uow.execution_authorities.get_link(workspace_id, execution_id)
+    if link is None:
+        return code_capture_operation_id(execution_id)
+    return read_native_preparation_receipt(uow, link).capture_operation_id
 
 
 @dataclass(frozen=True, slots=True)

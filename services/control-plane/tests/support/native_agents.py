@@ -108,9 +108,11 @@ _CP_FUNCTIONS = frozenset(
         "sidera_reject_handoff_bundle_payload_update",
         "sidera_reject_workspace_transfer_provenance_update",
         "sidera_reject_handoff_recovery_decision_mutation",
+        "sidera_reject_admission_pin_mutation",
     }
 )
 _NATIVE_CLEANUP_TABLES = (
+    "agent_admission_pin_history",
     "agent_execution_links",
     "execution_authorities",
     "agent_bindings",
@@ -356,7 +358,20 @@ def cleanup_native_cp_tables(database: Database, guard: NativeCPTestGuard) -> No
             for name in _NATIVE_CLEANUP_TABLES:
                 table = Base.metadata.tables.get(name)
                 if table is not None:
-                    connection.execute(delete(table))
+                    if name == "agent_admission_pin_history":
+                        connection.execute(
+                            text(
+                                "ALTER TABLE agent_admission_pin_history DISABLE TRIGGER trg_agent_admission_pin_append_only"
+                            )
+                        )
+                        connection.execute(delete(table))
+                        connection.execute(
+                            text(
+                                "ALTER TABLE agent_admission_pin_history ENABLE TRIGGER trg_agent_admission_pin_append_only"
+                            )
+                        )
+                    else:
+                        connection.execute(delete(table))
     except NativeCPTestTargetError as exc:
         reason = str(exc)
     except Exception:  # noqa: BLE001 - Cleanup must not expose driver diagnostics.
@@ -397,8 +412,9 @@ def native_cp_test_cleanup(
 class PublicAgentCatalog:
     """Only the external catalog I/O used by assignment tests is replaced."""
 
-    def __init__(self, profiles):
+    def __init__(self, profiles, resources=()):
         self.profiles = {profile.ref: profile for profile in profiles}
+        self.resources = {resource.ref: resource for resource in resources}
         self.enabled = True
         self.calls = []
 
@@ -417,6 +433,18 @@ class PublicAgentCatalog:
 
         self.calls.append(("get_profile_status", ref, grant_id))
         return ProfileStatus(profile_id=ref.profile_id, enabled=self.enabled, version=1)
+
+    def get_resource(self, ref, *, grant_id):
+        self.calls.append(("get_resource", ref, grant_id))
+        return self.resources[ref]
+
+    def get_resource_status(self, ref, *, grant_id):
+        from sidera_agents.contracts import ResourceStatus
+
+        self.calls.append(("get_resource_status", ref, grant_id))
+        return ResourceStatus(
+            resource_id=ref.resource_id, enabled=self.enabled, version=1
+        )
 
 
 class PublicAgentRuntimes:

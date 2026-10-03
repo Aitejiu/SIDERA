@@ -738,15 +738,26 @@ def test_gateway_runner_acknowledges_only_typed_terminal_dispositions(
 
 
 def test_gateway_observes_all_terminals_but_captures_only_success() -> None:
+    from contextlib import nullcontext
+
+    from sidera_control_plane.application.code_result_capture import (
+        code_capture_operation_id,
+    )
+
+    workspace_id = UUID("20000000-0000-0000-0000-000000000001")
+    execution_id = UUID("70000000-0000-0000-0000-000000000001")
+
+    def legacy_link(scope_id, target_id) -> None:
+        assert (scope_id, target_id) == (workspace_id, execution_id)
+
+    uow = SimpleNamespace(execution_authorities=SimpleNamespace(get_link=legacy_link))
     capture = RecordingResultCapture()
     gateway = WorkerGateway(
-        lambda: None,  # type: ignore[return-value]
+        lambda: nullcontext(uow),  # type: ignore[return-value]
         adapter_factories={},
         workspace_factories={},
         code_result_capture_service=capture,  # type: ignore[arg-type]
     )
-    workspace_id = UUID("20000000-0000-0000-0000-000000000001")
-    execution_id = UUID("70000000-0000-0000-0000-000000000001")
     report = EventIngestionReport(
         events=(),
         duplicate_sequences=(),
@@ -779,6 +790,10 @@ def test_gateway_observes_all_terminals_but_captures_only_success() -> None:
         "succeeded",
     ]
     assert len(capture.captures) == 1
+    assert all(
+        item["operation_id"] == code_capture_operation_id(execution_id)
+        for item in (*capture.observations, *capture.captures)
+    )
 
 
 def test_gateway_closes_known_local_verification_failure(monkeypatch) -> None:

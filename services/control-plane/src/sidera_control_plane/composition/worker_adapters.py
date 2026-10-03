@@ -15,6 +15,11 @@ from sidera_control_plane.adapters.local_verification import (
     LocalVerificationAdapter,
 )
 from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
+from sidera_control_plane.application.agent_execution import TaskExecutionInputBuilder
+from sidera_control_plane.application.agent_worker_adapter import (
+    AgentWorkerAdapter,
+    NativeWorkerServices,
+)
 from sidera_control_plane.application.ports import WorkerAdapter
 from sidera_control_plane.application.result_ports import LocalCheckRunnerPort
 from sidera_control_plane.config import Settings
@@ -53,6 +58,16 @@ class WorkerAdapterRegistration:
 
 
 _WORKER_ADAPTER_REGISTRATIONS = (
+    WorkerAdapterRegistration(
+        adapter_type="agent-run",
+        factory_key="agent-run",
+        implementation="AgentWorkerAdapter",
+        capability_versions=("native-run:v1", "context-sources:v1", "code-result:v1"),
+        is_fake=False,
+        delegates_to_opencode=False,
+        is_local_verification=False,
+        eligibility_note="requires an exact confirmed Profile and execution authority",
+    ),
     WorkerAdapterRegistration(
         adapter_type="fake",
         factory_key="fake",
@@ -125,6 +140,36 @@ _WORKER_ADAPTER_REGISTRATIONS = (
         ),
     ),
 )
+
+
+def build_native_worker_adapter(
+    uow_factory,
+    *,
+    services: NativeWorkerServices,
+    authorizer,
+    source_reader,
+    workspace_id,
+    execution_id,
+    capability_snapshot,
+    clock,
+):
+    builder = TaskExecutionInputBuilder(
+        uow_factory,
+        authorizer=authorizer,
+        source_reader=source_reader,
+        catalog=services.catalog,
+        runtimes=services.runtimes,
+    )
+    return AgentWorkerAdapter(
+        uow_factory,
+        execution=services.execution,
+        input_builder=builder,
+        authorizer=authorizer,
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        clock=clock,
+        capability_snapshot=capability_snapshot,
+    )
 
 
 def worker_adapter_inventory() -> tuple[WorkerAdapterRegistration, ...]:
@@ -313,6 +358,7 @@ def build_worker_adapter_factories(
             )
         )
         for registration in worker_adapter_inventory()
+        if registration.factory_key in builders
     }
 
 

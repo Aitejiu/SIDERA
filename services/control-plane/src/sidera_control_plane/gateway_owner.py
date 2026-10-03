@@ -145,7 +145,7 @@ class GatewayOwner:
                 self.owner_lock.close()
 
 
-def build_gateway_owner(settings: Settings) -> GatewayOwner:
+def build_gateway_owner(settings: Settings, *, native_services=None) -> GatewayOwner:
     """Build all native consumers around exactly one GatewayRuntime."""
 
     lock_database = Database(settings.database_url)
@@ -155,7 +155,11 @@ def build_gateway_owner(settings: Settings) -> GatewayOwner:
         raise GatewayOwnerAlreadyRunning("gateway_owner_already_running")
     gateway_runtime: GatewayRuntime | None = None
     try:
-        gateway_runtime = build_gateway(settings)
+        gateway_runtime = (
+            build_gateway(settings)
+            if native_services is None
+            else build_gateway(settings, native_services=native_services)
+        )
         input_runtime = build_input_dispatcher(
             settings, gateway_runtime=gateway_runtime
         )

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.code_result_capture import (
-    code_capture_operation_id,
+    capture_operation_for_execution,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.result_integration import (
@@ -77,7 +77,10 @@ def enqueue_integration_candidate_publication(
         return None
 
     snapshot = uow.results.get_code_result_by_capture_operation(
-        code_capture_operation_id(execution.id), execution.workspace_id
+        capture_operation_for_execution(
+            uow, workspace_id=execution.workspace_id, execution_id=execution.id
+        ),
+        execution.workspace_id,
     )
     if (
         not isinstance(snapshot, CodeResultSnapshotV1)

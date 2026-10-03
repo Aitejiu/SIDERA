@@ -2,6 +2,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Literal, Protocol, Self
 from uuid import UUID
@@ -1883,6 +1884,9 @@ class SchedulingBlockRepositoryPort(Protocol):
 
 
 class ExecutionBindingRepositoryPort(Protocol):
+    def retire_not_admitted(self, binding: ExecutionBinding, pin) -> None:
+        raise NotImplementedError
+
     def get_for_execution(
         self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionBinding | None:
@@ -2166,6 +2170,26 @@ class PlannerAdapter(Protocol):
 
 
 class WorkspaceProvider(Protocol):
+    def refence_not_admitted(
+        self,
+        manifest: ExecutionWorkspaceManifest,
+        *,
+        pin,
+        binding: ExecutionBinding,
+        physical_input: CodeInputReceipt | None,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def confirm_not_admitted_refence(
+        self, persisted: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> None:
+        raise NotImplementedError
+
+    def physical_directory(self, manifest: ExecutionWorkspaceManifest) -> Path:
+        """Resolve an exact prepared manifest through provider-owned validation."""
+        raise NotImplementedError
+
     def prepare(
         self, spec: ExecutionSpec, *, operation_id: UUID
     ) -> ExecutionWorkspaceManifest:
@@ -2501,8 +2525,43 @@ class AgentBindingRepositoryPort(Protocol):
     ) -> tuple[bool, frozenset[str]]:
         raise NotImplementedError
 
+    def retirable_intentions(self, workspace_id, target_type, target_id):
+        raise NotImplementedError
+
 
 class ExecutionAuthorityRepositoryPort(Protocol):
+    def save_preparation(
+        self, expected, preparation: Mapping[str, object], *, now: datetime
+    ):
+        raise NotImplementedError
+
+    def has_session(self, workspace_id: UUID, execution_id: UUID) -> bool:
+        raise NotImplementedError
+
+    def retirement_proof(self, workspace_id: UUID, execution_id: UUID):
+        raise NotImplementedError
+
+    def begin_start(self, expected, *, request_sha256: str, now: datetime):
+        raise NotImplementedError
+
+    def record_start(self, expected, receipt, *, now: datetime):
+        raise NotImplementedError
+
+    def lock_intention(self, expected, *, now: datetime | None = None):
+        raise NotImplementedError
+
+    def append_admission_history(self, pin):
+        raise NotImplementedError
+
+    def remove_archived_link(self, pin):
+        raise NotImplementedError
+
+    def admission_history(self, workspace_id: UUID, execution_id: UUID):
+        raise NotImplementedError
+
+    def list_intentions(self, workspace_id: UUID, *, limit: int = 100):
+        raise NotImplementedError
+
     def get(
         self, authority_id: UUID, *, workspace_id: UUID | None = None
     ) -> ExecutionAuthority | None:

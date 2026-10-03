@@ -10,6 +10,7 @@ from sidera_control_plane.adapters.git_workspace import (
     GitWorktreeWorkspaceManager,
     WorkspaceProviderError,
 )
+from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
     CheckoutMode,
@@ -106,6 +107,45 @@ def test_prepare_is_pinned_and_returns_opaque_location(tmp_path: Path) -> None:
     assert location.is_dir()
     assert _git(location, "branch", "--show-current") == checkout.branch
     assert _git(location, "rev-parse", "HEAD") == revision
+
+
+def test_native_directory_is_provider_verified_not_an_opaque_uri(
+    tmp_path: Path,
+) -> None:
+    repository, revision = _repository(tmp_path)
+    root = tmp_path / "native-workspaces"
+    root.mkdir()
+    manager = GitWorktreeWorkspaceManager(root)
+    spec = _spec(repository, revision)
+    manifest = manager.prepare(spec, operation_id=uuid4())
+    manifest.mark_preparing()
+    manifest.mark_ready()
+    directory = getattr(manager, "physical_directory", None)
+    assert callable(directory), "N12 requires a provider-verified physical directory"
+    assert directory(manifest) == (root / str(spec.execution_id)).resolve()
+    with pytest.raises(WorkspaceProviderError):
+        directory(replace(manifest, workspace_id=uuid4()))
+    _git(root / str(spec.execution_id), "checkout", "-b", "wrong-branch")
+    with pytest.raises(WorkspaceProviderError):
+        directory(manifest)
+
+
+def test_native_refence_requires_retired_busy_evidence(tmp_path: Path) -> None:
+    repository, revision = _repository(tmp_path)
+    root = tmp_path / "native-refence"
+    root.mkdir()
+    manager = GitWorktreeWorkspaceManager(root)
+    manifest = manager.prepare(_spec(repository, revision), operation_id=uuid4())
+    manifest.mark_preparing()
+    manifest.mark_ready()
+    refence = getattr(manager, "refence_not_admitted", None)
+    assert callable(refence), "N12 refence must require archived pre-admission evidence"
+    with pytest.raises((WorkspaceProviderError, DomainError, ValueError, TypeError)):
+        refence(
+            manifest, pin=None, binding=None, physical_input=None, operation_id=uuid4()
+        )
+    assert manager.physical_directory(manifest).is_dir()
+    assert manifest.fencing_token == 1
 
 
 def test_prepare_refuses_dirty_source_and_unsupported_checkout_policy(

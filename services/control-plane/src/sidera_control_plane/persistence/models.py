@@ -139,6 +139,18 @@ class AgentExecutionLinkModel(Base):
             "binding_version >= 1 AND event_cursor >= 0",
             name="ck_agent_execution_links_versions",
         ),
+        CheckConstraint(
+            "request_sha256 IS NULL OR request_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_agent_execution_links_request_sha",
+        ),
+        CheckConstraint(
+            "status <> 'waiting_capacity' OR (run_id IS NULL AND event_cursor = 0 "
+            "AND request_sha256 IS NOT NULL AND start_receipt IS NOT NULL "
+            "AND start_receipt->>'status' = 'busy' "
+            "AND start_receipt->>'operation_id' = start_operation_id::text "
+            "AND start_receipt->>'run_id' IS NULL)",
+            name="ck_agent_execution_links_busy",
+        ),
     )
     workspace_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True
@@ -157,6 +169,78 @@ class AgentExecutionLinkModel(Base):
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
     binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_sha256: Mapped[str | None] = mapped_column(String(64))
+    start_receipt: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    preparation: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+
+
+class AgentAdmissionPinHistoryModel(Base):
+    __tablename__ = "agent_admission_pin_history"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["execution_id", "workspace_id"],
+            ["executions.id", "executions.workspace_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["authority_id", "execution_id", "workspace_id"],
+            [
+                "execution_authorities.id",
+                "execution_authorities.execution_id",
+                "execution_authorities.workspace_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status = 'waiting_capacity' AND run_id IS NULL AND event_cursor = 0 "
+            "AND binding_version >= 1 AND fencing_token >= 1 "
+            "AND request_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND start_receipt->>'status' = 'busy' "
+            "AND start_receipt->>'operation_id' = start_operation_id::text "
+            "AND start_receipt->>'run_id' IS NULL",
+            name="ck_agent_admission_history_busy",
+        ),
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    start_operation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    authority_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_ref: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_receipt: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    run_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    event_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("assignment_leases.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    retired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    cause_command_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    preparation: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    execution_binding_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    workspace_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
 
 
 class WorkspaceModel(TimestampMixin, Base):

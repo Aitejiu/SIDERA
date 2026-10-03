@@ -4,7 +4,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.code_result_capture import (
-    code_capture_operation_id,
+    capture_operation_for_execution,
 )
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
@@ -1194,7 +1194,9 @@ class ExecutionInputCommandHandler:
                 event_ids=(),
             )
         terminal_operation = uow.results.get_operation(
-            code_capture_operation_id(execution.id),
+            capture_operation_for_execution(
+                uow, workspace_id=execution.workspace_id, execution_id=execution.id
+            ),
             envelope.workspace_id,
             for_update=True,
         )

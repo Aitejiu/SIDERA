@@ -5,11 +5,12 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.agent_bindings import AgentBinding, AssigneeRef
-from sidera_control_plane.domain.errors import VersionConflict
+from sidera_control_plane.domain.errors import DomainError, VersionConflict
 from sidera_control_plane.persistence.models import (
     AgentBindingModel,
     AgentExecutionLinkModel,
     AssignmentLeaseModel,
+    ExecutionAuthorityModel,
     ExecutionModel,
     ExecutionSessionModel,
 )
@@ -83,82 +84,104 @@ class AgentBindingRepository:
         )
 
     def execution_facts(self, workspace_id: UUID, target_type: str, target_id: UUID):
+        executions = self._target_executions(workspace_id, target_type, target_id)
+        proven = {
+            p.link.execution_id
+            for p in self.retirable_intentions(workspace_id, target_type, target_id)
+        }
+        ids = [row.id for row in executions if row.id not in proven]
+        requirements = frozenset(
+            cap
+            for row in executions
+            if row.status == "queued" or row.id in proven
+            for cap in row.capability_requirements
+        )
+        if not ids:
+            return False, requirements
+        active = any(
+            row.id in ids
+            and (
+                row.status in {"leased", "running", "lost"}
+                or row.active_lease_id is not None
+            )
+            for row in executions
+        )
+        for model, condition in (
+            (AssignmentLeaseModel, AssignmentLeaseModel.status == "active"),
+            (ExecutionSessionModel, ExecutionSessionModel.status != "closed"),
+            (
+                AgentExecutionLinkModel,
+                AgentExecutionLinkModel.status.not_in(
+                    {"succeeded", "failed", "stopped", "cancelled"}
+                ),
+            ),
+        ):
+            active |= (
+                self._session.scalar(
+                    select(model.execution_id)
+                    .where(
+                        model.workspace_id == workspace_id,
+                        model.execution_id.in_(ids),
+                        condition,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+        return active, requirements
+
+    def retirable_intentions(self, workspace_id, target_type, target_id):
+        from sidera_control_plane.persistence.execution_authority_repository import (
+            ExecutionAuthorityRepository,
+        )
+
+        authorities = ExecutionAuthorityRepository(self._session)
+        proofs = []
+        for row in self._target_executions(workspace_id, target_type, target_id):
+            try:
+                proof = authorities.retirement_proof(workspace_id, row.id)
+            except DomainError:
+                proof = None
+            if proof is not None:
+                authority = authorities.get(
+                    proof.link.authority_id, workspace_id=workspace_id
+                )
+                if (authority.target_type, authority.target_id) == (
+                    target_type,
+                    target_id,
+                ):
+                    proofs.append(proof)
+        return tuple(proofs)
+
+    def _target_executions(self, workspace_id, target_type, target_id):
         target = (
             ExecutionModel.worker_item_id == target_id
             if target_type == "worker_item"
             else (ExecutionModel.task_id == target_id)
             & ExecutionModel.worker_item_id.is_(None)
         )
-        executions = tuple(
+        # Inherited defaults affect only intentions actually pinned to this target.
+        target = or_(
+            target,
+            ExecutionModel.id.in_(
+                select(ExecutionAuthorityModel.execution_id).where(
+                    ExecutionAuthorityModel.workspace_id == workspace_id,
+                    ExecutionAuthorityModel.target_type == target_type,
+                    ExecutionAuthorityModel.target_id == target_id,
+                )
+            ),
+        )
+        return tuple(
             self._session.scalars(
                 select(ExecutionModel)
                 .where(
                     ExecutionModel.workspace_id == workspace_id,
                     target,
                 )
+                .order_by(ExecutionModel.id)
                 .with_for_update()
             )
         )
-        ids = [row.id for row in executions]
-        if not ids:
-            return False, frozenset()
-        # A pending start has uncertain dispatch even before the first Run receipt.
-        active = any(
-            row.status in {"leased", "running", "lost"}
-            or row.active_lease_id is not None
-            for row in executions
-        )
-        active = (
-            active
-            or self._session.scalar(
-                select(AssignmentLeaseModel.id)
-                .where(
-                    AssignmentLeaseModel.workspace_id == workspace_id,
-                    AssignmentLeaseModel.execution_id.in_(ids),
-                    AssignmentLeaseModel.status == "active",
-                )
-                .limit(1)
-            )
-            is not None
-        )
-        active = (
-            active
-            or self._session.scalar(
-                select(ExecutionSessionModel.id)
-                .where(
-                    ExecutionSessionModel.workspace_id == workspace_id,
-                    ExecutionSessionModel.execution_id.in_(ids),
-                    ExecutionSessionModel.status != "closed",
-                )
-                .limit(1)
-            )
-            is not None
-        )
-        active = (
-            active
-            or self._session.scalar(
-                select(AgentExecutionLinkModel.execution_id)
-                .where(
-                    AgentExecutionLinkModel.workspace_id == workspace_id,
-                    AgentExecutionLinkModel.execution_id.in_(ids),
-                    or_(
-                        AgentExecutionLinkModel.status.not_in(
-                            {"succeeded", "failed", "stopped", "cancelled"}
-                        ),
-                        AgentExecutionLinkModel.status.is_(None),
-                    ),
-                )
-                .limit(1)
-            )
-            is not None
-        )
-        requirements = frozenset(
-            cap
-            for row in executions
-            if row.status == "queued"
-            for cap in row.capability_requirements
-        )
-        return active, requirements
 
 
 def _binding(row):

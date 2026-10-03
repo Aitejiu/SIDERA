@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+import json
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -8,15 +10,19 @@ from sidera_agents.errors import AgentError
 from sidera_agents.ports import ExecutionAuthorizer
 
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.domain.agent_bindings import (
     AgentBinding,
     AssigneeRef,
     AssignmentDenied,
     HandoffRequired,
+    RetiredAdmissionPin,
 )
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.events import EventData
+from sidera_control_plane.domain.scheduling import SchedulingBlockReason
+from sidera_control_plane.domain.workspace import WorkspaceLifecycle
 
 ASSIGNMENT_COMMAND_TYPES = frozenset(
     {"SetSubtaskAssignee", "SetWorkerItemAssignee", "UpdateUnstartedAgentBinding"}
@@ -58,9 +64,11 @@ class AssignmentCommandHandler:
         runtimes: AgentRuntimes | None = None,
         identity: TrustedAssignmentIdentity | None = None,
         authorizer: ExecutionAuthorizer | None = None,
+        clock: Callable[[], datetime] | None = None,
     ):
         self._catalog, self._runtimes = catalog, runtimes
         self._identity, self._authorizer = identity, authorizer
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def _authorize(self, workspace_id, target_type, target_id, action):
         if self._identity is None or self._authorizer is None:
@@ -139,7 +147,10 @@ class AssignmentCommandHandler:
             current = uow.agent_bindings.get(
                 envelope.workspace_id, kind, target_id, for_update=True
             )
-            prepared.append((kind, target_id, aggregate, repository, current))
+            proofs = uow.agent_bindings.retirable_intentions(
+                envelope.workspace_id, kind, target_id
+            )
+            prepared.append((kind, target_id, aggregate, repository, current, proofs))
         pin, reasons = None, ()
         if assignee.kind == "profile":
             pin, reasons = self.resolve_profile(
@@ -148,9 +159,107 @@ class AssignmentCommandHandler:
                 payload.get("profile_revision"),
                 requirements,
             )
-        now = datetime.now(UTC)
-        bindings, events, versions = [], [], {}
-        for kind, target_id, aggregate, repository, current in prepared:
+        now = self._clock()
+        bindings, events, versions, pending_events = [], [], {}, []
+        for kind, target_id, aggregate, repository, current, proofs in prepared:
+            retired_operations = []
+            for proof in proofs:
+                execution, lease, link, authority = (
+                    uow.execution_authorities.lock_intention(proof.link)
+                )
+                if (authority.target_type, authority.target_id) != (kind, target_id):
+                    raise HandoffRequired("native intention belongs to another target")
+                refreshed = uow.execution_authorities.retirement_proof(
+                    envelope.workspace_id, execution.id
+                )
+                if refreshed != proof:
+                    raise HandoffRequired(
+                        "native intention is no longer known unstarted"
+                    )
+                runtime_binding = uow.bindings.get_for_execution(
+                    execution.id, envelope.workspace_id, for_update=True
+                )
+                worker = uow.workers.get(
+                    lease.worker_id, envelope.workspace_id, for_update=True
+                )
+                if (
+                    runtime_binding is None
+                    or worker is None
+                    or execution.assigned_worker_id != worker.id
+                    or (
+                        runtime_binding.workspace_id,
+                        runtime_binding.execution_id,
+                        runtime_binding.worker_id,
+                        runtime_binding.lease_id,
+                        runtime_binding.fencing_token,
+                    )
+                    != (
+                        envelope.workspace_id,
+                        execution.id,
+                        worker.id,
+                        proof.lease_id,
+                        proof.fencing_token,
+                    )
+                    or worker.current_load < 1
+                ):
+                    raise HandoffRequired("native reserved worker changed")
+                workspace = uow.workspaces.get(
+                    authority.workspace_ref, envelope.workspace_id, for_update=True
+                )
+                if (
+                    workspace is None
+                    or workspace.lifecycle is not WorkspaceLifecycle.READY
+                    or (
+                        workspace.id,
+                        workspace.workspace_id,
+                        workspace.execution_id,
+                        workspace.task_id,
+                        workspace.fencing_token,
+                    )
+                    != (
+                        authority.workspace_ref,
+                        envelope.workspace_id,
+                        execution.id,
+                        execution.task_id,
+                        proof.fencing_token,
+                    )
+                ):
+                    raise HandoffRequired("native prepared workspace changed")
+                retired_pin = RetiredAdmissionPin(
+                    link,
+                    lease.id,
+                    proof.fencing_token,
+                    now,
+                    envelope.id,
+                    json.loads(json.dumps(asdict(runtime_binding), default=str)),
+                    json.loads(json.dumps(asdict(workspace), default=str)),
+                )
+                uow.execution_authorities.append_admission_history(retired_pin)
+                previous_worker = worker.version
+                worker.release()
+                uow.workers.save(worker, previous_worker)
+                uow.bindings.retire_not_admitted(runtime_binding, retired_pin)
+                uow.execution_authorities.revoke(authority.id, envelope.workspace_id)
+                previous_lease = lease.version
+                lease.revoke(now=now)
+                uow.leases.save(lease, previous_lease)
+                previous_execution = execution.version
+                execution.requeue_not_admitted(proof, now=now)
+                uow.executions.save(execution, previous_execution)
+                block = uow.scheduling_blocks.get_active_for_execution(
+                    execution.id, envelope.workspace_id, for_update=True
+                )
+                if (
+                    block is not None
+                    and block.reason_code is SchedulingBlockReason.WAITING_CAPACITY
+                ):
+                    for event in SchedulingBlockService().resolve(
+                        uow, execution=execution, envelope=envelope, now=now
+                    ):
+                        pending_events.append(event)
+                        events.append(event.id)
+                uow.execution_authorities.remove_archived_link(retired_pin)
+                retired_operations.append(str(link.start_operation_id))
             binding = AgentBinding(
                 envelope.workspace_id,
                 kind,
@@ -170,7 +279,7 @@ class AssignmentCommandHandler:
                 aggregate.updated_at = now
             repository.save(aggregate, previous)
             event_id = uuid4()
-            uow.events.append_with_outbox(
+            pending_events.append(
                 EventData(
                     id=event_id,
                     workspace_id=envelope.workspace_id,
@@ -178,7 +287,10 @@ class AssignmentCommandHandler:
                     aggregate_id=target_id,
                     aggregate_version=aggregate.version,
                     event_type="AgentBindingChanged",
-                    payload=binding.to_mapping(),
+                    payload={
+                        **binding.to_mapping(),
+                        "retired_native_operations": retired_operations,
+                    },
                     actor_type=envelope.actor_type,
                     actor_id=envelope.actor_id,
                     causation_id=envelope.id,
@@ -189,13 +301,16 @@ class AssignmentCommandHandler:
             events.append(event_id)
             versions[target_id] = aggregate.version
         primary = next(b for b in bindings if b["target_id"] == str(envelope.target_id))
-        return CommandResult(
+        result = CommandResult(
             envelope.id,
             envelope.target_id,
             versions[envelope.target_id],
             tuple(events),
             {"binding": primary, "bindings": bindings},
         )
+        for event in pending_events:
+            uow.events.append_with_outbox(event)
+        return result
 
     def resolve_profile(
         self, workspace_id, profile_id, revision, requirements=frozenset()
