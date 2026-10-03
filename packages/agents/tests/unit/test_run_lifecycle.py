@@ -116,7 +116,9 @@ def test_conversation_reuses_one_session_and_pinned_projection_for_repeated_inpu
     assert all(
         set(event.data) <= {"status", "reason_code", "queue_sequence"}
         for event in events
+        if event.kind != "usage"
     )
+    assert all(event.data["usage"] is None for event in events if event.kind == "usage")
     entry = lab.store.get_runtime_entry(lab.runtime.ref)
     assert (entry.installation.active_count, entry.installation.session_count) == (0, 1)
 

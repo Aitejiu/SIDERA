@@ -18,9 +18,11 @@ from ..contracts import (
     AuthenticationState,
     CapabilityResourceDraft,
     ContextItem,
+    EventPage,
     InputReceipt,
     InputStatus,
     NativeHandle,
+    OutputRef,
     ProfileDraft,
     ProfileRef,
     ProfileRevision,
@@ -39,6 +41,13 @@ from ..contracts import (
 )
 from ..errors import AgentError
 from ..input_delivery import InputOperation, input_size_for_record
+from ..observations import (
+    SafeObservation,
+    event_page,
+    native_source,
+    public_event_data,
+    validate_page,
+)
 from ..ports import (
     RuntimeEntry,
     RuntimeInstallation,
@@ -192,7 +201,7 @@ def _event_from_row(row: Mapping[str, Any]) -> RunEvent:
         occurred_at=_utc_timestamp(row["occurred_at"]),
         operation_id=row["operation_id"],
         response_id=row["response_id"],
-        data=row["data"],
+        data=public_event_data(row["data"]),
     )
 
 
@@ -353,19 +362,44 @@ class PostgresAgentStore:
         operation_id: UUID | None = None,
         response_id: UUID | None = None,
         data: dict[str, object] | None = None,
+        observation: SafeObservation | None = None,
+        source: str | None = None,
     ) -> tuple[RunEvent, dict[str, object]]:
         snapshot = RunSnapshot.model_validate(run_row["snapshot"])
         sequence = snapshot.last_event_sequence + 1
         event_data = (
-            {}
-            if data is None
-            else {
-                key: value
-                for key, value in data.items()
-                if key in {"status", "reason_code", "queue_sequence"}
-            }
+            observation.data
+            if observation is not None
+            else (
+                {}
+                if data is None
+                else {
+                    key: value
+                    for key, value in data.items()
+                    if key in {"status", "reason_code", "queue_sequence"}
+                }
+            )
         )
-        occurred_at = datetime.now(UTC)
+        if operation_id is None and response_id is not None:
+            operation_id = connection.execute(
+                select(RunEventRow.operation_id)
+                .where(
+                    RunEventRow.run_id == snapshot.run_id,
+                    RunEventRow.response_id == response_id,
+                    RunEventRow.kind == "response.started",
+                )
+                .order_by(RunEventRow.sequence.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        stored_data = dict(event_data)
+        if observation is not None:
+            stored_data["_native"] = {
+                "source": source,
+                "identity": observation.identity,
+            }
+        occurred_at = (
+            datetime.now(UTC) if observation is None else observation.occurred_at
+        )
         connection.execute(
             RunEventRow.__table__.insert().values(
                 run_id=snapshot.run_id,
@@ -376,8 +410,10 @@ class PostgresAgentStore:
                 response_id=response_id,
                 status=kind.rsplit(".", 1)[-1],
                 reason_code=event_data.get("reason_code"),
-                native_cursor=None,
-                data=event_data,
+                native_cursor=None
+                if observation is None
+                else observation.native_cursor,
+                data=stored_data,
             )
         )
         updated = snapshot.model_copy(update={"last_event_sequence": sequence})
@@ -1285,6 +1321,7 @@ class PostgresAgentStore:
                 "run.started",
                 operation_id=operation_id,
                 response_id=snapshot.active_response_id,
+                data={"status": snapshot.state.value},
             )
             del event
             connection.execute(
@@ -2121,9 +2158,6 @@ class PostgresAgentStore:
                     .values(active_count=installation["active_count"] - 1)
                 )
             mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
-            self._append_event(
-                connection, mutable, "run.closed", response_id=response_id
-            )
             connection.execute(
                 update(runs)
                 .where(runs.c.run_id == run_id)
@@ -2389,6 +2423,141 @@ class PostgresAgentStore:
                 .all()
             )
         return tuple(_event_from_row(row) for row in rows)
+
+    def list_event_page(
+        self, workspace_id: UUID, run_id: UUID, after: int, limit: int
+    ) -> EventPage:
+        runs, events = AgentRunRow.__table__, RunEventRow.__table__
+        with self._engine.connect() as connection:
+            snapshot_data = connection.execute(
+                select(runs.c.snapshot).where(
+                    runs.c.workspace_id == workspace_id, runs.c.run_id == run_id
+                )
+            ).scalar_one_or_none()
+            if snapshot_data is None:
+                raise _not_found("run")
+            validate_page(
+                after,
+                limit,
+                RunSnapshot.model_validate(snapshot_data).last_event_sequence,
+            )
+            rows = (
+                connection.execute(
+                    select(events)
+                    .where(events.c.run_id == run_id, events.c.sequence > after)
+                    .order_by(events.c.sequence)
+                    .limit(limit + 1)
+                )
+                .mappings()
+                .all()
+            )
+        return event_page(tuple(_event_from_row(row) for row in rows), after, limit)
+
+    def list_output_refs(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> tuple[OutputRef, ...]:
+        return tuple(
+            OutputRef.model_validate(e.data["output"])
+            for e in self.get_lifecycle_events(workspace_id, run_id)
+            if e.kind == "artifact" and "output" in e.data
+        )
+
+    @staticmethod
+    def _native_cursor(connection: Connection, run_id: UUID, source: str) -> int:
+        events = RunEventRow.__table__
+        return (
+            connection.execute(
+                select(func.max(events.c.native_cursor)).where(
+                    events.c.run_id == run_id,
+                    events.c.data["_native"]["source"].as_string() == source,
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    def get_native_event_cursor(
+        self, workspace_id: UUID, run_id: UUID, source: str
+    ) -> int:
+        self.get_run_snapshot(workspace_id, run_id)
+        with self._engine.connect() as connection:
+            return self._native_cursor(connection, run_id, source)
+
+    def append_observation(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        record: SafeObservation,
+        *,
+        source: str,
+        owner_id: UUID,
+    ) -> RunEvent | None:
+        events = RunEventRow.__table__
+        with self._engine.begin() as connection:
+            self._assert_owner(connection, owner_id)
+            run = self._locked_run(connection, workspace_id, run_id)
+            if run is None:
+                raise _not_found("run")
+            if (
+                run["native_handle"] is None
+                or native_source(NativeHandle.model_validate(run["native_handle"]))
+                != source
+            ):
+                raise AgentError(
+                    "native_identity_unverified",
+                    "Native source identity is unavailable.",
+                )
+            existing = None
+            if record.identity is not None:
+                existing = (
+                    connection.execute(
+                        select(events)
+                        .where(
+                            events.c.run_id == run_id,
+                            events.c.data["_native"]["source"].as_string() == source,
+                            events.c.data["_native"]["identity"].as_string()
+                            == record.identity,
+                        )
+                        .limit(1)
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+            cursor = self._native_cursor(connection, run_id, source)
+            if record.native_cursor is not None and record.native_cursor <= cursor:
+                return None if existing is None else _event_from_row(existing)
+            if existing is not None:
+                if record.native_cursor is not None:
+                    connection.execute(
+                        update(events)
+                        .where(
+                            events.c.run_id == run_id,
+                            events.c.sequence == existing["sequence"],
+                        )
+                        .values(native_cursor=record.native_cursor)
+                    )
+                return _event_from_row(existing)
+            mutable = dict(run)
+            event, _ = self._append_event(
+                connection,
+                mutable,
+                record.kind,
+                operation_id=record.operation_id,
+                response_id=record.response_id,
+                observation=record,
+                source=source,
+            )
+            if record.kind == "usage" and "observed_model" in record.data:
+                snapshot = RunSnapshot.model_validate(mutable["snapshot"])
+                snapshot = snapshot.model_copy(
+                    update={
+                        "effective_config": snapshot.effective_config.model_copy(
+                            update={"observed_model": record.data["observed_model"]}
+                        )
+                    }
+                )
+                mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+            self._write_run(connection, mutable)
+            return event
 
     def fence_orphaned_runs(
         self, *, owner_id: UUID, live_run_ids: tuple[UUID, ...]
@@ -2668,6 +2837,31 @@ class PostgresAgentStore:
                     .where(reservations.c.run_id == run_id)
                     .values(**reservation_values)
                 )
+            if snapshot.state != current_snapshot.state and snapshot.state in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+                RunState.UNKNOWN,
+            ):
+                mutable = dict(run)
+                mutable["snapshot"] = snapshot.model_dump(mode="json", warnings=False)
+                kind = (
+                    "run.unknown"
+                    if snapshot.state is RunState.UNKNOWN
+                    else "run.failed"
+                    if snapshot.state is RunState.FAILED
+                    else "run.closed"
+                )
+                self._append_event(
+                    connection,
+                    mutable,
+                    kind,
+                    data={
+                        "status": snapshot.state.value,
+                        "reason_code": snapshot.reason_code,
+                    },
+                )
+                snapshot = RunSnapshot.model_validate(mutable["snapshot"])
             run_values: dict[str, object] = {
                 "state": snapshot.state.value,
                 "snapshot": snapshot.model_dump(mode="json", warnings=False),

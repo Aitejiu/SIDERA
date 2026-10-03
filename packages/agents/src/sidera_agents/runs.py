@@ -15,11 +15,13 @@ from .contracts import (
     AssembledInput,
     CapabilitySupport,
     EffectiveConfig,
+    EventPage,
     InputReceipt,
     InputStatus,
     InterruptReceipt,
     InterruptStatus,
     NativeCancelState,
+    NativeCloseOutcome,
     NativeCloseState,
     NativeHandle,
     NativeOpenRequest,
@@ -57,6 +59,7 @@ from .input_delivery import (
     input_size,
 )
 from .native_workers import NativeWorkers
+from .observations import ObservationIngestor, resolved_redaction_secrets
 from .ports import (
     ContextSourceReader,
     ExecutionAuthorizer,
@@ -111,6 +114,7 @@ class _LiveRun:
     workspace_id: UUID
     projection: LiveRunContext
     handle: NativeHandle
+    observations: ObservationIngestor
     drain_deadline: float | None = None
 
 
@@ -137,6 +141,7 @@ class RunExecution:
         self._context = ContextAssembler()
         self._pending: dict[UUID, _PendingStart] = {}
         self._run_contexts: dict[UUID, _LiveRun] = {}
+        self._observations: dict[UUID, ObservationIngestor] = {}
         self._open_handoffs: set[UUID] = set()
         self._unopened_runs: set[UUID] = set()
         self._opening_runs: set[UUID] = set()
@@ -317,6 +322,13 @@ class RunExecution:
                 if remaining <= 0:
                     return False
                 self._pending_lock.wait(timeout=remaining)
+        with self._input_lock:
+            observations = tuple(self._observations.values())
+        for ingestor in observations:
+            if ingestor.pending and (
+                monotonic() >= deadline or not ingestor.ingest(final=True, retry=True)
+            ):
+                return False
         return True
 
     def get_start(
@@ -331,6 +343,18 @@ class RunExecution:
     ) -> RunSnapshot:
         self._authorizer.require(grant_id, "run.read", workspace_id)
         return self._store.get_run_snapshot(workspace_id, run_id)
+
+    def list_events(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        after_sequence: int,
+        limit: int = 100,
+        *,
+        grant_id: UUID,
+    ) -> EventPage:
+        self.get_run(workspace_id, run_id, grant_id=grant_id)
+        return self._store.list_event_page(workspace_id, run_id, after_sequence, limit)
 
     def send_input(self, request: RunInput) -> InputReceipt:
         identity = self._begin_admission()
@@ -746,6 +770,7 @@ class RunExecution:
 
     def poll_once(self, *, _background: bool = False) -> int:
         self._require_owner()
+        ingest_failed = self._ingest_observations()
         processed = 0
         with self._pending_lock:
             while self._admissions_in_progress:
@@ -814,7 +839,7 @@ class RunExecution:
         with self._input_lock:
             live_runs = tuple(self._run_contexts.values())
         for live in live_runs:
-            if self._native_workers.busy(live.run_id):
+            if live.run_id in ingest_failed or self._native_workers.busy(live.run_id):
                 continue
             snapshot = self._store.get_run_snapshot(live.workspace_id, live.run_id)
             if snapshot.state in (
@@ -842,12 +867,76 @@ class RunExecution:
             terminal_state,
             terminal_reason_code,
         ) in self._store.list_unresolved_runs():
-            if self._native_workers.busy(snapshot.run_id):
+            if snapshot.run_id in ingest_failed or self._native_workers.busy(
+                snapshot.run_id
+            ):
+                continue
+            with self._input_lock:
+                live = self._run_contexts.get(snapshot.run_id)
+            if live is not None and live.observations.close_deferred:
+                if self._pending_stop_ids(snapshot):
+                    cleanup = lambda live=live: self._process_stop(live)
+                elif terminal_state is not None:
+                    cleanup = (
+                        lambda live=live, state=terminal_state, reason=terminal_reason_code: (
+                            self._close_live_session(live, state, reason)
+                        )
+                    )
+                else:
+                    continue
+                if _background:
+                    self._dispatch_native(
+                        snapshot.workspace_id, snapshot.run_id, cleanup
+                    )
+                else:
+                    cleanup()
                 continue
             self._inspect_unresolved(
                 snapshot, handle, terminal_state, terminal_reason_code
             )
         return processed
+
+    def _ingest_observations(self) -> set[UUID]:
+        with self._input_lock:
+            observations = tuple(self._observations.items())
+        failed = set()
+        for run_id, ingestor in observations:
+            if not ingestor.ingest(retry=True):
+                failed.add(run_id)
+            elif (
+                ingestor.closed
+                and not ingestor.pending
+                and not self._response_is_in_flight(run_id)
+                and not self._native_workers.busy(run_id)
+            ):
+                with self._input_lock:
+                    if self._observations.get(run_id) is ingestor:
+                        self._observations.pop(run_id)
+        return failed
+
+    def _close_native(self, harness, handle: NativeHandle):
+        with self._input_lock:
+            ingestor = self._observations.get(handle.run_id)
+        if ingestor is None:
+            return harness.close(handle)
+        with ingestor.lock:
+            if not ingestor.ingest(final=True):
+                ingestor.close_deferred = True
+                return NativeCloseOutcome(
+                    status=NativeCloseState.UNKNOWN, reason_code="native_close_unknown"
+                )
+            ingestor.close_deferred = False
+            ingestor.closing = True
+        # Native termination may wait. Only the pre-close flush takes the ingest lock.
+        result = None
+        try:
+            result = harness.close(handle)
+        finally:
+            with ingestor.lock:
+                if result is not None and result.status is NativeCloseState.CLOSED:
+                    ingestor.close_context()
+                ingestor.closing = False
+        return result
 
     def _dispatch_native(
         self, workspace_id: UUID, run_id: UUID, work: Callable[[], None]
@@ -986,8 +1075,20 @@ class RunExecution:
                     item.request, item.profile, item.runtime
                 ),
                 handle=handle,
+                observations=ObservationIngestor(
+                    self._store,
+                    harness,
+                    handle,
+                    snapshot.workspace_id,
+                    self._owner_id,
+                    resolved_redaction_secrets(open_request, item.request.grant_id),
+                    authorizer=self._authorizer,
+                    grant_id=item.request.grant_id,
+                    workspace=item.request.workspace,
+                ),
             )
             with self._input_lock:
+                self._observations[snapshot.run_id] = live.observations
                 current = self._store.get_run_snapshot(live.workspace_id, live.run_id)
                 stopping = current.state is RunState.CLOSING
                 if (
@@ -1012,8 +1113,12 @@ class RunExecution:
                     self._open_handoffs.discard(snapshot.run_id)
                     self._input_lock.notify_all()
 
-        if not self._begin_initial_prompt(live, item.response_id):
+        if not self._begin_initial_prompt(
+            live, item.response_id, item.request.operation_id
+        ):
             return
+        outcome = None
+        observed_model = None
         try:
             outcome = harness.prompt(handle, item.assembled_input, item.response_id)
         except Exception:  # noqa: BLE001 - a lost native response remains uncertain
@@ -1023,6 +1128,11 @@ class RunExecution:
             )
             return
         finally:
+            observed_model = live.observations.complete_response(
+                outcome
+                if outcome is not None and outcome.response_id == item.response_id
+                else None
+            )
             self._mark_response_in_flight(snapshot.run_id, False)
         self._require_owner()
         if outcome.response_id != item.response_id:
@@ -1043,7 +1153,7 @@ class RunExecution:
                 live,
                 item.response_id,
                 cancelled=outcome.status is NativeOutcomeStatus.CANCELLED,
-                observed_model=outcome.observed_model,
+                observed_model=observed_model,
             )
         else:
             self._fail_response(
@@ -1052,7 +1162,9 @@ class RunExecution:
                 _safe_native_reason(outcome.reason_code, "native_response_failed"),
             )
 
-    def _begin_initial_prompt(self, live: _LiveRun, response_id: UUID) -> bool:
+    def _begin_initial_prompt(
+        self, live: _LiveRun, response_id: UUID, operation_id: UUID
+    ) -> bool:
         with self._input_lock:
             self._require_owner()
             current = self._store.get_run_snapshot(live.workspace_id, live.run_id)
@@ -1062,6 +1174,16 @@ class RunExecution:
             ):
                 return False
             self._mark_response_in_flight(live.run_id, True)
+            live.observations.begin_response(response_id, operation_id)
+            self._store.record_lifecycle_event(
+                live.workspace_id,
+                live.run_id,
+                operation_id,
+                response_id,
+                "response.started",
+                None,
+                owner_id=self._owner_id,
+            )
             return True
 
     def _owned_live_run_ids(self) -> tuple[UUID, ...]:
@@ -1145,6 +1267,8 @@ class RunExecution:
         workspace_id = live.workspace_id
         while True:
             self._require_owner()
+            if not live.observations.ingest(final=True):
+                return
             current = self._store.get_run_snapshot(workspace_id, run_id)
             if current.state not in (RunState.RUNNING, RunState.IDLE) or (
                 current.state is RunState.RUNNING and current.active_response_id is None
@@ -1258,8 +1382,10 @@ class RunExecution:
                 self._after_failed_input(live, response_id)
                 continue
             self._require_owner()
-            if not self._begin_initial_prompt(live, response_id):
+            if not self._begin_initial_prompt(live, response_id, claimed.operation_id):
                 return
+            outcome = None
+            observed_model = None
             try:
                 harness = self._registry.get(live.projection.runtime.harness_id)
                 outcome = harness.prompt(live.handle, assembled, response_id)
@@ -1277,6 +1403,11 @@ class RunExecution:
                 self._fence_run(live, "native_response_unknown")
                 return
             finally:
+                observed_model = live.observations.complete_response(
+                    outcome
+                    if outcome is not None and outcome.response_id == response_id
+                    else None
+                )
                 self._mark_response_in_flight(run_id, False)
             self._require_owner()
             if (
@@ -1330,7 +1461,7 @@ class RunExecution:
                     response_id,
                     owner_id=self._owner_id,
                     cancelled=outcome.status is NativeOutcomeStatus.CANCELLED,
-                    observed_model=outcome.observed_model,
+                    observed_model=observed_model,
                 )
             else:
                 snapshot = self._close_after_response(
@@ -1433,7 +1564,7 @@ class RunExecution:
         close_reason = None
         session_reserved = True
         try:
-            result = harness.close(live.handle)
+            result = self._close_native(harness, live.handle)
             if result.status is NativeCloseState.CLOSED:
                 session_reserved = False
             else:
@@ -1512,11 +1643,13 @@ class RunExecution:
                 try:
                     if result is not None:
                         stopped, reason = result
-                        self._complete_pending_stops(
-                            snapshot, stopped=stopped, reason_code=reason
-                        )
-                        if stopped:
-                            self._run_contexts.pop(snapshot.run_id, None)
+                        ingestor = self._observations.get(snapshot.run_id)
+                        if ingestor is None or not ingestor.close_deferred:
+                            self._complete_pending_stops(
+                                snapshot, stopped=stopped, reason_code=reason
+                            )
+                            if stopped:
+                                self._run_contexts.pop(snapshot.run_id, None)
                 finally:
                     self._stop_cleanups.discard(snapshot.run_id)
 
@@ -1534,7 +1667,7 @@ class RunExecution:
             except Exception:  # noqa: BLE001, S110 - owned termination remains authoritative
                 pass
         try:
-            close_result = harness.close(handle)
+            close_result = self._close_native(harness, handle)
         except Exception:  # noqa: BLE001 - inspect remains the authority after close errors
             close_result = None
         if close_result is not None and close_result.status is NativeCloseState.CLOSED:
@@ -1573,7 +1706,7 @@ class RunExecution:
         harness = self._registry.get(item.runtime.harness_id)
         session_reserved = True
         try:
-            close_result = harness.close(handle)
+            close_result = self._close_native(harness, handle)
         except Exception:  # noqa: BLE001 - uncertain close retains the session reservation
             close_reason = "native_close_unknown"
         else:

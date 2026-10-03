@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from pydantic import SecretStr
+
 from ..contracts import (
     AssembledInput,
     CapabilitySupport,
@@ -33,6 +35,7 @@ from ..contracts import (
     SupportStatus,
 )
 from ..errors import AgentError
+from ..redaction import ObservationRedactor
 from . import opencode_descriptor
 from .acp_transport import ACPProcessTransport, ACPTransportError
 from .opencode_config import (
@@ -79,10 +82,13 @@ class _Session:
     close_supported: bool
     cancel_supported: bool
     secret_values: tuple[str, ...]
-    pending_updates: deque[Mapping[str, Any]] = field(default_factory=deque)
+    pending_updates: deque[tuple[Mapping[str, Any], UUID | None]] = field(
+        default_factory=deque
+    )
     condition: threading.Condition = field(default_factory=threading.Condition)
     response_state: NativeResponseState = NativeResponseState.IDLE
     active_response_id: UUID | None = None
+    last_response_id: UUID | None = None
     cancel_requested_response_id: UUID | None = None
     cancel_waiting_response_id: UUID | None = None
     cancel_outcomes: dict[UUID, NativeCancelOutcome] = field(default_factory=dict)
@@ -338,7 +344,9 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                     "native_response_unknown",
                     "OpenCode has an unresolved response in this session.",
                 )
+            self._collect_updates(session)
             session.active_response_id = response_id
+            session.last_response_id = response_id
             session.cancel_requested_response_id = None
             session.response_state = NativeResponseState.ACTIVE
         try:
@@ -352,6 +360,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             )
         except ACPTransportError as error:
             with session.condition:
+                self._collect_updates(session)
                 if session.active_response_id == response_id:
                     session.response_state = NativeResponseState.UNKNOWN
                 session.condition.notify_all()
@@ -368,12 +377,14 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
             )
         except Exception:
             with session.condition:
+                self._collect_updates(session)
                 if session.active_response_id == response_id:
                     session.response_state = NativeResponseState.UNKNOWN
                 session.condition.notify_all()
             raise
         stop_reason = result.get("stopReason")
         with session.condition:
+            self._collect_updates(session)
             if session.active_response_id != response_id:
                 session.response_state = NativeResponseState.UNKNOWN
             elif stop_reason in _TERMINAL_STOP_REASONS:
@@ -423,9 +434,10 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         try:
             session.transport.read_available(timeout=0.0)
         except ACPTransportError:
-            return ()
+            pass
         late_responses = session.transport.drain_late_responses()
         with session.condition:
+            self._collect_updates(session)
             for method, response in late_responses:
                 if method != "session/prompt" or response.get("error") is not None:
                     continue
@@ -453,14 +465,9 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                         )
                     session.active_response_id = None
                     session.cancel_requested_response_id = None
-            session.pending_updates.extend(
-                message
-                for message in session.transport.drain_notifications()
-                if message.get("method") == "session/update"
-            )
             events: list[NativeEvent] = []
             while session.pending_updates and len(events) < limit:
-                message = session.pending_updates.popleft()
+                message, response_id = session.pending_updates.popleft()
                 params = message.get("params")
                 update = params.get("update") if isinstance(params, Mapping) else None
                 if not isinstance(update, Mapping):
@@ -476,13 +483,26 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 text = _update_text(update)
                 data: dict[str, object] = {"update_type": safe_update_type}
                 if text is not None:
-                    data["text"] = _redact(text, session.secret_values)
+                    data.update(
+                        ObservationRedactor(
+                            SecretStr(value) for value in session.secret_values
+                        ).text(text)
+                    )
+                if safe_update_type in {"tool_call", "tool_call_update"}:
+                    for source_key, target_key in (
+                        ("toolName", "tool_name"),
+                        ("title", "tool_name"),
+                        ("status", "status"),
+                    ):
+                        value = update.get(source_key)
+                        if isinstance(value, str) and target_key not in data:
+                            data[target_key] = _redact(value, session.secret_values)
                 session.cursor += 1
                 event = NativeEvent(
                     cursor=session.cursor,
                     native_id=None,
                     kind=_event_kind(safe_update_type),
-                    response_id=None,
+                    response_id=response_id,
                     operation_id=None,
                     occurred_at=datetime.now(UTC),
                     data=data,
@@ -491,6 +511,18 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                     events.append(event)
             session.condition.notify_all()
             return tuple(events)
+
+    @staticmethod
+    def _collect_updates(session: _Session) -> None:
+        response_id = session.active_response_id or session.last_response_id
+        for message in session.transport.drain_notifications():
+            params = message.get("params")
+            if (
+                message.get("method") == "session/update"
+                and isinstance(params, Mapping)
+                and params.get("sessionId") == session.handle.session_id
+            ):
+                session.pending_updates.append((message, response_id))
 
     def cancel(self, handle: NativeHandle, response_id: UUID) -> NativeCancelOutcome:
         session = self._session(handle)

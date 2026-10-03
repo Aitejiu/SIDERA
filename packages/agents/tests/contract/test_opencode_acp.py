@@ -669,6 +669,34 @@ def test_read_events_preserves_updates_beyond_limit(tmp_path):
         adapter.close(handle)
 
 
+def test_pending_updates_keep_original_response_across_two_turns(tmp_path, monkeypatch):
+    monkeypatch.setattr(opencode_config, "managed_opencode_config_sources", lambda: ())
+    opencode = _launcher(tmp_path, "opencode", mode="multi_update")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
+    handle = adapter.open(_request(opencode, workspace))
+    first_id, second_id = uuid4(), uuid4()
+    try:
+        for response_id in (first_id, second_id):
+            outcome = adapter.prompt(
+                handle,
+                AssembledInput(instructions=(), text="Run.", context=()),
+                response_id,
+            )
+            assert outcome.status is NativeOutcomeStatus.COMPLETED
+        events = adapter.read_events(handle, 0)
+        assert [event.response_id for event in events] == [
+            first_id,
+            first_id,
+            second_id,
+            second_id,
+        ]
+        assert [event.cursor for event in events] == [1, 2, 3, 4]
+    finally:
+        adapter.close(handle)
+
+
 def test_skill_is_materialized_for_one_run_and_deleted_on_close(tmp_path):
     capture = tmp_path / "peer.jsonl"
     opencode = _launcher(tmp_path, "opencode", capture=capture)

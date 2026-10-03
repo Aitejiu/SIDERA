@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from itertools import islice
 from threading import RLock
 from uuid import UUID
 
 from .admission import OperationRecord
 from .contracts import (
     CapabilityResourceDraft,
+    EventPage,
     InputReceipt,
     InputStatus,
     NativeHandle,
+    OutputRef,
     ProfileDraft,
     ProfileRef,
     ProfileRevision,
@@ -29,6 +32,7 @@ from .contracts import (
 )
 from .errors import AgentError
 from .input_delivery import InputOperation, input_size_for_record
+from .observations import SafeObservation, event_page, native_source, validate_page
 from .ports import RuntimeEntry, RuntimeInstallation, RuntimeObservation, RuntimeRecord
 
 
@@ -65,6 +69,8 @@ class _StoredRun:
     terminal_state: RunState | None = None
     terminal_reason_code: str | None = None
     events: list[RunEvent] | None = None
+    native_cursors: dict[str, int] = field(default_factory=dict)
+    native_ids: dict[tuple[str, str], RunEvent] = field(default_factory=dict)
 
 
 def _profile_copy(value: ProfileRevision) -> ProfileRevision:
@@ -691,6 +697,7 @@ class MemoryAgentStore:
                 "run.started",
                 operation_id=operation_id,
                 response_id=snapshot.active_response_id,
+                data={"status": snapshot.state.value},
             )
             return _receipt_copy(receipt), True
 
@@ -1364,7 +1371,6 @@ class MemoryAgentStore:
                 reservation.active = False
             run.terminal_state = terminal_state
             run.terminal_reason_code = reason_code
-            self._append_event(run, "run.closed", response_id=response_id)
             return _run_copy(run.snapshot)
 
     def request_stop(
@@ -1509,6 +1515,90 @@ class MemoryAgentStore:
                 event for event in run.events or () if event.sequence > after_sequence
             )
 
+    def list_event_page(
+        self, workspace_id: UUID, run_id: UUID, after: int, limit: int
+    ) -> EventPage:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.snapshot.workspace_id != workspace_id:
+                raise _not_found("run")
+            validate_page(after, limit, run.snapshot.last_event_sequence)
+            selected = islice(
+                (e for e in (run.events or ()) if e.sequence > after), limit + 1
+            )
+            events = tuple(
+                RunEvent.model_validate(e.model_dump(mode="python")) for e in selected
+            )
+            return event_page(events, after, limit)
+
+    def list_output_refs(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> tuple[OutputRef, ...]:
+        return tuple(
+            OutputRef.model_validate(e.data["output"])
+            for e in self.get_lifecycle_events(workspace_id, run_id)
+            if e.kind == "artifact" and "output" in e.data
+        )
+
+    def get_native_event_cursor(
+        self, workspace_id: UUID, run_id: UUID, source: str
+    ) -> int:
+        with self._lock:
+            self.get_run_snapshot(workspace_id, run_id)
+            return self._runs[run_id].native_cursors.get(source, 0)
+
+    def append_observation(
+        self,
+        workspace_id: UUID,
+        run_id: UUID,
+        record: SafeObservation,
+        *,
+        source: str,
+        owner_id: UUID,
+    ) -> RunEvent | None:
+        with self._lock:
+            if self._execution_owner != owner_id:
+                raise AgentError(
+                    "execution_owner_unavailable",
+                    "The execution owner lock is not held.",
+                )
+            self.get_run_snapshot(workspace_id, run_id)
+            run = self._runs[run_id]
+            if run.native_handle is None or native_source(run.native_handle) != source:
+                raise AgentError(
+                    "native_identity_unverified",
+                    "Native source identity is unavailable.",
+                )
+            cursor = run.native_cursors.get(source, 0)
+            existing = (
+                run.native_ids.get((source, record.identity))
+                if record.identity is not None
+                else None
+            )
+            if record.native_cursor is not None and record.native_cursor <= cursor:
+                return existing
+            if existing is None:
+                existing = self._append_event(
+                    run,
+                    record.kind,
+                    operation_id=record.operation_id,
+                    response_id=record.response_id,
+                    observation=record,
+                )
+                if record.identity is not None:
+                    run.native_ids[(source, record.identity)] = existing
+                if record.kind == "usage" and "observed_model" in record.data:
+                    run.snapshot = run.snapshot.model_copy(
+                        update={
+                            "effective_config": run.snapshot.effective_config.model_copy(
+                                update={"observed_model": record.data["observed_model"]}
+                            )
+                        }
+                    )
+            if record.native_cursor is not None:
+                run.native_cursors[source] = record.native_cursor
+            return existing
+
     def _append_event(
         self,
         run: _StoredRun,
@@ -1517,16 +1607,30 @@ class MemoryAgentStore:
         operation_id: UUID | None = None,
         response_id: UUID | None = None,
         data: dict[str, object] | None = None,
+        observation: SafeObservation | None = None,
     ) -> RunEvent:
+        if operation_id is None and response_id is not None:
+            operation_id = next(
+                (
+                    e.operation_id
+                    for e in reversed(run.events or ())
+                    if e.response_id == response_id and e.kind == "response.started"
+                ),
+                None,
+            )
         sequence = run.snapshot.last_event_sequence + 1
         event = RunEvent(
             run_id=run.snapshot.run_id,
             sequence=sequence,
             kind=kind,
-            occurred_at=datetime.now(UTC),
+            occurred_at=datetime.now(UTC)
+            if observation is None
+            else observation.occurred_at,
             operation_id=operation_id,
             response_id=response_id,
-            data={}
+            data=observation.data
+            if observation is not None
+            else {}
             if data is None
             else {
                 key: value
@@ -1633,6 +1737,7 @@ class MemoryAgentStore:
                 reservation.active = active_reserved
             if session_reserved is not None:
                 reservation.session = session_reserved
+            previous_state = run.snapshot.state
             run.snapshot = _run_copy(
                 snapshot.model_copy(
                     update={
@@ -1648,6 +1753,27 @@ class MemoryAgentStore:
                 run.terminal_reason_code = terminal_reason_code
             if replace_native_handle:
                 run.native_handle = native_handle
+            if snapshot.state != previous_state and snapshot.state in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+                RunState.UNKNOWN,
+            ):
+                kind = (
+                    "run.unknown"
+                    if snapshot.state is RunState.UNKNOWN
+                    else "run.failed"
+                    if snapshot.state is RunState.FAILED
+                    else "run.closed"
+                )
+                self._append_event(
+                    run,
+                    kind,
+                    data={
+                        "status": snapshot.state.value,
+                        "reason_code": snapshot.reason_code,
+                    },
+                )
             if receipt_status is not None:
                 operation = self._run_operations[
                     (snapshot.workspace_id, run.operation_id)

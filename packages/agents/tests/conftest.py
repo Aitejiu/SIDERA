@@ -950,3 +950,95 @@ def admission_lab(admission_lab_factory):
     from sidera_agents.memory import MemoryAgentStore
 
     return admission_lab_factory(MemoryAgentStore())
+
+
+@pytest.fixture
+def observation_feed(monkeypatch):
+    """Replace only native notification I/O; service and store stay real."""
+
+    def attach(lab):
+        events: dict[UUID, list[NativeEvent]] = {}
+        lock = RLock()
+        closed: set[UUID] = set()
+        original_close = lab.native.close
+
+        def emit(run_id, *, cursor, text="safe text", **changes):
+            values = {
+                "cursor": cursor,
+                "native_id": None,
+                "kind": "message",
+                "response_id": None,
+                "operation_id": None,
+                "occurred_at": datetime(2026, 10, 3, tzinfo=UTC),
+                "data": {"text": text, "update_type": "agent_message_chunk"},
+            }
+            values.update(changes)
+            with lock:
+                events.setdefault(run_id, []).append(NativeEvent(**values))
+
+        def read(handle, after_cursor, limit=100):
+            with lock:
+                if handle.run_id in closed:
+                    raise RuntimeError("the native session has already been removed")
+                return tuple(
+                    event
+                    for event in events.get(handle.run_id, ())
+                    if event.cursor > after_cursor
+                )[:limit]
+
+        def close(handle):
+            with lock:
+                closed.add(handle.run_id)
+                events.pop(handle.run_id, None)
+            return original_close(handle)
+
+        monkeypatch.setattr(lab.native, "read_events", read)
+        monkeypatch.setattr(lab.native, "close", close)
+        return SimpleNamespace(emit=emit, closed=closed)
+
+    return attach
+
+
+@pytest.fixture
+def artifact_authority(monkeypatch):
+    def attach(lab, authorized_workspace):
+        original_require = lab.authorizer.require
+        state = SimpleNamespace(enabled=True, calls=[])
+
+        def require(grant_id, action, target):
+            if action in {"artifact.read", "workspace.execute"}:
+                state.calls.append((grant_id, action, target))
+                if (
+                    action == "artifact.read"
+                    and state.enabled
+                    and grant_id == lab.grant_id
+                    and target == authorized_workspace
+                ):
+                    return
+                raise AgentError(
+                    "permission_denied", "FAKE_ARTIFACT_AUTHORITY_PRIVATE_REASON"
+                )
+            return original_require(grant_id, action, target)
+
+        monkeypatch.setattr(lab.authorizer, "require", require)
+        return state
+
+    return attach
+
+
+@pytest.fixture
+def artifact_io(monkeypatch):
+    def observe():
+        from sidera_agents import observations
+
+        calls = []
+        original_open = observations.os.open
+
+        def open_file(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr(observations.os, "open", open_file)
+        return calls
+
+    return observe

@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from .catalog import ProfileCatalog
 from .errors import AgentError
+from .observations import RunObservations
 from .ports import (
     ContextSourceReader,
     ExecutionAuthorizer,
@@ -50,7 +51,7 @@ class AgentService:
             self._owner_id,
             tool_connections,
         )
-        self.observations = None
+        self.observations = RunObservations(self.execution, store)
 
     def migrate(self) -> None:
         migrate = getattr(self._store, "migrate", None)
