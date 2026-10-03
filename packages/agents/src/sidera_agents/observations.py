@@ -4,6 +4,7 @@ import math
 import os
 import stat
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -17,6 +18,7 @@ from pydantic import SecretStr
 from .contracts import (
     EventPage,
     ExecutionWorkspace,
+    JsonValue,
     NativeEvent,
     NativeHandle,
     NativeOutcome,
@@ -63,7 +65,7 @@ def event_page(events: tuple[RunEvent, ...], after: int, limit: int) -> EventPag
     )
 
 
-def public_event_data(data: dict[str, object]) -> dict[str, object]:
+def public_event_data(data: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     return {key: value for key, value in data.items() if key != "_native"}
 
 
@@ -102,7 +104,7 @@ class SafeObservation:
     occurred_at: datetime
     operation_id: UUID | None
     response_id: UUID | None
-    data: dict[str, object]
+    data: dict[str, JsonValue]
     native_cursor: int | None = None
     identity: str | None = None
 
@@ -112,22 +114,28 @@ def native_source(handle: NativeHandle) -> str:
     return sha256(handle.model_dump_json().encode("utf-8")).hexdigest()
 
 
-def _usage(value: object) -> dict[str, object] | None:
+def _usage(value: object) -> dict[str, JsonValue] | None:
     if not isinstance(value, dict):
         return None
-    safe: dict[str, object] = {}
+    safe: dict[str, JsonValue] = {}
     for key in ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens"):
         amount = value.get(key)
         if type(amount) is int and 0 <= amount <= 2**63 - 1:
             safe[key] = amount
     cost = value.get("cost")
-    if type(cost) in (int, float) and 0 <= cost <= 10**12 and math.isfinite(cost):
+    if (
+        (type(cost) is int or type(cost) is float)
+        and 0 <= cost <= 10**12
+        and math.isfinite(cost)
+    ):
         safe["cost"] = cost
     return safe or None
 
 
 def _output(
-    data, artifact_directory: str | None, redactor: ObservationRedactor
+    data: Mapping[str, JsonValue],
+    artifact_directory: str | None,
+    redactor: ObservationRedactor,
 ) -> OutputRef | None:
     if artifact_directory is None:
         return None
@@ -242,7 +250,7 @@ class ObservationIngestor:
                 None if outcome is None or self.closed else outcome.observed_model
             )
             usage = _usage(None if outcome is None or self.closed else outcome.usage)
-            data: dict[str, object] = {"usage": usage, "observed_model": model}
+            data: dict[str, JsonValue] = {"usage": usage, "observed_model": model}
             if usage is None:
                 data["reason_code"] = "usage_unavailable"
             if (
@@ -271,12 +279,16 @@ class ObservationIngestor:
 
     def _normalize(self, event: NativeEvent) -> SafeObservation:
         response_id = event.response_id or self._response_id
-        operation_id = self._correlations.get(response_id)
+        operation_id = (
+            self._correlations.get(response_id) if response_id is not None else None
+        )
         verified = response_id in self._correlations and (
             event.operation_id is None or event.operation_id == operation_id
         )
+        data: dict[str, JsonValue]
         if not verified:
-            kind, data = "diagnostic", {"reason_code": "native_correlation_unverified"}
+            kind = "diagnostic"
+            data = {"reason_code": "native_correlation_unverified"}
             response_id, operation_id = None, None
         else:
             kind, data = self._safe_data(event)
@@ -298,7 +310,7 @@ class ObservationIngestor:
             identity=identity,
         )
 
-    def _safe_data(self, event: NativeEvent) -> tuple[str, dict[str, object]]:
+    def _safe_data(self, event: NativeEvent) -> tuple[str, dict[str, JsonValue]]:
         kind = {
             "progress.updated": "message",
             "tool.updated": "tool",
@@ -323,7 +335,7 @@ class ObservationIngestor:
         if kind not in {"message", "tool", "diagnostic"}:
             return "diagnostic", {"reason_code": "native_content_omitted"}
         allowed = {"text", "update_type", "tool_name", "status", "truncated"}
-        data: dict[str, object] = {}
+        data: dict[str, JsonValue] = {}
         if "text" in event.data:
             data.update(
                 self._redactor.text(
@@ -371,22 +383,25 @@ class ObservationIngestor:
                 return False
             self._write_failed = False
             if self._cursor is None:
-                self._cursor = self._store.get_native_event_cursor(
+                cursor: int = self._store.get_native_event_cursor(
                     self.workspace_id, self.handle.run_id, self.source
                 )
+                self._cursor = cursor
+            else:
+                cursor = self._cursor
             for _ in range(100 if final else 1):
                 page = None
                 if not self._pending and not self.closed and not self.closing:
                     try:
                         page = self._harness.read_events(
-                            self.handle, self._cursor, _NATIVE_PAGE
+                            self.handle, cursor, _NATIVE_PAGE
                         )
                     except Exception:  # noqa: BLE001 - native diagnostics are never persisted raw
                         page = ()
                     self._pending.extend(
                         self._normalize(event)
                         for event in page[:_NATIVE_PAGE]
-                        if event.cursor > self._cursor
+                        if event.cursor > cursor
                     )
                 while self._pending:
                     record = self._pending[0]
@@ -401,7 +416,8 @@ class ObservationIngestor:
                     except Exception:  # noqa: BLE001 - keep only this safe page for the next owner tick
                         self._write_failed = True
                         return False
-                    self._cursor = max(self._cursor, record.native_cursor or 0)
+                    cursor = max(cursor, record.native_cursor or 0)
+                    self._cursor = cursor
                     self._pending.popleft()
                 if page is None and not self.closed and not self.closing:
                     if not final:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -37,6 +37,10 @@ class AgentStore(Protocol):
     ) -> ProfileRevision: ...
 
     def get_profile(self, ref: ProfileRef) -> ProfileRevision: ...
+
+    def get_profile_status(
+        self, workspace_id: UUID, profile_id: UUID
+    ) -> ProfileStatus: ...
 
     def get_profile_head(
         self, workspace_id: UUID, profile_id: UUID
@@ -297,7 +301,7 @@ def _validate_http_endpoint(value: object) -> None:
             raise _configuration_invalid("HTTP endpoint is invalid.")
 
 
-def _validate_resource_settings(kind: object, settings: dict[str, object]) -> None:
+def _validate_resource_settings(kind: object, settings: Mapping[str, object]) -> None:
     if kind == "skill":
         if set(settings) == {"body"}:
             body = settings["body"]
@@ -427,6 +431,12 @@ class ProfileCatalog:
         self._authorizer.require(grant_id, "profile.read", ref)
         return self._store.get_profile(ref)
 
+    def get_profile_status(self, ref: ProfileRef, *, grant_id: UUID) -> ProfileStatus:
+        """Read current identity status after authorizing the exact pinned revision."""
+        self._authorizer.require(grant_id, "profile.read", ref)
+        self._store.get_profile(ref)
+        return self._store.get_profile_status(ref.workspace_id, ref.profile_id)
+
     def list_profiles(
         self, workspace_id: UUID, *, grant_id: UUID
     ) -> tuple[ProfileRevision, ...]:
@@ -470,6 +480,14 @@ class ProfileCatalog:
     def get_resource(self, ref: ResourceRef, *, grant_id: UUID) -> ResourceRevision:
         self._authorizer.require(grant_id, "resource.read", ref)
         return self._store.get_resource(ref)
+
+    def get_resource_status(
+        self, ref: ResourceRef, *, grant_id: UUID
+    ) -> ResourceStatus:
+        """The Ref pins config, not a historical enabled/version snapshot."""
+        self._authorizer.require(grant_id, "resource.read", ref)
+        self._store.get_resource(ref)
+        return self._store.get_resource_status(ref.workspace_id, ref.resource_id)
 
     def list_resources(
         self, workspace_id: UUID, *, grant_id: UUID

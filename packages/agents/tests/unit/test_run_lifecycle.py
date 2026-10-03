@@ -3,21 +3,196 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from threading import Event
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
 from sidera_agents.contracts import (
     ContextItem,
+    CredentialRef,
+    ExecutionWorkspace,
     InputStatus,
+    NativeCloseState,
     RunInput,
     RunPolicy,
     RunState,
+    RunStop,
+    SecretBinding,
     SourceRef,
     StartStatus,
 )
 from sidera_agents.errors import AgentError
 from sidera_agents.input_delivery import InputDeliverySettings
+
+
+def _native_workspace_authority(lab, monkeypatch, workspace, *, enabled=True):
+    original = lab.execution._authorizer.require
+    state = SimpleNamespace(enabled=enabled, calls=[])
+
+    def require(grant_id, action, target):
+        if action == "workspace.execute":
+            state.calls.append((grant_id, action, target))
+            if not state.enabled or grant_id != lab.grant_id or target != workspace:
+                raise AgentError(
+                    "permission_denied", "N09_FAKE_PRIVATE_WORKSPACE_REASON"
+                )
+            return
+        return original(grant_id, action, target)
+
+    monkeypatch.setattr(lab.execution._authorizer, "require", require)
+    return state
+
+
+@pytest.mark.parametrize("mode", [None, "none", "read", "write"])
+def test_native_tool_workspace_authorization_uses_exact_start_target(
+    admission_lab, monkeypatch, mode
+):
+    lab = admission_lab
+    workspace = ExecutionWorkspace(
+        directory=lab.request().workspace.directory + "/prepared/../workspace",
+        writable=mode == "write",
+        artifact_directory="owned-artifacts",
+    )
+    authority = _native_workspace_authority(lab, monkeypatch, workspace)
+    profile = lab.catalog.revise_profile(
+        lab.profile.ref,
+        lab.profile.draft.model_copy(
+            update={"native_settings": {} if mode is None else {"native_tools": mode}}
+        ),
+        grant_id=lab.grant_id,
+    )
+    start = lab.execution.start(
+        lab.request(policy="conversation", profile_ref=profile.ref, workspace=workspace)
+    )
+    lab.pump()
+    assert len(lab.native.open_calls) == 1
+    assert lab.native.open_calls[0].workspace == workspace
+    expected = (
+        []
+        if mode in {None, "none"}
+        else [(lab.grant_id, "workspace.execute", workspace)]
+    )
+    assert authority.calls == expected
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.IDLE
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,writable,enabled,reason",
+    [
+        ("read", False, False, "permission_denied"),
+        ("write", True, False, "permission_denied"),
+        ("write", False, True, "configuration_invalid"),
+    ],
+)
+def test_native_workspace_denial_precedes_secret_read_and_native_open(
+    admission_lab, monkeypatch, mode, writable, enabled, reason
+):
+    lab = admission_lab
+    workspace = lab.request().workspace.model_copy(update={"writable": writable})
+    authority = _native_workspace_authority(
+        lab, monkeypatch, workspace, enabled=enabled
+    )
+    binding = SecretBinding(
+        credential_ref=CredentialRef(
+            workspace_id=lab.workspace_id, credential_id=uuid4()
+        ),
+        destination="PROFILE_TOKEN",
+    )
+    profile = lab.catalog.revise_profile(
+        lab.profile.ref,
+        lab.profile.draft.model_copy(
+            update={
+                "native_settings": {"native_tools": mode},
+                "secret_refs": (binding,),
+            }
+        ),
+        grant_id=lab.grant_id,
+    )
+    reads = []
+
+    class Secrets:
+        def read(self, grant_id, selected):
+            reads.append(selected)
+            return SecretStr("N09_FAKE_WORKSPACE_SECRET")
+
+    lab.execution._secrets = Secrets()
+    start = lab.execution.start(
+        lab.request(profile_ref=profile.ref, workspace=workspace)
+    )
+    lab.pump()
+    assert reads == []
+    assert lab.native.open_calls == []
+    assert authority.calls == [(lab.grant_id, "workspace.execute", workspace)]
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    assert snapshot.state is RunState.FAILED
+    assert snapshot.reason_code == reason
+
+
+def test_native_workspace_revocation_fails_accepted_input_on_original_run_and_allows_stop(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    workspace = lab.request().workspace
+    authority = _native_workspace_authority(lab, monkeypatch, workspace)
+    profile = lab.catalog.revise_profile(
+        lab.profile.ref,
+        lab.profile.draft.model_copy(
+            update={"native_settings": {"native_tools": "write"}}
+        ),
+        grant_id=lab.grant_id,
+    )
+    start = lab.execution.start(
+        lab.request(policy="conversation", profile_ref=profile.ref, workspace=workspace)
+    )
+    lab.pump()
+    request = _input(lab, start.run_id, "second turn after grant revocation")
+    accepted = lab.execution.send_input(request)
+    assert accepted.status is InputStatus.ACCEPTED
+    authority.enabled = False
+    lab.catalog.revise_profile(
+        profile.ref,
+        profile.draft.model_copy(update={"native_settings": {"native_tools": "none"}}),
+        grant_id=lab.grant_id,
+    )
+    lab.pump()
+    receipt = lab.execution.get_input(
+        lab.workspace_id, start.run_id, request.operation_id, grant_id=lab.grant_id
+    )
+    assert receipt.status is InputStatus.FAILED
+    assert receipt.reason_code == "permission_denied"
+    assert len(lab.native.open_calls) == 1 and len(lab.native.prompt_calls) == 1
+    assert len(authority.calls) == 3
+    assert all(
+        call == (lab.grant_id, "workspace.execute", workspace)
+        for call in authority.calls
+    )
+    before_stop = len(authority.calls)
+    stop = lab.execution.stop(
+        RunStop(
+            workspace_id=lab.workspace_id,
+            run_id=start.run_id,
+            operation_id=uuid4(),
+            grant_id=lab.grant_id,
+        )
+    )
+    lab.pump()
+    assert stop.run_id == start.run_id
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.STOPPED
+    )
+    assert len(authority.calls) == before_stop
 
 
 def _start(lab, *, policy: RunPolicy = RunPolicy.CONVERSATION, text: str = "first"):
@@ -268,6 +443,75 @@ def test_unknown_input_ack_is_never_resent(admission_lab, monkeypatch):
     assert lab.pump() == 0
     assert len(lab.native.open_calls) == 1
     assert len(lab.native.prompt_calls) == 2
+
+
+@pytest.mark.parametrize("phase", ["initial", "input"])
+def test_missing_native_prompt_outcome_retains_original_uncertain_response(
+    admission_lab, monkeypatch, phase
+):
+    lab = admission_lab
+    if phase == "input":
+        start = _start(lab)
+        lab.pump()
+
+    def missing_outcome(handle, assembled, response_id):
+        lab.native.begin_prompt(handle, assembled, response_id)
+
+    monkeypatch.setattr(lab.native, "prompt", missing_outcome)
+    request = None
+    if phase == "initial":
+        start = _start(lab)
+    else:
+        request = _input(lab, start.run_id, "uncertain input")
+        assert lab.execution.send_input(request).status is InputStatus.ACCEPTED
+
+    lab.pump()
+
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    assert snapshot.state is RunState.UNKNOWN
+    assert snapshot.reason_code == "native_response_unknown"
+    assert snapshot.active_response_id == lab.native.prompt_calls[-1][2]
+    assert snapshot.run_id == start.run_id and not snapshot.input_open
+    assert lab.native.active_responses[start.run_id] == snapshot.active_response_id
+    assert not lab.execution._response_is_in_flight(start.run_id)
+    if request is not None:
+        receipt = lab.execution.get_input(
+            lab.workspace_id, start.run_id, request.operation_id, grant_id=lab.grant_id
+        )
+        assert receipt.status is InputStatus.UNKNOWN
+        assert receipt.reason_code == "native_response_unknown"
+        assert receipt.run_id == start.run_id
+    counts = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert (counts.active_count, counts.session_count) == (1, 1)
+    assert lab.pump() == 0
+    assert len(lab.native.open_calls) == 1
+    assert len(lab.native.prompt_calls) == (1 if phase == "initial" else 2)
+
+
+@pytest.mark.parametrize("with_observations", [True, False])
+def test_missing_native_close_outcome_returns_unknown_without_releasing_context(
+    admission_lab, monkeypatch, with_observations
+):
+    lab = admission_lab
+    start = _start(lab)
+    lab.pump()
+    handle = lab.native.handles[start.run_id]
+    ingestor = lab.execution._observations[start.run_id]
+    if not with_observations:
+        lab.execution._observations.pop(start.run_id)
+    monkeypatch.setattr(lab.native, "close", lambda owned_handle: None)
+
+    outcome = lab.execution._close_native(lab.native, handle)
+
+    assert outcome.status is NativeCloseState.UNKNOWN
+    assert outcome.reason_code == "native_close_unknown"
+    assert not ingestor.closed and not ingestor.closing
+    assert lab.native.handles[start.run_id] == handle
+    counts = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert (counts.active_count, counts.session_count) == (0, 1)
+    assert len(lab.native.open_calls) == 1 and len(lab.native.prompt_calls) == 1
 
 
 def test_idle_input_retries_capacity_rejection_after_active_slot_releases(

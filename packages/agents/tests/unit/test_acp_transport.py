@@ -215,7 +215,10 @@ def test_read_available_zero_timeout_retries_queued_server_request(tmp_path):
         "from pathlib import Path\n"
         + _permission_request_source("permission-retry")
         + "response=json.loads(sys.stdin.buffer.readline())\n"
-        + f"Path({str(response_file)!r}).write_text(json.dumps(response))\n"
+        + f"response_path=Path({str(response_file)!r})\n"
+        + "temporary_response=response_path.with_suffix('.tmp')\n"
+        + "temporary_response.write_text(json.dumps(response))\n"
+        + "temporary_response.replace(response_path)\n"
         + f"while not Path({str(check_extra)!r}).exists(): time.sleep(0.005)\n"
         + "if select.select([sys.stdin.buffer], [], [], 0.1)[0]:\n"
         + "    extra=sys.stdin.buffer.readline()\n"

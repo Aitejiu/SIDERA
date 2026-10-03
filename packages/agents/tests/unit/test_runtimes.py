@@ -100,6 +100,39 @@ def test_version_probe_uses_fixed_argv_and_minimal_environment(tmp_path, monkeyp
     assert opencode_descriptor.read_version(str(executable)) == "1.4.2"
 
 
+@pytest.mark.parametrize("missing_stream", ["stdout", "stderr"])
+def test_version_probe_missing_pipe_fails_safely_and_reaps_owned_process(
+    tmp_path, monkeypatch, missing_stream
+):
+    executable = _executable_script(tmp_path, "import time\ntime.sleep(10)")
+    popen = opencode_descriptor.subprocess.Popen
+    processes = []
+
+    def missing_pipe(*args, **kwargs):
+        kwargs[missing_stream] = opencode_descriptor.subprocess.DEVNULL
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(opencode_descriptor.subprocess, "Popen", missing_pipe)
+    try:
+        with pytest.raises(AgentError) as error:
+            opencode_descriptor.read_version(str(executable))
+
+        assert error.value.code == "runtime_probe_failed"
+        assert len(processes) == 1 and processes[0].poll() is not None
+        remaining = (
+            processes[0].stderr if missing_stream == "stdout" else processes[0].stdout
+        )
+        assert remaining is not None and remaining.closed
+    finally:
+        for process in processes:
+            opencode_descriptor._terminate(process)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+
+
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 def test_version_probe_bounds_output_and_hides_raw_output(tmp_path, stream):
     marker = "synthetic-probe-secret"

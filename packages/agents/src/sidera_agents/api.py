@@ -43,6 +43,10 @@ class AgentCatalog(Protocol):
 
     def get_profile(self, ref: ProfileRef, *, grant_id: UUID) -> ProfileRevision: ...
 
+    def get_profile_status(
+        self, ref: ProfileRef, *, grant_id: UUID
+    ) -> ProfileStatus: ...
+
     def list_profiles(
         self, workspace_id: UUID, *, grant_id: UUID
     ) -> tuple[ProfileRevision, ...]: ...
@@ -56,6 +60,10 @@ class AgentCatalog(Protocol):
     ) -> ResourceRevision: ...
 
     def get_resource(self, ref: ResourceRef, *, grant_id: UUID) -> ResourceRevision: ...
+
+    def get_resource_status(
+        self, ref: ResourceRef, *, grant_id: UUID
+    ) -> ResourceStatus: ...
 
     def list_resources(
         self, workspace_id: UUID, *, grant_id: UUID

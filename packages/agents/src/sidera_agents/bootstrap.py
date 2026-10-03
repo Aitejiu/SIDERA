@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from threading import Event, Lock, Thread, current_thread
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from .catalog import ProfileCatalog
+from .catalog import AgentStore, ProfileCatalog
 from .errors import AgentError
 from .observations import RunObservations
 from .ports import (
     ContextSourceReader,
     ExecutionAuthorizer,
+    HarnessAdapter,
     SecretReader,
     ToolConnectionReader,
 )
 from .runs import RunExecution
 from .runtimes import RuntimeCatalog
+
+if TYPE_CHECKING:
+    from .harnesses.registry import HarnessRegistry
 
 
 class AgentService:
@@ -58,9 +63,28 @@ class AgentService:
         if migrate is not None:
             migrate()
 
-    def readiness(self) -> bool:
+    def readiness(self, *, require_execution_owner: bool = False) -> bool:
+        """Point-in-time storage/optional owner evidence, not an execution grant."""
         readiness = getattr(self._store, "readiness", None)
-        return True if readiness is None else bool(readiness())
+        try:
+            ready = True if readiness is None else bool(readiness())
+        except Exception:
+            if not require_execution_owner:
+                raise
+            return False
+        if not ready or not require_execution_owner:
+            return ready
+        with self._lifecycle_lock:
+            if (
+                self._closing
+                or not self._owner_claimed
+                or (self._thread is not None and not self._thread.is_alive())
+            ):
+                return False
+            try:
+                return self._store.execution_owner_is_held(self._owner_id) is True
+            except Exception:  # noqa: BLE001 - owner evidence fails closed without driver details
+                return False
 
     def poll_once(self) -> int:
         return self._poll_once(background=False)
@@ -191,6 +215,55 @@ def create_agent_service(
         clock,
         tool_connections,
     )
+
+
+def open_memory_store() -> AgentStore:
+    """Create an explicit ephemeral store; never a persistence fallback."""
+    from .memory import MemoryAgentStore
+
+    return MemoryAgentStore()
+
+
+def create_harness_registry(
+    harnesses: Iterable[HarnessAdapter] | None = None,
+) -> HarnessRegistry:
+    """Select exactly the supplied trusted adapters, or the lazy built-in default."""
+    from .harnesses.registry import HarnessRegistry, default_harness_registry
+
+    if harnesses is None:
+        return default_harness_registry()
+    adapters = tuple(harnesses)
+    identities: set[str] = set()
+    for adapter in adapters:
+        identity = getattr(adapter, "harness_id", None)
+        executable = getattr(adapter, "executable_name", None)
+        if (
+            not isinstance(identity, str)
+            or not identity.strip()
+            or identity in identities
+            or not isinstance(executable, str)
+            or not executable.strip()
+        ):
+            raise ValueError("Harness identities must be unique and non-empty strings.")
+        if any(
+            not callable(getattr(adapter, method, None))
+            for method in (
+                "describe",
+                "probe",
+                "validate",
+                "open",
+                "prompt",
+                "read_events",
+                "cancel",
+                "inspect",
+                "close",
+            )
+        ):
+            raise ValueError(
+                "A trusted harness must implement the full native contract."
+            )
+        identities.add(identity)
+    return HarnessRegistry(adapters)
 
 
 def open_postgres_store(database_url: str):

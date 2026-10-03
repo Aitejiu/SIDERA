@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from threading import Condition, RLock
 from time import monotonic
+from typing import cast
 from uuid import UUID, uuid4
 
 from pydantic import SecretStr
@@ -25,6 +26,7 @@ from .contracts import (
     NativeCloseState,
     NativeHandle,
     NativeOpenRequest,
+    NativeOutcome,
     NativeOutcomeStatus,
     NativeProcessState,
     NativeResponseState,
@@ -51,6 +53,7 @@ from .contracts import (
     StopStatus,
     SupportStatus,
     ToolConnection,
+    _ProjectedJsonValue,
 )
 from .errors import AgentError
 from .input_delivery import (
@@ -249,8 +252,6 @@ class RunExecution:
             response_id=response_id,
         )
         created = False
-        conflict_error: AgentError | None = None
-        stored_operation = None
         with self._input_lock:
             self._unopened_runs.add(run_id)
         try:
@@ -274,15 +275,16 @@ class RunExecution:
                     request.profile_ref.workspace_id, request.operation_id
                 )
                 conflict_error = error
-            if conflict_error is not None:
-                if (
-                    stored_operation is not None
-                    and stored_operation.profile_ref != request.profile_ref
-                ):
-                    self._authorizer.require(
-                        request.grant_id, "run.start", stored_operation.profile_ref
-                    )
-                raise conflict_error
+            else:
+                return receipt
+            if (
+                stored_operation is not None
+                and stored_operation.profile_ref != request.profile_ref
+            ):
+                self._authorizer.require(
+                    request.grant_id, "run.start", stored_operation.profile_ref
+                )
+            raise conflict_error
         finally:
             with self._pending_lock:
                 if created:
@@ -290,7 +292,6 @@ class RunExecution:
                 else:
                     with self._input_lock:
                         self._unopened_runs.discard(run_id)
-        return receipt
 
     def _begin_admission(self) -> UUID:
         with self._pending_lock:
@@ -322,6 +323,12 @@ class RunExecution:
                 if remaining <= 0:
                     return False
                 self._pending_lock.wait(timeout=remaining)
+        try:
+            owner_held = self._store.execution_owner_is_held(self._owner_id)
+        except Exception:  # noqa: BLE001 - unverified ownership cannot authorize writes
+            return True
+        if owner_held is not True:
+            return True
         with self._input_lock:
             observations = tuple(self._observations.values())
         for ingestor in observations:
@@ -914,11 +921,19 @@ class RunExecution:
                         self._observations.pop(run_id)
         return failed
 
-    def _close_native(self, harness, handle: NativeHandle):
+    def _close_native(self, harness, handle: NativeHandle) -> NativeCloseOutcome:
+        result: NativeCloseOutcome | None = None
         with self._input_lock:
             ingestor = self._observations.get(handle.run_id)
         if ingestor is None:
-            return harness.close(handle)
+            result = harness.close(handle)
+            return (
+                result
+                if result is not None
+                else NativeCloseOutcome(
+                    status=NativeCloseState.UNKNOWN, reason_code="native_close_unknown"
+                )
+            )
         with ingestor.lock:
             if not ingestor.ingest(final=True):
                 ingestor.close_deferred = True
@@ -928,7 +943,6 @@ class RunExecution:
             ingestor.close_deferred = False
             ingestor.closing = True
         # Native termination may wait. Only the pre-close flush takes the ingest lock.
-        result = None
         try:
             result = harness.close(handle)
         finally:
@@ -936,7 +950,13 @@ class RunExecution:
                 if result is not None and result.status is NativeCloseState.CLOSED:
                     ingestor.close_context()
                 ingestor.closing = False
-        return result
+        return (
+            result
+            if result is not None
+            else NativeCloseOutcome(
+                status=NativeCloseState.UNKNOWN, reason_code="native_close_unknown"
+            )
+        )
 
     def _dispatch_native(
         self, workspace_id: UUID, run_id: UUID, work: Callable[[], None]
@@ -1117,7 +1137,7 @@ class RunExecution:
             live, item.response_id, item.request.operation_id
         ):
             return
-        outcome = None
+        outcome: NativeOutcome | None = None
         observed_model = None
         try:
             outcome = harness.prompt(handle, item.assembled_input, item.response_id)
@@ -1135,7 +1155,11 @@ class RunExecution:
             )
             self._mark_response_in_flight(snapshot.run_id, False)
         self._require_owner()
-        if outcome.response_id != item.response_id:
+        if outcome is None:
+            self._finish_unknown_response(
+                live, item.response_id, "native_response_unknown"
+            )
+        elif outcome.response_id != item.response_id:
             self._finish_unknown_response(
                 live, item.response_id, "native_response_unverified"
             )
@@ -1384,7 +1408,7 @@ class RunExecution:
             self._require_owner()
             if not self._begin_initial_prompt(live, response_id, claimed.operation_id):
                 return
-            outcome = None
+            outcome: NativeOutcome | None = None
             observed_model = None
             try:
                 harness = self._registry.get(live.projection.runtime.harness_id)
@@ -1411,11 +1435,14 @@ class RunExecution:
                 self._mark_response_in_flight(run_id, False)
             self._require_owner()
             if (
-                outcome.response_id != response_id
+                outcome is None
+                or outcome.response_id != response_id
                 or outcome.status is NativeOutcomeStatus.UNKNOWN
             ):
                 reason = (
-                    "native_response_unverified"
+                    "native_response_unknown"
+                    if outcome is None
+                    else "native_response_unverified"
                     if outcome.response_id != response_id
                     else _safe_native_reason(
                         outcome.reason_code, "native_response_unknown"
@@ -1503,6 +1530,7 @@ class RunExecution:
         self._check_required_capabilities(
             live.projection.request, live.projection.runtime.capabilities
         )
+        self._require_native_workspace(live.projection.request, live.projection.profile)
         for binding in live.projection.request.tools:
             self._authorizer.require(grant_id, "tool.execute", binding)
         for resource_ref in live.projection.profile.draft.resource_refs:
@@ -1819,15 +1847,21 @@ class RunExecution:
         )
 
     def _build_open_request(self, item: _PendingStart) -> NativeOpenRequest:
+        self._require_native_workspace(item.request, item.profile)
         for binding in item.request.tools:
             self._authorizer.require(item.request.grant_id, "tool.execute", binding)
 
-        environment: dict[str, object] = dict(item.profile.draft.environment)
+        environment: dict[str, _ProjectedJsonValue] = dict(
+            item.profile.draft.environment
+        )
         for binding in item.profile.draft.secret_refs:
             try:
-                environment[binding.destination] = self._secrets.read(
-                    item.request.grant_id, binding
-                )
+                secret = self._secrets.read(item.request.grant_id, binding)
+                if not isinstance(secret, SecretStr):
+                    raise AgentError(
+                        "secret_unavailable", "Authorized secret is unavailable."
+                    )
+                environment[binding.destination] = secret
             except AgentError:
                 raise
             except Exception:  # noqa: BLE001 - never expose secret-reader exception details
@@ -1836,7 +1870,10 @@ class RunExecution:
                 ) from None
 
         tools = self._resolve_tools(item.request, item.profile)
-        projected_config: dict[str, object] = dict(item.profile.draft.native_settings)
+        # This owned copy widens validated, secret-free JSON to projection values.
+        projected_config = cast(
+            dict[str, _ProjectedJsonValue], dict(item.profile.draft.native_settings)
+        )
         if item.profile.draft.model_id is not None:
             projected_config["model_id"] = item.profile.draft.model_id
         if item.profile.draft.thinking is not None:
@@ -1850,6 +1887,22 @@ class RunExecution:
             skills=self._resolve_skills(item.request, item.profile),
             environment=environment,
         )
+
+    def _require_native_workspace(
+        self, request: RunStart, profile: ProfileRevision
+    ) -> None:
+        mode = profile.draft.native_settings.get("native_tools", "none")
+        if mode not in ("read", "write"):
+            return
+        self._authorizer.require(
+            request.grant_id, "workspace.execute", request.workspace
+        )
+        if mode == "write" and not request.workspace.writable:
+            raise AgentError(
+                "configuration_invalid",
+                "Native write tools require a writable workspace.",
+                "workspace.writable",
+            )
 
     def _reject_projection(self, snapshot: RunSnapshot, reason_code: str) -> None:
         safe_codes = {

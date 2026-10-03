@@ -18,6 +18,7 @@ from pydantic import SecretStr
 from sidera_agents.contracts import (
     AssembledInput,
     ConfigValidation,
+    CredentialRef,
     NativeCancelState,
     NativeCloseState,
     NativeOpenRequest,
@@ -30,6 +31,7 @@ from sidera_agents.contracts import (
     RuntimeCandidate,
     RuntimeRef,
     RuntimeSnapshot,
+    SecretBinding,
     SupportStatus,
     ToolConnection,
 )
@@ -38,9 +40,207 @@ from sidera_agents.harnesses import acp_transport, opencode_config
 from sidera_agents.harnesses import opencode as opencode_module
 from sidera_agents.harnesses.acp_transport import ACPProcessTransport
 from sidera_agents.harnesses.opencode import OpenCodeHarness
-from sidera_agents.harnesses.registry import TrustedHarness, default_harness_registry
+from sidera_agents.harnesses.registry import (
+    HarnessRegistry,
+    TrustedHarness,
+    default_harness_registry,
+)
 
 _PEER = Path(__file__).parents[1] / "fixtures" / "acp_peer.py"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "request_timeout_seconds",
+        "stop_grace_seconds",
+        "prompt_timeout_seconds",
+        "cancel_timeout_seconds",
+        "close_timeout_seconds",
+    ],
+)
+@pytest.mark.parametrize(
+    "value", [0, -1, True, False, float("nan"), float("inf"), float("-inf")]
+)
+def test_invalid_deadline_rejects_before_native_spawn(field, value, monkeypatch):
+    def forbidden_spawn(*args, **kwargs):
+        raise AssertionError("Invalid deadlines must not spawn native processes")
+
+    monkeypatch.setattr(ACPProcessTransport, "spawn_argv", forbidden_spawn)
+    with pytest.raises(ValueError):
+        OpenCodeHarness(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "configuration,prompt_timeout,close_timeout",
+    [
+        ("builtin", 900, 1),
+        ("explicit_none", 2, 2),
+        ("overrides", 17, 0.05),
+    ],
+)
+def test_setup_prompt_and_close_use_independent_transport_deadlines(
+    tmp_path, monkeypatch, configuration, prompt_timeout, close_timeout
+):
+    calls = []
+    request = ACPProcessTransport.request
+
+    def capture_request(self, method, params, *, timeout):
+        calls.append((method, timeout))
+        return request(self, method, params, timeout=timeout)
+
+    monkeypatch.setattr(ACPProcessTransport, "request", capture_request)
+    if configuration == "builtin":
+        adapter = default_harness_registry().get("opencode")
+        setup_timeout = 30
+    elif configuration == "explicit_none":
+        adapter = OpenCodeHarness(
+            request_timeout_seconds=2,
+            prompt_timeout_seconds=None,
+            cancel_timeout_seconds=None,
+            close_timeout_seconds=None,
+            stop_grace_seconds=0.2,
+        )
+        setup_timeout = 2
+    else:
+        adapter = OpenCodeHarness(
+            request_timeout_seconds=2,
+            prompt_timeout_seconds=17,
+            cancel_timeout_seconds=0.03,
+            close_timeout_seconds=0.05,
+            stop_grace_seconds=0.2,
+        )
+        setup_timeout = 2
+    executable = _launcher(tmp_path, "opencode")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    handle = adapter.open(_request(executable, workspace))
+    try:
+        assert (
+            adapter.prompt(
+                handle,
+                AssembledInput(instructions=(), text="fixture", context=()),
+                uuid4(),
+            ).status
+            is NativeOutcomeStatus.COMPLETED
+        )
+    finally:
+        assert adapter.close(handle).status is NativeCloseState.CLOSED
+    assert calls == [
+        ("initialize", setup_timeout),
+        ("session/new", setup_timeout),
+        ("session/prompt", prompt_timeout),
+        ("session/close", close_timeout),
+    ]
+
+
+@pytest.mark.parametrize(
+    "configuration,expected_cancel",
+    [("builtin", 1), ("explicit_none", 2), ("override", 0.05)],
+)
+def test_cancel_confirmation_budget_is_independent_of_long_prompt(
+    tmp_path, monkeypatch, configuration, expected_cancel
+):
+    if configuration == "builtin":
+        adapter = default_harness_registry().get("opencode")
+    else:
+        adapter = OpenCodeHarness(
+            request_timeout_seconds=2,
+            prompt_timeout_seconds=900,
+            cancel_timeout_seconds=None if configuration == "explicit_none" else 0.05,
+            close_timeout_seconds=0.05,
+            stop_grace_seconds=0.2,
+        )
+    capture = tmp_path / "peer.jsonl"
+    executable = _launcher(
+        tmp_path, "opencode", capture=capture, mode="withhold_prompt"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    handle = adapter.open(_request(executable, workspace))
+    session = adapter._sessions[handle.process_identity.owned_nonce]
+    wait = session.condition.wait
+    budgets = []
+
+    def bounded_wait(timeout):
+        budgets.append(timeout)
+        return wait(min(timeout, 0.01))
+
+    monkeypatch.setattr(session.condition, "wait", bounded_wait)
+    _shorten_prompt_timeout(adapter, handle, monkeypatch, seconds=0.3)
+    response_id = uuid4()
+    outcomes = []
+    prompt_thread = Thread(
+        target=lambda: outcomes.append(
+            adapter.prompt(
+                handle,
+                AssembledInput(instructions=(), text="fixture", context=()),
+                response_id,
+            )
+        ),
+        daemon=True,
+    )
+    try:
+        prompt_thread.start()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not any(
+            row.get("kind") == "server_reply" for row in _records(capture)
+        ):
+            time.sleep(0.005)
+        assert any(row.get("kind") == "server_reply" for row in _records(capture))
+        outcome = adapter.cancel(handle, response_id)
+        assert outcome.status is NativeCancelState.UNKNOWN
+        assert outcome.response_id == response_id
+        assert budgets[0] == pytest.approx(expected_cancel, rel=0.05, abs=0.01)
+        if configuration == "override":
+            assert prompt_thread.is_alive()
+            assert adapter.inspect(handle).response_state is NativeResponseState.ACTIVE
+    finally:
+        adapter.close(handle)
+        prompt_thread.join(timeout=1)
+    assert not prompt_thread.is_alive()
+
+
+def test_independent_prompt_timeout_retains_original_uncertain_response(tmp_path):
+    capture = tmp_path / "peer.jsonl"
+    executable = _launcher(
+        tmp_path, "opencode", capture=capture, mode="withhold_prompt"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = OpenCodeHarness(
+        request_timeout_seconds=2,
+        prompt_timeout_seconds=0.05,
+        cancel_timeout_seconds=0.01,
+        close_timeout_seconds=0.01,
+        stop_grace_seconds=0.2,
+    )
+    handle = adapter.open(_request(executable, workspace))
+    prepared = adapter._sessions[handle.process_identity.owned_nonce].prepared
+    response_id = uuid4()
+    try:
+        outcome = adapter.prompt(
+            handle,
+            AssembledInput(instructions=(), text="fixture", context=()),
+            response_id,
+        )
+        assert outcome.status is NativeOutcomeStatus.UNKNOWN
+        assert outcome.reason_code == "native_response_unknown"
+        assert outcome.response_id == response_id
+        assert prepared.directory.exists()
+        assert adapter.inspect(handle).response_state is NativeResponseState.UNKNOWN
+        with pytest.raises(AgentError) as error:
+            adapter.prompt(
+                handle,
+                AssembledInput(instructions=(), text="retry", context=()),
+                uuid4(),
+            )
+        assert error.value.code == "native_response_unknown"
+        assert (
+            sum(row.get("method") == "session/prompt" for row in _records(capture)) == 1
+        )
+    finally:
+        assert adapter.close(handle).status is NativeCloseState.CLOSED
 
 
 def test_trusted_harness_validate_returns_config_validation_contract():
@@ -376,13 +576,20 @@ def test_open_rejects_wrong_acp_protocol_version_before_session_new(tmp_path, mo
         ("permission_no_reject", {"outcome": "cancelled"}),
     ],
 )
-def test_permission_request_uses_valid_reject_outcome(tmp_path, mode, expected_outcome):
+@pytest.mark.parametrize("native_tools", ["none", "read", "write"])
+def test_permission_request_uses_valid_reject_outcome(
+    tmp_path, mode, expected_outcome, native_tools
+):
     capture = tmp_path / "peer.jsonl"
     opencode = _launcher(tmp_path, "opencode", capture=capture, mode=mode)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
-    handle = adapter.open(_request(opencode, workspace))
+    handle = adapter.open(
+        _request(opencode, workspace).model_copy(
+            update={"projected_config": {"native_tools": native_tools}}
+        )
+    )
 
     try:
         adapter.prompt(
@@ -396,6 +603,17 @@ def test_permission_request_uses_valid_reject_outcome(tmp_path, mode, expected_o
             if row.get("kind") == "server_reply"
         )
         assert reply["result"]["outcome"] == expected_outcome
+        environment = next(
+            row for row in _records(capture) if row["kind"] == "environment"
+        )
+        allowed = (
+            {}
+            if native_tools == "none"
+            else {"read": "allow", "glob": "allow", "grep": "allow"}
+        )
+        if native_tools == "write":
+            allowed.update(edit="allow", bash="allow")
+        assert environment["permission"] == {"*": "deny", **allowed}
     finally:
         adapter.close(handle)
 
@@ -615,6 +833,23 @@ def test_prompt_events_permission_request_and_selected_observed_separation(tmp_p
         assert adapter.inspect(handle).process_state is NativeProcessState.ALIVE
     finally:
         adapter.close(handle)
+
+
+def test_known_secret_collection_does_not_call_getter_on_plain_text(tmp_path):
+    class PlainText(str):
+        def get_secret_value(self):
+            raise AssertionError("Plain text must not be treated as a credential")
+
+    request = _request(_launcher(tmp_path, "opencode"), tmp_path).model_copy(
+        update={
+            "environment": {
+                "PLAIN_TEXT": PlainText("ordinary value"),
+                "BOUND_SECRET": SecretStr("fixture-bound-secret"),
+            }
+        }
+    )
+
+    assert opencode_module._secret_values(request) == ("fixture-bound-secret",)
 
 
 def test_prompt_event_secret_is_redacted_and_not_recorded(tmp_path):
@@ -1193,22 +1428,222 @@ def test_cancel_without_negotiated_capability_is_unsupported(tmp_path):
         adapter.close(handle)
 
 
-def test_profile_model_is_not_claimed_as_applied_or_observed(tmp_path):
+def test_profile_model_is_projected_without_fabricated_observed_evidence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(opencode_config, "managed_opencode_config_sources", lambda: ())
     capture = tmp_path / "peer.jsonl"
     opencode = _launcher(tmp_path, "opencode", capture=capture)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     request = _request(opencode, workspace).model_copy(
-        update={"projected_config": {"model_id": "fixture/provider-model"}}
+        update={"projected_config": {"model_id": "opencode-go/deepseek-v4.1-flash"}}
     )
     adapter = OpenCodeHarness(request_timeout_seconds=2, stop_grace_seconds=0.2)
 
-    with pytest.raises(AgentError) as error:
-        adapter.open(request)
+    handle = adapter.open(request)
+    try:
+        environment = next(
+            row for row in _records(capture) if row["kind"] == "environment"
+        )
+        assert environment["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert environment["small_model"] == "opencode-go/deepseek-v4.1-flash"
+        assert environment["enabled_providers"] == ["opencode-go"]
+        assert environment["pid"] == handle.process_identity.pid
+        assert handle.session_id == "owned-acp-session"
+        assert _request_record(capture, "session/new")["params"]["cwd"] == str(
+            workspace
+        )
+        outcome = adapter.prompt(
+            handle, AssembledInput(instructions=(), text="fixture", context=()), uuid4()
+        )
+        assert outcome.status is NativeOutcomeStatus.COMPLETED
+        assert outcome.observed_model is None
+        assert request.runtime.auth_state == "unconfirmed"
+    finally:
+        assert adapter.close(handle).status is NativeCloseState.CLOSED
 
-    assert error.value.code == "configuration_invalid"
-    assert request.projected_config["model_id"] == "fixture/provider-model"
-    assert not capture.exists()
+
+def test_two_profiles_deliver_independent_child_credentials_without_global_inheritance(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(opencode_config, "managed_opencode_config_sources", lambda: ())
+    adapter = OpenCodeHarness(
+        request_timeout_seconds=2,
+        stop_grace_seconds=0.2,
+        parent_environment={
+            "PATH": os.defpath,
+            "OPENCODE_API_KEY": "N09_FAKE_PARENT_PROVIDER_KEY",
+        },
+    )
+    delivered = []
+    spawn = ACPProcessTransport.spawn_argv
+
+    def capture_spawn(argv, *, cwd, environment):
+        delivered.append(environment["OPENCODE_API_KEY"])
+        return spawn(argv, cwd=cwd, environment=environment)
+
+    monkeypatch.setattr(ACPProcessTransport, "spawn_argv", capture_spawn)
+    handles = []
+    captures = []
+    roots = []
+    try:
+        for index in range(2):
+            capture = tmp_path / f"peer-{index}.jsonl"
+            captures.append(capture)
+            executable = _launcher(tmp_path, f"opencode-{index}", capture=capture)
+            workspace = tmp_path / f"workspace-{index}"
+            workspace.mkdir()
+            request = _request(
+                executable,
+                workspace,
+                environment={
+                    "OPENCODE_API_KEY": SecretStr(f"N09_FAKE_PROFILE_KEY_{index}")
+                },
+            )
+            request = request.model_copy(
+                update={
+                    "projected_config": {"model_id": "opencode-go/deepseek-v4.1-flash"}
+                }
+            )
+            handle = adapter.open(request)
+            handles.append(handle)
+            root = adapter._sessions[
+                handle.process_identity.owned_nonce
+            ].prepared.directory
+            roots.append(root)
+            environment = next(
+                row for row in _records(capture) if row["kind"] == "environment"
+            )
+            assert environment["provider_placeholders"] == {
+                "opencode-go": "{env:OPENCODE_API_KEY}"
+            }
+            assert environment["provider_credential_present"] is True
+            assert environment["home"] == str(root)
+            assert "N09_FAKE_" not in capture.read_text()
+        assert delivered == ["N09_FAKE_PROFILE_KEY_0", "N09_FAKE_PROFILE_KEY_1"]
+        assert roots[0] != roots[1]
+    finally:
+        for handle in handles:
+            assert adapter.close(handle).status is NativeCloseState.CLOSED
+    assert not adapter._sessions
+    assert all(not root.exists() for root in roots)
+
+
+def test_authorized_profile_credentials_reach_owned_peer_and_redacted_run_trace(
+    admission_lab, tmp_path, monkeypatch
+):
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.memory import MemoryAgentStore
+    from sidera_agents.ports import DenyContextSourceReader
+
+    monkeypatch.setattr(opencode_config, "managed_opencode_config_sources", lambda: ())
+    lab = admission_lab
+    capture = tmp_path / "projected-peer.jsonl"
+    executable = _launcher(
+        tmp_path, "opencode", capture=capture, mode="provider_update"
+    )
+    adapter = OpenCodeHarness(
+        request_timeout_seconds=2,
+        stop_grace_seconds=0.2,
+        parent_environment={
+            "PATH": os.defpath,
+            "OPENCODE_API_KEY": "N09_FAKE_GLOBAL_KEY",
+        },
+    )
+    values = {}
+    reads = []
+
+    class Secrets:
+        def read(self, grant_id, binding):
+            assert grant_id == lab.grant_id
+            reads.append(binding)
+            return SecretStr(values[binding.credential_ref.credential_id])
+
+    service = create_agent_service(
+        MemoryAgentStore(),
+        HarnessRegistry((adapter,)),
+        lab.authorizer,
+        DenyContextSourceReader(),
+        Secrets(),
+        lab.clock,
+    )
+    try:
+        runtime = service.runtimes.register(
+            lab.workspace_id,
+            "opencode",
+            str(executable),
+            max_active=2,
+            max_sessions=2,
+            grant_id=lab.grant_id,
+        )
+        service.poll_once()
+        starts = []
+        bindings = []
+        for index in range(2):
+            binding = SecretBinding(
+                credential_ref=CredentialRef(
+                    workspace_id=lab.workspace_id, credential_id=uuid4()
+                ),
+                destination="OPENCODE_API_KEY",
+            )
+            bindings.append(binding)
+            values[binding.credential_ref.credential_id] = (
+                f"N09_FAKE_AUTHORIZED_PROFILE_{index}"
+            )
+            profile = service.catalog.create_profile(
+                lab.workspace_id,
+                lab.profile.draft.model_copy(
+                    update={
+                        "name": f"explicit-native-profile-{index}",
+                        "runtime_ref": runtime.ref,
+                        "model_id": "opencode-go/deepseek-v4.1-flash",
+                        "secret_refs": (binding,),
+                        "native_settings": {"provider_env": "OPENCODE_API_KEY"},
+                    }
+                ),
+                grant_id=lab.grant_id,
+            )
+            start = service.execution.start(
+                lab.request(profile_ref=profile.ref, required_capabilities=("acp",))
+            )
+            starts.append(start)
+            service.poll_once()
+            snapshot = service.execution.get_run(
+                lab.workspace_id, start.run_id, grant_id=lab.grant_id
+            )
+            trace = service.observations.read_trace(
+                lab.workspace_id, start.run_id, 0, grant_id=lab.grant_id
+            )
+            assert snapshot.state.value == "completed"
+            assert (
+                snapshot.effective_config.selected_model
+                == "opencode-go/deepseek-v4.1-flash"
+            )
+            assert snapshot.effective_config.observed_model is None
+            assert [
+                event.data["text"] for event in trace.events if event.kind == "message"
+            ] == ["[REDACTED]"]
+            assert all(
+                value not in snapshot.model_dump_json() + trace.model_dump_json()
+                for value in values.values()
+            )
+        assert reads == bindings
+        assert starts[0].run_id != starts[1].run_id
+        environments = [
+            row
+            for row in _records(capture)
+            if row.get("kind") == "environment" and row.get("provider_placeholders")
+        ]
+        assert len(environments) == 2
+        assert all(row["provider_credential_present"] for row in environments)
+        assert environments[0]["home"] != environments[1]["home"]
+        assert all(not Path(row["home"]).exists() for row in environments)
+        assert "N09_FAKE_" not in capture.read_text()
+        assert not adapter._sessions
+        assert runtime.auth_state.value == "unconfirmed"
+    finally:
+        service.close()
 
 
 def test_probe_negotiates_protocol_capabilities_without_prompting(tmp_path):
@@ -1225,9 +1660,16 @@ def test_probe_negotiates_protocol_capabilities_without_prompting(tmp_path):
     assert probe.protocol_state is ProtocolState.READY
     assert probe.capabilities["mcp"].status is SupportStatus.SUPPORTED
     assert probe.capabilities["mcp_http"].status is SupportStatus.UNSUPPORTED
-    assert probe.capabilities["native_tools"].status is SupportStatus.UNSUPPORTED
+    assert probe.capabilities["native_login"].status is SupportStatus.UNSUPPORTED
     assert (
-        probe.capabilities["native_tools"].reason_code == "native_tools_not_projected"
+        probe.capabilities["native_login"].reason_code
+        == "global_auth_inheritance_not_supported"
+    )
+    assert probe.capabilities["model"].status is SupportStatus.UNCONFIRMED
+    assert probe.capabilities["native_tools"].status is SupportStatus.UNCONFIRMED
+    assert (
+        probe.capabilities["native_tools"].reason_code
+        == "native_tool_execution_unconfirmed"
     )
     assert not any(
         row.get("method") in {"session/new", "session/prompt"}

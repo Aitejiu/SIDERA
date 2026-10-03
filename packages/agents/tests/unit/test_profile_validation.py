@@ -82,16 +82,20 @@ def test_model_evidence_is_empty_and_selected_model_never_becomes_observed(
         profile.ref, grant_id=runtime_lab.grant_id
     )
 
-    model_issue = next(
-        issue for issue in validation.issues if issue.field == "model_id"
-    )
     assert descriptor.model_options == ()
     assert descriptor.thinking_options == ()
-    assert validation.valid is False
-    assert model_issue.code == "model_evidence_unavailable"
-    assert model_issue.support.status == "unconfirmed"
+    assert validation.valid is True
+    assert not any(issue.field == "model_id" for issue in validation.issues)
+    assert (
+        next(
+            field for field in descriptor.fields if field.key == "model_id"
+        ).support.status
+        is SupportStatus.SUPPORTED
+    )
     assert validation.effective_preview.selected_model == "unverified/provider-model"
     assert validation.effective_preview.observed_model is None
+    assert validation.effective_preview.applied_fields == ()
+    assert runtime.auth_state is AuthenticationState.UNCONFIRMED
     assert calls == []
 
 
@@ -143,6 +147,44 @@ def test_unsupported_native_options_remain_saveable_but_not_executable(
     }
 
 
+@pytest.mark.parametrize("mode", ["none", "read", "write"])
+def test_descriptor_accepts_declared_native_tool_mode(runtime_lab, monkeypatch, mode):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    profile = _create_profile(
+        runtime_lab, runtime.ref, native_settings={"native_tools": mode}
+    )
+    descriptor = runtime_lab.runtimes.describe(
+        "opencode", grant_id=runtime_lab.grant_id
+    )
+    field = next(
+        field
+        for field in descriptor.fields
+        if field.key == "native_settings.native_tools"
+    )
+    assert field.kind.value == "select"
+    assert field.options == ("none", "read", "write")
+    assert field.support.status is SupportStatus.SUPPORTED
+    assert runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    ).valid
+
+
+def test_descriptor_rejects_unknown_native_tool_mode(runtime_lab, monkeypatch):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    profile = _create_profile(
+        runtime_lab, runtime.ref, native_settings={"native_tools": "all"}
+    )
+    validation = runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    )
+    assert not validation.valid
+    assert any(
+        issue.field == "native_settings.native_tools"
+        and issue.code == "configuration_invalid"
+        for issue in validation.issues
+    )
+
+
 def test_harness_validation_returns_config_validation_contract(
     runtime_lab, monkeypatch
 ):
@@ -167,12 +209,118 @@ def test_harness_validation_returns_config_validation_contract(
     assert descriptor_validation.effective_preview is None
     assert isinstance(local, ConfigValidation)
     assert local.effective_preview is None
-    assert any(issue.field == "model_id" for issue in local.issues)
+    assert local.valid
+    assert not any(issue.field == "model_id" for issue in local.issues)
     assert {issue.field for issue in aggregate.issues} >= {
         issue.field for issue in local.issues
     }
     assert aggregate.effective_preview is not None
     assert aggregate.effective_preview.selected_model == "unverified/provider-model"
+
+
+@pytest.mark.parametrize("destination", ["OPENCODE_API_KEY", "CUSTOM_PROVIDER_API_KEY"])
+def test_provider_env_accepts_only_declared_profile_secret_binding(
+    runtime_lab, monkeypatch, destination
+):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    binding = SecretBinding(
+        credential_ref=CredentialRef(
+            workspace_id=runtime_lab.workspace_id, credential_id=uuid4()
+        ),
+        destination=destination,
+    )
+    profile = _create_profile(
+        runtime_lab,
+        runtime.ref,
+        model_id="opencode-go/deepseek-v4.1-flash",
+        secret_refs=(binding,),
+        native_settings={"provider_env": destination},
+    )
+    validation = runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    )
+    assert validation.valid
+    assert validation.effective_preview.observed_model is None
+    assert runtime.auth_state is AuthenticationState.UNCONFIRMED
+    assert any(
+        issue.code == "authentication_unconfirmed" for issue in validation.issues
+    )
+
+
+@pytest.mark.parametrize(
+    "model,destination,selected",
+    [
+        (None, "OPENCODE_API_KEY", "OPENCODE_API_KEY"),
+        ("opencode-go/model", "BOUND_API_KEY", "OTHER_API_KEY"),
+        (
+            "opencode-go/model",
+            "OPENCODE_EXPERIMENTAL_API_KEY",
+            "OPENCODE_EXPERIMENTAL_API_KEY",
+        ),
+    ],
+)
+def test_provider_env_binding_mismatch_is_safe_and_blocks_execution(
+    runtime_lab, monkeypatch, model, destination, selected
+):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    binding = SecretBinding(
+        credential_ref=CredentialRef(
+            workspace_id=runtime_lab.workspace_id, credential_id=uuid4()
+        ),
+        destination=destination,
+    )
+    profile = _create_profile(
+        runtime_lab,
+        runtime.ref,
+        model_id=model,
+        secret_refs=(binding,),
+        native_settings={"provider_env": selected},
+    )
+    validation = runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    )
+    assert not validation.valid
+    assert any(
+        issue.field == "native_settings.provider_env"
+        and issue.code == "configuration_invalid"
+        for issue in validation.issues
+    )
+
+
+@pytest.mark.parametrize("failure", ["revoked", "failed", "plain"])
+def test_secret_reader_failure_prevents_native_open(admission_lab, failure):
+    lab = admission_lab
+    binding = SecretBinding(
+        credential_ref=CredentialRef(
+            workspace_id=lab.workspace_id, credential_id=uuid4()
+        ),
+        destination="OPENCODE_API_KEY",
+    )
+    profile = _create_profile(
+        lab, lab.runtime.ref, model_id="opencode-go/model", secret_refs=(binding,)
+    )
+
+    class Secrets:
+        def read(self, grant_id, selected):
+            assert grant_id == lab.grant_id and selected == binding
+            if failure == "revoked":
+                raise AgentError("permission_denied", "N09_FAKE_PRIVATE_READER_REASON")
+            if failure == "failed":
+                raise RuntimeError("N09_FAKE_PRIVATE_READER_REASON")
+            return "N09_FAKE_PRIVATE_READER_REASON"
+
+    lab.execution._secrets = Secrets()
+    start = lab.execution.start(lab.request(profile_ref=profile.ref))
+    lab.pump()
+    assert lab.native.open_calls == []
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    assert snapshot.state.value == "failed"
+    assert snapshot.reason_code == (
+        "permission_denied" if failure == "revoked" else "secret_unavailable"
+    )
+    assert "N09_FAKE_PRIVATE_READER_REASON" not in snapshot.model_dump_json()
 
 
 def test_reserved_environment_fields_are_reported_for_saved_legacy_profile(

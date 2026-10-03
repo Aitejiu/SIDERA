@@ -8,9 +8,11 @@ from sidera_agents.catalog import ProfileCatalog
 from sidera_agents.contracts import (
     AuthenticationState,
     ProfileDraft,
+    ProtocolState,
 )
 from sidera_agents.errors import AgentError
 from sidera_agents.harnesses import opencode_descriptor
+from sidera_agents.harnesses.registry import HarnessRegistry
 from sidera_agents.postgres.models import RuntimeInstallationRow
 from sidera_agents.postgres.store import PostgresAgentStore
 from sidera_agents.runtimes import RuntimeCatalog
@@ -42,8 +44,9 @@ def test_runtime_references_and_shared_installation_persist(
     grant_a, grant_b = uuid4(), uuid4()
     authorizer = _WorkspaceAuthorizer({grant_a: workspace_a, grant_b: workspace_b})
     clock = lambda: datetime(2026, 10, 1, tzinfo=UTC)
+    registry = HarnessRegistry((opencode_descriptor.OpenCodeDescriptor(),))
     store_a = PostgresAgentStore(engine)
-    runtimes_a = RuntimeCatalog(store_a, authorizer, clock=clock)
+    runtimes_a = RuntimeCatalog(store_a, authorizer, registry=registry, clock=clock)
     runtime_a = runtimes_a.register(
         workspace_a,
         "opencode",
@@ -52,6 +55,8 @@ def test_runtime_references_and_shared_installation_persist(
         max_sessions=4,
         grant_id=grant_a,
     )
+    assert runtime_a.protocol_state is ProtocolState.UNCONFIRMED
+    assert runtime_a.auth_state is AuthenticationState.UNCONFIRMED
     profile_catalog = ProfileCatalog(store_a, authorizer, clock)
     profile = profile_catalog.create_profile(
         workspace_a,
@@ -72,7 +77,9 @@ def test_runtime_references_and_shared_installation_persist(
     )
 
     reopened_store = PostgresAgentStore(engine)
-    reopened_runtimes = RuntimeCatalog(reopened_store, authorizer, clock=clock)
+    reopened_runtimes = RuntimeCatalog(
+        reopened_store, authorizer, registry=registry, clock=clock
+    )
     first_validation = reopened_runtimes.validate_profile(profile.ref, grant_id=grant_a)
     assert first_validation.valid is True
     assert {issue.code for issue in first_validation.issues} == {
@@ -87,7 +94,7 @@ def test_runtime_references_and_shared_installation_persist(
     )
     reopened_store.update_runtime_observation(runtime_a.ref, failed_observation)
     validation_after_restart = RuntimeCatalog(
-        PostgresAgentStore(engine), authorizer, clock=clock
+        PostgresAgentStore(engine), authorizer, registry=registry, clock=clock
     ).validate_profile(profile.ref, grant_id=grant_a)
     assert validation_after_restart.valid is False
     assert any(
@@ -96,7 +103,7 @@ def test_runtime_references_and_shared_installation_persist(
     )
 
     runtime_b = RuntimeCatalog(
-        PostgresAgentStore(engine), authorizer, clock=clock
+        PostgresAgentStore(engine), authorizer, registry=registry, clock=clock
     ).register(
         workspace_b,
         "opencode",
@@ -121,7 +128,9 @@ def test_runtime_references_and_shared_installation_persist(
     assert installation_count == 1
 
     def reopened_runtimes():
-        return RuntimeCatalog(PostgresAgentStore(engine), authorizer, clock=clock)
+        return RuntimeCatalog(
+            PostgresAgentStore(engine), authorizer, registry=registry, clock=clock
+        )
 
     changed_limits = reopened_runtimes().set_runtime_limits(
         runtime_a.ref,

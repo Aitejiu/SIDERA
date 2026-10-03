@@ -1,6 +1,8 @@
 import traceback
 from hashlib import sha256
 from threading import Event, Thread
+from time import monotonic
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -20,6 +22,7 @@ from sidera_agents.contracts import (
     NativeResponseState,
     ProfileRef,
     ResourceKind,
+    RunInput,
     RunPolicy,
     RunStart,
     SecretBinding,
@@ -1190,6 +1193,276 @@ def test_fresh_owner_reconciles_running_handle_without_replay(
 
     assert not old_poll.is_alive()
     assert poll_errors and poll_errors[0].code == "execution_owner_unavailable"
+
+
+def test_stale_close_preserves_pending_outcome_and_current_owner_while_joining_native_work(
+    admission_lab, monkeypatch
+):
+    import threading
+
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+
+    lab = admission_lab
+    entered = Event()
+    resume = Event()
+    worker_errors = []
+    native_close = Mock(wraps=lab.native.close)
+    monkeypatch.setattr(lab.native, "close", native_close)
+
+    def blocked_prompt(handle, assembled, response_id):
+        lab.native.begin_prompt(handle, assembled, response_id)
+        entered.set()
+        assert resume.wait(timeout=4)
+        return lab.native.finish_prompt(
+            handle, response_id, NativeOutcomeStatus.COMPLETED
+        )
+
+    monkeypatch.setattr(lab.native, "prompt", blocked_prompt)
+    monkeypatch.setattr(
+        threading, "excepthook", lambda args: worker_errors.append(str(args.exc_value))
+    )
+    started = lab.execution.start(lab.request())
+    replacement = create_agent_service(
+        lab.store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        lab.service.start_background(interval_seconds=0.001)
+        assert entered.wait(timeout=1)
+        lab.store.release_execution_owner(lab.service._owner_id)
+        monkeypatch.setattr(
+            lab.native,
+            "inspect",
+            lambda handle: NativeInspection(
+                process_state=NativeProcessState.UNKNOWN,
+                response_state=NativeResponseState.UNKNOWN,
+                reason_code=None,
+            ),
+        )
+        replacement.poll_once()
+        assert lab.store.execution_owner_is_held(replacement._owner_id)
+        original_query = lab.store.execution_owner_is_held
+        original_release = lab.store.release_execution_owner
+        queried = []
+        released = []
+
+        def query(owner_id):
+            queried.append(owner_id)
+            return original_query(owner_id)
+
+        def release(owner_id):
+            released.append(owner_id)
+            return original_release(owner_id)
+
+        with monkeypatch.context() as blocked_shutdown:
+            blocked_shutdown.setattr(lab.store, "execution_owner_is_held", query)
+            blocked_shutdown.setattr(lab.store, "release_execution_owner", release)
+            with pytest.raises(AgentError) as blocked:
+                lab.service.close(timeout=0.01)
+            assert blocked.value.code == "shutdown_pending"
+            assert queried == [] and released == []
+            assert lab.service._owner_claimed
+
+        resume.set()
+        assert lab.execution._native_workers.wait_until(monotonic() + 1)
+        assert worker_errors == ["native_worker_failed"]
+        ingestor = lab.execution._observations[started.run_id]
+        pending = ingestor._outcome
+        assert pending is not None and ingestor.pending
+        snapshot = lab.store.get_run_snapshot(lab.workspace_id, started.run_id)
+        handle = lab.store.get_native_handle(lab.workspace_id, started.run_id)
+        events = lab.store.get_lifecycle_events(lab.workspace_id, started.run_id)
+        installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+        assert snapshot.state.value == "unknown"
+        assert (installation.active_count, installation.session_count) == (1, 1)
+        assert handle is not None
+        original_append = lab.store.append_observation
+        append_attempts = []
+
+        def append(*args, **kwargs):
+            append_attempts.append(kwargs["owner_id"])
+            return original_append(*args, **kwargs)
+
+        with monkeypatch.context() as stale_shutdown:
+            stale_shutdown.setattr(lab.store, "append_observation", append)
+            stale_shutdown.setattr(lab.store, "release_execution_owner", release)
+            lab.service.close(timeout=1)
+        assert append_attempts == []
+        assert released == [lab.service._owner_id]
+        assert not lab.service._owner_claimed
+        assert lab.store.execution_owner_is_held(replacement._owner_id)
+        assert ingestor._outcome is pending and ingestor.pending
+        assert lab.store.get_run_snapshot(lab.workspace_id, started.run_id) == snapshot
+        assert lab.store.get_native_handle(lab.workspace_id, started.run_id) == handle
+        assert (
+            lab.store.get_lifecycle_events(lab.workspace_id, started.run_id) == events
+        )
+        assert lab.store.get_runtime_entry(lab.runtime.ref).installation == installation
+        assert len(lab.native.open_calls) == len(lab.native.prompt_calls) == 1
+        native_close.assert_not_called()
+        with pytest.raises(AgentError) as start:
+            lab.execution.start(lab.request())
+        assert start.value.code == "shutdown_pending"
+        with pytest.raises(AgentError) as send:
+            lab.execution.send_input(
+                RunInput(
+                    workspace_id=lab.workspace_id,
+                    run_id=started.run_id,
+                    operation_id=uuid4(),
+                    grant_id=lab.grant_id,
+                    text="must not reacquire while closing",
+                    context=(),
+                )
+            )
+        assert send.value.code == "shutdown_pending"
+        with pytest.raises(AgentError) as poll:
+            lab.service.poll_once()
+        assert poll.value.code == "shutdown_pending"
+        assert lab.store.execution_owner_is_held(replacement._owner_id)
+    finally:
+        resume.set()
+        assert lab.execution._native_workers.wait_until(monotonic() + 1)
+        replacement.close(timeout=1)
+
+
+@pytest.mark.parametrize("query_result", ("error", "unknown"))
+@pytest.mark.parametrize("release_fails", (False, True))
+def test_close_with_unverified_owner_still_requires_confirmed_owned_release(
+    admission_lab, monkeypatch, query_result, release_fails
+):
+    lab = admission_lab
+    native_close = Mock(wraps=lab.native.close)
+    monkeypatch.setattr(lab.native, "close", native_close)
+    started = lab.execution.start(lab.request(policy="conversation"))
+    original_append = lab.store.append_observation
+
+    def fail_write(*args, **kwargs):
+        raise RuntimeError("synthetic observation write failure")
+
+    with monkeypatch.context() as pending_write:
+        pending_write.setattr(lab.store, "append_observation", fail_write)
+        lab.pump()
+    ingestor = lab.execution._observations[started.run_id]
+    pending = ingestor._outcome
+    assert pending is not None and ingestor.pending
+    snapshot = lab.store.get_run_snapshot(lab.workspace_id, started.run_id)
+    handle = lab.store.get_native_handle(lab.workspace_id, started.run_id)
+    events = lab.store.get_lifecycle_events(lab.workspace_id, started.run_id)
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    original_query = lab.store.execution_owner_is_held
+    original_release = lab.store.release_execution_owner
+    append_attempts = []
+    release_attempts = []
+
+    def unverified_owner(owner_id):
+        assert owner_id == lab.service._owner_id
+        if query_result == "error":
+            raise RuntimeError("synthetic ownership query failure")
+
+    def append(*args, **kwargs):
+        append_attempts.append(kwargs["owner_id"])
+        return original_append(*args, **kwargs)
+
+    def release(owner_id):
+        release_attempts.append(owner_id)
+        if release_fails and len(release_attempts) == 1:
+            raise RuntimeError("synthetic owned release failure")
+        return original_release(owner_id)
+
+    with monkeypatch.context() as shutdown:
+        shutdown.setattr(lab.store, "execution_owner_is_held", unverified_owner)
+        shutdown.setattr(lab.store, "append_observation", append)
+        shutdown.setattr(lab.store, "release_execution_owner", release)
+        if release_fails:
+            with pytest.raises(AgentError) as caught:
+                lab.service.close(timeout=1)
+            assert caught.value.code == "shutdown_pending"
+            assert lab.service._owner_claimed
+            assert original_query(lab.service._owner_id)
+            assert release_attempts == [lab.service._owner_id]
+            assert append_attempts == []
+            assert ingestor._outcome is pending and ingestor.pending
+        lab.service.close(timeout=1)
+
+    assert release_attempts == [lab.service._owner_id] * (2 if release_fails else 1)
+    assert append_attempts == []
+    assert not lab.service._owner_claimed
+    assert not original_query(lab.service._owner_id)
+    assert ingestor._outcome is pending and ingestor.pending
+    assert lab.store.get_run_snapshot(lab.workspace_id, started.run_id) == snapshot
+    assert lab.store.get_native_handle(lab.workspace_id, started.run_id) == handle
+    assert lab.store.get_lifecycle_events(lab.workspace_id, started.run_id) == events
+    assert lab.store.get_runtime_entry(lab.runtime.ref).installation == installation
+    assert len(lab.native.open_calls) == len(lab.native.prompt_calls) == 1
+    native_close.assert_not_called()
+
+
+def test_close_retains_verified_owner_until_pending_safe_outcome_is_persisted(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    native_close = Mock(wraps=lab.native.close)
+    monkeypatch.setattr(lab.native, "close", native_close)
+    started = lab.execution.start(lab.request(policy="conversation"))
+    original_append = lab.store.append_observation
+    allow_write = False
+    attempts = []
+
+    def append(*args, **kwargs):
+        attempts.append(kwargs["owner_id"])
+        if not allow_write:
+            raise RuntimeError("synthetic observation write failure")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(lab.store, "append_observation", append)
+    try:
+        lab.pump()
+        ingestor = lab.execution._observations[started.run_id]
+        pending = ingestor._outcome
+        assert pending is not None and ingestor.pending
+        snapshot = lab.store.get_run_snapshot(lab.workspace_id, started.run_id)
+        handle = lab.store.get_native_handle(lab.workspace_id, started.run_id)
+        events = lab.store.get_lifecycle_events(lab.workspace_id, started.run_id)
+        installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+        attempts.clear()
+        with pytest.raises(AgentError) as caught:
+            lab.service.close(timeout=0.01)
+        assert caught.value.code == "shutdown_pending"
+        assert attempts == [lab.service._owner_id]
+        assert lab.service._owner_claimed
+        assert lab.store.execution_owner_is_held(lab.service._owner_id)
+        assert ingestor._outcome is pending and ingestor.pending
+        assert lab.store.get_run_snapshot(lab.workspace_id, started.run_id) == snapshot
+        assert (
+            lab.store.get_lifecycle_events(lab.workspace_id, started.run_id) == events
+        )
+        assert lab.store.get_runtime_entry(lab.runtime.ref).installation == installation
+        allow_write = True
+        lab.service.close(timeout=1)
+        lab.service.close(timeout=1)
+        assert not ingestor.pending and ingestor._outcome is None
+        assert not lab.service._owner_claimed
+        assert not lab.store.execution_owner_is_held(lab.service._owner_id)
+        committed = lab.store.get_lifecycle_events(lab.workspace_id, started.run_id)
+        usage = [event for event in committed if event.kind == "usage"]
+        assert len(usage) == 1 and usage[0].response_id == pending.response_id
+        assert not any(event.kind == "run.closed" for event in committed)
+        assert (
+            lab.store.get_run_snapshot(lab.workspace_id, started.run_id).state
+            is snapshot.state
+        )
+        assert lab.store.get_native_handle(lab.workspace_id, started.run_id) == handle
+        assert lab.store.get_runtime_entry(lab.runtime.ref).installation == installation
+        assert len(lab.native.open_calls) == len(lab.native.prompt_calls) == 1
+        native_close.assert_not_called()
+    finally:
+        allow_write = True
+        lab.service.close(timeout=1)
 
 
 def test_service_factory_is_thread_free_until_background_start(admission_lab):

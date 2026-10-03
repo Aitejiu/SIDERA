@@ -1,19 +1,32 @@
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import datetime
+from typing import NoReturn, Protocol
 from uuid import UUID
 
 from pydantic import SecretStr
 
 from .contracts import (
+    AssembledInput,
     AuthenticationState,
+    ConfigValidation,
+    NativeCancelOutcome,
+    NativeCloseOutcome,
+    NativeEvent,
+    NativeHandle,
+    NativeInspection,
+    NativeOpenRequest,
+    NativeOutcome,
     ProfileRef,
     ProfileRevision,
     ProfileStatus,
     ResourceRef,
     ResourceRevision,
     ResourceStatus,
+    RuntimeCandidate,
+    RuntimeDescriptor,
     RuntimeProbe,
     RuntimeRef,
+    RuntimeSnapshot,
     SecretBinding,
     SourceContent,
     SourceRef,
@@ -36,6 +49,41 @@ class SecretReader(Protocol):
 
 class ToolConnectionReader(Protocol):
     def resolve(self, grant_id: UUID, connection_id: UUID) -> ToolConnection: ...
+
+
+class HarnessAdapter(Protocol):
+    """Native boundary for explicitly trusted, statically composed adapters."""
+
+    harness_id: str
+    executable_name: str
+
+    def describe(self) -> RuntimeDescriptor: ...
+
+    def probe(
+        self, candidate: RuntimeCandidate, checked_at: datetime
+    ) -> RuntimeProbe: ...
+
+    def validate(
+        self, profile: ProfileRevision, runtime: RuntimeSnapshot
+    ) -> ConfigValidation: ...
+
+    def open(self, request: NativeOpenRequest) -> NativeHandle: ...
+
+    def prompt(
+        self, handle: NativeHandle, input: AssembledInput, response_id: UUID
+    ) -> NativeOutcome: ...
+
+    def read_events(
+        self, handle: NativeHandle, after_cursor: int, limit: int = 100
+    ) -> tuple[NativeEvent, ...]: ...
+
+    def cancel(
+        self, handle: NativeHandle, response_id: UUID
+    ) -> NativeCancelOutcome: ...
+
+    def inspect(self, handle: NativeHandle) -> NativeInspection: ...
+
+    def close(self, handle: NativeHandle) -> NativeCloseOutcome: ...
 
 
 @dataclass(frozen=True)
@@ -122,7 +170,7 @@ class RuntimeStore(Protocol):
     ) -> ResourceStatus: ...
 
 
-def _deny() -> None:
+def _deny() -> NoReturn:
     raise AgentError("permission_denied", "Access denied.")
 
 

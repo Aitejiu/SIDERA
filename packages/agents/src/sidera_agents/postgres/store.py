@@ -5,12 +5,12 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import Table, func, inspect, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError
 
 from ..admission import OperationRecord
@@ -21,6 +21,7 @@ from ..contracts import (
     EventPage,
     InputReceipt,
     InputStatus,
+    JsonValue,
     NativeHandle,
     OutputRef,
     ProfileDraft,
@@ -56,6 +57,7 @@ from ..ports import (
 )
 from .models import (
     AgentRunRow,
+    Base,
     ProfileHead,
     ProfileRevisionRow,
     ResourceHead,
@@ -93,7 +95,7 @@ def _utc_timestamp(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _profile_from_row(row: Mapping[str, Any]) -> ProfileRevision:
+def _profile_from_row(row: RowMapping | Mapping[str, Any]) -> ProfileRevision:
     return ProfileRevision(
         ref=ProfileRef(
             workspace_id=row["workspace_id"],
@@ -106,7 +108,7 @@ def _profile_from_row(row: Mapping[str, Any]) -> ProfileRevision:
     )
 
 
-def _resource_from_row(row: Mapping[str, Any]) -> ResourceRevision:
+def _resource_from_row(row: RowMapping | Mapping[str, Any]) -> ResourceRevision:
     return ResourceRevision(
         ref=ResourceRef(
             workspace_id=row["workspace_id"],
@@ -120,7 +122,8 @@ def _resource_from_row(row: Mapping[str, Any]) -> ResourceRevision:
 
 
 def _runtime_entry_from_rows(
-    runtime_row: Mapping[str, Any], installation_row: Mapping[str, Any]
+    runtime_row: RowMapping | Mapping[str, Any],
+    installation_row: RowMapping | Mapping[str, Any],
 ) -> RuntimeEntry:
     probe = RuntimeProbe(
         actual_version=runtime_row["actual_version"],
@@ -157,7 +160,7 @@ def _runtime_entry_from_rows(
     return RuntimeEntry(record=record, installation=installation)
 
 
-def _start_receipt_from_row(row: Mapping[str, Any]) -> StartReceipt:
+def _start_receipt_from_row(row: RowMapping | Mapping[str, Any]) -> StartReceipt:
     return StartReceipt(
         operation_id=row["operation_id"],
         status=StartStatus(row["status"]),
@@ -166,7 +169,9 @@ def _start_receipt_from_row(row: Mapping[str, Any]) -> StartReceipt:
     )
 
 
-def _input_from_row(row: Mapping[str, Any], grant_id: UUID) -> InputOperation:
+def _input_from_row(
+    row: RowMapping | Mapping[str, Any], grant_id: UUID
+) -> InputOperation:
     payload = None
     if row["text"] is not None:
         payload = RunInput(
@@ -193,7 +198,7 @@ def _input_from_row(row: Mapping[str, Any], grant_id: UUID) -> InputOperation:
     )
 
 
-def _event_from_row(row: Mapping[str, Any]) -> RunEvent:
+def _event_from_row(row: RowMapping | Mapping[str, Any]) -> RunEvent:
     return RunEvent(
         run_id=row["run_id"],
         sequence=row["sequence"],
@@ -228,8 +233,31 @@ class PostgresAgentStore:
             command.upgrade(config, "head")
 
     def readiness(self) -> bool:
-        with self._engine.connect() as connection:
-            return connection.execute(text("SELECT 1")).scalar_one() == 1
+        from alembic.config import Config
+        from alembic.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+
+        try:
+            package_root = Path(str(files("sidera_agents")))
+            source_root = Path(__file__).resolve().parents[3]
+            config_path = _resolve_alembic_config_path(package_root, source_root)
+            expected = set(
+                ScriptDirectory.from_config(Config(str(config_path))).get_heads()
+            )
+            if not expected:
+                return False
+            with self._engine.connect() as connection:
+                context = MigrationContext.configure(
+                    connection, opts={"version_table_schema": "agents"}
+                )
+                if set(context.get_current_heads()) != expected:
+                    return False
+                required = {table.name for table in Base.metadata.tables.values()}
+                return required <= set(
+                    inspect(connection).get_table_names(schema="agents")
+                )
+        except Exception:  # noqa: BLE001 - readiness fails closed without driver details
+            return False
 
     def close(self) -> None:
         with self._owner_state_lock:
@@ -361,7 +389,7 @@ class PostgresAgentStore:
         *,
         operation_id: UUID | None = None,
         response_id: UUID | None = None,
-        data: dict[str, object] | None = None,
+        data: dict[str, JsonValue] | None = None,
         observation: SafeObservation | None = None,
         source: str | None = None,
     ) -> tuple[RunEvent, dict[str, object]]:
@@ -401,7 +429,9 @@ class PostgresAgentStore:
             datetime.now(UTC) if observation is None else observation.occurred_at
         )
         connection.execute(
-            RunEventRow.__table__.insert().values(
+            cast(Table, RunEventRow.__table__)
+            .insert()
+            .values(
                 run_id=snapshot.run_id,
                 sequence=sequence,
                 occurred_at=occurred_at,
@@ -434,7 +464,7 @@ class PostgresAgentStore:
     def find_runtime(
         self, workspace_id: UUID, harness_id: str, executable: str
     ) -> RuntimeEntry | None:
-        references = RuntimeReferenceRow.__table__
+        references = cast(Table, RuntimeReferenceRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -462,8 +492,8 @@ class PostgresAgentStore:
         max_active: int,
         max_sessions: int,
     ) -> RuntimeEntry:
-        installations = RuntimeInstallationRow.__table__
-        references = RuntimeReferenceRow.__table__
+        installations = cast(Table, RuntimeInstallationRow.__table__)
+        references = cast(Table, RuntimeReferenceRow.__table__)
         probe = observation.probe
         with self._engine.begin() as connection:
             connection.execute(
@@ -538,7 +568,7 @@ class PostgresAgentStore:
             return _runtime_entry_from_rows(runtime_row, installation)
 
     def get_runtime_entry(self, ref: RuntimeRef) -> RuntimeEntry:
-        references = RuntimeReferenceRow.__table__
+        references = cast(Table, RuntimeReferenceRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -555,7 +585,7 @@ class PostgresAgentStore:
             return self._runtime_entry_for_row(connection, row)
 
     def list_runtime_entries(self, workspace_id: UUID) -> tuple[RuntimeEntry, ...]:
-        references = RuntimeReferenceRow.__table__
+        references = cast(Table, RuntimeReferenceRow.__table__)
         with self._engine.connect() as connection:
             rows = tuple(
                 connection.execute(
@@ -569,7 +599,7 @@ class PostgresAgentStore:
     def update_runtime_observation(
         self, ref: RuntimeRef, observation: RuntimeObservation
     ) -> RuntimeEntry:
-        table = RuntimeReferenceRow.__table__
+        table = cast(Table, RuntimeReferenceRow.__table__)
         probe = observation.probe
         with self._engine.begin() as connection:
             result = connection.execute(
@@ -611,8 +641,8 @@ class PostgresAgentStore:
         max_sessions: int | None = None,
         enabled: bool | None = None,
     ) -> RuntimeEntry:
-        references = RuntimeReferenceRow.__table__
-        installations = RuntimeInstallationRow.__table__
+        references = cast(Table, RuntimeReferenceRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
         with self._engine.begin() as connection:
             runtime_row = (
                 connection.execute(
@@ -668,7 +698,7 @@ class PostgresAgentStore:
             return self._runtime_entry_for_row(connection, row)
 
     def get_profile_status(self, workspace_id: UUID, profile_id: UUID) -> ProfileStatus:
-        table = ProfileHead.__table__
+        table = cast(Table, ProfileHead.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -690,7 +720,7 @@ class PostgresAgentStore:
 
     @staticmethod
     def _runtime_entry_for_row(connection: Connection, runtime_row) -> RuntimeEntry:
-        installations = RuntimeInstallationRow.__table__
+        installations = cast(Table, RuntimeInstallationRow.__table__)
         installation_row = (
             connection.execute(
                 select(installations).where(
@@ -712,8 +742,8 @@ class PostgresAgentStore:
         config_hash: str,
         created_at: datetime,
     ) -> ProfileRevision:
-        heads = ProfileHead.__table__
-        revisions = ProfileRevisionRow.__table__
+        heads = cast(Table, ProfileHead.__table__)
+        revisions = cast(Table, ProfileRevisionRow.__table__)
         ref = ProfileRef(workspace_id=workspace_id, profile_id=profile_id, revision=1)
         revision = ProfileRevision(
             ref=ref, draft=draft, config_hash=config_hash, created_at=created_at
@@ -747,7 +777,7 @@ class PostgresAgentStore:
         return ProfileRevision.model_validate(revision.model_dump(mode="python"))
 
     def get_profile(self, ref: ProfileRef) -> ProfileRevision:
-        table = ProfileRevisionRow.__table__
+        table = cast(Table, ProfileRevisionRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -765,7 +795,7 @@ class PostgresAgentStore:
         return _profile_from_row(row)
 
     def get_profile_head(self, workspace_id: UUID, profile_id: UUID) -> ProfileRevision:
-        heads = ProfileHead.__table__
+        heads = cast(Table, ProfileHead.__table__)
         with self._engine.connect() as connection:
             head = (
                 connection.execute(
@@ -789,7 +819,7 @@ class PostgresAgentStore:
         return _profile_from_row(row)
 
     def list_profiles(self, workspace_id: UUID) -> tuple[ProfileRevision, ...]:
-        heads = ProfileHead.__table__
+        heads = cast(Table, ProfileHead.__table__)
         with self._engine.connect() as connection:
             head_rows = tuple(
                 connection.execute(
@@ -821,8 +851,8 @@ class PostgresAgentStore:
         config_hash: str,
         created_at: datetime,
     ) -> ProfileRevision:
-        heads = ProfileHead.__table__
-        revisions = ProfileRevisionRow.__table__
+        heads = cast(Table, ProfileHead.__table__)
+        revisions = cast(Table, ProfileRevisionRow.__table__)
         next_revision = expected_ref.revision + 1
         ref = ProfileRef(
             workspace_id=expected_ref.workspace_id,
@@ -868,7 +898,7 @@ class PostgresAgentStore:
     def set_profile_enabled(
         self, workspace_id: UUID, profile_id: UUID, enabled: bool, expected_version: int
     ) -> ProfileStatus:
-        table = ProfileHead.__table__
+        table = cast(Table, ProfileHead.__table__)
         with self._engine.begin() as connection:
             result = connection.execute(
                 update(table)
@@ -895,8 +925,8 @@ class PostgresAgentStore:
         content_hash: str,
         created_at: datetime,
     ) -> ResourceRevision:
-        heads = ResourceHead.__table__
-        revisions = ResourceRevisionRow.__table__
+        heads = cast(Table, ResourceHead.__table__)
+        revisions = cast(Table, ResourceRevisionRow.__table__)
         ref = ResourceRef(
             workspace_id=workspace_id, resource_id=resource_id, revision=1
         )
@@ -929,7 +959,7 @@ class PostgresAgentStore:
         return ResourceRevision.model_validate(revision.model_dump(mode="python"))
 
     def get_resource(self, ref: ResourceRef) -> ResourceRevision:
-        table = ResourceRevisionRow.__table__
+        table = cast(Table, ResourceRevisionRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -949,7 +979,7 @@ class PostgresAgentStore:
     def get_resource_head(
         self, workspace_id: UUID, resource_id: UUID
     ) -> ResourceRevision:
-        heads = ResourceHead.__table__
+        heads = cast(Table, ResourceHead.__table__)
         with self._engine.connect() as connection:
             head = (
                 connection.execute(
@@ -973,7 +1003,7 @@ class PostgresAgentStore:
         return _resource_from_row(row)
 
     def list_resources(self, workspace_id: UUID) -> tuple[ResourceRevision, ...]:
-        heads = ResourceHead.__table__
+        heads = cast(Table, ResourceHead.__table__)
         with self._engine.connect() as connection:
             head_rows = tuple(
                 connection.execute(
@@ -1005,8 +1035,8 @@ class PostgresAgentStore:
         content_hash: str,
         created_at: datetime,
     ) -> ResourceRevision:
-        heads = ResourceHead.__table__
-        revisions = ResourceRevisionRow.__table__
+        heads = cast(Table, ResourceHead.__table__)
+        revisions = cast(Table, ResourceRevisionRow.__table__)
         next_revision = expected_ref.revision + 1
         ref = ResourceRef(
             workspace_id=expected_ref.workspace_id,
@@ -1049,7 +1079,7 @@ class PostgresAgentStore:
     def get_resource_status(
         self, workspace_id: UUID, resource_id: UUID
     ) -> ResourceStatus:
-        table = ResourceHead.__table__
+        table = cast(Table, ResourceHead.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -1076,7 +1106,7 @@ class PostgresAgentStore:
         enabled: bool,
         expected_version: int,
     ) -> ResourceStatus:
-        table = ResourceHead.__table__
+        table = cast(Table, ResourceHead.__table__)
         with self._engine.begin() as connection:
             result = connection.execute(
                 update(table)
@@ -1109,13 +1139,13 @@ class PostgresAgentStore:
         run_id: UUID,
         snapshot: RunSnapshot,
     ) -> tuple[StartReceipt, bool]:
-        operations = RunOperationRow.__table__
-        runs = AgentRunRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
-        references = RuntimeReferenceRow.__table__
-        profile_heads = ProfileHead.__table__
-        profile_revisions = ProfileRevisionRow.__table__
+        operations = cast(Table, RunOperationRow.__table__)
+        runs = cast(Table, AgentRunRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
+        references = cast(Table, RuntimeReferenceRow.__table__)
+        profile_heads = cast(Table, ProfileHead.__table__)
+        profile_revisions = cast(Table, ProfileRevisionRow.__table__)
 
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
@@ -1342,7 +1372,7 @@ class PostgresAgentStore:
     def get_start_receipt(
         self, workspace_id: UUID, operation_id: UUID
     ) -> StartReceipt | None:
-        table = RunOperationRow.__table__
+        table = cast(Table, RunOperationRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -1359,7 +1389,7 @@ class PostgresAgentStore:
     def get_start_operation(
         self, workspace_id: UUID, operation_id: UUID
     ) -> OperationRecord | None:
-        table = RunOperationRow.__table__
+        table = cast(Table, RunOperationRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -1385,7 +1415,7 @@ class PostgresAgentStore:
         )
 
     def get_run_snapshot(self, workspace_id: UUID, run_id: UUID) -> RunSnapshot:
-        table = AgentRunRow.__table__
+        table = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -1402,8 +1432,10 @@ class PostgresAgentStore:
         return RunSnapshot.model_validate(row["snapshot"])
 
     @staticmethod
-    def _locked_run(connection: Connection, workspace_id: UUID, run_id: UUID):
-        table = AgentRunRow.__table__
+    def _locked_run(
+        connection: Connection, workspace_id: UUID, run_id: UUID
+    ) -> RowMapping | None:
+        table = cast(Table, AgentRunRow.__table__)
         return (
             connection.execute(
                 select(table)
@@ -1415,10 +1447,12 @@ class PostgresAgentStore:
         )
 
     @staticmethod
-    def _locked_run_capacity(connection: Connection, workspace_id: UUID, run_id: UUID):
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
-        runs = AgentRunRow.__table__
+    def _locked_run_capacity(
+        connection: Connection, workspace_id: UUID, run_id: UUID
+    ) -> tuple[dict[str, object], RowMapping, RowMapping] | tuple[None, None, None]:
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
+        runs = cast(Table, AgentRunRow.__table__)
         installation_key = connection.execute(
             select(reservations.c.installation_key).where(
                 reservations.c.workspace_id == workspace_id,
@@ -1459,14 +1493,19 @@ class PostgresAgentStore:
         )
         if installation is None or reservation is None or run is None:
             return None, None, None
-        return dict(run), dict(reservation), dict(installation)
+        # Only the Run row is mutated; column names establish its string-keyed copy.
+        return (
+            {column.name: run[column.name] for column in runs.c},
+            reservation,
+            installation,
+        )
 
     @staticmethod
     def _write_run(connection: Connection, run_row: dict[str, Any]) -> None:
         snapshot = RunSnapshot.model_validate(run_row["snapshot"])
         connection.execute(
-            update(AgentRunRow.__table__)
-            .where(AgentRunRow.__table__.c.run_id == snapshot.run_id)
+            update(cast(Table, AgentRunRow.__table__))
+            .where(cast(Table, AgentRunRow.__table__).c.run_id == snapshot.run_id)
             .values(state=snapshot.state.value, snapshot=run_row["snapshot"])
         )
 
@@ -1479,7 +1518,7 @@ class PostgresAgentStore:
         *,
         lock: bool = False,
     ):
-        table = RunInputRow.__table__
+        table = cast(Table, RunInputRow.__table__)
         query = select(table).where(
             table.c.workspace_id == workspace_id,
             table.c.run_id == run_id,
@@ -1491,7 +1530,7 @@ class PostgresAgentStore:
 
     @staticmethod
     def _input_rows(connection: Connection, run_id: UUID, statuses: tuple[str, ...]):
-        table = RunInputRow.__table__
+        table = cast(Table, RunInputRow.__table__)
         return (
             connection.execute(
                 select(table)
@@ -1503,7 +1542,7 @@ class PostgresAgentStore:
         )
 
     def get_run_authorization_grant(self, workspace_id: UUID, run_id: UUID) -> UUID:
-        table = AgentRunRow.__table__
+        table = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             grant_id = connection.execute(
                 select(table.c.original_grant_id).where(
@@ -1517,7 +1556,7 @@ class PostgresAgentStore:
     def get_native_handle(
         self, workspace_id: UUID, run_id: UUID
     ) -> NativeHandle | None:
-        table = AgentRunRow.__table__
+        table = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             row = connection.execute(
                 select(table.c.native_handle).where(
@@ -1537,17 +1576,17 @@ class PostgresAgentStore:
         max_input_bytes: int,
         payload_bytes: int,
     ) -> InputReceipt:
-        inputs = RunInputRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
-        profile_heads = ProfileHead.__table__
-        profile_revisions = ProfileRevisionRow.__table__
+        inputs = cast(Table, RunInputRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
+        profile_heads = cast(Table, ProfileHead.__table__)
+        profile_revisions = cast(Table, ProfileRevisionRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             run_row, reservation, installation = self._locked_run_capacity(
                 connection, request.workspace_id, request.run_id
             )
-            if run_row is None:
+            if run_row is None or reservation is None or installation is None:
                 raise _not_found("run")
             if run_row["original_grant_id"] != request.grant_id:
                 raise AgentError("permission_denied", "Access denied.")
@@ -1568,9 +1607,7 @@ class PostgresAgentStore:
                     existing["status"] == InputStatus.REJECTED.value
                     and existing["reason_code"] == "resource_busy"
                 ):
-                    return _input_from_row(
-                        existing, run_row["original_grant_id"]
-                    ).receipt()
+                    return _input_from_row(existing, request.grant_id).receipt()
 
             snapshot = RunSnapshot.model_validate(run_row["snapshot"])
             pending_rows = self._input_rows(
@@ -1579,8 +1616,7 @@ class PostgresAgentStore:
                 (InputStatus.ACCEPTED.value, "delivering"),
             )
             pending_operations = tuple(
-                _input_from_row(row, run_row["original_grant_id"])
-                for row in pending_rows
+                _input_from_row(row, request.grant_id) for row in pending_rows
             )
             reason = None
             if not snapshot.input_open or snapshot.state not in (
@@ -1721,13 +1757,13 @@ class PostgresAgentStore:
                     )
                 )
             self._write_run(connection, run_row)
-            return _input_from_row(row_values, run_row["original_grant_id"]).receipt()
+            return _input_from_row(row_values, request.grant_id).receipt()
 
     def get_input_operation(
         self, workspace_id: UUID, run_id: UUID, operation_id: UUID
     ) -> InputOperation | None:
-        inputs = RunInputRow.__table__
-        runs = AgentRunRow.__table__
+        inputs = cast(Table, RunInputRow.__table__)
+        runs = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             row = (
                 connection.execute(
@@ -1753,8 +1789,8 @@ class PostgresAgentStore:
         return operation.receipt()
 
     def list_pending_inputs(self, run_id: UUID) -> tuple[InputOperation, ...]:
-        inputs = RunInputRow.__table__
-        runs = AgentRunRow.__table__
+        inputs = cast(Table, RunInputRow.__table__)
+        runs = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             rows = (
                 connection.execute(
@@ -1775,7 +1811,7 @@ class PostgresAgentStore:
     def _finish_input_tx(
         connection: Connection,
         run_row: dict[str, Any],
-        input_row: Mapping[str, Any],
+        input_row: RowMapping | Mapping[str, Any],
         status: InputStatus,
         reason_code: str | None,
     ) -> InputReceipt:
@@ -1793,7 +1829,7 @@ class PostgresAgentStore:
             response_id=input_row["response_id"],
             data={"reason_code": reason_code},
         )
-        table = RunInputRow.__table__
+        table = cast(Table, RunInputRow.__table__)
         connection.execute(
             update(table)
             .where(
@@ -1820,13 +1856,13 @@ class PostgresAgentStore:
     def claim_input(
         self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
     ) -> InputOperation | None:
-        inputs = RunInputRow.__table__
+        inputs = cast(Table, RunInputRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             run = (
                 connection.execute(
-                    select(AgentRunRow.__table__)
-                    .where(AgentRunRow.__table__.c.run_id == run_id)
+                    select(cast(Table, AgentRunRow.__table__))
+                    .where(cast(Table, AgentRunRow.__table__).c.run_id == run_id)
                     .with_for_update()
                 )
                 .mappings()
@@ -1908,19 +1944,20 @@ class PostgresAgentStore:
         cancelled: bool = False,
         observed_model: str | None = None,
     ) -> RunSnapshot:
-        runs = AgentRunRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
+            workspace_id: UUID | None = connection.execute(
+                select(runs.c.workspace_id).where(runs.c.run_id == run_id)
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                raise _not_found("run")
             run, reservation, installation = self._locked_run_capacity(
-                connection,
-                connection.execute(
-                    select(runs.c.workspace_id).where(runs.c.run_id == run_id)
-                ).scalar_one_or_none(),
-                run_id,
+                connection, workspace_id, run_id
             )
-            if run is None:
+            if run is None or reservation is None or installation is None:
                 raise _not_found("run")
             mutable = dict(run)
             snapshot = RunSnapshot.model_validate(run["snapshot"])
@@ -1973,11 +2010,11 @@ class PostgresAgentStore:
     def activate_pending_input(
         self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
     ) -> bool:
-        runs = AgentRunRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
-        heads = ProfileHead.__table__
-        revisions = ProfileRevisionRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
+        heads = cast(Table, ProfileHead.__table__)
+        revisions = cast(Table, ProfileRevisionRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             workspace_id = connection.execute(
@@ -1988,7 +2025,7 @@ class PostgresAgentStore:
             run, reservation, installation = self._locked_run_capacity(
                 connection, workspace_id, run_id
             )
-            if run is None:
+            if run is None or reservation is None or installation is None:
                 raise _not_found("run")
             snapshot = RunSnapshot.model_validate(run["snapshot"])
             operation = self._input_row(
@@ -2079,9 +2116,9 @@ class PostgresAgentStore:
         terminal_state: RunState = RunState.COMPLETED,
         reason_code: str | None = None,
     ) -> RunSnapshot:
-        runs = AgentRunRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             workspace_id = connection.execute(
@@ -2092,7 +2129,7 @@ class PostgresAgentStore:
             run, reservation, installation = self._locked_run_capacity(
                 connection, workspace_id, run_id
             )
-            if run is None:
+            if run is None or reservation is None or installation is None:
                 raise _not_found("run")
             mutable = dict(run)
             snapshot = RunSnapshot.model_validate(run["snapshot"])
@@ -2173,7 +2210,7 @@ class PostgresAgentStore:
     def request_stop(
         self, run_id: UUID, operation_id: UUID, *, owner_id: UUID
     ) -> RunEvent:
-        runs = AgentRunRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             workspace_id = connection.execute(
@@ -2186,13 +2223,14 @@ class PostgresAgentStore:
                 raise _not_found("run")
             prior = (
                 connection.execute(
-                    select(RunEventRow.__table__)
+                    select(cast(Table, RunEventRow.__table__))
                     .where(
-                        RunEventRow.__table__.c.run_id == run_id,
-                        RunEventRow.__table__.c.operation_id == operation_id,
-                        RunEventRow.__table__.c.kind.like("stop.%"),
+                        cast(Table, RunEventRow.__table__).c.run_id == run_id,
+                        cast(Table, RunEventRow.__table__).c.operation_id
+                        == operation_id,
+                        cast(Table, RunEventRow.__table__).c.kind.like("stop.%"),
                     )
-                    .order_by(RunEventRow.__table__.c.sequence.desc())
+                    .order_by(cast(Table, RunEventRow.__table__).c.sequence.desc())
                     .limit(1)
                 )
                 .mappings()
@@ -2241,9 +2279,9 @@ class PostgresAgentStore:
         stopped: bool,
         reason_code: str | None,
     ) -> RunEvent:
-        runs = AgentRunRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             workspace_id = connection.execute(
@@ -2254,7 +2292,7 @@ class PostgresAgentStore:
             run, reservation, installation = self._locked_run_capacity(
                 connection, workspace_id, run_id
             )
-            if run is None:
+            if run is None or reservation is None or installation is None:
                 raise _not_found("run")
             mutable = dict(run)
             if reservation is None:
@@ -2344,10 +2382,11 @@ class PostgresAgentStore:
                 raise _not_found("run")
             existing = (
                 connection.execute(
-                    select(RunEventRow.__table__).where(
-                        RunEventRow.__table__.c.run_id == run_id,
-                        RunEventRow.__table__.c.operation_id == operation_id,
-                        RunEventRow.__table__.c.kind == kind,
+                    select(cast(Table, RunEventRow.__table__)).where(
+                        cast(Table, RunEventRow.__table__).c.run_id == run_id,
+                        cast(Table, RunEventRow.__table__).c.operation_id
+                        == operation_id,
+                        cast(Table, RunEventRow.__table__).c.kind == kind,
                     )
                 )
                 .mappings()
@@ -2370,8 +2409,8 @@ class PostgresAgentStore:
     def get_lifecycle_event(
         self, workspace_id: UUID, run_id: UUID, operation_id: UUID, prefix: str
     ) -> RunEvent | None:
-        runs = AgentRunRow.__table__
-        events = RunEventRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        events = cast(Table, RunEventRow.__table__)
         with self._engine.connect() as connection:
             exists = connection.execute(
                 select(runs.c.run_id).where(
@@ -2399,8 +2438,8 @@ class PostgresAgentStore:
     def get_lifecycle_events(
         self, workspace_id: UUID, run_id: UUID, after_sequence: int = 0
     ) -> tuple[RunEvent, ...]:
-        runs = AgentRunRow.__table__
-        events = RunEventRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        events = cast(Table, RunEventRow.__table__)
         with self._engine.connect() as connection:
             exists = connection.execute(
                 select(runs.c.run_id).where(
@@ -2427,7 +2466,10 @@ class PostgresAgentStore:
     def list_event_page(
         self, workspace_id: UUID, run_id: UUID, after: int, limit: int
     ) -> EventPage:
-        runs, events = AgentRunRow.__table__, RunEventRow.__table__
+        runs, events = (
+            cast(Table, AgentRunRow.__table__),
+            cast(Table, RunEventRow.__table__),
+        )
         with self._engine.connect() as connection:
             snapshot_data = connection.execute(
                 select(runs.c.snapshot).where(
@@ -2464,7 +2506,7 @@ class PostgresAgentStore:
 
     @staticmethod
     def _native_cursor(connection: Connection, run_id: UUID, source: str) -> int:
-        events = RunEventRow.__table__
+        events = cast(Table, RunEventRow.__table__)
         return (
             connection.execute(
                 select(func.max(events.c.native_cursor)).where(
@@ -2491,7 +2533,7 @@ class PostgresAgentStore:
         source: str,
         owner_id: UUID,
     ) -> RunEvent | None:
-        events = RunEventRow.__table__
+        events = cast(Table, RunEventRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             run = self._locked_run(connection, workspace_id, run_id)
@@ -2562,7 +2604,7 @@ class PostgresAgentStore:
     def fence_orphaned_runs(
         self, *, owner_id: UUID, live_run_ids: tuple[UUID, ...]
     ) -> int:
-        runs = AgentRunRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
         fenced = 0
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
@@ -2661,7 +2703,7 @@ class PostgresAgentStore:
             return RunSnapshot.model_validate(mutable["snapshot"])
 
     def list_starting_runs(self) -> tuple[RunSnapshot, ...]:
-        table = AgentRunRow.__table__
+        table = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             rows = (
                 connection.execute(
@@ -2677,7 +2719,7 @@ class PostgresAgentStore:
     def list_unresolved_runs(
         self,
     ) -> tuple[tuple[RunSnapshot, NativeHandle, RunState | None, str | None], ...]:
-        table = AgentRunRow.__table__
+        table = cast(Table, AgentRunRow.__table__)
         with self._engine.connect() as connection:
             rows = (
                 connection.execute(
@@ -2729,10 +2771,10 @@ class PostgresAgentStore:
         terminal_state: RunState | None = None,
         terminal_reason_code: str | None = None,
     ) -> None:
-        runs = AgentRunRow.__table__
-        reservations = RunReservationRow.__table__
-        installations = RuntimeInstallationRow.__table__
-        operations = RunOperationRow.__table__
+        runs = cast(Table, AgentRunRow.__table__)
+        reservations = cast(Table, RunReservationRow.__table__)
+        installations = cast(Table, RuntimeInstallationRow.__table__)
+        operations = cast(Table, RunOperationRow.__table__)
         with self._engine.begin() as connection:
             self._assert_owner(connection, owner_id)
             reservation_key = connection.execute(
@@ -2895,8 +2937,8 @@ class PostgresAgentStore:
     def _require_enabled_resources(
         self, connection: Connection, workspace_id: UUID, refs: tuple[ResourceRef, ...]
     ) -> None:
-        heads = ResourceHead.__table__
-        revisions = ResourceRevisionRow.__table__
+        heads = cast(Table, ResourceHead.__table__)
+        revisions = cast(Table, ResourceRevisionRow.__table__)
         if any(ref.workspace_id != workspace_id for ref in refs):
             raise AgentError(
                 "configuration_invalid",
@@ -2956,7 +2998,7 @@ class PostgresAgentStore:
     def _profile_row(
         connection: Connection, workspace_id: UUID, profile_id: UUID, revision: int
     ):
-        table = ProfileRevisionRow.__table__
+        table = cast(Table, ProfileRevisionRow.__table__)
         return (
             connection.execute(
                 select(table).where(
@@ -2973,7 +3015,7 @@ class PostgresAgentStore:
     def _resource_row(
         connection: Connection, workspace_id: UUID, resource_id: UUID, revision: int
     ):
-        table = ResourceRevisionRow.__table__
+        table = cast(Table, ResourceRevisionRow.__table__)
         return (
             connection.execute(
                 select(table).where(

@@ -1,8 +1,10 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from threading import Event
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 
 from sidera_agents.contracts import (
@@ -20,6 +22,7 @@ from sidera_agents.contracts import (
     RunStop,
     StopStatus,
 )
+from sidera_agents.errors import AgentError
 
 
 def _postgres_lab(owned_agents_pg, admission_lab_factory):
@@ -40,6 +43,97 @@ def _context(text: str) -> ContextItem:
         content_hash="sha256:" + sha256(text.encode("utf-8")).hexdigest(),
         text=text,
     )
+
+
+@pytest.mark.parametrize("missing", ["reservation", "installation"])
+@pytest.mark.parametrize(
+    "action", ["finish", "close_input", "stop", "admit", "activate"]
+)
+def test_postgres_incomplete_capacity_never_returns_success_or_changes_evidence(
+    owned_agents_pg, admission_lab_factory, monkeypatch, missing, action
+):
+    lab, store = _postgres_lab(owned_agents_pg, admission_lab_factory)
+    start = lab.execution.start(lab.request(policy=RunPolicy.CONVERSATION.value))
+    lab.pump()
+    response_id = lab.native.prompt_calls[0][2]
+    snapshot = store.get_run_snapshot(lab.workspace_id, start.run_id)
+    handle = store.get_native_handle(lab.workspace_id, start.run_id)
+    events = store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    installation = store.get_runtime_entry(lab.runtime.ref).installation
+    locked_capacity = store._locked_run_capacity
+
+    def incomplete_capacity(connection, workspace_id, run_id):
+        run, reservation, runtime = locked_capacity(connection, workspace_id, run_id)
+        return (
+            run,
+            None if missing == "reservation" else reservation,
+            None if missing == "installation" else runtime,
+        )
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store, "_locked_run_capacity", incomplete_capacity)
+        with pytest.raises(AgentError) as error:
+            if action == "finish":
+                store.finish_conversation_response(
+                    start.run_id, response_id, owner_id=lab.service._owner_id
+                )
+            elif action == "close_input":
+                store.close_input_admission(
+                    start.run_id,
+                    response_id,
+                    owner_id=lab.service._owner_id,
+                    terminal_state=RunState.COMPLETED,
+                    reason_code=None,
+                )
+            elif action == "stop":
+                store.complete_stop(
+                    start.run_id,
+                    uuid4(),
+                    owner_id=lab.service._owner_id,
+                    stopped=True,
+                    reason_code=None,
+                )
+            elif action == "admit":
+                lab.execution.send_input(
+                    RunInput(
+                        workspace_id=lab.workspace_id,
+                        run_id=start.run_id,
+                        operation_id=uuid4(),
+                        grant_id=lab.grant_id,
+                        text="must not reserve incomplete capacity",
+                        context=(),
+                    )
+                )
+            else:
+                store.activate_pending_input(
+                    start.run_id, uuid4(), owner_id=lab.service._owner_id
+                )
+
+    assert error.value.code == "not_found"
+    assert store.get_run_snapshot(lab.workspace_id, start.run_id) == snapshot
+    assert store.get_native_handle(lab.workspace_id, start.run_id) == handle
+    assert store.get_lifecycle_events(lab.workspace_id, start.run_id) == events
+    assert store.get_runtime_entry(lab.runtime.ref).installation == installation
+    assert len(lab.native.open_calls) == 1 and len(lab.native.prompt_calls) == 1
+
+
+def test_postgres_missing_run_workspace_rejects_before_capacity_lookup(
+    owned_agents_pg, admission_lab_factory, monkeypatch
+):
+    lab, store = _postgres_lab(owned_agents_pg, admission_lab_factory)
+    locked_capacity = store._locked_run_capacity
+
+    def owned_capacity(connection, workspace_id, run_id):
+        assert workspace_id is not None, "Capacity requires a verified workspace"
+        return locked_capacity(connection, workspace_id, run_id)
+
+    monkeypatch.setattr(store, "_locked_run_capacity", owned_capacity)
+    with pytest.raises(AgentError) as error:
+        store.finish_conversation_response(
+            uuid4(), uuid4(), owner_id=lab.service._owner_id
+        )
+    assert error.value.code == "not_found"
+    assert lab.native.open_calls == [] and lab.native.prompt_calls == []
 
 
 def test_postgres_persists_only_live_input_payload_and_safe_events(
@@ -195,10 +289,11 @@ def test_postgres_restart_fences_accepted_input_without_replay(
     from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
     from sidera_agents.postgres.models import RunEventRow, RunInputRow
 
-    lab, _ = _postgres_lab(owned_agents_pg, admission_lab_factory)
+    lab, store = _postgres_lab(owned_agents_pg, admission_lab_factory)
     started = lab.execution.start(lab.request(policy=RunPolicy.CONVERSATION.value))
     assert started.run_id is not None
     lab.pump()
+    initial_response_id = lab.native.prompt_calls[0][2]
     request = RunInput(
         workspace_id=lab.workspace_id,
         run_id=started.run_id,
@@ -207,8 +302,15 @@ def test_postgres_restart_fences_accepted_input_without_replay(
         text="QUEUED_TEXT_MUST_NOT_REPLAY_AFTER_RESTART",
         context=(),
     )
-    assert lab.execution.send_input(request).status is InputStatus.ACCEPTED
+    accepted = lab.execution.send_input(request)
+    assert accepted.status is InputStatus.ACCEPTED
+    queued = store.get_input_operation(
+        lab.workspace_id, started.run_id, request.operation_id
+    )
+    assert queued is not None
+    queued_response_id = queued.response_id
     native_counts = (len(lab.native.open_calls), len(lab.native.prompt_calls))
+    assert native_counts == (1, 1)
     lab.service.close()
 
     from sidera_agents.postgres.store import PostgresAgentStore
@@ -231,6 +333,7 @@ def test_postgres_restart_fences_accepted_input_without_replay(
         )
         assert receipt.status is InputStatus.FAILED
         assert receipt.reason_code == "owner_restarted"
+        assert receipt.operation_id == accepted.operation_id == request.operation_id
         assert (
             replacement.execution.get_run(
                 lab.workspace_id, started.run_id, grant_id=lab.grant_id
@@ -265,20 +368,77 @@ def test_postgres_restart_fences_accepted_input_without_replay(
             )
             events = (
                 connection.execute(
-                    select(RunEventRow.__table__).where(
-                        RunEventRow.__table__.c.run_id == started.run_id
-                    )
+                    select(RunEventRow.__table__)
+                    .where(RunEventRow.__table__.c.run_id == started.run_id)
+                    .order_by(RunEventRow.__table__.c.sequence)
                 )
                 .mappings()
                 .all()
             )
         assert input_row["text"] is None
         assert input_row["context"] is None
+        assert input_row["operation_id"] == request.operation_id
+        assert input_row["response_id"] == queued_response_id
         assert "QUEUED_TEXT_MUST_NOT_REPLAY_AFTER_RESTART" not in repr(events)
-        assert all(
-            set(event["data"]) <= {"status", "reason_code", "queue_sequence"}
-            for event in events
+        expected_kinds = (
+            "run.started",
+            "response.started",
+            "usage",
+            "response.completed",
+            "run.idle",
+            "input.accepted",
+            "input.failed",
+            "run.owner_restarted",
+            "recovery.unsupported",
         )
+        assert tuple(event["kind"] for event in events) == expected_kinds
+        for event in events:
+            data = event["data"]
+            if event["kind"] == "usage":
+                assert set(data) == {
+                    "usage",
+                    "observed_model",
+                    "reason_code",
+                    "_native",
+                }
+                assert data["usage"] is None
+                assert data["observed_model"] is None
+                assert data["reason_code"] == "usage_unavailable"
+                native = data["_native"]
+                assert isinstance(native, dict)
+                assert set(native) == {"source", "identity"}
+                assert isinstance(native["source"], str)
+                assert re.fullmatch(r"[0-9a-f]{64}", native["source"]) is not None
+                assert native["identity"] == f"outcome:{initial_response_id}"
+                assert event["native_cursor"] is None
+                assert event["response_id"] == initial_response_id
+                assert event["operation_id"] == started.operation_id
+            else:
+                assert set(data) <= {"status", "reason_code", "queue_sequence"}
+            if event["kind"] in {"input.accepted", "input.failed"}:
+                assert event["operation_id"] == request.operation_id
+                assert event["response_id"] == queued_response_id
+
+        trace = replacement.observations.read_trace(
+            lab.workspace_id, started.run_id, 0, grant_id=lab.grant_id
+        )
+        page = replacement.execution.list_events(
+            lab.workspace_id, started.run_id, 0, grant_id=lab.grant_id
+        )
+        assert trace == page
+        assert tuple(event.kind for event in page.events) == expected_kinds
+        assert page.next_sequence == events[-1]["sequence"] and not page.has_more
+        assert all("_native" not in event.data for event in page.events)
+        assert "_native" not in page.model_dump_json()
+        assert "QUEUED_TEXT_MUST_NOT_REPLAY_AFTER_RESTART" not in page.model_dump_json()
+        public_usage = next(event for event in page.events if event.kind == "usage")
+        assert public_usage.data == {
+            "usage": None,
+            "observed_model": None,
+            "reason_code": "usage_unavailable",
+        }
+        assert public_usage.response_id == initial_response_id
+        assert public_usage.operation_id == started.operation_id
     finally:
         replacement.close()
 

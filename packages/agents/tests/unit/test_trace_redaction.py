@@ -251,11 +251,17 @@ def test_resolved_profile_environment_is_redacted_and_cleared_with_native_contex
         credential_ref=CredentialRef(
             workspace_id=lab.workspace_id, credential_id=uuid4()
         ),
-        destination="PROFILE_TOKEN",
+        destination="OPENCODE_API_KEY",
     )
     profile = lab.catalog.revise_profile(
         lab.profile.ref,
-        lab.profile.draft.model_copy(update={"secret_refs": (binding,)}),
+        lab.profile.draft.model_copy(
+            update={
+                "model_id": "opencode-go/deepseek-v4.1-flash",
+                "native_settings": {"provider_env": "OPENCODE_API_KEY"},
+                "secret_refs": (binding,),
+            }
+        ),
         grant_id=lab.grant_id,
     )
 

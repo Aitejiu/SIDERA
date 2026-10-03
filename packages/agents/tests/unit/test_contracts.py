@@ -292,10 +292,12 @@ def test_public_api_protocol_method_names_and_parameter_modes() -> None:
             "create_profile": ("self", "workspace_id", "draft", "grant_id"),
             "revise_profile": ("self", "ref", "draft", "grant_id"),
             "get_profile": ("self", "ref", "grant_id"),
+            "get_profile_status": ("self", "ref", "grant_id"),
             "list_profiles": ("self", "workspace_id", "grant_id"),
             "create_resource": ("self", "workspace_id", "draft", "grant_id"),
             "revise_resource": ("self", "ref", "draft", "grant_id"),
             "get_resource": ("self", "ref", "grant_id"),
+            "get_resource_status": ("self", "ref", "grant_id"),
             "list_resources": ("self", "workspace_id", "grant_id"),
             "set_profile_enabled": (
                 "self",

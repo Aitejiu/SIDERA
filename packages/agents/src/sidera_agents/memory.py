@@ -12,6 +12,7 @@ from .contracts import (
     EventPage,
     InputReceipt,
     InputStatus,
+    JsonValue,
     NativeHandle,
     OutputRef,
     ProfileDraft,
@@ -1606,7 +1607,7 @@ class MemoryAgentStore:
         *,
         operation_id: UUID | None = None,
         response_id: UUID | None = None,
-        data: dict[str, object] | None = None,
+        data: dict[str, JsonValue] | None = None,
         observation: SafeObservation | None = None,
     ) -> RunEvent:
         if operation_id is None and response_id is not None:

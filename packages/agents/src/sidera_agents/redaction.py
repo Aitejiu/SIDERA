@@ -3,6 +3,8 @@ from collections.abc import Iterable
 
 from pydantic import SecretStr
 
+from .contracts import JsonValue
+
 
 def redact_secrets(value: str, secrets: Iterable[SecretStr]) -> str:
     values = sorted(
@@ -44,7 +46,7 @@ class ObservationRedactor:
             return None
         return value
 
-    def text(self, value: object, *, maximum_bytes: int = 8192) -> dict[str, object]:
+    def text(self, value: object, *, maximum_bytes: int = 8192) -> dict[str, JsonValue]:
         if not isinstance(value, str):
             return {"reason_code": "native_content_omitted"}
         value = redact_secrets(value, self._secrets)

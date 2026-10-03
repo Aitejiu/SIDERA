@@ -7,6 +7,7 @@ import signal
 import subprocess
 import time
 from datetime import datetime
+from typing import IO, cast
 
 from ..contracts import (
     CapabilitySupport,
@@ -23,27 +24,18 @@ from ..contracts import (
     SupportStatus,
 )
 from ..errors import AgentError
+from .opencode_config import (
+    parse_model_route,
+    reserved_environment_key,
+    resolve_provider_env,
+    validate_native_tools,
+)
 
 _MAX_OUTPUT_BYTES = 2048
 _PROBE_TIMEOUT_SECONDS = 4.0
 _VERSION_PATTERN = re.compile(
     r"(?i)(?:opencode\s+)?v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)"
 )
-_RESERVED_ENVIRONMENT_KEYS = {
-    "HOME",
-    "PATH",
-    "PWD",
-    "SHELL",
-    "TMPDIR",
-    "TEMP",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-    "XDG_CACHE_HOME",
-    "OPENCODE_CONFIG",
-    "CODEX_HOME",
-}
-_RESERVED_ENVIRONMENT_PREFIXES = ("SIDERA_", "OPENCODE_", "CODEX_")
 
 
 def _support(status: SupportStatus, reason_code: str) -> CapabilitySupport:
@@ -79,10 +71,20 @@ def read_version(executable: str) -> str:
             "runtime_probe_failed", "Runtime version check failed."
         ) from None
 
-    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    stdout, stderr = process.stdout, process.stderr
+    if stdout is None or stderr is None:
+        try:
+            _terminate(process)
+        finally:
+            for stream in (stdout, stderr):
+                if stream is not None:
+                    stream.close()
+        raise AgentError("runtime_probe_failed", "Runtime version check failed.")
+
+    streams: dict[IO[bytes], bytearray] = {stdout: bytearray(), stderr: bytearray()}
     selector = selectors.DefaultSelector()
-    for stream in streams:
-        selector.register(stream, selectors.EVENT_READ)
+    for stream, current in streams.items():
+        selector.register(stream, selectors.EVENT_READ, data=(stream, current))
     deadline = time.monotonic() + _PROBE_TIMEOUT_SECONDS
     try:
         while selector.get_map():
@@ -93,8 +95,7 @@ def read_version(executable: str) -> str:
                     "runtime_probe_timeout", "Runtime version check timed out."
                 )
             for key, _ in selector.select(remaining):
-                stream = key.fileobj
-                current = streams[stream]
+                stream, current = cast(tuple[IO[bytes], bytearray], key.data)
                 chunk = os.read(
                     stream.fileno(), min(1024, _MAX_OUTPUT_BYTES + 1 - len(current))
                 )
@@ -125,7 +126,7 @@ def read_version(executable: str) -> str:
 
     if return_code != 0:
         raise AgentError("runtime_probe_failed", "Runtime version check failed.")
-    output = bytes(streams[process.stdout]).decode("utf-8", errors="replace")
+    output = bytes(streams[stdout]).decode("utf-8", errors="replace")
     match = _VERSION_PATTERN.search(output)
     if match is None:
         raise AgentError("runtime_probe_failed", "Runtime version could not be read.")
@@ -137,7 +138,6 @@ class OpenCodeDescriptor:
     executable_name = "opencode"
 
     def describe(self) -> RuntimeDescriptor:
-        unconfirmed = _support(SupportStatus.UNCONFIRMED, "model_evidence_unavailable")
         return RuntimeDescriptor(
             harness_id=self.harness_id,
             display_name="OpenCode",
@@ -149,7 +149,29 @@ class OpenCodeDescriptor:
                     options=(),
                     minimum=None,
                     maximum=None,
-                    support=unconfirmed,
+                    support=_support(SupportStatus.SUPPORTED, "model_route_projection"),
+                ),
+                ConfigField(
+                    key="native_settings.provider_env",
+                    label="Provider credential environment",
+                    kind=ConfigFieldKind.TEXT,
+                    options=(),
+                    minimum=None,
+                    maximum=None,
+                    support=_support(
+                        SupportStatus.SUPPORTED, "bound_provider_environment"
+                    ),
+                ),
+                ConfigField(
+                    key="native_settings.native_tools",
+                    label="Native coding tools",
+                    kind=ConfigFieldKind.SELECT,
+                    options=("none", "read", "write"),
+                    minimum=None,
+                    maximum=None,
+                    support=_support(
+                        SupportStatus.SUPPORTED, "native_tool_permission_projection"
+                    ),
                 ),
                 ConfigField(
                     key="thinking",
@@ -171,12 +193,16 @@ class OpenCodeDescriptor:
         acp = _support(SupportStatus.UNCONFIRMED, "acp_handshake_not_performed")
         capabilities = {
             "acp": acp,
+            "model": _support(SupportStatus.UNCONFIRMED, "model_response_unconfirmed"),
+            "native_login": _support(
+                SupportStatus.UNSUPPORTED, "global_auth_inheritance_not_supported"
+            ),
             "skill": _support(
                 SupportStatus.UNCONFIRMED, "skill_projection_unconfirmed"
             ),
             "mcp": _support(SupportStatus.UNCONFIRMED, "mcp_projection_unconfirmed"),
             "native_tools": _support(
-                SupportStatus.UNSUPPORTED, "native_tools_not_projected"
+                SupportStatus.UNCONFIRMED, "native_tool_execution_unconfirmed"
             ),
             "integration": _support(
                 SupportStatus.UNSUPPORTED, "integration_not_supported"
@@ -206,15 +232,15 @@ class OpenCodeDescriptor:
     ) -> ConfigValidation:
         draft = profile.draft
         issues: list[ConfigIssue] = []
-        if draft.model_id is not None:
+        try:
+            parse_model_route(draft.model_id)
+        except AgentError:
             issues.append(
                 ConfigIssue(
                     field="model_id",
-                    code="model_evidence_unavailable",
-                    message="No model or provider evidence is available.",
-                    support=_support(
-                        SupportStatus.UNCONFIRMED, "model_evidence_unavailable"
-                    ),
+                    code="configuration_invalid",
+                    message="The native model route is invalid.",
+                    support=_support(SupportStatus.UNSUPPORTED, "model_route_invalid"),
                 )
             )
         if draft.thinking is not None:
@@ -229,6 +255,8 @@ class OpenCodeDescriptor:
                 )
             )
         for key in sorted(draft.native_settings):
+            if key in {"provider_env", "native_tools"}:
+                continue
             issues.append(
                 ConfigIssue(
                     field=f"native_settings.{key}",
@@ -237,10 +265,54 @@ class OpenCodeDescriptor:
                     support=_support(SupportStatus.UNSUPPORTED, "unknown_native_field"),
                 )
             )
-        for key in sorted(draft.environment):
-            if key.upper() in _RESERVED_ENVIRONMENT_KEYS or key.upper().startswith(
-                _RESERVED_ENVIRONMENT_PREFIXES
+        try:
+            validate_native_tools(draft.native_settings.get("native_tools", "none"))
+        except AgentError:
+            issues.append(
+                ConfigIssue(
+                    field="native_settings.native_tools",
+                    code="configuration_invalid",
+                    message="Native coding tools must be none, read or write.",
+                    support=_support(
+                        SupportStatus.UNSUPPORTED, "native_tool_mode_invalid"
+                    ),
+                )
+            )
+        provider_env = None
+        try:
+            provider_env = resolve_provider_env(
+                draft.model_id,
+                draft.native_settings.get("provider_env"),
+                tuple(binding.destination for binding in draft.secret_refs),
+            )
+        except AgentError:
+            issues.append(
+                ConfigIssue(
+                    field="native_settings.provider_env",
+                    code="configuration_invalid",
+                    message="Provider credentials require an explicit model and bound environment name.",
+                    support=_support(
+                        SupportStatus.UNSUPPORTED, "provider_binding_invalid"
+                    ),
+                )
+            )
+        for binding in draft.secret_refs:
+            if reserved_environment_key(binding.destination) and not (
+                binding.destination == "OPENCODE_API_KEY"
+                and provider_env == binding.destination
             ):
+                issues.append(
+                    ConfigIssue(
+                        field="secret_refs",
+                        code="reserved_environment_field",
+                        message="This secret destination is reserved by the runtime.",
+                        support=_support(
+                            SupportStatus.UNSUPPORTED, "reserved_environment_field"
+                        ),
+                    )
+                )
+        for key in sorted(draft.environment):
+            if reserved_environment_key(key):
                 issues.append(
                     ConfigIssue(
                         field=f"environment.{key}",

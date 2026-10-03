@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import threading
@@ -17,6 +18,7 @@ from pydantic import SecretStr
 from ..contracts import (
     AssembledInput,
     CapabilitySupport,
+    JsonValue,
     NativeCancelOutcome,
     NativeCancelState,
     NativeCloseOutcome,
@@ -44,6 +46,7 @@ from .opencode_config import (
     build_mcp_servers,
     preflight_opencode_config_sources,
     prepare_opencode_config,
+    resolve_provider_env,
 )
 
 _REQUEST_TIMEOUT = 30.0
@@ -109,13 +112,29 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         self,
         *,
         request_timeout_seconds: float = _REQUEST_TIMEOUT,
+        prompt_timeout_seconds: float | None = None,
+        cancel_timeout_seconds: float | None = None,
+        close_timeout_seconds: float | None = None,
         stop_grace_seconds: float = _STOP_GRACE,
         parent_environment: Mapping[str, str] | None = None,
     ) -> None:
-        if request_timeout_seconds <= 0 or stop_grace_seconds <= 0:
-            raise ValueError("OpenCode timeouts must be positive")
-        self._request_timeout = request_timeout_seconds
-        self._stop_grace = stop_grace_seconds
+        self._request_timeout = _positive_timeout(request_timeout_seconds)
+        self._prompt_timeout = _positive_timeout(
+            request_timeout_seconds
+            if prompt_timeout_seconds is None
+            else prompt_timeout_seconds
+        )
+        self._cancel_timeout = _positive_timeout(
+            request_timeout_seconds
+            if cancel_timeout_seconds is None
+            else cancel_timeout_seconds
+        )
+        self._close_timeout = _positive_timeout(
+            request_timeout_seconds
+            if close_timeout_seconds is None
+            else close_timeout_seconds
+        )
+        self._stop_grace = _positive_timeout(stop_grace_seconds)
         self._parent_environment = dict(
             os.environ if parent_environment is None else parent_environment
         )
@@ -186,12 +205,6 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         self._reap_orphaned()
         if request.runtime.harness_id != self.harness_id:
             raise AgentError("configuration_invalid", "Runtime target is invalid.")
-        if request.projected_config:
-            raise AgentError(
-                "configuration_invalid",
-                "OpenCode profile settings are not confirmed for this runtime.",
-                "projected_config",
-            )
         workspace = Path(request.workspace.directory)
         if not workspace.is_absolute() or not workspace.is_dir():
             raise AgentError(
@@ -203,8 +216,16 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         prepared: PreparedOpenCodeConfig | None = None
         transport: ACPProcessTransport | None = None
         try:
+            projected_config = dict(request.projected_config)
+            provider_env = resolve_provider_env(
+                projected_config.get("model_id"),
+                projected_config.get("provider_env"),
+                tuple(request.environment),
+            )
+            if provider_env is not None:
+                projected_config["provider_env"] = provider_env
             prepared = prepare_opencode_config(
-                request.projected_config, request.skills, tools=request.tools
+                projected_config, request.skills, tools=request.tools
             )
             environment = build_child_environment(
                 self._parent_environment, request.environment, prepared
@@ -356,7 +377,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                     "sessionId": handle.session_id,
                     "prompt": _prompt_blocks(input),
                 },
-                timeout=self._request_timeout,
+                timeout=self._prompt_timeout,
             )
         except ACPTransportError as error:
             with session.condition:
@@ -481,7 +502,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                     else "unknown"
                 )
                 text = _update_text(update)
-                data: dict[str, object] = {"update_type": safe_update_type}
+                data: dict[str, JsonValue] = {"update_type": safe_update_type}
                 if text is not None:
                     data.update(
                         ObservationRedactor(
@@ -573,7 +594,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 )
 
             try:
-                deadline = time.monotonic() + self._request_timeout
+                deadline = time.monotonic() + self._cancel_timeout
                 while True:
                     confirmed = session.cancel_outcomes.pop(response_id, None)
                     if confirmed is not None:
@@ -630,7 +651,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 session.transport.request(
                     "session/close",
                     {"sessionId": handle.session_id},
-                    timeout=self._request_timeout,
+                    timeout=self._close_timeout,
                 )
             except ACPTransportError:
                 reason = "native_close_unknown"
@@ -653,11 +674,15 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
     def _unavailable_capabilities(reason: str) -> dict[str, CapabilitySupport]:
         return {
             "acp": _support(SupportStatus.UNSUPPORTED, reason),
+            "model": _support(SupportStatus.UNCONFIRMED, "model_response_unconfirmed"),
+            "native_login": _support(
+                SupportStatus.UNSUPPORTED, "global_auth_inheritance_not_supported"
+            ),
             "skill": _support(SupportStatus.UNCONFIRMED, "skill_not_negotiated"),
             "mcp": _support(SupportStatus.UNSUPPORTED, reason),
             "mcp_http": _support(SupportStatus.UNSUPPORTED, "http_not_negotiated"),
             "native_tools": _support(
-                SupportStatus.UNSUPPORTED, "native_tools_not_projected"
+                SupportStatus.UNCONFIRMED, "native_tool_execution_unconfirmed"
             ),
             "integration": _support(
                 SupportStatus.UNSUPPORTED, "integration_not_supported"
@@ -674,6 +699,10 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
         agent = _agent_capabilities(initialize)
         return {
             "acp": _support(SupportStatus.SUPPORTED, "acp_v1_initialized"),
+            "model": _support(SupportStatus.UNCONFIRMED, "model_response_unconfirmed"),
+            "native_login": _support(
+                SupportStatus.UNSUPPORTED, "global_auth_inheritance_not_supported"
+            ),
             "skill": _support(SupportStatus.UNCONFIRMED, "skill_effect_unconfirmed"),
             "mcp": _support(SupportStatus.SUPPORTED, "acp_v1_stdio"),
             "mcp_http": _support(
@@ -683,7 +712,7 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 "http_advertised" if _http_supported(agent) else "http_not_advertised",
             ),
             "native_tools": _support(
-                SupportStatus.UNSUPPORTED, "native_tools_not_projected"
+                SupportStatus.UNCONFIRMED, "native_tool_execution_unconfirmed"
             ),
             "integration": _support(
                 SupportStatus.UNSUPPORTED, "integration_not_supported"
@@ -698,6 +727,18 @@ class OpenCodeHarness(opencode_descriptor.OpenCodeDescriptor):
                 "native_identity_unverified", "OpenCode process is unavailable."
             )
         return session
+
+
+def _positive_timeout(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("OpenCode timeouts must be positive finite numbers")
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        raise ValueError("OpenCode timeouts must be positive finite numbers") from None
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError("OpenCode timeouts must be positive finite numbers")
+    return number
 
 
 def _initialize_params() -> dict[str, object]:
@@ -740,7 +781,7 @@ def _cancel_current_response_supported(capabilities: Mapping[str, Any]) -> bool:
 def _secret_values(request: NativeOpenRequest) -> tuple[str, ...]:
     values: set[str] = set()
     for value in request.environment.values():
-        if hasattr(value, "get_secret_value"):
+        if isinstance(value, SecretStr):
             secret = value.get_secret_value()
             if secret:
                 values.add(secret)

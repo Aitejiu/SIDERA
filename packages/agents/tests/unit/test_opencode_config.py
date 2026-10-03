@@ -55,7 +55,6 @@ def test_opencode_config_writes_exact_skills_to_private_instruction_files(tmp_pa
 @pytest.mark.parametrize(
     "projected_config",
     [
-        {"model_id": "provider/model"},
         {"thinking": "deep"},
         {"temperature": 0.1},
         {"provider": {"apiKey": "synthetic"}},
@@ -69,6 +68,62 @@ def test_unconfirmed_or_secret_native_config_fails_explicitly(
 
     assert error.value.code == "configuration_invalid"
     assert error.value.field == "projected_config"
+
+
+def test_explicit_model_projects_one_provider_without_fallback(tmp_path):
+    prepared = prepare_opencode_config(
+        {"model_id": "opencode-go/deepseek-v4.1-flash"}, (), private_root=tmp_path
+    )
+    try:
+        config = json.loads(prepared.content)
+        assert config["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert config["small_model"] == "opencode-go/deepseek-v4.1-flash"
+        assert config["enabled_providers"] == ["opencode-go"]
+        assert "provider" not in config
+        assert config["permission"] == {"*": "deny"}
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize("projected", [{}, {"model_id": None}])
+def test_absent_model_does_not_invent_native_override(tmp_path, projected):
+    prepared = prepare_opencode_config(projected, (), private_root=tmp_path)
+    try:
+        config = json.loads(prepared.content)
+        assert not {"model", "small_model", "enabled_providers"} & config.keys()
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "",
+        "provider",
+        "/model",
+        "provider/",
+        "provider//model",
+        "provider/../model",
+        "provider/model\n",
+        "provider/mo\x00del",
+        "provider/{env:MODEL}",
+        "provider/$(MODEL)",
+        "https://provider/model",
+        "provider/model?apiKey=value",
+        "provider/sk-1234567890abcdefghijkl",
+        "provider/ghp_1234567890abcdefghijkl",
+        "p" * 65 + "/model",
+        "provider/" + "m" * 193,
+        True,
+    ],
+)
+def test_invalid_model_route_fails_before_private_config_allocation(tmp_path, route):
+    with pytest.raises(AgentError) as error:
+        prepare_opencode_config({"model_id": route}, (), private_root=tmp_path)
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "model_id"
+    assert "1234567890abcdefghijkl" not in str(error.value)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_child_environment_is_exact_and_excludes_parent_secrets(tmp_path):
@@ -125,6 +180,91 @@ def test_child_environment_is_exact_and_excludes_parent_secrets(tmp_path):
         prepared.close()
 
 
+@pytest.mark.parametrize("destination", ["OPENCODE_API_KEY", "BOUND_PROVIDER_KEY"])
+def test_provider_credential_uses_placeholder_and_child_only_secret(
+    tmp_path, destination
+):
+    secret = "N09_FAKE_EXPLICIT_PROVIDER_SECRET"
+    prepared = prepare_opencode_config(
+        {"model_id": "opencode-go/deepseek-v4.1-flash", "provider_env": destination},
+        (),
+        private_root=tmp_path,
+    )
+    try:
+        config = json.loads(prepared.content)
+        assert config["provider"] == {
+            "opencode-go": {"options": {"apiKey": "{env:" + destination + "}"}}
+        }
+        assert secret not in prepared.content
+        environment = build_child_environment(
+            {"OPENCODE_API_KEY": "N09_FAKE_PARENT_KEY"},
+            {destination: SecretStr(secret)},
+            prepared,
+        )
+        assert environment[destination] == secret
+        assert "N09_FAKE_PARENT_KEY" not in repr(environment)
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize("value", ["N09_FAKE_PLAIN_KEY", None])
+def test_provider_routing_requires_authorized_secret_value(tmp_path, value):
+    prepared = prepare_opencode_config(
+        {
+            "model_id": "opencode-go/deepseek-v4.1-flash",
+            "provider_env": "OPENCODE_API_KEY",
+        },
+        (),
+        private_root=tmp_path,
+    )
+    try:
+        with pytest.raises(AgentError) as error:
+            build_child_environment({}, {"OPENCODE_API_KEY": value}, prepared)
+        assert error.value.code == "configuration_invalid"
+        assert error.value.field == "provider_env"
+        assert "N09_FAKE_PLAIN_KEY" not in str(error.value)
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize(
+    "projected",
+    [
+        {"provider_env": "OPENCODE_API_KEY"},
+        {"model_id": "opencode-go/model", "provider_env": "OPENCODE_CONFIG_CONTENT"},
+        {"model_id": "opencode-go/model", "provider_env": "OPENCODE_EXPERIMENTAL"},
+        {"model_id": "opencode-go/model", "provider_env": "XDG_DATA_HOME"},
+        {"model_id": "opencode-go/model", "provider_env": "BAD-NAME"},
+        {"model_id": "opencode-go/model", "provider_env": "{env:KEY}"},
+        {"model_id": "opencode-go/model", "provider_env": {"apiKey": "fake"}},
+        {"model_id": "other/model", "provider_env": "OPENCODE_API_KEY"},
+    ],
+)
+def test_provider_routing_rejects_missing_model_or_invalid_destination(
+    tmp_path, projected
+):
+    with pytest.raises(AgentError) as error:
+        prepare_opencode_config(projected, (), private_root=tmp_path)
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "provider_env"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "key", ["OPENCODE_CONFIG", "OPENCODE_EXPERIMENTAL", "OPENCODE_CONFIG_DIR"]
+)
+def test_other_reserved_opencode_keys_remain_rejected_for_secrets(tmp_path, key):
+    prepared = prepare_opencode_config({}, (), private_root=tmp_path)
+    try:
+        with pytest.raises(AgentError) as error:
+            build_child_environment(
+                {}, {key: SecretStr("N09_FAKE_RESERVED_SECRET")}, prepared
+            )
+        assert error.value.field == "environment"
+    finally:
+        prepared.close()
+
+
 def test_prepare_config_denies_unlisted_tools_and_projects_only_bound_mcp(
     tmp_path,
 ):
@@ -155,6 +295,59 @@ def test_prepare_config_denies_unlisted_tools_and_projects_only_bound_mcp(
         )
     finally:
         prepared.close()
+
+
+@pytest.mark.parametrize(
+    "mode,allowed",
+    [
+        ("none", {}),
+        ("read", {"read": "allow", "glob": "allow", "grep": "allow"}),
+        (
+            "write",
+            {
+                "read": "allow",
+                "glob": "allow",
+                "grep": "allow",
+                "edit": "allow",
+                "bash": "allow",
+            },
+        ),
+    ],
+)
+def test_native_tools_grant_exact_declared_permissions_preserving_scoped_mcp(
+    tmp_path, mode, allowed
+):
+    tool = ToolConnection(
+        name="task-bridge",
+        transport="stdio",
+        endpoint_or_argv=("/not-spawned",),
+        headers={},
+        environment={},
+    )
+    prepared = prepare_opencode_config(
+        {"native_tools": mode}, (), private_root=tmp_path, tools=(tool,)
+    )
+    try:
+        config = json.loads(prepared.content)
+        assert config["permission"] == {
+            "*": "deny",
+            **allowed,
+            "task-bridge_*": "allow",
+        }
+        assert (
+            not {"task", "skill", "webfetch", "external_directory", "*_*"}
+            & config["permission"].keys()
+        )
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize("mode", ["all", "READ", "bash", "*", None, True, ["read"]])
+def test_invalid_native_tool_mode_fails_before_allocation(tmp_path, mode):
+    with pytest.raises(AgentError) as error:
+        prepare_opencode_config({"native_tools": mode}, (), private_root=tmp_path)
+    assert error.value.field == "native_tools"
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("key", ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"])

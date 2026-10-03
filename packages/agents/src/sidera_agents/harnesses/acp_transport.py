@@ -400,7 +400,7 @@ class ACPProcessTransport:
         with self._notification_lock:
             method = (
                 self._pending_requests.pop(request_id, None)
-                if type(request_id) in {int, str}
+                if type(request_id) is int
                 else None
             )
             if method is None:

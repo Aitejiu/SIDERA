@@ -105,6 +105,16 @@ def run_peer() -> None:
     except json.JSONDecodeError:
         config = {}
     instructions = config.get("instructions", [])
+    provider_placeholders = {
+        name: value.get("options", {}).get("apiKey")
+        for name, value in config.get("provider", {}).items()
+        if isinstance(value, dict)
+    }
+    provider_environments = [
+        value[5:-1]
+        for value in provider_placeholders.values()
+        if isinstance(value, str) and value.startswith("{env:") and value.endswith("}")
+    ]
     skill_hashes = []
     for instruction in instructions:
         try:
@@ -117,6 +127,15 @@ def run_peer() -> None:
         {
             "kind": "environment",
             "config_keys": sorted(config) if isinstance(config, dict) else [],
+            "model": config.get("model"),
+            "small_model": config.get("small_model"),
+            "enabled_providers": config.get("enabled_providers"),
+            "permission": config.get("permission"),
+            "provider_placeholders": provider_placeholders,
+            "provider_credential_present": all(
+                bool(os.environ.get(name)) for name in provider_environments
+            ),
+            "home": str(Path.home()),
             "skill_hashes": skill_hashes,
             "parent_sidera_present": "SIDERA_PARENT_SECRET" in os.environ,
             "parent_provider_present": "OPENAI_API_KEY" in os.environ,
@@ -282,6 +301,10 @@ def run_peer() -> None:
                         _record({"kind": "request", "method": "session/cancel"})
                         break
             update_texts = [os.environ.get("PROFILE_TOKEN", "fixture response")]
+            if mode == "provider_update" and provider_environments:
+                update_texts = [
+                    os.environ.get(provider_environments[0], "fixture response")
+                ]
             if os.environ.get("ACME_TEST_MODE") == "multi_update":
                 update_texts.append("second fixture update")
             for update_text in update_texts:

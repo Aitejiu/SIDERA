@@ -53,4 +53,12 @@ class HarnessRegistry:
 def default_harness_registry() -> HarnessRegistry:
     from .opencode import OpenCodeHarness
 
-    return HarnessRegistry((OpenCodeHarness(),))
+    return HarnessRegistry(
+        (
+            OpenCodeHarness(
+                prompt_timeout_seconds=900,
+                cancel_timeout_seconds=1,
+                close_timeout_seconds=1,
+            ),
+        )
+    )

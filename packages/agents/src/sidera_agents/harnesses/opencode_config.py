@@ -7,7 +7,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
@@ -19,6 +19,14 @@ from ..contracts import NativeSkill, ToolConnection
 from ..errors import AgentError
 
 _ENVIRONMENT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_MODEL_ROUTE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._/-]{0,191}\Z"
+)
+_CREDENTIAL_TEXT = re.compile(
+    r"(?:\bsk-[A-Za-z0-9_-]{16,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|"
+    r"\bxox[baprs]-[A-Za-z0-9-]{16,}\b)",
+    re.IGNORECASE,
+)
 _RESERVED_ENVIRONMENT_KEYS = frozenset(
     {
         "HOME",
@@ -56,6 +64,66 @@ def _invalid(field: str, code: str = "configuration_invalid") -> AgentError:
     return AgentError(code, message, field)
 
 
+def parse_model_route(value: object) -> tuple[str, str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or _MODEL_ROUTE.fullmatch(value) is None
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+        or _CREDENTIAL_TEXT.search(value)
+    ):
+        raise _invalid("model_id")
+    provider, model = value.split("/", 1)
+    return provider, model
+
+
+def validate_provider_env(model_id: object, value: object) -> str | None:
+    if value is None:
+        return None
+    route = parse_model_route(model_id)
+    if (
+        route is None
+        or not isinstance(value, str)
+        or len(value) > 128
+        or _ENVIRONMENT_KEY.fullmatch(value) is None
+        or (
+            reserved_environment_key(value)
+            and not (
+                value == "OPENCODE_API_KEY" and route[0] in {"opencode", "opencode-go"}
+            )
+        )
+    ):
+        raise _invalid("provider_env")
+    return value
+
+
+def resolve_provider_env(
+    model_id: object, selected: object, destinations: Collection[str]
+) -> str | None:
+    if selected is None and "OPENCODE_API_KEY" in destinations:
+        selected = "OPENCODE_API_KEY"
+    name = validate_provider_env(model_id, selected)
+    if (
+        name is not None
+        and sum(destination == name for destination in destinations) != 1
+    ):
+        raise _invalid("provider_env")
+    return name
+
+
+def reserved_environment_key(key: str) -> bool:
+    return key.upper() in _RESERVED_ENVIRONMENT_KEYS or key.upper().startswith(
+        _RESERVED_ENVIRONMENT_PREFIXES
+    )
+
+
+def validate_native_tools(value: object) -> str:
+    if not isinstance(value, str) or value not in {"none", "read", "write"}:
+        raise _invalid("native_tools")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedOpenCodeConfig:
     directory: Path
@@ -67,6 +135,7 @@ class PreparedOpenCodeConfig:
     content: str
     skill_paths: tuple[Path, ...]
     skill_hashes: tuple[str, ...]
+    provider_env: str | None
 
     def close(self) -> None:
         shutil.rmtree(self.directory, ignore_errors=True)
@@ -79,8 +148,14 @@ def prepare_opencode_config(
     private_root: Path | None = None,
     tools: tuple[ToolConnection, ...] = (),
 ) -> PreparedOpenCodeConfig:
-    if projected_config:
+    if set(projected_config) - {"model_id", "provider_env", "native_tools"}:
         raise _invalid("projected_config")
+    model_route = parse_model_route(projected_config.get("model_id"))
+    provider_env = validate_provider_env(
+        projected_config.get("model_id"), projected_config.get("provider_env")
+    )
+    native_tools = validate_native_tools(projected_config.get("native_tools", "none"))
+    directory: Path | None = None
     try:
         directory = Path(
             tempfile.mkdtemp(prefix="sidera-agents-opencode-", dir=private_root)
@@ -115,8 +190,19 @@ def prepare_opencode_config(
             "instructions": [str(path) for path in paths],
             "mcp": {},
             "plugin": [],
-            "permission": _tool_permission_policy(tools),
+            "permission": _tool_permission_policy(tools, native_tools=native_tools),
         }
+        if model_route is not None:
+            provider, model = model_route
+            config.update(
+                model=f"{provider}/{model}",
+                small_model=f"{provider}/{model}",
+                enabled_providers=[provider],
+            )
+            if provider_env is not None:
+                config["provider"] = {
+                    provider: {"options": {"apiKey": f"{{env:{provider_env}}}"}}
+                }
         content = json.dumps(config, sort_keys=True, separators=(",", ":"))
         return PreparedOpenCodeConfig(
             directory=directory,
@@ -128,9 +214,10 @@ def prepare_opencode_config(
             content=content,
             skill_paths=tuple(paths),
             skill_hashes=tuple(hashes),
+            provider_env=provider_env,
         )
     except OSError:
-        if "directory" in locals():
+        if directory is not None:
             shutil.rmtree(directory, ignore_errors=True)
         raise AgentError(
             "configuration_invalid", "Run-local configuration is unavailable."
@@ -142,6 +229,10 @@ def build_child_environment(
     profile_environment: Mapping[str, object],
     prepared: PreparedOpenCodeConfig,
 ) -> dict[str, str]:
+    if prepared.provider_env is not None:
+        credential = profile_environment.get(prepared.provider_env)
+        if not isinstance(credential, SecretStr) or not credential.get_secret_value():
+            raise _invalid("provider_env")
     environment = {
         key: value
         for key, value in parent.items()
@@ -153,8 +244,14 @@ def build_child_environment(
         if (
             not isinstance(key, str)
             or _ENVIRONMENT_KEY.fullmatch(key) is None
-            or key.upper() in _RESERVED_ENVIRONMENT_KEYS
-            or key.upper().startswith(_RESERVED_ENVIRONMENT_PREFIXES)
+            or (
+                reserved_environment_key(key)
+                and not (
+                    key == "OPENCODE_API_KEY"
+                    and key == prepared.provider_env
+                    and isinstance(raw_value, SecretStr)
+                )
+            )
         ):
             raise _invalid("environment")
         value = (
@@ -230,8 +327,14 @@ def preflight_opencode_config_sources(workspace: Path) -> None:
         raise _invalid("configuration_sources", "unsupported_capability")
 
 
-def _tool_permission_policy(tools: tuple[ToolConnection, ...]) -> dict[str, str]:
+def _tool_permission_policy(
+    tools: tuple[ToolConnection, ...], *, native_tools: str
+) -> dict[str, str]:
     policy = {"*": "deny"}
+    if native_tools in {"read", "write"}:
+        policy.update(read="allow", glob="allow", grep="allow")
+    if native_tools == "write":
+        policy.update(edit="allow", bash="allow")
     names: set[str] = set()
     for tool in tools:
         name = tool.name.strip()

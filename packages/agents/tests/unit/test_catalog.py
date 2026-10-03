@@ -459,6 +459,99 @@ def test_authorization_is_checked_before_catalog_lookup(catalog_lab) -> None:
     assert target == nonexistent
 
 
+@pytest.mark.parametrize("kind", ["profile", "resource"])
+def test_public_status_reads_current_identity_without_changing_pinned_history(
+    catalog_lab, kind
+) -> None:
+    catalog = catalog_lab.catalog
+    draft = catalog_lab.draft if kind == "profile" else catalog_lab.skill_draft
+    create = getattr(catalog, f"create_{kind}")
+    get_revision = getattr(catalog, f"get_{kind}")
+    get_status = getattr(catalog, f"get_{kind}_status")
+    revise = getattr(catalog, f"revise_{kind}")
+    set_enabled = getattr(catalog, f"set_{kind}_enabled")
+    first = create(catalog_lab.workspace_id, draft, grant_id=catalog_lab.grant_id)
+    identity = getattr(first.ref, f"{kind}_id")
+
+    initial = get_status(first.ref, grant_id=catalog_lab.grant_id)
+    assert (initial.enabled, initial.version) == (True, 1)
+    disabled = set_enabled(
+        catalog_lab.workspace_id, identity, False, 1, grant_id=catalog_lab.grant_id
+    )
+    assert get_status(first.ref, grant_id=catalog_lab.grant_id) == disabled
+    second = revise(
+        first.ref,
+        draft.model_copy(update={"name": "revised"}),
+        grant_id=catalog_lab.grant_id,
+    )
+    assert second.ref.revision == 2
+
+    for ref in (first.ref, second.ref, first.ref):
+        status = get_status(ref, grant_id=catalog_lab.grant_id)
+        assert getattr(status, f"{kind}_id") == identity
+        assert (status.enabled, status.version) == (False, 2)
+        assert catalog_lab.authorizer.calls[-1] == (
+            catalog_lab.grant_id,
+            f"{kind}.read",
+            ref,
+        )
+    assert get_revision(first.ref, grant_id=catalog_lab.grant_id) == first
+    assert get_revision(second.ref, grant_id=catalog_lab.grant_id) == second
+
+
+@pytest.mark.parametrize("kind", ["profile", "resource"])
+@pytest.mark.parametrize("target_case", ["unauthorized", "foreign", "missing"])
+def test_public_status_authorizes_exact_ref_before_missing_lookup(
+    catalog_lab, kind, target_case
+) -> None:
+    from sidera_agents.contracts import ProfileRef
+
+    ref_type = ProfileRef if kind == "profile" else ResourceRef
+    ref = ref_type(
+        workspace_id=(
+            uuid4() if target_case == "foreign" else catalog_lab.workspace_id
+        ),
+        **{f"{kind}_id": uuid4()},
+        revision=7,
+    )
+    if target_case == "unauthorized":
+        draft = catalog_lab.draft if kind == "profile" else catalog_lab.skill_draft
+        ref = getattr(catalog_lab.catalog, f"create_{kind}")(
+            catalog_lab.workspace_id, draft, grant_id=catalog_lab.grant_id
+        ).ref
+    grant_id = uuid4() if target_case != "foreign" else catalog_lab.grant_id
+    get_status = getattr(catalog_lab.catalog, f"get_{kind}_status")
+    with pytest.raises(AgentError) as denied:
+        get_status(ref, grant_id=grant_id)
+
+    assert denied.value.code == "permission_denied"
+    assert catalog_lab.authorizer.calls[-1] == (grant_id, f"{kind}.read", ref)
+
+
+@pytest.mark.parametrize("kind", ["profile", "resource"])
+@pytest.mark.parametrize("revision", [0, 2])
+def test_public_status_requires_the_supplied_revision_to_exist(
+    catalog_lab, kind, revision
+) -> None:
+    catalog = catalog_lab.catalog
+    draft = catalog_lab.draft if kind == "profile" else catalog_lab.skill_draft
+    first = getattr(catalog, f"create_{kind}")(
+        catalog_lab.workspace_id, draft, grant_id=catalog_lab.grant_id
+    )
+    get_status = getattr(catalog, f"get_{kind}_status")
+    missing_revision = first.ref.model_copy(update={"revision": revision})
+    with pytest.raises(AgentError) as missing:
+        get_status(missing_revision, grant_id=catalog_lab.grant_id)
+    assert missing.value.code == "not_found"
+    assert catalog_lab.authorizer.calls[-1] == (
+        catalog_lab.grant_id,
+        f"{kind}.read",
+        missing_revision,
+    )
+    unchanged = get_status(first.ref, grant_id=catalog_lab.grant_id)
+    assert (unchanged.enabled, unchanged.version) == (True, 1)
+
+
 def test_profile_revision_revalidates_malformed_nested_json(catalog_lab) -> None:
     malformed = catalog_lab.skill_draft.model_copy(
         update={"settings": {"body": object()}}
@@ -492,7 +585,8 @@ runtime_expected = {
     "runtime_references",
 }
 run_expected = {"run_operations", "runs", "run_reservations"}
-expected = base_expected | runtime_expected | run_expected
+input_event_expected = {"run_inputs", "run_events"}
+expected = base_expected | runtime_expected | run_expected | input_event_expected
 tables = Base.metadata.tables
 assert {table.name for table in tables.values()} == expected
 assert all(table.schema == "agents" for table in tables.values())
@@ -501,7 +595,19 @@ assert not any(
     for table in tables.values()
     for foreign_key in table.foreign_keys
 )
-assert all(not tables[f"agents.{name}"].foreign_keys for name in run_expected)
+assert all(
+    not tables[f"agents.{name}"].foreign_keys
+    for name in run_expected | input_event_expected
+)
+assert set(tables["agents.run_inputs"].c.keys()) == {
+    "workspace_id", "run_id", "operation_id", "fingerprint", "response_id",
+    "queue_sequence", "status", "reason_code", "evidence_sequence", "text", "context",
+}
+assert set(tables["agents.run_events"].c.keys()) == {
+    "run_id", "sequence", "occurred_at", "kind", "operation_id", "response_id",
+    "status", "reason_code", "native_cursor", "data",
+}
+assert tables["agents.runs"].c.original_grant_id.nullable is True
 
 path = Path("migrations/versions/0001_agent_catalog.py")
 spec = spec_from_file_location("migration_0001_agent_catalog", path)
@@ -584,6 +690,53 @@ with Operations.context(context):
 downgrade_sql = buffer.getvalue().lower()
 assert all(f"drop table agents.{name}" in downgrade_sql for name in run_expected)
 assert downgrade_sql.count("drop table ") == len(run_expected)
+
+path = Path("migrations/versions/0004_inputs_events.py")
+spec = spec_from_file_location("migration_0004_inputs_events", path)
+module = module_from_spec(spec)
+spec.loader.exec_module(module)
+buffer = StringIO()
+context = MigrationContext.configure(
+    dialect_name="postgresql",
+    opts={"as_sql": True, "output_buffer": buffer, "version_table_schema": "agents"},
+)
+with Operations.context(context):
+    module.upgrade()
+upgrade_sql = buffer.getvalue().lower()
+assert all(f"create table agents.{name}" in upgrade_sql for name in input_event_expected)
+assert upgrade_sql.count("create table ") == len(input_event_expected)
+assert "foreign key" not in upgrade_sql
+assert " ".join(upgrade_sql.split()) == (
+    "alter table agents.runs add column original_grant_id uuid; "
+    "create table agents.run_inputs ("
+    " workspace_id uuid not null, run_id uuid not null, operation_id uuid not null,"
+    " fingerprint varchar(71) not null, response_id uuid not null,"
+    " queue_sequence integer not null, status varchar(24) not null,"
+    " reason_code varchar(120), evidence_sequence integer not null, text text,"
+    " context json, primary key (workspace_id, run_id, operation_id) ); "
+    "alter table agents.run_inputs add constraint uq_run_inputs_run_queue_sequence"
+    " unique (run_id, queue_sequence); "
+    "create table agents.run_events ("
+    " run_id uuid not null, sequence integer not null,"
+    " occurred_at timestamp with time zone not null, kind varchar(80) not null,"
+    " operation_id uuid, response_id uuid, status varchar(24) not null,"
+    " reason_code varchar(120), native_cursor integer, data json not null,"
+    " primary key (run_id, sequence) );"
+)
+
+buffer = StringIO()
+context = MigrationContext.configure(
+    dialect_name="postgresql", opts={"as_sql": True, "output_buffer": buffer}
+)
+with Operations.context(context):
+    module.downgrade()
+downgrade_sql = buffer.getvalue().lower()
+assert all(f"drop table agents.{name}" in downgrade_sql for name in input_event_expected)
+assert downgrade_sql.count("drop table ") == len(input_event_expected)
+assert " ".join(downgrade_sql.split()) == (
+    "drop table agents.run_events; drop table agents.run_inputs; "
+    "alter table agents.runs drop column original_grant_id;"
+)
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
