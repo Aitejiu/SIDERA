@@ -62,6 +62,9 @@ class AgentService:
         return True if readiness is None else bool(readiness())
 
     def poll_once(self) -> int:
+        return self._poll_once(background=False)
+
+    def _poll_once(self, *, background: bool) -> int:
         with self._poll_lock:
             with self._lifecycle_lock:
                 if self._closing:
@@ -81,7 +84,7 @@ class AgentService:
                         "execution_owner_unavailable",
                         "The execution owner lock is not held.",
                     )
-            return self.execution.poll_once()
+            return self.execution.poll_once(_background=background)
 
     def start_background(self, *, interval_seconds: float = 0.25) -> None:
         if interval_seconds <= 0:
@@ -117,7 +120,7 @@ class AgentService:
     def _background_loop(self, interval_seconds: float) -> None:
         while not self._stop.is_set():
             try:
-                self.poll_once()
+                self._poll_once(background=True)
             except AgentError as error:
                 if error.code in {"execution_owner_unavailable", "shutdown_pending"}:
                     return
@@ -130,6 +133,7 @@ class AgentService:
         with self._lifecycle_lock:
             self._closing = True
             self._stop.set()
+            self.execution.begin_close()
             thread = self._thread
         if thread is current_thread():
             raise AgentError(
@@ -149,6 +153,11 @@ class AgentService:
                 "A service poll has not stopped; owner lock retained.",
             )
         try:
+            if not self.execution.wait_until(deadline):
+                raise AgentError(
+                    "shutdown_pending",
+                    "Native work or admission has not stopped; owner lock retained.",
+                )
             with self._lifecycle_lock:
                 if self._owner_claimed:
                     try:

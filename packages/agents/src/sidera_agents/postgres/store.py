@@ -2167,6 +2167,16 @@ class PostgresAgentStore:
             if prior is not None:
                 return _event_from_row(prior)
             mutable = dict(run)
+            if RunState(run["state"]) in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+            ):
+                event, _ = self._append_event(
+                    connection, mutable, "stop.stopped", operation_id=operation_id
+                )
+                self._write_run(connection, mutable)
+                return event
             for row in self._input_rows(
                 connection, run_id, (InputStatus.ACCEPTED.value, "delivering")
             ):
@@ -2215,6 +2225,16 @@ class PostgresAgentStore:
             mutable = dict(run)
             if reservation is None:
                 raise _not_found("run")
+            if RunState(run["state"]) in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+            ):
+                event, _ = self._append_event(
+                    connection, mutable, "stop.stopped", operation_id=operation_id
+                )
+                self._write_run(connection, mutable)
+                return event
             active_after = False if stopped else reservation["active"]
             active_delta = int(reservation["active"]) if stopped else 0
             session_delta = int(reservation["session"]) if stopped else 0
@@ -2586,6 +2606,30 @@ class PostgresAgentStore:
             ):
                 raise AgentError("catalog_corrupt", "Run identity is invalid.")
             current_snapshot = RunSnapshot.model_validate(run["snapshot"])
+            if current_snapshot.state in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+            ) or (
+                replace_native_handle
+                and snapshot.state is RunState.RUNNING
+                and (
+                    current_snapshot.state is not RunState.STARTING
+                    or current_snapshot.active_response_id
+                    != snapshot.active_response_id
+                )
+            ):
+                if replace_native_handle:
+                    connection.execute(
+                        update(runs)
+                        .where(runs.c.run_id == run_id)
+                        .values(
+                            native_handle=None
+                            if native_handle is None
+                            else native_handle.model_dump(mode="json", warnings=False)
+                        )
+                    )
+                return
             if snapshot.last_event_sequence < current_snapshot.last_event_sequence:
                 snapshot = snapshot.model_copy(
                     update={"last_event_sequence": current_snapshot.last_event_sequence}

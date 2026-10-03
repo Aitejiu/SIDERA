@@ -732,6 +732,79 @@ class ControlledHarness:
 
 
 @pytest.fixture
+def exercise_background_parallel(monkeypatch):
+    from threading import Event
+
+    from sidera_agents.contracts import RunState, StartStatus
+
+    def exercise(lab):
+        requests = (
+            lab.request(text="first background run"),
+            lab.request(text="second background run"),
+        )
+        starts = tuple(lab.execution.start(request) for request in requests)
+        assert all(start.status is StartStatus.ACCEPTED for start in starts)
+        entered = {start.run_id: Event() for start in starts}
+        release = {start.run_id: Event() for start in starts}
+
+        def gated_prompt(handle, assembled, response_id):
+            lab.native.begin_prompt(handle, assembled, response_id)
+            entered[handle.run_id].set()
+            if not release[handle.run_id].wait(timeout=4):
+                raise RuntimeError("background response was not released")
+            return lab.native.finish_prompt(
+                handle, response_id, NativeOutcomeStatus.COMPLETED
+            )
+
+        monkeypatch.setattr(lab.native, "prompt", gated_prompt)
+        try:
+            lab.service.start_background(interval_seconds=0.001)
+            for start in sorted(starts, key=lambda item: str(item.run_id)):
+                assert entered[start.run_id].wait(timeout=1)
+            assert len(lab.native.open_calls) == 2
+            for request, start in zip(requests, starts, strict=True):
+                assert (
+                    lab.execution.get_run(
+                        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+                    ).state
+                    is RunState.RUNNING
+                )
+                assert lab.execution.start(request) == start
+                assert (
+                    lab.execution.get_start(
+                        lab.workspace_id, request.operation_id, grant_id=lab.grant_id
+                    ).receipt
+                    == start
+                )
+            installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+            assert installation.active_count == 2
+            assert installation.session_count == 2
+            lab.service.poll_once()
+        finally:
+            for gate in release.values():
+                gate.set()
+            lab.service.close(timeout=3)
+
+        for start in starts:
+            snapshot = lab.execution.get_run(
+                lab.workspace_id, start.run_id, grant_id=lab.grant_id
+            )
+            assert snapshot.state is RunState.COMPLETED
+            events = lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+            assert [event.sequence for event in events] == list(
+                range(1, snapshot.last_event_sequence + 1)
+            )
+        installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+        assert installation.active_count == 0
+        assert installation.session_count == 0
+        assert len(lab.native.open_calls) == 2
+        assert len(lab.native.prompt_calls) == 2
+        return tuple(start.run_id for start in starts)
+
+    return exercise
+
+
+@pytest.fixture
 def admission_lab_factory(tmp_path):
     services = []
 

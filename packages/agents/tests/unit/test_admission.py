@@ -756,18 +756,13 @@ def test_close_retains_owner_while_native_boundary_is_blocked(admission_lab):
     lab.service.start_background(interval_seconds=0.001)
     assert entered.wait(timeout=1)
 
-    thread = lab.service._thread
-    actual_join = thread.join
-    thread.join = lambda timeout=None: None
     try:
         with pytest.raises(AgentError) as caught:
-            lab.service.close()
+            lab.service.close(timeout=0.01)
         assert caught.value.code == "shutdown_pending"
         assert lab.store.execution_owner_is_held(lab.service._owner_id)
     finally:
-        thread.join = actual_join
         unblock.set()
-        thread.join(timeout=1)
 
     lab.service.close()
     assert not lab.store.execution_owner_is_held(lab.service._owner_id)

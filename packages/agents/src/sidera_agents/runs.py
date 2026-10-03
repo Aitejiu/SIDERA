@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import Condition, RLock
@@ -55,6 +56,7 @@ from .input_delivery import (
     input_fingerprint,
     input_size,
 )
+from .native_workers import NativeWorkers
 from .ports import (
     ContextSourceReader,
     ExecutionAuthorizer,
@@ -135,9 +137,15 @@ class RunExecution:
         self._context = ContextAssembler()
         self._pending: dict[UUID, _PendingStart] = {}
         self._run_contexts: dict[UUID, _LiveRun] = {}
+        self._open_handoffs: set[UUID] = set()
+        self._unopened_runs: set[UUID] = set()
+        self._opening_runs: set[UUID] = set()
+        self._stop_cleanups: set[UUID] = set()
         # Store admission stays concurrent; poll waits until each result is published.
         self._pending_lock = Condition()
         self._admissions_in_progress: set[UUID] = set()
+        self._closing = False
+        self._native_workers = NativeWorkers()
         self._input_lock = Condition(RLock())
         self._input_admissions: dict[UUID, int] = {}
         self._closing_runs: set[UUID] = set()
@@ -148,6 +156,13 @@ class RunExecution:
         self._monotonic = monotonic
 
     def start(self, request: RunStart) -> StartReceipt:
+        run_id = self._begin_admission()
+        try:
+            return self._start(request, run_id)
+        finally:
+            self._end_admission(run_id)
+
+    def _start(self, request: RunStart, run_id: UUID) -> StartReceipt:
         self._authorizer.require(request.grant_id, "run.start", request.profile_ref)
         operation = self._store.get_start_operation(
             request.profile_ref.workspace_id, request.operation_id
@@ -200,7 +215,6 @@ class RunExecution:
         runtime_entry = self._store.get_runtime_entry(profile.draft.runtime_ref)
 
         assembled = self._context.assemble(profile, request, self._sources)
-        run_id = uuid4()
         fingerprint = request_fingerprint(request, profile.config_hash)
         response_id = uuid4()
         effective_config = EffectiveConfig.model_validate(
@@ -229,11 +243,11 @@ class RunExecution:
             assembled_input=assembled.input,
             response_id=response_id,
         )
-        with self._pending_lock:
-            self._admissions_in_progress.add(run_id)
         created = False
         conflict_error: AgentError | None = None
         stored_operation = None
+        with self._input_lock:
+            self._unopened_runs.add(run_id)
         try:
             try:
                 receipt, created = self._store.admit_start(
@@ -268,9 +282,42 @@ class RunExecution:
             with self._pending_lock:
                 if created:
                     self._pending[run_id] = pending
-                self._admissions_in_progress.discard(run_id)
-                self._pending_lock.notify_all()
+                else:
+                    with self._input_lock:
+                        self._unopened_runs.discard(run_id)
         return receipt
+
+    def _begin_admission(self) -> UUID:
+        with self._pending_lock:
+            if self._closing:
+                raise AgentError(
+                    "shutdown_pending", "The execution service is closing."
+                )
+            identity = uuid4()
+            self._admissions_in_progress.add(identity)
+            return identity
+
+    def _end_admission(self, identity: UUID) -> None:
+        with self._pending_lock:
+            self._admissions_in_progress.discard(identity)
+            self._pending_lock.notify_all()
+
+    def begin_close(self) -> None:
+        with self._pending_lock:
+            self._closing = True
+            self._native_workers.begin_close()
+            self._pending_lock.notify_all()
+
+    def wait_until(self, deadline: float) -> bool:
+        if not self._native_workers.wait_until(deadline):
+            return False
+        with self._pending_lock:
+            while self._admissions_in_progress:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return False
+                self._pending_lock.wait(timeout=remaining)
+        return True
 
     def get_start(
         self, workspace_id: UUID, operation_id: UUID, *, grant_id: UUID
@@ -286,42 +333,52 @@ class RunExecution:
         return self._store.get_run_snapshot(workspace_id, run_id)
 
     def send_input(self, request: RunInput) -> InputReceipt:
+        identity = self._begin_admission()
+        try:
+            return self._send_input(request)
+        finally:
+            self._end_admission(identity)
+
+    def _send_input(self, request: RunInput) -> InputReceipt:
         self._authorize_run_request(
             request.workspace_id, request.run_id, request.grant_id, "run.input"
         )
         self._require_owner()
         with self._input_lock:
-            while request.run_id in self._closing_runs:
+            while (
+                request.run_id in self._closing_runs
+                or request.run_id in self._open_handoffs
+            ):
+                snapshot = self._store.get_run_snapshot(
+                    request.workspace_id, request.run_id
+                )
+                if snapshot.state is not RunState.RUNNING:
+                    receipt = self._admit_input(request)
+                    if receipt.status is not InputStatus.ACCEPTED:
+                        return receipt
                 self._input_lock.wait()
             self._input_admissions[request.run_id] = (
                 self._input_admissions.get(request.run_id, 0) + 1
             )
+            live = self._run_contexts.get(request.run_id)
         try:
             self._store.get_run_snapshot(request.workspace_id, request.run_id)
-            live = self._run_contexts.get(request.run_id)
             if live is None:
                 self._store.fence_orphaned_runs(
                     owner_id=self._owner_id,
-                    live_run_ids=tuple(self._run_contexts),
+                    live_run_ids=self._owned_live_run_ids(),
                 )
             else:
                 self._reauthorize_input(live, request)
-            response_id = uuid4()
-            receipt = self._store.admit_input(
-                request,
-                owner_id=self._owner_id,
-                fingerprint=input_fingerprint(request),
-                response_id=response_id,
-                max_pending=self._input_settings.max_pending,
-                max_input_bytes=self._input_settings.max_input_bytes,
-                payload_bytes=input_size(request),
-            )
+            receipt = self._admit_input(request)
             if receipt.status is InputStatus.ACCEPTED:
-                live = self._run_contexts.get(request.run_id)
-                if live is not None and live.drain_deadline is None:
-                    live.drain_deadline = (
-                        self._monotonic() + self._input_settings.drain_deadline_seconds
-                    )
+                with self._input_lock:
+                    live = self._run_contexts.get(request.run_id)
+                    if live is not None and live.drain_deadline is None:
+                        live.drain_deadline = (
+                            self._monotonic()
+                            + self._input_settings.drain_deadline_seconds
+                        )
             return receipt
         finally:
             with self._input_lock:
@@ -331,6 +388,17 @@ class RunExecution:
                 else:
                     self._input_admissions[request.run_id] = remaining
                 self._input_lock.notify_all()
+
+    def _admit_input(self, request: RunInput) -> InputReceipt:
+        return self._store.admit_input(
+            request,
+            owner_id=self._owner_id,
+            fingerprint=input_fingerprint(request),
+            response_id=uuid4(),
+            max_pending=self._input_settings.max_pending,
+            max_input_bytes=self._input_settings.max_input_bytes,
+            payload_bytes=input_size(request),
+        )
 
     def get_input(
         self,
@@ -344,6 +412,13 @@ class RunExecution:
         return self._store.get_input_receipt(workspace_id, run_id, operation_id)
 
     def interrupt(self, request: RunInterrupt) -> InterruptReceipt:
+        identity = self._begin_admission()
+        try:
+            return self._interrupt(request)
+        finally:
+            self._end_admission(identity)
+
+    def _interrupt(self, request: RunInterrupt) -> InterruptReceipt:
         self._authorize_run_request(
             request.workspace_id, request.run_id, request.grant_id, "run.interrupt"
         )
@@ -360,7 +435,8 @@ class RunExecution:
             return self._record_interrupt(
                 request, InterruptStatus.FAILED, "response_not_current"
             )
-        live = self._run_contexts.get(request.run_id)
+        with self._input_lock:
+            live = self._run_contexts.get(request.run_id)
         if live is None or "cancel_current_response" not in live.handle.capabilities:
             return self._record_interrupt(
                 request, InterruptStatus.UNSUPPORTED, "cancel_not_negotiated"
@@ -422,23 +498,44 @@ class RunExecution:
         )
 
     def stop(self, request: RunStop) -> StopReceipt:
+        identity = self._begin_admission()
+        try:
+            return self._stop(request)
+        finally:
+            self._end_admission(identity)
+
+    def _stop(self, request: RunStop) -> StopReceipt:
         self._require_owner()
         self._require_original_grant(
             request.workspace_id, request.run_id, request.grant_id
         )
-        event = self._store.request_stop(
-            request.run_id, request.operation_id, owner_id=self._owner_id
-        )
-        if event.kind != "stop.accepted":
-            return self._stop_receipt(request.operation_id, request.run_id, event)
-        live = self._run_contexts.get(request.run_id)
-        if live is not None:
-            self._process_stop(live, request.operation_id)
-        else:
+        with self._input_lock:
+            event = self._store.request_stop(
+                request.run_id, request.operation_id, owner_id=self._owner_id
+            )
+            if event.kind != "stop.accepted":
+                return self._stop_receipt(request.operation_id, request.run_id, event)
+            live = self._run_contexts.get(request.run_id)
             snapshot = self._store.get_run_snapshot(
                 request.workspace_id, request.run_id
             )
-            handle = self._store.get_native_handle(request.workspace_id, request.run_id)
+            if request.run_id in self._unopened_runs:
+                self._unopened_runs.discard(request.run_id)
+                self._complete_pending_stops(snapshot, stopped=True, reason_code=None)
+                return self._stop_receipt(request.operation_id, request.run_id, event)
+            if live is None:
+                handle = self._store.get_native_handle(
+                    request.workspace_id, request.run_id
+                )
+                if handle is None and request.run_id in self._opening_runs:
+                    return self._stop_receipt(
+                        request.operation_id, request.run_id, event
+                    )
+            else:
+                handle = None
+        if live is not None:
+            self._process_stop(live)
+        else:
             if handle is not None:
                 runtime_entry = self._store.get_runtime_entry(
                     snapshot.effective_config.runtime_ref
@@ -447,23 +544,14 @@ class RunExecution:
                     snapshot,
                     handle,
                     self._registry.get(runtime_entry.record.harness_id),
-                    request.operation_id,
                 )
             else:
-                self._store.complete_stop(
-                    request.run_id,
-                    request.operation_id,
-                    owner_id=self._owner_id,
+                self._complete_pending_stops(
+                    snapshot,
                     stopped=False,
                     reason_code="native_close_unknown",
                 )
-        return StopReceipt(
-            operation_id=request.operation_id,
-            run_id=request.run_id,
-            status=StopStatus.ACCEPTED,
-            reason_code=None,
-            evidence_sequence=event.sequence,
-        )
+        return self._stop_receipt(request.operation_id, request.run_id, event)
 
     def get_stop(
         self,
@@ -482,6 +570,13 @@ class RunExecution:
         return self._stop_receipt(operation_id, run_id, event)
 
     def recover(self, request: RunRecover) -> RecoveryReceipt:
+        identity = self._begin_admission()
+        try:
+            return self._recover(request)
+        finally:
+            self._end_admission(identity)
+
+    def _recover(self, request: RunRecover) -> RecoveryReceipt:
         self._require_original_grant(
             request.workspace_id, request.run_id, request.grant_id
         )
@@ -498,7 +593,8 @@ class RunExecution:
                 status=RecoveryStatus(prior.kind.removeprefix("recovery.")),
                 reason_code=prior.data.get("reason_code"),
             )
-        live = self._run_contexts.get(request.run_id)
+        with self._input_lock:
+            live = self._run_contexts.get(request.run_id)
         if live is not None:
             self._reauthorize_pinned_scope(live, request.grant_id)
             stored_handle = self._store.get_native_handle(
@@ -648,13 +744,15 @@ class RunExecution:
             evidence_sequence=event.sequence,
         )
 
-    def poll_once(self) -> int:
+    def poll_once(self, *, _background: bool = False) -> int:
         self._require_owner()
         processed = 0
         with self._pending_lock:
             while self._admissions_in_progress:
+                if _background:
+                    return 0
                 self._pending_lock.wait()
-            pending_ids = set(self._pending)
+            pending_ids = set(self._pending) | set(self._native_workers.run_ids())
             for snapshot in self._store.list_starting_runs():
                 if snapshot.run_id not in pending_ids:
                     unknown = snapshot.model_copy(
@@ -671,22 +769,72 @@ class RunExecution:
                     )
                     processed += 1
             pending = tuple(
-                self._pending.pop(run_id) for run_id in sorted(self._pending, key=str)
+                self._pending[run_id] for run_id in sorted(self._pending, key=str)
             )
         fenced = self._store.fence_orphaned_runs(
             owner_id=self._owner_id,
-            live_run_ids=tuple(self._run_contexts),
+            live_run_ids=self._owned_live_run_ids(),
         )
         processed += fenced
         for item in pending:
-            self._process_pending(item)
+            with self._pending_lock:
+                if self._closing or self._native_workers.busy(item.snapshot.run_id):
+                    continue
+                if _background:
+                    try:
+                        dispatched = self._dispatch_native(
+                            item.snapshot.workspace_id,
+                            item.snapshot.run_id,
+                            lambda item=item: self._process_pending(item),
+                        )
+                    except Exception:  # noqa: BLE001 - Thread.start proves no callback ran
+                        self._pending.pop(item.snapshot.run_id, None)
+                        self._transition_run(
+                            item.snapshot.run_id,
+                            item.snapshot.model_copy(
+                                update={
+                                    "state": RunState.FAILED,
+                                    "reason_code": "native_start_failed",
+                                }
+                            ),
+                            receipt_status=StartStatus.REJECTED,
+                            active_reserved=False,
+                            session_reserved=False,
+                        )
+                        with self._input_lock:
+                            self._unopened_runs.discard(item.snapshot.run_id)
+                        processed += 1
+                        continue
+                    if not dispatched:
+                        continue
+                self._pending.pop(item.snapshot.run_id, None)
+            if not _background:
+                self._process_pending(item)
             processed += 1
-        for live in tuple(self._run_contexts.values()):
+        with self._input_lock:
+            live_runs = tuple(self._run_contexts.values())
+        for live in live_runs:
+            if self._native_workers.busy(live.run_id):
+                continue
             snapshot = self._store.get_run_snapshot(live.workspace_id, live.run_id)
             if snapshot.state in (
                 RunState.RUNNING,
                 RunState.IDLE,
             ) and not self._response_is_in_flight(live.run_id):
+                with self._pending_lock:
+                    if self._closing:
+                        continue
+                    if _background:
+                        if self._store.list_pending_inputs(live.run_id):
+                            try:
+                                self._dispatch_native(
+                                    live.workspace_id,
+                                    live.run_id,
+                                    lambda live=live: self._drain_inputs(live),
+                                )
+                            except Exception:  # noqa: BLE001 - no native input was dispatched
+                                self._fail_input_dispatch(live)
+                        continue
                 self._drain_inputs(live)
         for (
             snapshot,
@@ -694,68 +842,178 @@ class RunExecution:
             terminal_state,
             terminal_reason_code,
         ) in self._store.list_unresolved_runs():
+            if self._native_workers.busy(snapshot.run_id):
+                continue
             self._inspect_unresolved(
                 snapshot, handle, terminal_state, terminal_reason_code
             )
         return processed
 
+    def _dispatch_native(
+        self, workspace_id: UUID, run_id: UUID, work: Callable[[], None]
+    ) -> bool:
+        def run() -> None:
+            try:
+                self._require_owner()
+                work()
+            except Exception:
+                if self._store.execution_owner_is_held(self._owner_id):
+                    snapshot = self._store.get_run_snapshot(workspace_id, run_id)
+                    if snapshot.state is RunState.STARTING:
+                        self._mark_start_unknown(snapshot, "native_start_unknown")
+                    elif snapshot.state is RunState.RUNNING:
+                        self._store.fence_run(
+                            workspace_id,
+                            run_id,
+                            "native_response_unknown",
+                            owner_id=self._owner_id,
+                        )
+                raise
+
+        return self._native_workers.dispatch(run_id, run)
+
+    def _fail_input_dispatch(self, live: _LiveRun) -> None:
+        snapshot = self._store.get_run_snapshot(live.workspace_id, live.run_id)
+        for operation in self._store.list_pending_inputs(live.run_id):
+            self._store.finish_input(
+                live.workspace_id,
+                live.run_id,
+                operation.operation_id,
+                InputStatus.FAILED,
+                "native_response_failed",
+                owner_id=self._owner_id,
+            )
+        if snapshot.policy is RunPolicy.CONVERSATION:
+            with self._input_lock:
+                live.drain_deadline = None
+            if snapshot.active_response_id is not None:
+                self._store.finish_conversation_response(
+                    live.run_id, snapshot.active_response_id, owner_id=self._owner_id
+                )
+        elif snapshot.active_response_id is not None:
+            self._store.close_input_admission(
+                live.run_id,
+                snapshot.active_response_id,
+                owner_id=self._owner_id,
+                terminal_state=RunState.FAILED,
+                reason_code="native_response_failed",
+            )
+
     def _process_pending(self, item: _PendingStart) -> None:
         snapshot = item.snapshot
+        with self._input_lock:
+            self._open_handoffs.add(snapshot.run_id)
+        published = False
         try:
-            open_request = self._build_open_request(item)
-            harness = self._registry.get(item.runtime.harness_id)
-        except AgentError as error:
-            self._require_owner()
-            self._reject_projection(snapshot, error.code)
-            return
-        except Exception:  # noqa: BLE001 - projection errors reject only this admitted run
-            self._require_owner()
-            self._reject_projection(snapshot, "run_projection_failed")
-            return
+            try:
+                open_request = self._build_open_request(item)
+                harness = self._registry.get(item.runtime.harness_id)
+            except AgentError as error:
+                self._require_owner()
+                self._reject_projection(snapshot, error.code)
+                return
+            except Exception:  # noqa: BLE001 - projection errors reject only this admitted run
+                self._require_owner()
+                self._reject_projection(snapshot, "run_projection_failed")
+                return
 
-        self._require_owner()
-        try:
-            handle = harness.open(open_request)
-        except VerifiedNativeOpenFailure as error:
-            failed = snapshot.model_copy(
-                update={
-                    "state": RunState.FAILED,
-                    "reason_code": _safe_native_reason(
-                        error.reason_code, "native_start_failed"
-                    ),
-                }
-            )
+            with self._input_lock:
+                self._require_owner()
+                current = self._store.get_run_snapshot(
+                    snapshot.workspace_id, snapshot.run_id
+                )
+                if (
+                    current.state is not RunState.STARTING
+                    or current.active_response_id != item.response_id
+                ):
+                    return
+                # Stop and native creation share this short claim, never native I/O.
+                self._unopened_runs.discard(snapshot.run_id)
+                self._opening_runs.add(snapshot.run_id)
+            try:
+                handle = harness.open(open_request)
+            except VerifiedNativeOpenFailure as error:
+                failed = snapshot.model_copy(
+                    update={
+                        "state": RunState.FAILED,
+                        "reason_code": _safe_native_reason(
+                            error.reason_code, "native_start_failed"
+                        ),
+                    }
+                )
+                with self._input_lock:
+                    if not self._complete_pending_stops(
+                        snapshot, stopped=True, reason_code=None
+                    ):
+                        self._transition_run(
+                            snapshot.run_id,
+                            failed,
+                            receipt_status=StartStatus.REJECTED,
+                            active_reserved=False,
+                            session_reserved=False,
+                        )
+                return
+            except Exception:  # noqa: BLE001 - an ambiguous native open must not be retried
+                with self._input_lock:
+                    if not self._complete_pending_stops(
+                        snapshot, stopped=False, reason_code="native_start_unknown"
+                    ):
+                        self._mark_start_unknown(snapshot, "native_start_unknown")
+                return
+
+            self._require_owner()
+            if handle.run_id != snapshot.run_id:
+                with self._input_lock:
+                    if not self._complete_pending_stops(
+                        snapshot,
+                        stopped=False,
+                        reason_code="native_identity_unverified",
+                    ):
+                        self._mark_start_unknown(snapshot, "native_identity_unverified")
+                return
             self._transition_run(
                 snapshot.run_id,
-                failed,
-                receipt_status=StartStatus.REJECTED,
-                active_reserved=False,
-                session_reserved=False,
+                snapshot.model_copy(
+                    update={"state": RunState.RUNNING, "input_open": True}
+                ),
+                native_handle=handle,
+                replace_native_handle=True,
             )
-            return
-        except Exception:  # noqa: BLE001 - an ambiguous native open must not be retried
-            self._mark_start_unknown(snapshot, "native_start_unknown")
-            return
+            live = _LiveRun(
+                run_id=snapshot.run_id,
+                workspace_id=snapshot.workspace_id,
+                projection=LiveRunContext.from_start(
+                    item.request, item.profile, item.runtime
+                ),
+                handle=handle,
+            )
+            with self._input_lock:
+                current = self._store.get_run_snapshot(live.workspace_id, live.run_id)
+                stopping = current.state is RunState.CLOSING
+                if (
+                    current.state is not RunState.RUNNING
+                    or current.active_response_id != item.response_id
+                ):
+                    if not stopping:
+                        return
+                else:
+                    self._run_contexts[snapshot.run_id] = live
+                    self._open_handoffs.discard(snapshot.run_id)
+                    self._input_lock.notify_all()
+                    published = True
+            if stopping:
+                self._process_stop_handle(current, handle, harness)
+                return
+        finally:
+            with self._input_lock:
+                self._unopened_runs.discard(snapshot.run_id)
+                self._opening_runs.discard(snapshot.run_id)
+                if not published:
+                    self._open_handoffs.discard(snapshot.run_id)
+                    self._input_lock.notify_all()
 
-        if handle.run_id != snapshot.run_id:
-            self._mark_start_unknown(snapshot, "native_identity_unverified")
+        if not self._begin_initial_prompt(live, item.response_id):
             return
-        self._transition_run(
-            snapshot.run_id,
-            snapshot.model_copy(update={"state": RunState.RUNNING, "input_open": True}),
-            native_handle=handle,
-            replace_native_handle=True,
-        )
-        live = _LiveRun(
-            run_id=snapshot.run_id,
-            workspace_id=snapshot.workspace_id,
-            projection=LiveRunContext.from_start(
-                item.request, item.profile, item.runtime
-            ),
-            handle=handle,
-        )
-        self._run_contexts[snapshot.run_id] = live
-        self._mark_response_in_flight(snapshot.run_id, True)
         try:
             outcome = harness.prompt(handle, item.assembled_input, item.response_id)
         except Exception:  # noqa: BLE001 - a lost native response remains uncertain
@@ -794,8 +1052,29 @@ class RunExecution:
                 _safe_native_reason(outcome.reason_code, "native_response_failed"),
             )
 
+    def _begin_initial_prompt(self, live: _LiveRun, response_id: UUID) -> bool:
+        with self._input_lock:
+            self._require_owner()
+            current = self._store.get_run_snapshot(live.workspace_id, live.run_id)
+            if (
+                current.state is not RunState.RUNNING
+                or current.active_response_id != response_id
+            ):
+                return False
+            self._mark_response_in_flight(live.run_id, True)
+            return True
+
+    def _owned_live_run_ids(self) -> tuple[UUID, ...]:
+        with self._input_lock:
+            return tuple(
+                set(self._run_contexts)
+                | self._open_handoffs
+                | set(self._native_workers.run_ids())
+            )
+
     def _response_is_in_flight(self, run_id: UUID) -> bool:
-        return getattr(self, "_in_flight_responses", set()).__contains__(run_id)
+        with self._in_flight_lock:
+            return run_id in self._in_flight_responses
 
     def _finish_response(
         self,
@@ -865,9 +1144,45 @@ class RunExecution:
         run_id = live.run_id
         workspace_id = live.workspace_id
         while True:
+            self._require_owner()
             current = self._store.get_run_snapshot(workspace_id, run_id)
+            if current.state not in (RunState.RUNNING, RunState.IDLE) or (
+                current.state is RunState.RUNNING and current.active_response_id is None
+            ):
+                return
+            pending = self._store.list_pending_inputs(run_id)
+            now = self._monotonic()
+            if (
+                pending
+                and live.drain_deadline is not None
+                and now >= live.drain_deadline
+            ):
+                if current.policy is RunPolicy.CONVERSATION:
+                    live.drain_deadline = None
+                for item in pending:
+                    self._store.finish_input(
+                        item.workspace_id,
+                        run_id,
+                        item.operation_id,
+                        InputStatus.FAILED,
+                        "input_drain_deadline",
+                        owner_id=self._owner_id,
+                    )
+                if current.policy is RunPolicy.BOUNDED:
+                    self._close_after_response(
+                        live,
+                        current.active_response_id,
+                        terminal_state=RunState.COMPLETED,
+                        reason_code=None,
+                    )
+                elif current.active_response_id is not None:
+                    self._store.finish_conversation_response(
+                        run_id,
+                        current.active_response_id,
+                        owner_id=self._owner_id,
+                    )
+                return
             if current.state is RunState.IDLE:
-                pending = self._store.list_pending_inputs(run_id)
                 if not pending or not self._store.activate_pending_input(
                     run_id, pending[0].operation_id, owner_id=self._owner_id
                 ):
@@ -896,33 +1211,6 @@ class RunExecution:
                     )
                 return
             operation = pending[0]
-            now = self._monotonic()
-            if live.drain_deadline is not None and now >= live.drain_deadline:
-                if current.policy is RunPolicy.CONVERSATION:
-                    live.drain_deadline = None
-                for item in pending:
-                    self._store.finish_input(
-                        item.workspace_id,
-                        run_id,
-                        item.operation_id,
-                        InputStatus.FAILED,
-                        "input_drain_deadline",
-                        owner_id=self._owner_id,
-                    )
-                if current.policy is RunPolicy.BOUNDED:
-                    self._close_after_response(
-                        live,
-                        current.active_response_id,
-                        terminal_state=RunState.COMPLETED,
-                        reason_code=None,
-                    )
-                else:
-                    self._store.finish_conversation_response(
-                        run_id,
-                        current.active_response_id,
-                        owner_id=self._owner_id,
-                    )
-                return
             claimed = self._store.claim_input(
                 run_id, operation.operation_id, owner_id=self._owner_id
             )
@@ -970,7 +1258,8 @@ class RunExecution:
                 self._after_failed_input(live, response_id)
                 continue
             self._require_owner()
-            self._mark_response_in_flight(run_id, True)
+            if not self._begin_initial_prompt(live, response_id):
+                return
             try:
                 harness = self._registry.get(live.projection.runtime.harness_id)
                 outcome = harness.prompt(live.handle, assembled, response_id)
@@ -1171,27 +1460,71 @@ class RunExecution:
             terminal_reason_code=reason_code if session_reserved else None,
         )
         if not session_reserved:
-            self._run_contexts.pop(run_id, None)
+            with self._input_lock:
+                self._run_contexts.pop(run_id, None)
 
-    def _process_stop(self, live: _LiveRun, operation_id: UUID) -> None:
+    def _pending_stop_ids(self, snapshot: RunSnapshot) -> tuple[UUID, ...]:
+        latest = {
+            event.operation_id: event
+            for event in self._store.get_lifecycle_events(
+                snapshot.workspace_id, snapshot.run_id
+            )
+            if event.kind.startswith("stop.")
+        }
+        return tuple(
+            operation_id
+            for operation_id, event in latest.items()
+            if operation_id is not None and event.kind == "stop.accepted"
+        )
+
+    def _complete_pending_stops(
+        self, snapshot: RunSnapshot, *, stopped: bool, reason_code: str | None
+    ) -> bool:
+        with self._input_lock:
+            operation_ids = self._pending_stop_ids(snapshot)
+            for operation_id in operation_ids:
+                self._store.complete_stop(
+                    snapshot.run_id,
+                    operation_id,
+                    owner_id=self._owner_id,
+                    stopped=stopped,
+                    reason_code=reason_code,
+                )
+            return bool(operation_ids)
+
+    def _process_stop(self, live: _LiveRun) -> None:
         snapshot = self._store.get_run_snapshot(live.workspace_id, live.run_id)
         harness = self._registry.get(live.projection.runtime.harness_id)
-        self._process_stop_handle(snapshot, live.handle, harness, operation_id)
+        self._process_stop_handle(snapshot, live.handle, harness)
 
-    def _process_stop_handle(
-        self, snapshot, handle, harness, operation_id: UUID
-    ) -> None:
+    def _process_stop_handle(self, snapshot, handle, harness) -> None:
+        with self._input_lock:
+            if snapshot.run_id in self._stop_cleanups or not self._pending_stop_ids(
+                snapshot
+            ):
+                return
+            self._stop_cleanups.add(snapshot.run_id)
+        result = None
+        try:
+            result = self._close_stop_handle(snapshot, handle, harness)
+        finally:
+            with self._input_lock:
+                try:
+                    if result is not None:
+                        stopped, reason = result
+                        self._complete_pending_stops(
+                            snapshot, stopped=stopped, reason_code=reason
+                        )
+                        if stopped:
+                            self._run_contexts.pop(snapshot.run_id, None)
+                finally:
+                    self._stop_cleanups.discard(snapshot.run_id)
+
+    def _close_stop_handle(self, snapshot, handle, harness) -> tuple[bool, str | None]:
         reason = None
         stopped = False
         if handle.run_id != snapshot.run_id:
-            self._store.complete_stop(
-                snapshot.run_id,
-                operation_id,
-                owner_id=self._owner_id,
-                stopped=False,
-                reason_code="native_identity_unverified",
-            )
-            return
+            return False, "native_identity_unverified"
         if (
             snapshot.active_response_id is not None
             and "cancel_current_response" in handle.capabilities
@@ -1218,15 +1551,7 @@ class RunExecution:
                 stopped = True
             else:
                 reason = "native_close_unknown"
-        self._store.complete_stop(
-            snapshot.run_id,
-            operation_id,
-            owner_id=self._owner_id,
-            stopped=stopped,
-            reason_code=reason,
-        )
-        if stopped:
-            self._run_contexts.pop(snapshot.run_id, None)
+        return stopped, reason
 
     def _close_terminal(
         self,

@@ -58,6 +58,208 @@ def _interrupt(lab, run_id, response_id, *, operation_id=None):
     )
 
 
+def test_stop_before_native_dispatch_finishes_without_opening(admission_lab):
+    lab = admission_lab
+    request = lab.request()
+    start = lab.execution.start(request)
+    stop = RunStop(
+        workspace_id=lab.workspace_id,
+        run_id=start.run_id,
+        operation_id=uuid4(),
+        grant_id=lab.grant_id,
+    )
+    assert lab.execution.stop(stop).status is StopStatus.ACCEPTED
+    stopped = lab.execution.get_stop(
+        lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+    )
+    assert stopped.status is StopStatus.STOPPED
+    lab.pump()
+    assert lab.execution.stop(stop) == stopped
+    assert lab.execution.start(request).run_id == start.run_id
+    assert lab.native.open_calls == []
+    assert lab.native.prompt_calls == []
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.STOPPED
+    )
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert installation.active_count == 0
+    assert installation.session_count == 0
+    independent = lab.execution.start(lab.request(text="use reclaimed capacity"))
+    assert independent.status is StartStatus.ACCEPTED
+    assert independent.run_id != start.run_id
+    lab.pump()
+
+
+def test_stop_during_start_publication_uses_local_no_dispatch_proof(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    request = lab.request()
+    entered = Event()
+    release = Event()
+    original_admit = lab.store.admit_start
+
+    def gated_admit(**kwargs):
+        result = original_admit(**kwargs)
+        entered.set()
+        if not release.wait(timeout=4):
+            raise RuntimeError("start admission was not released")
+        return result
+
+    monkeypatch.setattr(lab.store, "admit_start", gated_admit)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        starting = pool.submit(lab.execution.start, request)
+        try:
+            assert entered.wait(timeout=1)
+            accepted = lab.execution.get_start(
+                lab.workspace_id, request.operation_id, grant_id=lab.grant_id
+            ).receipt
+            assert accepted.status is StartStatus.ACCEPTED
+            stop = RunStop(
+                workspace_id=lab.workspace_id,
+                run_id=accepted.run_id,
+                operation_id=uuid4(),
+                grant_id=lab.grant_id,
+            )
+            assert lab.execution.stop(stop).status is StopStatus.ACCEPTED
+            assert (
+                lab.execution.get_stop(
+                    lab.workspace_id,
+                    accepted.run_id,
+                    stop.operation_id,
+                    grant_id=lab.grant_id,
+                ).status
+                is StopStatus.STOPPED
+            )
+        finally:
+            release.set()
+        assert starting.result(timeout=2).run_id == accepted.run_id
+    lab.pump()
+    assert lab.native.open_calls == []
+    assert lab.native.prompt_calls == []
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, accepted.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.STOPPED
+    )
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert installation.active_count == 0
+    assert installation.session_count == 0
+
+
+@pytest.mark.parametrize(
+    "terminal", (RunState.COMPLETED, RunState.FAILED, RunState.STOPPED)
+)
+def test_stop_of_terminal_run_preserves_state_and_native_history(
+    admission_lab, monkeypatch, terminal
+):
+    lab = admission_lab
+    start = _start(
+        lab,
+        policy=RunPolicy.CONVERSATION
+        if terminal is RunState.STOPPED
+        else RunPolicy.BOUNDED,
+    )
+    if terminal is RunState.FAILED:
+        lab.native.outcomes[start.run_id] = NativeOutcomeStatus.FAILED
+    lab.pump()
+    if terminal is RunState.STOPPED:
+        lab.execution.stop(
+            RunStop(
+                workspace_id=lab.workspace_id,
+                run_id=start.run_id,
+                operation_id=uuid4(),
+                grant_id=lab.grant_id,
+            )
+        )
+    before = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    assert before.state is terminal
+    history = lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    closes = []
+    original_close = lab.native.close
+
+    def tracked_close(handle):
+        closes.append(handle.run_id)
+        return original_close(handle)
+
+    monkeypatch.setattr(lab.native, "close", tracked_close)
+    stop = RunStop(
+        workspace_id=lab.workspace_id,
+        run_id=start.run_id,
+        operation_id=uuid4(),
+        grant_id=lab.grant_id,
+    )
+    receipt = lab.execution.stop(stop)
+    assert receipt.status is StopStatus.STOPPED
+    assert lab.execution.stop(stop) == receipt
+    assert (
+        lab.execution.get_stop(
+            lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+        )
+        == receipt
+    )
+    after = lab.execution.get_run(lab.workspace_id, start.run_id, grant_id=lab.grant_id)
+    assert after.state is terminal
+    assert after.run_id == before.run_id
+    assert after.reason_code == before.reason_code
+    assert (
+        lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)[: len(history)]
+        == history
+    )
+    assert closes == []
+    assert len(lab.native.open_calls) == 1
+    assert len(lab.native.prompt_calls) == 1
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert installation.active_count == 0
+    assert installation.session_count == 0
+
+
+def test_restarted_start_without_local_no_dispatch_proof_keeps_unknown_capacity(
+    admission_lab,
+):
+    from sidera_agents.bootstrap import create_agent_service
+    from sidera_agents.ports import DenyContextSourceReader, DenySecretReader
+
+    lab = admission_lab
+    start = _start(lab, policy=RunPolicy.BOUNDED)
+    lab.service.close()
+    replacement = create_agent_service(
+        lab.store,
+        lab.registry,
+        lab.authorizer,
+        DenyContextSourceReader(),
+        DenySecretReader(),
+        lab.clock,
+    )
+    try:
+        replacement.poll_once()
+        stop = RunStop(
+            workspace_id=lab.workspace_id,
+            run_id=start.run_id,
+            operation_id=uuid4(),
+            grant_id=lab.grant_id,
+        )
+        assert replacement.execution.stop(stop).status is StopStatus.ACCEPTED
+        assert (
+            replacement.execution.get_stop(
+                lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+            ).status
+            is StopStatus.UNKNOWN
+        )
+        assert lab.native.open_calls == []
+        installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+        assert installation.active_count == 1
+        assert installation.session_count == 1
+    finally:
+        replacement.close()
+
+
 def _run_prompt_blocked(lab, monkeypatch, *, with_cancel=False):
     start = _start(lab)
     entered = Event()
@@ -526,6 +728,59 @@ def test_stop_closes_input_gate_and_fails_queued_inputs(admission_lab, monkeypat
         is StopStatus.STOPPED
     )
     assert len(lab.native.open_calls) == 1
+
+
+def test_stop_winning_open_handoff_prevents_initial_prompt_dispatch(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start = _start(lab)
+    persisted = Event()
+    release_handoff = Event()
+    original_transition = lab.execution._transition_run
+
+    def gated_transition(run_id, snapshot, **kwargs):
+        result = original_transition(run_id, snapshot, **kwargs)
+        if snapshot.state is RunState.RUNNING and kwargs.get("replace_native_handle"):
+            persisted.set()
+            if not release_handoff.wait(timeout=4):
+                raise RuntimeError("native-open handoff was not released")
+        return result
+
+    monkeypatch.setattr(lab.execution, "_transition_run", gated_transition)
+    stop = RunStop(
+        workspace_id=lab.workspace_id,
+        run_id=start.run_id,
+        operation_id=uuid4(),
+        grant_id=lab.grant_id,
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pumping = pool.submit(lab.pump)
+            assert persisted.wait(timeout=2)
+            assert lab.execution.stop(stop).status is StopStatus.ACCEPTED
+            assert (
+                lab.execution.get_stop(
+                    lab.workspace_id,
+                    start.run_id,
+                    stop.operation_id,
+                    grant_id=lab.grant_id,
+                ).status
+                is StopStatus.STOPPED
+            )
+            release_handoff.set()
+            pumping.result(timeout=3)
+
+        snapshot = lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        )
+        assert snapshot.state is RunState.STOPPED
+        assert not snapshot.input_open
+        assert lab.native.prompt_calls == []
+        assert len(lab.native.open_calls) == 1
+    finally:
+        release_handoff.set()
 
 
 def test_unknown_stop_retains_session_reservation(admission_lab, monkeypatch):

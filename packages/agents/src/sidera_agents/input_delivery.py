@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from hashlib import sha256
 from uuid import UUID
 
-from .admission import canonical_fingerprint
 from .contracts import InputReceipt, InputStatus, RunInput
 
 MAX_PENDING_INPUTS = 16
@@ -53,16 +54,21 @@ class InputOperation:
 
 
 def input_fingerprint(request: RunInput) -> str:
-    payload = request.model_dump(mode="json", warnings=False)
-    return canonical_fingerprint(payload)
+    return "sha256:" + sha256(_canonical_input_bytes(request)).hexdigest()
 
 
 def input_size(request: RunInput) -> int:
-    context_bytes = sum(
-        len(item.text.encode("utf-8")) if item.text is not None else 0
-        for item in request.context
-    )
-    return len(request.text.encode("utf-8")) + context_bytes
+    return len(_canonical_input_bytes(request))
+
+
+def _canonical_input_bytes(request: RunInput) -> bytes:
+    payload = request.model_dump(mode="json", warnings=False)
+    return json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def input_size_for_record(record: InputOperation) -> int:

@@ -13,6 +13,8 @@ from sidera_agents.contracts import (
     RunInput,
     RunPolicy,
     RunState,
+    SourceRef,
+    StartStatus,
 )
 from sidera_agents.errors import AgentError
 from sidera_agents.input_delivery import InputDeliverySettings
@@ -129,6 +131,66 @@ def test_conversation_reuses_one_session_and_pinned_projection_for_repeated_inpu
     )
     assert len(lab.native.open_calls) == 1
     assert len(lab.native.prompt_calls) == 3
+
+
+def test_input_during_native_open_handoff_is_delivered_once_on_same_handle(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start = _start(lab)
+    persisted = Event()
+    release_handoff = Event()
+    original_transition = lab.execution._transition_run
+
+    def gated_transition(run_id, snapshot, **kwargs):
+        result = original_transition(run_id, snapshot, **kwargs)
+        if snapshot.state is RunState.RUNNING and kwargs.get("replace_native_handle"):
+            persisted.set()
+            if not release_handoff.wait(timeout=4):
+                raise RuntimeError("native-open handoff was not released")
+        return result
+
+    send_started = Event()
+    original_send = lab.execution.send_input
+
+    def tracked_send(request):
+        send_started.set()
+        return original_send(request)
+
+    monkeypatch.setattr(lab.execution, "_transition_run", gated_transition)
+    monkeypatch.setattr(lab.execution, "send_input", tracked_send)
+    request = _input(lab, start.run_id, "arrives during native-open handoff")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pumping = pool.submit(lab.pump)
+            assert persisted.wait(timeout=2)
+            sending = pool.submit(lab.execution.send_input, request)
+            assert send_started.wait(timeout=2)
+            release_handoff.set()
+            receipt = sending.result(timeout=3)
+            pumping.result(timeout=3)
+
+        assert receipt.status is InputStatus.ACCEPTED
+        lab.pump()
+        delivered = lab.execution.get_input(
+            lab.workspace_id,
+            start.run_id,
+            request.operation_id,
+            grant_id=lab.grant_id,
+        )
+        assert delivered.status is InputStatus.DELIVERED
+        assert [call[1].text for call in lab.native.prompt_calls] == [
+            "first",
+            request.text,
+        ]
+        assert len(lab.native.open_calls) == 1
+        assert all(
+            call[0] == lab.native.handles[start.run_id]
+            for call in lab.native.prompt_calls
+        )
+    finally:
+        release_handoff.set()
 
 
 def test_busy_inputs_are_delivered_in_acceptance_order_before_bounded_close(
@@ -252,11 +314,11 @@ def test_queue_and_byte_limits_reject_only_new_inputs(admission_lab, monkeypatch
         lab.execution,
         "_input_settings",
         InputDeliverySettings(
-            max_pending=1, max_input_bytes=8, drain_deadline_seconds=5
+            max_pending=1, max_input_bytes=512, drain_deadline_seconds=5
         ),
     )
     entered, release = _block_next_prompt(lab, monkeypatch)
-    too_large = _input(lab, start.run_id, "123456789")
+    too_large = _input(lab, start.run_id, "x" * 513)
     accepted = _input(lab, start.run_id, "one")
     over_queue = _input(lab, start.run_id, "two")
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -289,6 +351,95 @@ def test_queue_and_byte_limits_reject_only_new_inputs(admission_lab, monkeypatch
         == "input_too_large"
     )
     assert [call[1].text for call in lab.native.prompt_calls] == ["first", "one"]
+
+
+def test_source_reference_metadata_counts_toward_input_byte_limit(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start = _start(lab)
+    lab.pump()
+    monkeypatch.setattr(
+        lab.execution,
+        "_input_settings",
+        InputDeliverySettings(
+            max_pending=4, max_input_bytes=256, drain_deadline_seconds=5
+        ),
+    )
+    source_context = ContextItem(
+        item_id="large-source",
+        origin="user",
+        required=True,
+        ordinal=0,
+        version="v1",
+        content_hash="sha256:" + "0" * 64,
+        source_ref=SourceRef(
+            provider="provider-" + "p" * 256,
+            key="key-" + "k" * 256,
+            version="v1",
+        ),
+    )
+    request = _input(lab, start.run_id, "x", context=(source_context,))
+
+    receipt = lab.execution.send_input(request)
+
+    assert receipt.status is InputStatus.REJECTED
+    assert receipt.reason_code == "input_too_large"
+    assert not any(
+        event.kind == "input.accepted" and event.operation_id == request.operation_id
+        for event in lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    )
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.IDLE
+    )
+
+
+def test_many_metadata_only_context_items_count_toward_input_byte_limit(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start = _start(lab)
+    lab.pump()
+    monkeypatch.setattr(
+        lab.execution,
+        "_input_settings",
+        InputDeliverySettings(
+            max_pending=4, max_input_bytes=512, drain_deadline_seconds=5
+        ),
+    )
+    context = tuple(
+        ContextItem(
+            item_id=f"source-{index:02d}",
+            origin="user",
+            required=True,
+            ordinal=index,
+            version="v1",
+            content_hash="sha256:" + "0" * 64,
+            source_ref=SourceRef(
+                provider="files", key=f"document-{index:02d}", version="v1"
+            ),
+        )
+        for index in range(6)
+    )
+    request = _input(lab, start.run_id, "x", context=context)
+
+    receipt = lab.execution.send_input(request)
+
+    assert receipt.status is InputStatus.REJECTED
+    assert receipt.reason_code == "input_too_large"
+    assert not any(
+        event.kind == "input.accepted" and event.operation_id == request.operation_id
+        for event in lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    )
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.IDLE
+    )
 
 
 def test_expired_drain_fails_accepted_input_without_sending_it(
@@ -327,6 +478,98 @@ def test_expired_drain_fails_accepted_input_without_sending_it(
         ).state
         is RunState.COMPLETED
     )
+
+
+def test_expired_idle_input_fails_while_active_capacity_remains_unavailable(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start = _start(lab)
+    lab.pump()
+    now = [10.0]
+    monkeypatch.setattr(lab.execution, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        lab.execution,
+        "_input_settings",
+        InputDeliverySettings(
+            max_pending=2, max_input_bytes=1024, drain_deadline_seconds=5
+        ),
+    )
+
+    first_input = _input(lab, start.run_id, "active response")
+    expired_input = _input(lab, start.run_id, "expired while busy")
+    assert lab.execution.send_input(first_input).status is InputStatus.ACCEPTED
+
+    active_prompt_entered = Event()
+    release_active_prompt = Event()
+    finish_entered = Event()
+    release_finish = Event()
+    original_prompt = lab.native.prompt
+    original_finish = lab.store.finish_conversation_response
+
+    def gated_prompt(handle, assembled, response_id):
+        if assembled.text == first_input.text:
+            active_prompt_entered.set()
+            assert release_active_prompt.wait(timeout=3)
+        return original_prompt(handle, assembled, response_id)
+
+    finish_blocked = False
+
+    def gated_finish(run_id, response_id, **kwargs):
+        nonlocal finish_blocked
+        result = original_finish(run_id, response_id, **kwargs)
+        if run_id == start.run_id and not finish_blocked:
+            finish_blocked = True
+            finish_entered.set()
+            assert release_finish.wait(timeout=3)
+        return result
+
+    monkeypatch.setattr(lab.native, "prompt", gated_prompt)
+    monkeypatch.setattr(lab.store, "finish_conversation_response", gated_finish)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            target_poll = pool.submit(lab.pump)
+            assert active_prompt_entered.wait(timeout=2)
+            assert (
+                lab.execution.send_input(expired_input).status is InputStatus.ACCEPTED
+            )
+            release_active_prompt.set()
+            assert finish_entered.wait(timeout=2)
+
+            competing_run = _start(
+                lab, policy=RunPolicy.BOUNDED, text="occupy active capacity"
+            )
+            assert competing_run.status is StartStatus.ACCEPTED
+            now[0] = 16.0
+            release_finish.set()
+            target_poll.result(timeout=3)
+
+            assert (
+                lab.execution.get_run(
+                    lab.workspace_id, competing_run.run_id, grant_id=lab.grant_id
+                ).state
+                is RunState.STARTING
+            )
+            assert (
+                lab.store.get_runtime_entry(lab.runtime.ref).installation.active_count
+                == 1
+            )
+            expired_receipt = lab.execution.get_input(
+                lab.workspace_id,
+                start.run_id,
+                expired_input.operation_id,
+                grant_id=lab.grant_id,
+            )
+            assert expired_receipt.status is InputStatus.FAILED
+            assert expired_receipt.reason_code == "input_drain_deadline"
+            assert [call[1].text for call in lab.native.prompt_calls] == [
+                "first",
+                first_input.text,
+            ]
+    finally:
+        release_active_prompt.set()
+        release_finish.set()
 
 
 def test_conversation_starts_a_fresh_deadline_for_a_later_input_queue(

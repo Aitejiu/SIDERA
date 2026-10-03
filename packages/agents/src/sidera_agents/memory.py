@@ -1390,6 +1390,14 @@ class MemoryAgentStore:
             )
             if previous is not None:
                 return previous
+            if run.snapshot.state in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+            ):
+                return self._append_event(
+                    run, "stop.stopped", operation_id=operation_id
+                )
             pending = tuple(
                 item
                 for item in self._input_operations.values()
@@ -1429,6 +1437,14 @@ class MemoryAgentStore:
                 raise AgentError(
                     "execution_owner_unavailable",
                     "The execution owner lock is not held.",
+                )
+            if run.snapshot.state in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+            ):
+                return self._append_event(
+                    run, "stop.stopped", operation_id=operation_id
                 )
             reservation = self._run_reservations[run_id]
             if stopped and reservation.active:
@@ -1574,6 +1590,21 @@ class MemoryAgentStore:
             reservation = self._run_reservations.get(run_id)
             if run is None or reservation is None or snapshot.run_id != run_id:
                 raise _not_found("run")
+            if run.snapshot.state in (
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.STOPPED,
+            ) or (
+                replace_native_handle
+                and snapshot.state is RunState.RUNNING
+                and (
+                    run.snapshot.state is not RunState.STARTING
+                    or run.snapshot.active_response_id != snapshot.active_response_id
+                )
+            ):
+                if replace_native_handle:
+                    run.native_handle = native_handle
+                return
             installation = self._runtime_installations.get(reservation.installation_key)
             if installation is None:
                 raise AgentError("catalog_corrupt", "Runtime installation is missing.")
