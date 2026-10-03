@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -36,6 +37,7 @@ from sidera_control_plane.domain.context_packages import (
     ContextTrustLevel,
     ControlPlaneFactSection,
     MaterializedContextSource,
+    MaterializedResultInput,
     ProjectKnowledgeSection,
     SystemConstraintSection,
     TypedContextRef,
@@ -45,6 +47,14 @@ from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.work_context import WorkContextRevision
 
 MAX_CONTEXT_PAYLOAD_BYTES = 256 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedContextFacts:
+    manifest: ContextPackageManifest
+    revision: WorkContextRevision
+    project_knowledge: tuple[ProjectKnowledgeSection, ...]
+    result_inputs: tuple[MaterializedResultInput, ...]
 
 
 class ContextMaterializationError(RuntimeError):
@@ -96,6 +106,68 @@ class ContextMaterializer:
         correlation_id: UUID,
         caller_request_id: UUID,
     ) -> ContextMaterialization:
+        facts = self.validate_facts(
+            manifest,
+            work_context_revision,
+            mode=mode,
+            workspace_id=workspace_id,
+            consumer_id=consumer_id,
+            purpose=purpose,
+            context_version=context_version,
+            expected_package_hash=expected_package_hash,
+            owner_capability=owner_capability,
+            now=now,
+            correlation_id=correlation_id,
+            caller_request_id=caller_request_id,
+        )
+        manifest = facts.manifest
+        materialization = self._assemble(
+            manifest,
+            facts.revision,
+            facts.project_knowledge,
+            facts.result_inputs,
+        )
+        if materialization.total_byte_count > self._max_payload_bytes:
+            raise ContextMaterializationError(
+                "context_budget_exceeded",
+                "Materialized context exceeds the hard payload limit",
+            )
+        if isinstance(
+            materialization, (ContextMaterializationV2, ContextMaterializationV3)
+        ):
+            assert isinstance(
+                manifest, (ContextPackageManifestV2, ContextPackageManifestV3)
+            )
+            if manifest.result_input_manifest is None:
+                return materialization
+            result_budget = manifest.result_input_manifest.budget
+            if (
+                materialization.total_byte_count > result_budget.max_payload_bytes
+                or materialization.input_token_count > manifest.budget.max_input_tokens
+            ):
+                raise ContextMaterializationError(
+                    "result_input_budget_exceeded",
+                    "Materialized context exceeds its pinned result input budget",
+                )
+        return materialization
+
+    def validate_facts(
+        self,
+        manifest: ContextPackageManifest | None,
+        work_context_revision: WorkContextRevision | None,
+        *,
+        mode: ContextMaterializationMode,
+        workspace_id: UUID,
+        consumer_id: UUID | None = None,
+        purpose: ContextPurpose | None = None,
+        context_version: int | None = None,
+        expected_package_hash: str | None = None,
+        owner_capability: bool = False,
+        now: datetime | None = None,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+        include_bodies: bool = True,
+    ) -> ValidatedContextFacts:
         try:
             normalized_mode = ContextMaterializationMode(mode)
         except (TypeError, ValueError) as exc:
@@ -119,7 +191,10 @@ class ContextMaterializer:
                 "context_workspace_mismatch",
                 "Context package belongs to another workspace",
             )
-        if expected_package_hash is None or expected_package_hash != manifest.package_hash:
+        if (
+            expected_package_hash is None
+            or expected_package_hash != manifest.package_hash
+        ):
             raise ContextMaterializationError(
                 "context_hash_mismatch",
                 "Context package hash does not match the expected manifest",
@@ -141,6 +216,9 @@ class ContextMaterializer:
             now=current_time,
         )
         self._validate_revision(manifest, work_context_revision, workspace_id)
+        assert work_context_revision is not None
+        if not include_bodies:
+            return ValidatedContextFacts(manifest, work_context_revision, (), ())
         refs = tuple(
             ExactSectionRef(
                 ordinal=item.ordinal,
@@ -164,31 +242,81 @@ class ContextMaterializer:
             refs,
             bodies,
         )
-        assert work_context_revision is not None
-        materialization = self._assemble(
+        return ValidatedContextFacts(
             manifest,
             work_context_revision,
             project_knowledge,
+            self.read_result_inputs(manifest),
         )
-        if materialization.total_byte_count > self._max_payload_bytes:
+
+    def read_knowledge_section(
+        self,
+        facts: ValidatedContextFacts,
+        ordinal: int,
+        *,
+        correlation_id: UUID,
+        caller_request_id: UUID,
+    ) -> ProjectKnowledgeSection:
+        reference = next(
+            (item for item in facts.manifest.knowledge_refs if item.ordinal == ordinal),
+            None,
+        )
+        if reference is None:
             raise ContextMaterializationError(
-                "context_budget_exceeded",
-                "Materialized context exceeds the hard payload limit",
+                "context_reference_not_found", "Knowledge reference not found"
             )
-        if isinstance(materialization, (ContextMaterializationV2, ContextMaterializationV3)):
-            assert isinstance(manifest, (ContextPackageManifestV2, ContextPackageManifestV3))
-            if manifest.result_input_manifest is None:
-                return materialization
-            result_budget = manifest.result_input_manifest.budget
-            if (
-                materialization.total_byte_count > result_budget.max_payload_bytes
-                or materialization.input_token_count > manifest.budget.max_input_tokens
-            ):
-                raise ContextMaterializationError(
-                    "result_input_budget_exceeded",
-                    "Materialized context exceeds its pinned result input budget",
-                )
-        return materialization
+        refs = (
+            ExactSectionRef(
+                ordinal=reference.ordinal,
+                page_id=reference.page_id,
+                revision_id=reference.revision_id,
+                revision_hash=reference.revision_hash,
+                section_key=reference.section_key,
+                section_hash=reference.section_hash,
+                source_ids=reference.source_ids,
+            ),
+        )
+        bodies = self._materialize_knowledge(
+            facts.manifest.workspace_id,
+            refs,
+            correlation_id=correlation_id,
+            caller_request_id=caller_request_id,
+        )
+        return self._validate_knowledge(facts.manifest, refs, bodies, complete=False)[0]
+
+    def read_result_inputs(
+        self, manifest: ContextPackageManifest
+    ) -> tuple[MaterializedResultInput, ...]:
+        if not isinstance(
+            manifest, (ContextPackageManifestV2, ContextPackageManifestV3)
+        ):
+            return ()
+        if manifest.result_input_manifest is None:
+            return ()
+        if (
+            manifest.result_input_manifest.artifacts
+            and self._result_input_content is None
+        ):
+            raise ContextMaterializationError(
+                "result_input_unavailable",
+                "Result input content port is not configured",
+                temporary=True,
+            )
+        if self._result_input_content is None:
+            return ()
+        try:
+            return materialize_result_inputs(
+                workspace_id=manifest.workspace_id,
+                manifest=manifest.result_input_manifest,
+                content_port=self._result_input_content,
+            )
+        except ResultInputDeliveryError as exc:
+            raise ContextMaterializationError(
+                exc.code,
+                str(exc),
+                temporary=exc.temporary,
+                corrupt=exc.corrupt,
+            ) from exc
 
     @staticmethod
     def _validate_access(
@@ -301,6 +429,12 @@ class ContextMaterializer:
     ) -> tuple[ExactSectionBody, ...]:
         if not refs:
             return ()
+        if self._catalog is None:
+            raise ContextMaterializationError(
+                "context_service_unavailable",
+                "Knowledge catalog is not configured",
+                temporary=True,
+            )
         try:
             return tuple(
                 self._catalog.materialize(
@@ -327,6 +461,8 @@ class ContextMaterializer:
         manifest: ContextPackageManifestV1,
         refs: Sequence[ExactSectionRef],
         bodies: Sequence[ExactSectionBody],
+        *,
+        complete: bool = True,
     ) -> tuple[ProjectKnowledgeSection, ...]:
         if len(bodies) != len(refs):
             raise ContextMaterializationError(
@@ -407,7 +543,15 @@ class ContextMaterializer:
         expected_body_tokens = manifest.budget.actual_input_tokens
         actual_body_bytes = sum(item.section_byte_count for item in result)
         actual_body_tokens = sum(_input_tokens(item.section_byte_count) for item in result)
-        if actual_body_bytes != expected_body_bytes or actual_body_tokens != expected_body_tokens:
+        if (
+            complete
+            and (
+                actual_body_bytes != expected_body_bytes
+                or actual_body_tokens != expected_body_tokens
+            )
+            or actual_body_bytes > expected_body_bytes
+            or actual_body_tokens > expected_body_tokens
+        ):
             raise ContextMaterializationError(
                 "context_hash_mismatch",
                 "Knowledge materialization budget counts do not match the package",
@@ -420,6 +564,7 @@ class ContextMaterializer:
         manifest: ContextPackageManifest,
         revision: WorkContextRevision,
         project_knowledge: Sequence[ProjectKnowledgeSection],
+        result_inputs: tuple[MaterializedResultInput, ...],
     ) -> ContextMaterialization:
         snapshot = revision.snapshot
         metadata = ContextMetadata(
@@ -480,34 +625,6 @@ class ContextMaterializer:
                 project_knowledge=tuple(project_knowledge),
                 artifact_and_evidence_refs=artifact_and_evidence_refs,
             )
-        if (
-            manifest.result_input_manifest is not None
-            and manifest.result_input_manifest.artifacts
-            and self._result_input_content is None
-        ):
-            raise ContextMaterializationError(
-                "result_input_unavailable",
-                "Result input content port is not configured",
-                temporary=True,
-            )
-        try:
-            result_inputs = (
-                materialize_result_inputs(
-                    workspace_id=manifest.workspace_id,
-                    manifest=manifest.result_input_manifest,
-                    content_port=self._result_input_content,
-                )
-                if self._result_input_content is not None
-                and manifest.result_input_manifest is not None
-                else ()
-            )
-        except ResultInputDeliveryError as exc:
-            raise ContextMaterializationError(
-                exc.code,
-                str(exc),
-                temporary=exc.temporary,
-                corrupt=exc.corrupt,
-            ) from exc
         if isinstance(manifest, ContextPackageManifestV3):
             return ContextMaterializationV3(
                 metadata=metadata,

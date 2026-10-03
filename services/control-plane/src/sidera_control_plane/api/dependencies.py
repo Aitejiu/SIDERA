@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from sidera_agents.api import AgentCatalog, AgentRuntimes
 from sidera_agents.ports import ExecutionAuthorizer
 
 from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
+from sidera_control_plane.application.agent_sources import TaskContextSourceReader
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.assignments import (
     AssignmentCommandHandler,
@@ -37,6 +38,9 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.context_package_queries import (
     ContextPackageCommandHandler,
     ContextPackageQueryService,
+)
+from sidera_control_plane.application.execution_authority import (
+    ExecutionAuthorityReader,
 )
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -78,7 +82,11 @@ from sidera_control_plane.application.plan_transition_queries import (
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.planning_metrics import PlanningMetricsService
 from sidera_control_plane.application.planning_queries import PlanningQueryService
-from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.ports import (
+    ControlPlaneUnitOfWork,
+    KnowledgeCatalogPort,
+    ResultInputContentPort,
+)
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.result_acceptance import ResultAcceptanceService
 from sidera_control_plane.application.result_input_queries import (
@@ -370,6 +378,57 @@ def get_assignment_agent_catalog() -> AgentCatalog | None:
 
 def get_assignment_agent_runtimes() -> AgentRuntimes | None:
     return None
+
+
+def get_agent_context_identity(
+    identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ],
+) -> TrustedAssignmentIdentity:
+    if identity is None or not identity.principal_id:
+        raise HTTPException(status_code=401, detail="Trusted task identity required.")
+    return identity
+
+
+def get_agent_context_knowledge_catalog() -> KnowledgeCatalogPort | None:
+    """Product composition injects exact knowledge I/O; no legacy service token."""
+    return None
+
+
+def get_agent_context_result_input_content() -> ResultInputContentPort | None:
+    return None
+
+
+def get_agent_context_source_reader(
+    identity: Annotated[TrustedAssignmentIdentity, Depends(get_agent_context_identity)],
+    authorizer: Annotated[
+        ExecutionAuthorizer | None, Depends(get_assignment_authorizer)
+    ],
+    database: Annotated[Database, Depends(get_database)],
+    catalog: Annotated[
+        KnowledgeCatalogPort | None, Depends(get_agent_context_knowledge_catalog)
+    ],
+    content: Annotated[
+        ResultInputContentPort | None, Depends(get_agent_context_result_input_content)
+    ],
+) -> TaskContextSourceReader:
+    if authorizer is None:
+        raise HTTPException(status_code=403, detail="Task source access denied.")
+
+    def factory():
+        return SqlAlchemyUnitOfWork(database)
+
+    authority_reader = ExecutionAuthorityReader(
+        factory,
+        principal=lambda: identity.principal_id,
+        authorizer=authorizer,
+    )
+    return TaskContextSourceReader(
+        factory,
+        authorizer=authority_reader,
+        catalog=catalog,
+        result_input_content=content,
+    )
 
 
 def get_command_service(

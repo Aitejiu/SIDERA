@@ -10,6 +10,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from sidera_control_plane.api.agent_context_queries import (
+    router as agent_context_queries_router,
+)
 from sidera_control_plane.api.artifact_content import (
     router as artifact_content_router,
 )
@@ -125,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await call_next(request)
 
     install_error_handlers(app)
+    app.include_router(agent_context_queries_router)
     app.include_router(task_commands_router)
     app.include_router(command_queries_router)
     app.include_router(collaboration_queries_router)
